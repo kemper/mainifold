@@ -5,7 +5,7 @@ export interface LayoutElements {
   viewsContainer: HTMLElement;
   galleryContainer: HTMLElement;
   statusBar: HTMLElement;
-  sectionPanel: HTMLElement;
+  clipControls: HTMLElement;
   switchTab: (tab: 'interactive' | 'ai' | 'gallery') => void;
 }
 
@@ -38,10 +38,6 @@ export function createLayout(appContainer: HTMLElement): LayoutElements {
   editorContainer.id = 'editor-container';
   editorContainer.className = 'flex-1 min-h-0 overflow-hidden';
   editorPane.appendChild(editorContainer);
-
-  // Cross-section panel
-  const sectionPanel = createSectionPanel();
-  editorPane.appendChild(sectionPanel);
 
   // === Splitter ===
   const splitter = document.createElement('div');
@@ -86,6 +82,10 @@ export function createLayout(appContainer: HTMLElement): LayoutElements {
   const viewportPane = document.createElement('div');
   viewportPane.id = 'viewport-container';
   viewportPane.className = 'relative flex-1 min-h-0';
+
+  // Clip controls overlay — positioned inside viewport
+  const clipControls = createClipControls();
+  viewportPane.appendChild(clipControls);
 
   const viewsContainer = document.createElement('div');
   viewsContainer.id = 'views-container';
@@ -139,7 +139,7 @@ export function createLayout(appContainer: HTMLElement): LayoutElements {
 
   appContainer.appendChild(main);
 
-  return { editorPane, editorContainer, viewportPane, viewsContainer, galleryContainer, statusBar, sectionPanel, switchTab };
+  return { editorPane, editorContainer, viewportPane, viewsContainer, galleryContainer, statusBar, clipControls, switchTab };
 }
 
 function createTab(label: string, active: boolean): HTMLButtonElement {
@@ -152,86 +152,43 @@ function createTab(label: string, active: boolean): HTMLButtonElement {
   return btn;
 }
 
-function createSectionPanel(): HTMLElement {
-  const sectionPanel = document.createElement('div');
-  sectionPanel.id = 'section-panel';
-  sectionPanel.className = 'border-t border-zinc-700 shrink-0 hidden';
+function createClipControls(): HTMLElement {
+  const container = document.createElement('div');
+  container.id = 'clip-controls';
+  container.className = 'absolute top-2 right-2 z-10 flex items-center gap-2';
 
-  const sectionToggle = document.createElement('button');
-  sectionToggle.id = 'section-toggle';
-  sectionToggle.className = 'flex items-center w-full px-3 py-2 bg-zinc-800 hover:bg-zinc-700 text-xs text-zinc-400 font-mono';
+  // Clip toggle button
+  const toggleBtn = document.createElement('button');
+  toggleBtn.id = 'clip-toggle';
+  toggleBtn.className = 'px-2 py-1 rounded text-xs bg-zinc-800/80 backdrop-blur text-zinc-400 hover:text-zinc-200 hover:bg-zinc-700/80 transition-colors border border-zinc-600/50';
+  toggleBtn.textContent = '✂ Clip';
+  toggleBtn.title = 'Toggle cross-section clipping plane';
+  container.appendChild(toggleBtn);
 
-  const toggleLabel = document.createElement('span');
-  toggleLabel.textContent = '\u2298 Cross-Section';
-  sectionToggle.appendChild(toggleLabel);
-
-  const chevron = document.createElement('span');
-  chevron.id = 'section-chevron';
-  chevron.className = 'ml-auto';
-  chevron.textContent = '\u25BE';
-  sectionToggle.appendChild(chevron);
-
-  sectionPanel.appendChild(sectionToggle);
-
-  const sectionContent = document.createElement('div');
-  sectionContent.id = 'section-content';
-  sectionContent.className = 'p-3 space-y-2';
-
-  const sliderRow = document.createElement('div');
-  sliderRow.className = 'flex items-center gap-2';
-
-  const label = document.createElement('label');
-  label.className = 'text-xs text-zinc-400 w-4';
-  label.textContent = 'Z';
-  sliderRow.appendChild(label);
+  // Slider + Z value (hidden until clip is active)
+  const sliderGroup = document.createElement('div');
+  sliderGroup.id = 'clip-slider-group';
+  sliderGroup.className = 'hidden flex items-center gap-2 px-2 py-1 rounded bg-zinc-800/80 backdrop-blur border border-zinc-600/50';
 
   const slider = document.createElement('input');
   slider.type = 'range';
-  slider.id = 'z-slider';
-  slider.className = 'flex-1 accent-blue-500';
+  slider.id = 'clip-z-slider';
+  slider.className = 'w-28 accent-red-400';
   slider.min = '0';
   slider.max = '10';
   slider.step = '0.01';
   slider.value = '5';
-  sliderRow.appendChild(slider);
+  sliderGroup.appendChild(slider);
 
-  const zValue = document.createElement('span');
-  zValue.id = 'z-value';
-  zValue.className = 'text-xs text-zinc-300 w-14 text-right font-mono';
-  zValue.textContent = '5.00';
-  sliderRow.appendChild(zValue);
+  const zLabel = document.createElement('span');
+  zLabel.id = 'clip-z-label';
+  zLabel.className = 'text-xs text-zinc-300 font-mono w-16 text-right';
+  zLabel.textContent = 'Z: 5.00';
+  sliderGroup.appendChild(zLabel);
 
-  sectionContent.appendChild(sliderRow);
+  container.appendChild(sliderGroup);
 
-  const svgPreview = document.createElement('div');
-  svgPreview.id = 'svg-preview';
-  svgPreview.className = 'bg-zinc-900 rounded p-2 flex justify-center';
-  sectionContent.appendChild(svgPreview);
-
-  const stats = document.createElement('div');
-  stats.id = 'section-stats';
-  stats.className = 'text-xs text-zinc-500';
-  sectionContent.appendChild(stats);
-
-  const btnRow = document.createElement('div');
-  btnRow.className = 'flex gap-2';
-
-  const btnCopySvg = document.createElement('button');
-  btnCopySvg.id = 'btn-copy-svg';
-  btnCopySvg.className = 'px-2.5 py-1 rounded text-xs text-zinc-300 bg-zinc-700 hover:bg-zinc-600 transition-colors';
-  btnCopySvg.textContent = 'Copy SVG';
-  btnRow.appendChild(btnCopySvg);
-
-  const btnCopyJson = document.createElement('button');
-  btnCopyJson.id = 'btn-copy-json';
-  btnCopyJson.className = 'px-2.5 py-1 rounded text-xs text-zinc-300 bg-zinc-700 hover:bg-zinc-600 transition-colors';
-  btnCopyJson.textContent = 'Copy JSON';
-  btnRow.appendChild(btnCopyJson);
-
-  sectionContent.appendChild(btnRow);
-  sectionPanel.appendChild(sectionContent);
-
-  return sectionPanel;
+  return container;
 }
 
 function initSplitter(splitter: HTMLElement, editorPane: HTMLElement) {

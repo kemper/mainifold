@@ -335,6 +335,14 @@ mainifold.sliceAtZ(3.5)
 mainifold.getBoundingBox()
 // → { min: [x,y,z], max: [x,y,z] }
 
+// 3D Clipping plane (cross-section visualization)
+mainifold.toggleClip(on?)      // Toggle clip plane; omit arg to toggle
+// → { enabled, z, min, max }
+mainifold.setClipZ(z)          // Set clip height
+// → { enabled, z, min, max }
+mainifold.getClipState()       // Current state
+// → { enabled, z, min, max }
+
 // Exports
 await mainifold.exportGLB()
 mainifold.exportSTL()

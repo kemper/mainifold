@@ -1,7 +1,7 @@
 import './style.css';
 import { initEngine, executeCode, getModule } from './geometry/engine';
 import { sliceAtZ, getBoundingBox } from './geometry/crossSection';
-import { initViewport, updateMesh } from './renderer/viewport';
+import { initViewport, updateMesh, setClipping, setClipZ, getClipState } from './renderer/viewport';
 import { renderCompositeCanvas } from './renderer/multiview';
 import { initEditor, setValue, getValue } from './editor/codeEditor';
 import { createLayout } from './ui/layout';
@@ -172,7 +172,6 @@ async function main() {
   // Create toolbar
   createToolbar(app, examples, {
     onRun: () => runCode(),
-    onSection: () => toggleSection(),
     onExportGLB: async () => {
       try { await exportGLB(); } catch (e) { console.error('GLB export error:', e); }
     },
@@ -204,7 +203,7 @@ async function main() {
   });
 
   // Create layout
-  const { editorContainer, viewportPane, viewsContainer, galleryContainer, statusBar, sectionPanel, switchTab } = createLayout(app);
+  const { editorContainer, viewportPane, viewsContainer, galleryContainer, statusBar, clipControls, switchTab } = createLayout(app);
 
   // Init views panel
   initViewsPanel(viewsContainer);
@@ -234,8 +233,8 @@ async function main() {
     runCode(code);
   });
 
-  // Wire up cross-section panel
-  initSectionPanel(sectionPanel);
+  // Wire up clip controls
+  initClipControls(clipControls);
 
   // Load session from URL if present
   const sessionId = getSessionIdFromURL();
@@ -250,12 +249,10 @@ async function main() {
         refreshGallery();
       }
     } else {
-      // Session not found, run default
       setStatus(statusBar, 'ready', 'Ready');
       runCode(defaultCode);
     }
   } else {
-    // No session, run default
     setStatus(statusBar, 'ready', 'Ready');
     runCode(defaultCode);
   }
@@ -317,6 +314,28 @@ async function main() {
       const result = executeCode(code);
       if (result.error) return { valid: false, error: result.error };
       return { valid: true };
+    },
+
+    // === Clipping API ===
+
+    /** Toggle clipping plane on/off */
+    toggleClip(enabled?: boolean) {
+      const on = enabled ?? !getClipState().enabled;
+      setClipping(on);
+      syncClipUI();
+      return getClipState();
+    },
+
+    /** Set clipping plane Z height */
+    setClipZ(z: number) {
+      setClipZ(z);
+      syncClipUI();
+      return getClipState();
+    },
+
+    /** Get current clip state */
+    getClipState() {
+      return getClipState();
     },
 
     // === Session API ===
@@ -432,6 +451,7 @@ async function main() {
     '%c[mAInifold]%c Console API available at %cwindow.mainifold%c\n' +
     'Methods: .run(code?), .getGeometryData(), .getCode(), .setCode(code),\n' +
     '         .sliceAtZ(z), .getBoundingBox(), .validate(code),\n' +
+    '         .toggleClip(on?), .setClipZ(z), .getClipState(),\n' +
     '         .getModule(), .exportGLB(), .exportSTL()\n' +
     'Sessions: .createSession(name?), .saveVersion(label?), .runAndSave(code, label?),\n' +
     '          .listSessions(), .openSession(id), .listVersions(), .loadVersion(idx),\n' +
@@ -471,8 +491,71 @@ async function main() {
       updateMesh(result.mesh);
       updateMultiView(result.mesh);
       updateGeometryData(elapsed, src);
-      updateSectionSlider(sectionPanel);
+      syncClipSliderBounds();
       setStatus(statusBar, 'ready', 'Ready');
+    }
+  }
+
+  function initClipControls(container: HTMLElement) {
+    const toggleBtn = container.querySelector('#clip-toggle') as HTMLButtonElement;
+    const slider = container.querySelector('#clip-z-slider') as HTMLInputElement;
+    const zLabel = container.querySelector('#clip-z-label') as HTMLElement;
+
+    toggleBtn.addEventListener('click', () => {
+      const state = getClipState();
+      setClipping(!state.enabled);
+      syncClipUI();
+    });
+
+    slider.addEventListener('input', () => {
+      const z = parseFloat(slider.value);
+      setClipZ(z);
+      zLabel.textContent = `Z: ${z.toFixed(2)}`;
+    });
+  }
+
+  function syncClipUI() {
+    const state = getClipState();
+    const toggleBtn = document.getElementById('clip-toggle');
+    const sliderGroup = document.getElementById('clip-slider-group');
+    const slider = document.getElementById('clip-z-slider') as HTMLInputElement;
+    const zLabel = document.getElementById('clip-z-label');
+
+    if (toggleBtn) {
+      toggleBtn.className = state.enabled
+        ? 'px-2 py-1 rounded text-xs bg-red-500/20 backdrop-blur text-red-300 hover:bg-red-500/30 transition-colors border border-red-500/50'
+        : 'px-2 py-1 rounded text-xs bg-zinc-800/80 backdrop-blur text-zinc-400 hover:text-zinc-200 hover:bg-zinc-700/80 transition-colors border border-zinc-600/50';
+    }
+
+    if (sliderGroup) {
+      sliderGroup.classList.toggle('hidden', !state.enabled);
+    }
+
+    if (slider && state.enabled) {
+      slider.value = String(state.z);
+    }
+
+    if (zLabel && state.enabled) {
+      zLabel.textContent = `Z: ${state.z.toFixed(2)}`;
+    }
+  }
+
+  function syncClipSliderBounds() {
+    const state = getClipState();
+    const slider = document.getElementById('clip-z-slider') as HTMLInputElement;
+    if (!slider) return;
+
+    slider.min = String(state.min);
+    slider.max = String(state.max);
+    slider.step = String((state.max - state.min) / 200);
+
+    if (state.enabled) {
+      // Keep current Z if within bounds, else reset to 75%
+      if (state.z < state.min || state.z > state.max) {
+        const newZ = state.min + (state.max - state.min) * 0.75;
+        setClipZ(newZ);
+        syncClipUI();
+      }
     }
   }
 }
@@ -491,102 +574,6 @@ function setStatus(el: HTMLElement, state: 'ready' | 'running' | 'error' | 'load
     case 'error':
       el.className += 'text-red-400';
       break;
-  }
-}
-
-function toggleSection() {
-  const panel = document.getElementById('section-panel');
-  if (!panel) return;
-  panel.classList.toggle('hidden');
-  if (!panel.classList.contains('hidden')) {
-    updateSectionSlider(panel);
-  }
-}
-
-function initSectionPanel(panel: HTMLElement) {
-  const toggle = panel.querySelector('#section-toggle');
-  const content = panel.querySelector('#section-content') as HTMLElement;
-  const chevron = panel.querySelector('#section-chevron');
-
-  toggle?.addEventListener('click', () => {
-    content.classList.toggle('hidden');
-    if (chevron) {
-      chevron.textContent = content.classList.contains('hidden') ? '\u25BE' : '\u25B4';
-    }
-  });
-
-  const slider = panel.querySelector('#z-slider') as HTMLInputElement;
-  slider?.addEventListener('input', () => {
-    updateSectionPreview(panel, parseFloat(slider.value));
-  });
-
-  // Copy SVG
-  panel.querySelector('#btn-copy-svg')?.addEventListener('click', async () => {
-    const svgEl = panel.querySelector('#svg-preview svg');
-    if (svgEl) {
-      await navigator.clipboard.writeText(svgEl.outerHTML);
-    }
-  });
-
-  // Copy JSON
-  panel.querySelector('#btn-copy-json')?.addEventListener('click', async () => {
-    if (!currentManifold) return;
-    const slider = panel.querySelector('#z-slider') as HTMLInputElement;
-    const z = parseFloat(slider.value);
-    const result = sliceAtZ(currentManifold, z);
-    if (result) {
-      await navigator.clipboard.writeText(JSON.stringify({
-        z,
-        polygons: result.polygons,
-        boundingBox: result.boundingBox,
-        area: result.area,
-      }, null, 2));
-    }
-  });
-}
-
-function updateSectionSlider(panel: HTMLElement) {
-  if (!currentManifold) return;
-
-  const bbox = getBoundingBox(currentManifold);
-  if (!bbox) return;
-
-  const slider = panel.querySelector('#z-slider') as HTMLInputElement;
-  if (!slider) return;
-
-  slider.min = bbox.min[2].toString();
-  slider.max = bbox.max[2].toString();
-  slider.step = ((bbox.max[2] - bbox.min[2]) / 100).toString();
-
-  const midZ = (bbox.min[2] + bbox.max[2]) / 2;
-  slider.value = midZ.toString();
-
-  updateSectionPreview(panel, midZ);
-}
-
-function updateSectionPreview(panel: HTMLElement, z: number) {
-  const zValueEl = panel.querySelector('#z-value');
-  if (zValueEl) zValueEl.textContent = z.toFixed(2);
-
-  if (!currentManifold) return;
-
-  const result = sliceAtZ(currentManifold, z);
-  const preview = panel.querySelector('#svg-preview');
-  const stats = panel.querySelector('#section-stats');
-
-  if (!result || !preview) return;
-
-  preview.innerHTML = result.svg;
-
-  const svg = preview.querySelector('svg');
-  if (svg) {
-    svg.setAttribute('width', '100%');
-    svg.setAttribute('height', 'auto');
-    svg.style.maxWidth = '300px';
-  }
-
-  if (stats) {
-    stats.textContent = `Area: ${result.area.toFixed(2)} | Contours: ${result.polygons.length} | Bounds: [${result.boundingBox.minX.toFixed(1)}, ${result.boundingBox.minY.toFixed(1)}] to [${result.boundingBox.maxX.toFixed(1)}, ${result.boundingBox.maxY.toFixed(1)}]`;
   }
 }
 

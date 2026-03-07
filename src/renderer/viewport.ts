@@ -10,6 +10,23 @@ let controls: OrbitControls;
 let meshGroup: THREE.Group;
 let animationId: number;
 
+// Clipping plane state
+const clipPlane = new THREE.Plane(new THREE.Vector3(0, 0, -1), 0); // clips above Z
+let clippingEnabled = false;
+let clipZ = 0;
+let modelBounds: { min: number; max: number } = { min: 0, max: 10 };
+
+// Back-face cap material — shows the cut face in a different color
+const capMaterial = new THREE.MeshPhongMaterial({
+  color: 0xff6b6b,
+  shininess: 20,
+  side: THREE.BackSide,
+  clippingPlanes: [clipPlane],
+});
+
+// Clip plane visualization — translucent disc at the cut height
+let clipPlaneHelper: THREE.Mesh | null = null;
+
 export function initViewport(container: HTMLElement): {
   scene: THREE.Scene;
   camera: THREE.PerspectiveCamera;
@@ -29,6 +46,7 @@ export function initViewport(container: HTMLElement): {
 
   renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
   renderer.setPixelRatio(window.devicePixelRatio);
+  renderer.localClippingEnabled = true;
 
   controls = new OrbitControls(camera, canvas);
   controls.enableDamping = true;
@@ -88,17 +106,37 @@ export function updateMesh(meshData: MeshData): void {
 
   const geometry = meshGLToBufferGeometry(meshData);
 
-  const solidMesh = new THREE.Mesh(geometry, createDefaultMaterial());
-  const wireMesh = new THREE.Mesh(geometry, createWireframeMaterial());
+  const solidMat = createDefaultMaterial();
+  const wireMat = createWireframeMaterial();
+
+  // Apply clipping planes to materials
+  if (clippingEnabled) {
+    solidMat.clippingPlanes = [clipPlane];
+    wireMat.clippingPlanes = [clipPlane];
+  }
+
+  const solidMesh = new THREE.Mesh(geometry, solidMat);
+  const wireMesh = new THREE.Mesh(geometry, wireMat);
 
   meshGroup.add(solidMesh);
   meshGroup.add(wireMesh);
+
+  // Back-face cap mesh (shows cut face when clipping)
+  if (clippingEnabled) {
+    const capGeometry = geometry.clone();
+    const capMesh = new THREE.Mesh(capGeometry, capMaterial);
+    capMesh.name = 'clip-cap';
+    meshGroup.add(capMesh);
+  }
 
   // Auto-frame the camera
   const box = new THREE.Box3().setFromObject(meshGroup);
   const center = box.getCenter(new THREE.Vector3());
   const size = box.getSize(new THREE.Vector3());
   const maxDim = Math.max(size.x, size.y, size.z);
+
+  // Update model bounds for clip slider
+  modelBounds = { min: box.min.z, max: box.max.z };
 
   controls.target.copy(center);
   camera.position.set(
@@ -107,6 +145,105 @@ export function updateMesh(meshData: MeshData): void {
     center.z + maxDim * 1.2,
   );
   controls.update();
+
+  // Update clip plane position if clipping
+  if (clippingEnabled) {
+    updateClipPlaneVisual();
+  }
+}
+
+// === Clipping API ===
+
+export function setClipping(enabled: boolean): void {
+  clippingEnabled = enabled;
+
+  meshGroup.children.forEach(child => {
+    if (child instanceof THREE.Mesh) {
+      if (child.name === 'clip-cap') {
+        child.visible = enabled;
+        return;
+      }
+      const mat = child.material as THREE.Material;
+      if (mat) {
+        (mat as THREE.MeshPhongMaterial | THREE.MeshBasicMaterial).clippingPlanes = enabled ? [clipPlane] : [];
+        mat.needsUpdate = true;
+      }
+    }
+  });
+
+  if (enabled) {
+    // Default to 75% height on first enable
+    if (clipZ === 0) {
+      clipZ = modelBounds.min + (modelBounds.max - modelBounds.min) * 0.75;
+    }
+    clipPlane.constant = clipZ;
+
+    // Add cap mesh if not present
+    const hasCap = meshGroup.children.some(c => c.name === 'clip-cap');
+    if (!hasCap) {
+      const solidChild = meshGroup.children[0];
+      if (solidChild instanceof THREE.Mesh) {
+        const capGeometry = solidChild.geometry.clone();
+        const capMesh = new THREE.Mesh(capGeometry, capMaterial);
+        capMesh.name = 'clip-cap';
+        meshGroup.add(capMesh);
+      }
+    }
+
+    updateClipPlaneVisual();
+  } else {
+    removeClipPlaneVisual();
+  }
+}
+
+export function setClipZ(z: number): void {
+  clipZ = z;
+  clipPlane.constant = z;
+  updateClipPlaneVisual();
+}
+
+export function getClipState(): { enabled: boolean; z: number; min: number; max: number } {
+  return { enabled: clippingEnabled, z: clipZ, min: modelBounds.min, max: modelBounds.max };
+}
+
+export function isClipping(): boolean {
+  return clippingEnabled;
+}
+
+function updateClipPlaneVisual() {
+  removeClipPlaneVisual();
+
+  if (!clippingEnabled) return;
+
+  // Create a translucent disc at the clip height
+  const range = Math.max(modelBounds.max - modelBounds.min, 1);
+  const radius = range * 1.5;
+  const planeGeo = new THREE.CircleGeometry(radius, 64);
+  const planeMat = new THREE.MeshBasicMaterial({
+    color: 0xff6b6b,
+    transparent: true,
+    opacity: 0.08,
+    side: THREE.DoubleSide,
+    depthWrite: false,
+  });
+  clipPlaneHelper = new THREE.Mesh(planeGeo, planeMat);
+  clipPlaneHelper.name = 'clip-plane-helper';
+  clipPlaneHelper.position.set(
+    (modelBounds.min + modelBounds.max) / 2, // rough center — will be off but acceptable
+    (modelBounds.min + modelBounds.max) / 2,
+    clipZ,
+  );
+  // The disc lies in XY plane by default, which is what we want for Z-clipping
+  scene.add(clipPlaneHelper);
+}
+
+function removeClipPlaneVisual() {
+  if (clipPlaneHelper) {
+    scene.remove(clipPlaneHelper);
+    clipPlaneHelper.geometry.dispose();
+    (clipPlaneHelper.material as THREE.Material).dispose();
+    clipPlaneHelper = null;
+  }
 }
 
 function meshGLToBufferGeometry(mesh: MeshData): THREE.BufferGeometry {

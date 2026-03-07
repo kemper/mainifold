@@ -21,6 +21,9 @@ mainifold.setCode(code)       // Set editor contents (no auto-run)
 mainifold.sliceAtZ(z)         // Cross-section → {polygons, svg, boundingBox, area}
 mainifold.getBoundingBox()    // → {min:[x,y,z], max:[x,y,z]}
 mainifold.getModule()         // Raw manifold-3d WASM module
+mainifold.toggleClip(on?)     // Toggle 3D clipping plane → {enabled, z, min, max}
+mainifold.setClipZ(z)         // Set clip height → {enabled, z, min, max}
+mainifold.getClipState()      // → {enabled, z, min, max}
 await mainifold.exportGLB()   // Download GLB
 mainifold.exportSTL()         // Download STL
 

@@ -1,6 +1,5 @@
 export interface ToolbarCallbacks {
   onRun: () => void;
-  onSection: () => void;
   onExportGLB: () => void;
   onExportSTL: () => void;
   onExampleSelect: (code: string) => void;
@@ -24,11 +23,6 @@ export function createToolbar(
   const btnRun = createButton('btn-run', '\u25B6 Run');
   btnRun.addEventListener('click', callbacks.onRun);
   toolbar.appendChild(btnRun);
-
-  // Section button
-  const btnSection = createButton('btn-section', '\u2298 Section');
-  btnSection.addEventListener('click', callbacks.onSection);
-  toolbar.appendChild(btnSection);
 
   // Spacer
   const spacer = document.createElement('div');
