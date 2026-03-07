@@ -293,6 +293,18 @@ Intermediate Manifold/CrossSection objects consume WASM memory. For simple scrip
 - `CrossSection.circle`: always centered at origin (no `center` param needed)
 - `CrossSection.square`: like cube, defaults to first-quadrant placement. `center=true` → centered.
 
+## Development Guidelines
+
+### URL State
+
+All meaningful UI state must be reflected in the URL via query parameters so that views are linkable and shareable. When adding a new feature that changes what the user sees (tabs, modes, panels, filters, etc.), update the URL with `history.replaceState`. Current URL parameters:
+
+- `?view=ai` — AI Views tab
+- `?gallery` — Gallery tab
+- `?session=<id>` — Active session
+- `?session=<id>&v=3` — Specific version
+- Tab switching is handled in `src/ui/layout.ts` (`switchTab`). Session/version state is handled in `src/storage/sessionManager.ts` (`updateURL`).
+
 ## Common Errors
 
 | Error | Cause |
