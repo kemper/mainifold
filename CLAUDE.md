@@ -65,11 +65,21 @@ Manifold.tetrahedron()
 // Centroid at origin, fits in a 2-unit bounding box.
 // Scale it to desired size.
 
-Manifold.extrude(crossSection, height)
+Manifold.extrude(crossSection, height, nDivisions?, twistDegrees?, scaleTop?, center?)
 // Extrude a 2D CrossSection along Z from z=0 to z=height.
+// nDivisions: extra vertical slices (useful with twist to avoid artifacts)
+// twistDegrees: twist the top relative to the bottom
+// scaleTop: scale at the top — number for uniform, [x,y] for non-uniform. Default 1.
+//           Use 0 for a cone-like point at the top.
+// center: if true, centered on Z from -height/2 to height/2
 
-Manifold.revolve(crossSection, segments?)
-// Revolve a 2D CrossSection around the Y axis.
+Manifold.revolve(crossSection, segments?, revolveDegrees?)
+// Revolve a 2D CrossSection around the Y axis, then remap so the result is Z-up.
+// In the 2D profile: X = radial distance from center, Y = height.
+// After revolve: the profile's Y becomes the 3D Z axis automatically.
+// So a profile spanning Y=0..16 produces geometry with Z=0..16 — no rotation needed.
+// Only the positive-X side of the profile is used.
+// revolveDegrees: partial revolution (default 360). E.g. 180 for a half-turn.
 
 Manifold.compose(manifolds[])               // Combine without booleans
 Manifold.union(manifolds[])                 // Boolean union array
@@ -161,6 +171,46 @@ CrossSection.union(sections[])
 CrossSection.difference(sections[])
 CrossSection.intersection(sections[])
 CrossSection.hull(sections[])
+```
+
+### CrossSection Instance Methods
+
+```javascript
+// 2D to 3D (return Manifold)
+cs.extrude(height, nDivisions?, twistDegrees?, scaleTop?, center?)
+cs.revolve(segments?, revolveDegrees?)
+
+// Transforms (return new CrossSection)
+cs.translate([x, y]) or cs.translate(x, y?)
+cs.rotate(degrees)               // Rotation around the Z-axis (in 2D: around origin)
+cs.scale([x, y]) or cs.scale(s)  // Uniform or per-axis scaling
+cs.mirror([nx, ny])              // Mirror across axis through origin
+cs.transform(mat3)               // Arbitrary 2D affine transform
+cs.warp(fn)                      // Per-vertex warp function (fn receives [x,y])
+
+// Booleans (return new CrossSection)
+cs.add(other)                    // Union
+cs.subtract(other)               // Difference
+cs.intersect(other)              // Intersection
+cs.hull()                        // Convex hull
+
+// Modification
+cs.offset(delta, joinType?, miterLimit?, circularSegments?)
+// Inflate/deflate contours. delta>0 = expand outlines, shrink holes.
+// joinType: 'Round' (default), 'Miter', 'Square'
+cs.simplify(epsilon?)            // Remove near-duplicate vertices
+
+// Queries
+cs.area()                        // Total area
+cs.isEmpty()
+cs.numVert()
+cs.numContour()                  // Number of contours (outer + holes)
+cs.bounds()                      // Axis-aligned bounding rect
+
+// Output
+cs.toPolygons()                  // → SimplePolygon[]
+cs.decompose()                   // Separate disconnected sections → CrossSection[]
+cs.delete()                      // Free WASM memory
 ```
 
 ## Common Errors

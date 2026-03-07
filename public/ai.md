@@ -68,8 +68,12 @@ cube([x,y,z])         → spans [0,0,0] to [x,y,z]. center=true → centered at 
 sphere(r, n?)         → centered at origin
 cylinder(h,rLo,rHi?,n?) → Z-axis, base z=0, top z=h. rHi=0 for cone
 tetrahedron()          → vertices at [1,1,1],[1,-1,-1],[-1,1,-1],[-1,-1,1]. Scale to size.
-extrude(cs, h)         → along Z, z=0 to z=h
-revolve(cs, n?)        → around Y axis
+extrude(cs, h, nDiv?, twist?, scaleTop?, center?)
+  → along Z, z=0 to z=h. twist=degrees, scaleTop=number or [x,y] (0 for cone point)
+revolve(cs, n?, degrees?)
+  → around Y axis, then remaps so result is Z-up.
+    Profile X=radial distance, Y=height → after revolve, Y becomes Z automatically.
+    Only positive-X side used. degrees defaults to 360.
 Segments guide: 6-8 low-poly, 32-48 smooth, 64+ high quality
 ```
 
@@ -82,7 +86,7 @@ CrossSection: square, circle, ofPolygons (CCW outer, CW holes),
               compose, union, difference, intersection, hull
 ```
 
-### Instance methods
+### Manifold instance methods
 
 ```
 Booleans:   .add(other)  .subtract(other)  .intersect(other)  .hull()
@@ -94,6 +98,18 @@ Queries:    .volume()  .surfaceArea()  .genus()  .numVert()  .numTri()  .isEmpty
             .boundingBox()  .status() (0=valid)  .decompose()
 Slicing:    .slice(z)  .project()  .trimByPlane(n,off)  .splitByPlane(n,off)
 Output:     .getMesh() → {vertProperties, triVerts, numVert, numTri, numProp}
+```
+
+### CrossSection instance methods
+
+```
+2D→3D:      .extrude(h, nDiv?, twist?, scaleTop?, center?)  .revolve(n?, degrees?)
+Transforms: .translate([x,y])  .rotate(degrees)  .scale(s or [x,y])
+            .mirror([nx,ny])  .warp(fn)  .transform(mat3)
+Booleans:   .add(other)  .subtract(other)  .intersect(other)  .hull()
+Modify:     .offset(delta, joinType?, miterLimit?, segments?)  .simplify(epsilon?)
+Queries:    .area()  .isEmpty()  .numVert()  .numContour()  .bounds()
+Output:     .toPolygons()  .decompose()  .delete()
 ```
 
 ## Verification

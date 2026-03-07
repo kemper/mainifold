@@ -37,8 +37,10 @@ return box.subtract(hole);</pre>
 sphere(r, n?)       → centered at origin
 cylinder(h,rLo,rHi?,n?) → Z-axis, base z=0, top z=h. rHi=0 for cone
 tetrahedron()       → ~2-unit bbox at origin. Scale to size.
-extrude(cs, h)      → along Z, z=0 to z=h
-revolve(cs, n?)     → around Y axis</pre>
+extrude(cs, h, nDiv?, twist?, scaleTop?, center?)
+                    → along Z. twist=degrees, scaleTop=0 for cone point
+revolve(cs, n?, deg?) → around Y axis, result is Z-up automatically.
+                    Profile X=radial, Y=height → Y becomes Z.</pre>
 
       <p style="margin-top:8px;color:#a1a1aa;"><strong>Constructors:</strong>
       <span style="color:#e4e4e7;">cube, sphere, cylinder, tetrahedron, extrude, revolve, union, difference, intersection, hull, compose, smooth, levelSet, ofMesh</span></p>
