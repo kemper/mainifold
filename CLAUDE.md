@@ -153,11 +153,11 @@ CrossSection.circle(radius, segments?)
 // Circle centered at origin on XY plane.
 
 CrossSection.ofPolygons(polygons)
-// Array of polygon contours. Each contour is an array of [x,y] points.
-// First contour = outer boundary (CCW winding).
+// Type: [number, number][][] — array of contours, each contour is [x,y] pairs.
+// First contour = outer boundary (CCW winding in standard math coords: Y-up).
 // Subsequent contours = holes (CW winding).
 // Example — triangle: CrossSection.ofPolygons([[[0,0], [10,0], [5,8]]])
-// Example — square with circular hole approximation:
+// Example — ring (square with circular hole):
 //   const outer = [[0,0],[10,0],[10,10],[0,10]];     // CCW
 //   const hole = [];                                   // CW
 //   for (let i = 0; i < 16; i++) {
@@ -165,6 +165,8 @@ CrossSection.ofPolygons(polygons)
 //     hole.push([5 + 2*Math.cos(a), 5 + 2*Math.sin(a)]);
 //   }
 //   CrossSection.ofPolygons([outer, hole])
+// Note: near-coincident points and minor self-intersections are cleaned up
+// by the Positive fill rule (default). Exact duplicates are fine.
 
 CrossSection.compose(sections[])
 CrossSection.union(sections[])
@@ -212,6 +214,35 @@ cs.toPolygons()                  // → SimplePolygon[]
 cs.decompose()                   // Separate disconnected sections → CrossSection[]
 cs.delete()                      // Free WASM memory
 ```
+
+**Note:** `Manifold.extrude(cs, h, ...)` and `cs.extrude(h, ...)` are equivalent, as are `Manifold.revolve(cs, n, ...)` and `cs.revolve(n, ...)`. Use whichever reads better.
+
+### Common Patterns
+
+```javascript
+// Circular array of features (bolt holes, gear teeth, crenellations)
+const features = [];
+const n = 8;
+for (let i = 0; i < n; i++) {
+  const angle = (i * 360) / n;
+  features.push(
+    Manifold.cylinder(10, 2, 2, 32).translate([20, 0, 0]).rotate([0, 0, angle])
+  );
+}
+const result = body.subtract(Manifold.union(features));
+
+// Revolve profile: X = radial distance, Y = height → Z-up result
+const profile = [[0,0], [5,0], [5,10], [3,12], [0,12]]; // CCW, half-profile
+const vase = Manifold.revolve(CrossSection.ofPolygons([profile]), 64);
+
+// Extrude with twist (e.g., twisted column)
+const star = CrossSection.ofPolygons([/* star shape */]);
+const column = star.extrude(20, 10, 90); // 10 divisions, 90-degree twist
+```
+
+### Memory Management
+
+Intermediate Manifold/CrossSection objects consume WASM memory. For simple scripts, this is fine — the page reload cleans up. For complex models with many intermediates, call `.delete()` on objects you no longer need.
 
 ## Common Errors
 
