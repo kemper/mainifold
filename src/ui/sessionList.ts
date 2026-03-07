@@ -1,0 +1,158 @@
+// Session list modal — browse, create, delete sessions
+
+import {
+  listSessions,
+  createSession,
+  deleteSession,
+  openSession,
+  type Session,
+} from '../storage/sessionManager';
+import { getVersionCount } from '../storage/db';
+
+let modalEl: HTMLElement | null = null;
+let onLoadVersion: ((code: string) => void) | null = null;
+
+export function initSessionList(loadCode: (code: string) => void): void {
+  onLoadVersion = loadCode;
+}
+
+export async function showSessionList(): Promise<void> {
+  if (modalEl) {
+    modalEl.remove();
+    modalEl = null;
+  }
+
+  const overlay = document.createElement('div');
+  overlay.className = 'fixed inset-0 bg-black/60 flex items-center justify-center z-50';
+  overlay.addEventListener('click', (e) => {
+    if (e.target === overlay) closeModal();
+  });
+
+  const modal = document.createElement('div');
+  modal.className = 'bg-zinc-800 rounded-xl shadow-2xl border border-zinc-700 w-full max-w-lg max-h-[70vh] flex flex-col';
+
+  // Header
+  const header = document.createElement('div');
+  header.className = 'flex items-center justify-between px-5 py-3 border-b border-zinc-700';
+
+  const title = document.createElement('h2');
+  title.className = 'text-sm font-semibold text-zinc-100';
+  title.textContent = 'Sessions';
+  header.appendChild(title);
+
+  const headerActions = document.createElement('div');
+  headerActions.className = 'flex gap-2';
+
+  const newBtn = document.createElement('button');
+  newBtn.className = 'px-3 py-1 rounded text-xs bg-blue-600 hover:bg-blue-500 text-white transition-colors';
+  newBtn.textContent = '+ New Session';
+  newBtn.addEventListener('click', async () => {
+    const name = prompt('Session name:');
+    if (name === null) return;
+    await createSession(name || undefined);
+    closeModal();
+  });
+  headerActions.appendChild(newBtn);
+
+  const closeBtn = document.createElement('button');
+  closeBtn.className = 'px-2 py-1 rounded text-zinc-400 hover:text-zinc-200 hover:bg-zinc-700 text-sm';
+  closeBtn.textContent = '✕';
+  closeBtn.addEventListener('click', closeModal);
+  headerActions.appendChild(closeBtn);
+
+  header.appendChild(headerActions);
+  modal.appendChild(header);
+
+  // Session list
+  const listContainer = document.createElement('div');
+  listContainer.className = 'flex-1 overflow-auto';
+
+  const sessions = await listSessions();
+
+  if (sessions.length === 0) {
+    const empty = document.createElement('div');
+    empty.className = 'flex items-center justify-center py-12 text-zinc-500 text-sm';
+    empty.textContent = 'No sessions yet. Create one to start tracking versions.';
+    listContainer.appendChild(empty);
+  } else {
+    for (const session of sessions) {
+      listContainer.appendChild(await createSessionRow(session));
+    }
+  }
+
+  modal.appendChild(listContainer);
+  overlay.appendChild(modal);
+  document.body.appendChild(overlay);
+  modalEl = overlay;
+
+  // Close on Escape
+  const escHandler = (e: KeyboardEvent) => {
+    if (e.key === 'Escape') {
+      closeModal();
+      document.removeEventListener('keydown', escHandler);
+    }
+  };
+  document.addEventListener('keydown', escHandler);
+}
+
+async function createSessionRow(session: Session): Promise<HTMLElement> {
+  const count = await getVersionCount(session.id);
+
+  const row = document.createElement('div');
+  row.className = 'flex items-center gap-3 px-5 py-3 hover:bg-zinc-700/50 cursor-pointer border-b border-zinc-700/50 transition-colors';
+
+  row.addEventListener('click', async () => {
+    const version = await openSession(session.id);
+    if (version && onLoadVersion) {
+      onLoadVersion(version.code);
+    }
+    closeModal();
+  });
+
+  // Info
+  const info = document.createElement('div');
+  info.className = 'flex-1 min-w-0';
+
+  const name = document.createElement('div');
+  name.className = 'text-sm text-zinc-200 truncate';
+  name.textContent = session.name;
+  info.appendChild(name);
+
+  const meta = document.createElement('div');
+  meta.className = 'text-xs text-zinc-500 font-mono mt-0.5';
+  meta.textContent = `${count} version${count !== 1 ? 's' : ''} · ${formatDate(session.updated)}`;
+  info.appendChild(meta);
+
+  row.appendChild(info);
+
+  // Delete button
+  const delBtn = document.createElement('button');
+  delBtn.className = 'px-2 py-1 rounded text-zinc-500 hover:text-red-400 hover:bg-zinc-700 text-xs transition-colors';
+  delBtn.textContent = 'Delete';
+  delBtn.addEventListener('click', async (e) => {
+    e.stopPropagation();
+    if (confirm(`Delete "${session.name}" and all its versions?`)) {
+      await deleteSession(session.id);
+      row.remove();
+    }
+  });
+  row.appendChild(delBtn);
+
+  return row;
+}
+
+function closeModal() {
+  if (modalEl) {
+    modalEl.remove();
+    modalEl = null;
+  }
+}
+
+function formatDate(ts: number): string {
+  const d = new Date(ts);
+  const now = new Date();
+  if (d.toDateString() === now.toDateString()) {
+    return 'today ' + d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  }
+  return d.toLocaleDateString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+}

@@ -2,13 +2,34 @@ import './style.css';
 import { initEngine, executeCode, getModule } from './geometry/engine';
 import { sliceAtZ, getBoundingBox } from './geometry/crossSection';
 import { initViewport, updateMesh } from './renderer/viewport';
+import { renderCompositeCanvas } from './renderer/multiview';
 import { initEditor, setValue, getValue } from './editor/codeEditor';
 import { createLayout } from './ui/layout';
 import { createToolbar } from './ui/toolbar';
 import { initViewsPanel, updateMultiView } from './ui/panels';
+import { createSessionBar } from './ui/sessionBar';
+import { createGalleryView, refreshGallery } from './ui/gallery';
+import { initSessionList, showSessionList } from './ui/sessionList';
 import { exportGLB } from './export/gltf';
 import { exportSTL } from './export/stl';
 import type { MeshData } from './geometry/types';
+import {
+  getSessionIdFromURL,
+  getVersionFromURL,
+  isGalleryMode,
+  openSession,
+  createSession,
+  closeSession,
+  listSessions,
+  deleteSession,
+  saveVersion,
+  navigateVersion,
+  loadVersionByIndex,
+  listCurrentVersions,
+  getState,
+  getSessionUrl,
+  getGalleryUrl,
+} from './storage/sessionManager';
 
 // Load examples as raw text
 const exampleModules = import.meta.glob('../examples/*.js', { query: '?raw', import: 'default' });
@@ -55,17 +76,14 @@ function updateGeometryData(executionTimeMs?: number, sourceCode?: string) {
     // fallback if methods unavailable
   }
 
-  // Centroid approximation from bounding box center
   const centroid = bbox
     ? [(bbox.min[0] + bbox.max[0]) / 2, (bbox.min[1] + bbox.max[1]) / 2, (bbox.min[2] + bbox.max[2]) / 2]
     : null;
 
-  // Dimensions
   const dimensions = bbox
     ? [bbox.max[0] - bbox.min[0], bbox.max[1] - bbox.min[1], bbox.max[2] - bbox.min[2]]
     : null;
 
-  // Component count
   let componentCount = 1;
   try {
     const parts = currentManifold.decompose();
@@ -75,7 +93,6 @@ function updateGeometryData(executionTimeMs?: number, sourceCode?: string) {
     // fallback
   }
 
-  // Is manifold (status 0 = ok)
   let isManifold = true;
   try {
     isManifold = currentManifold.status() === 0;
@@ -83,7 +100,6 @@ function updateGeometryData(executionTimeMs?: number, sourceCode?: string) {
     // fallback
   }
 
-  // Cross-sections at quartiles
   const quartileSlices: Record<string, { z: number; area: number; contours: number }> = {};
   if (bbox) {
     const zRange = bbox.max[2] - bbox.min[2];
@@ -120,6 +136,26 @@ function updateGeometryData(executionTimeMs?: number, sourceCode?: string) {
   geometryDataEl.textContent = JSON.stringify(data, null, 2);
 }
 
+function captureThumbnail(): Promise<Blob | null> {
+  if (!currentMeshData) return Promise.resolve(null);
+  try {
+    const canvas = renderCompositeCanvas(currentMeshData);
+    return new Promise(resolve => {
+      canvas.toBlob(b => resolve(b), 'image/png');
+    });
+  } catch {
+    return Promise.resolve(null);
+  }
+}
+
+function getGeometryDataObj(): Record<string, unknown> | null {
+  try {
+    return JSON.parse(geometryDataEl.textContent || '{}');
+  } catch {
+    return null;
+  }
+}
+
 async function main() {
   const app = document.getElementById('app')!;
   geometryDataEl = createGeometryDataElement();
@@ -149,11 +185,42 @@ async function main() {
     },
   });
 
-  // Create layout
-  const { editorContainer, viewportPane, viewsContainer, statusBar, sectionPanel } = createLayout(app);
+  // Create session bar
+  createSessionBar(app, {
+    onSaveVersion: async () => ({
+      code: getValue(),
+      geometryData: getGeometryDataObj(),
+      thumbnail: await captureThumbnail(),
+    }),
+    onLoadVersion: (code: string) => {
+      setValue(code);
+      runCode(code);
+    },
+    onOpenGallery: () => {
+      switchTab('gallery');
+      refreshGallery();
+    },
+    onOpenSessionList: () => showSessionList(),
+  });
 
-  // Init views panel (always visible)
+  // Create layout
+  const { editorContainer, viewportPane, viewsContainer, galleryContainer, statusBar, sectionPanel, switchTab } = createLayout(app);
+
+  // Init views panel
   initViewsPanel(viewsContainer);
+
+  // Init gallery
+  createGalleryView(galleryContainer, (code: string) => {
+    setValue(code);
+    runCode(code);
+    switchTab('interactive');
+  });
+
+  // Init session list
+  initSessionList((code: string) => {
+    setValue(code);
+    runCode(code);
+  });
 
   // Init geometry engine
   setStatus(statusBar, 'loading', 'Loading WASM...');
@@ -170,9 +237,28 @@ async function main() {
   // Wire up cross-section panel
   initSectionPanel(sectionPanel);
 
-  // Initial run
-  setStatus(statusBar, 'ready', 'Ready');
-  runCode(defaultCode);
+  // Load session from URL if present
+  const sessionId = getSessionIdFromURL();
+  if (sessionId) {
+    const versionIndex = getVersionFromURL();
+    const version = await openSession(sessionId, versionIndex ?? undefined);
+    if (version) {
+      setValue(version.code);
+      runCode(version.code);
+      if (isGalleryMode()) {
+        switchTab('gallery');
+        refreshGallery();
+      }
+    } else {
+      // Session not found, run default
+      setStatus(statusBar, 'ready', 'Ready');
+      runCode(defaultCode);
+    }
+  } else {
+    // No session, run default
+    setStatus(statusBar, 'ready', 'Ready');
+    runCode(defaultCode);
+  }
 
   // === Expose window.mainifold console API ===
   const mainifoldAPI = {
@@ -232,6 +318,111 @@ async function main() {
       if (result.error) return { valid: false, error: result.error };
       return { valid: true };
     },
+
+    // === Session API ===
+
+    /** Create a new session and make it active */
+    async createSession(name?: string) {
+      const session = await createSession(name);
+      return { id: session.id, url: getSessionUrl() };
+    },
+
+    /** List all saved sessions */
+    async listSessions() {
+      const sessions = await listSessions();
+      return sessions.map(s => ({ id: s.id, name: s.name, updated: s.updated }));
+    },
+
+    /** Open an existing session (loads latest version) */
+    async openSession(id: string) {
+      const version = await openSession(id);
+      if (version) {
+        setValue(version.code);
+        runCodeSync(version.code);
+      }
+      return version ? { id: version.id, index: version.index, label: version.label } : null;
+    },
+
+    /** Close the current session */
+    async closeSession() {
+      await closeSession();
+    },
+
+    /** Delete a session and all its versions */
+    async deleteSession(id: string) {
+      await deleteSession(id);
+    },
+
+    /** Save current state as a new version in the active session */
+    async saveVersion(label?: string) {
+      const thumbnail = await captureThumbnail();
+      const version = await saveVersion(getValue(), getGeometryDataObj(), thumbnail, label);
+      return version ? { id: version.id, index: version.index, label: version.label } : null;
+    },
+
+    /** List all versions in the current session */
+    async listVersions() {
+      const versions = await listCurrentVersions();
+      return versions.map(v => ({
+        id: v.id,
+        index: v.index,
+        label: v.label,
+        timestamp: v.timestamp,
+        status: (v.geometryData as Record<string, unknown> | null)?.status ?? null,
+      }));
+    },
+
+    /** Load a specific version by index */
+    async loadVersion(index: number) {
+      const version = await loadVersionByIndex(index);
+      if (version) {
+        setValue(version.code);
+        runCodeSync(version.code);
+      }
+      return version ? { id: version.id, index: version.index, label: version.label } : null;
+    },
+
+    /** Navigate to previous or next version */
+    async navigateVersion(direction: 'prev' | 'next') {
+      const version = await navigateVersion(direction);
+      if (version) {
+        setValue(version.code);
+        runCodeSync(version.code);
+      }
+      return version ? { id: version.id, index: version.index, label: version.label } : null;
+    },
+
+    /** Run code and save as a new version in one call */
+    async runAndSave(code: string, label?: string) {
+      setValue(code);
+      runCodeSync(code);
+      const thumbnail = await captureThumbnail();
+      const version = await saveVersion(code, getGeometryDataObj(), thumbnail, label);
+      return {
+        geometry: JSON.parse(geometryDataEl.textContent || '{}'),
+        version: version ? { id: version.id, index: version.index, label: version.label } : null,
+      };
+    },
+
+    /** Get URL for the current session */
+    getSessionUrl() {
+      return getSessionUrl();
+    },
+
+    /** Get URL for the gallery view of the current session */
+    getGalleryUrl() {
+      return getGalleryUrl();
+    },
+
+    /** Get current session state */
+    getSessionState() {
+      const state = getState();
+      return {
+        session: state.session ? { id: state.session.id, name: state.session.name } : null,
+        currentVersion: state.currentVersion ? { index: state.currentVersion.index, label: state.currentVersion.label } : null,
+        versionCount: state.versionCount,
+      };
+    },
   };
 
   (window as unknown as Record<string, unknown>).mainifold = mainifoldAPI;
@@ -242,6 +433,9 @@ async function main() {
     'Methods: .run(code?), .getGeometryData(), .getCode(), .setCode(code),\n' +
     '         .sliceAtZ(z), .getBoundingBox(), .validate(code),\n' +
     '         .getModule(), .exportGLB(), .exportSTL()\n' +
+    'Sessions: .createSession(name?), .saveVersion(label?), .runAndSave(code, label?),\n' +
+    '          .listSessions(), .openSession(id), .listVersions(), .loadVersion(idx),\n' +
+    '          .getGalleryUrl(), .getSessionUrl(), .getSessionState()\n' +
     'Structured data: document.getElementById("geometry-data").textContent',
     'color: #4ade80; font-weight: bold',
     'color: inherit',

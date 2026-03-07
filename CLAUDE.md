@@ -343,6 +343,50 @@ mainifold.exportSTL()
 mainifold.getModule()
 ```
 
+### Session & Versioning API
+
+Sessions let you (or an AI agent) save multiple versions of a design, then compare them in a gallery view.
+
+```javascript
+// Create a session and iterate on a design
+const { id, url } = await mainifold.createSession("Gear variations");
+
+// Run code and save as version in one call
+await mainifold.runAndSave(`
+  const { Manifold } = api;
+  return Manifold.cylinder(10, 8, 8, 32);
+`, "v1 - basic cylinder");
+
+// Run more variations
+await mainifold.runAndSave(variant2Code, "v2 - added teeth");
+await mainifold.runAndSave(variant3Code, "v3 - wider base");
+
+// Get gallery URL for human review
+mainifold.getGalleryUrl()
+// → "http://localhost:5173/?session=abc123&gallery"
+
+// Session management
+await mainifold.listSessions()        // → [{id, name, updated}]
+await mainifold.openSession(id)       // Load latest version
+await mainifold.closeSession()
+
+// Version navigation
+await mainifold.listVersions()        // → [{id, index, label, timestamp, status}]
+await mainifold.loadVersion(2)        // Load version by index
+await mainifold.navigateVersion('prev')
+await mainifold.navigateVersion('next')
+await mainifold.saveVersion("label")  // Save current state as version
+mainifold.getSessionState()           // → {session, currentVersion, versionCount}
+```
+
+**URL parameters:**
+- `?session=<id>` — Load session, resume latest version
+- `?session=<id>&v=3` — Load specific version
+- `?session=<id>&gallery` — Open gallery view
+- `?view=ai` — Works with any of the above
+
+**Gallery view:** Grid of version tiles with isometric thumbnails, geometry stats (volume, dimensions), and status indicators. Click any tile to load that version. Ideal for AI to produce N variations, then hand off a gallery URL for human review.
+
 ## Structured Geometry Data
 
 `document.getElementById("geometry-data").textContent` always contains current model stats as JSON:

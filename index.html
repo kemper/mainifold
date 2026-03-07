@@ -24,7 +24,11 @@ mainifold.setCode(code)     // Set editor (no auto-run)
 mainifold.sliceAtZ(z)       // Cross-section → polygons + area
 mainifold.getBoundingBox()  // → {min:[x,y,z], max:[x,y,z]}
 mainifold.exportGLB()       // Download GLB
-mainifold.exportSTL()       // Download STL</pre>
+mainifold.exportSTL()       // Download STL
+// Sessions
+await mainifold.createSession(name?)
+await mainifold.runAndSave(code, label?)
+mainifold.getGalleryUrl()   // Gallery for human review</pre>
 
       <p style="margin-top:8px;color:#a1a1aa;"><strong>Code pattern</strong> — must <code style="color:#f87171;">return</code> a Manifold. All transforms are immutable.</p>
       <pre style="background:#09090b;padding:8px;margin:4px 0;overflow-x:auto;color:#e4e4e7;font-size:11px;">const { Manifold, CrossSection } = api;

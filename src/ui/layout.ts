@@ -3,8 +3,10 @@ export interface LayoutElements {
   editorContainer: HTMLElement;
   viewportPane: HTMLElement;
   viewsContainer: HTMLElement;
+  galleryContainer: HTMLElement;
   statusBar: HTMLElement;
   sectionPanel: HTMLElement;
+  switchTab: (tab: 'interactive' | 'ai' | 'gallery') => void;
 }
 
 export function createLayout(appContainer: HTMLElement): LayoutElements {
@@ -56,6 +58,7 @@ export function createLayout(appContainer: HTMLElement): LayoutElements {
 
   const tabInteractive = createTab('Interactive', true);
   const tabAI = createTab('AI Views', false);
+  const tabGallery = createTab('Gallery', false);
 
   // Copy / Download buttons (shown only on AI Views tab)
   const viewActions = document.createElement('div');
@@ -76,6 +79,7 @@ export function createLayout(appContainer: HTMLElement): LayoutElements {
 
   tabBar.appendChild(tabInteractive);
   tabBar.appendChild(tabAI);
+  tabBar.appendChild(tabGallery);
   tabBar.appendChild(viewActions);
 
   // Tab content panels
@@ -87,35 +91,47 @@ export function createLayout(appContainer: HTMLElement): LayoutElements {
   viewsContainer.id = 'views-container';
   viewsContainer.className = 'flex-1 min-h-0 overflow-auto bg-zinc-900 hidden p-2';
 
+  const galleryContainer = document.createElement('div');
+  galleryContainer.id = 'gallery-container';
+  galleryContainer.className = 'flex-1 min-h-0 overflow-auto bg-zinc-900 hidden p-4';
+
+  const allTabs = [tabInteractive, tabAI, tabGallery];
+  const allPanes = [viewportPane, viewsContainer, galleryContainer];
+
   // Tab switching
-  function switchTab(tab: 'interactive' | 'ai') {
-    if (tab === 'interactive') {
-      viewportPane.classList.remove('hidden');
-      viewsContainer.classList.add('hidden');
-      viewActions.classList.add('hidden');
-      setActiveTab(tabInteractive, tabAI);
-    } else {
-      viewportPane.classList.add('hidden');
-      viewsContainer.classList.remove('hidden');
-      viewActions.classList.remove('hidden');
-      setActiveTab(tabAI, tabInteractive);
+  function switchTab(tab: 'interactive' | 'ai' | 'gallery') {
+    const idx = tab === 'interactive' ? 0 : tab === 'ai' ? 1 : 2;
+
+    for (let i = 0; i < allPanes.length; i++) {
+      if (i === idx) {
+        allPanes[i].classList.remove('hidden');
+        allTabs[i].className = 'px-4 py-1.5 text-xs font-medium text-zinc-100 border-b-2 border-blue-500 bg-zinc-900';
+      } else {
+        allPanes[i].classList.add('hidden');
+        allTabs[i].className = 'px-4 py-1.5 text-xs font-medium text-zinc-500 hover:text-zinc-300 border-b-2 border-transparent';
+      }
     }
-    // Trigger resize so viewport/views adapt
+
+    viewActions.classList.toggle('hidden', tab !== 'ai');
     window.dispatchEvent(new Event('resize'));
   }
 
   tabInteractive.addEventListener('click', () => switchTab('interactive'));
   tabAI.addEventListener('click', () => switchTab('ai'));
+  tabGallery.addEventListener('click', () => switchTab('gallery'));
 
-  // Default to AI views if ?view=ai query param is present
-  const startOnAI = new URLSearchParams(window.location.search).get('view') === 'ai';
-  if (startOnAI) {
+  // Default to AI views if ?view=ai, gallery if ?gallery
+  const params = new URLSearchParams(window.location.search);
+  if (params.has('gallery')) {
+    switchTab('gallery');
+  } else if (params.get('view') === 'ai') {
     switchTab('ai');
   }
 
   rightPane.appendChild(tabBar);
   rightPane.appendChild(viewportPane);
   rightPane.appendChild(viewsContainer);
+  rightPane.appendChild(galleryContainer);
 
   main.appendChild(editorPane);
   main.appendChild(splitter);
@@ -123,7 +139,7 @@ export function createLayout(appContainer: HTMLElement): LayoutElements {
 
   appContainer.appendChild(main);
 
-  return { editorPane, editorContainer, viewportPane, viewsContainer, statusBar, sectionPanel };
+  return { editorPane, editorContainer, viewportPane, viewsContainer, galleryContainer, statusBar, sectionPanel, switchTab };
 }
 
 function createTab(label: string, active: boolean): HTMLButtonElement {
@@ -134,11 +150,6 @@ function createTab(label: string, active: boolean): HTMLButtonElement {
   btn.textContent = label;
   btn.dataset.tab = label;
   return btn;
-}
-
-function setActiveTab(active: HTMLButtonElement, inactive: HTMLButtonElement) {
-  active.className = 'px-4 py-1.5 text-xs font-medium text-zinc-100 border-b-2 border-blue-500 bg-zinc-900';
-  inactive.className = 'px-4 py-1.5 text-xs font-medium text-zinc-500 hover:text-zinc-300 border-b-2 border-transparent';
 }
 
 function createSectionPanel(): HTMLElement {

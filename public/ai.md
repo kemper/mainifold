@@ -23,6 +23,17 @@ mainifold.getBoundingBox()    // → {min:[x,y,z], max:[x,y,z]}
 mainifold.getModule()         // Raw manifold-3d WASM module
 await mainifold.exportGLB()   // Download GLB
 mainifold.exportSTL()         // Download STL
+
+// Sessions — save/compare design iterations
+await mainifold.createSession(name?)    // → {id, url}
+await mainifold.runAndSave(code, label?) // Run + save as version → {geometry, version}
+await mainifold.saveVersion(label?)     // Save current state as version
+await mainifold.listVersions()          // → [{id, index, label, timestamp, status}]
+await mainifold.loadVersion(index)      // Load specific version
+mainifold.getGalleryUrl()               // → URL for gallery view (human review)
+mainifold.getSessionUrl()               // → URL for this session
+await mainifold.listSessions()          // → [{id, name, updated}]
+await mainifold.openSession(id)         // Open existing session
 ```
 
 ## #geometry-data schema
