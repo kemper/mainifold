@@ -200,7 +200,8 @@ cs.hull()                        // Convex hull
 // Modification
 cs.offset(delta, joinType?, miterLimit?, circularSegments?)
 // Inflate/deflate contours. delta>0 = expand outlines, shrink holes.
-// joinType: 'Round' (default), 'Miter', 'Square'
+// joinType: 'Square' | 'Round' (default) | 'Miter'
+// miterLimit: max offset distance for Miter joins (default 2, minimum 2)
 cs.simplify(epsilon?)            // Remove near-duplicate vertices
 
 // Queries
@@ -255,11 +256,42 @@ for (let i = 0; i <= 8; i++) {
 const plate = Manifold.cube([40, 30, 5]);
 const hole = Manifold.cylinder(5, 2, 2, 32).translate([20, 15, 0]);
 const result = plate.subtract(hole); // genus = 1 per through-hole
+
+// Rounded rectangle via hull of 4 corner circles
+function roundedRect(w, h, r, segs) {
+  const hw = w/2 - r, hh = h/2 - r;
+  return CrossSection.hull([
+    CrossSection.circle(r, segs).translate([hw, hh]),
+    CrossSection.circle(r, segs).translate([-hw, hh]),
+    CrossSection.circle(r, segs).translate([-hw, -hh]),
+    CrossSection.circle(r, segs).translate([hw, -hh]),
+  ]);
+}
+const base = roundedRect(100, 50, 5, 32).extrude(10);
+
+// Hollow container (open top): subtract inner with +1mm Z overshoot
+const outerCS = roundedRect(40, 40, 3, 32);
+const innerCS = outerCS.offset(-2); // 2mm wall thickness
+const container = outerCS.extrude(30)
+  .subtract(innerCS.extrude(31)); // +1 ensures open top
 ```
+
+### Performance Tips
+
+- Prefer `Manifold.union(array)` over chaining `.add()` calls — the batch version is optimized.
+- Same for `Manifold.difference(array)` and `Manifold.intersection(array)`.
+- Boolean operations on complex meshes (high segment counts) are expensive. Use lower segment counts during iteration, increase for final output.
 
 ### Memory Management
 
 Intermediate Manifold/CrossSection objects consume WASM memory. For simple scripts, this is fine — the page reload cleans up. For complex models with many intermediates, call `.delete()` on objects you no longer need.
+
+### Default Values
+
+- `center`: defaults to `false` for cube, square, extrude (origin-corner placement)
+- `segments`: defaults to ~22 based on internal quality heuristics. Pass explicit value for control.
+- `CrossSection.circle`: always centered at origin (no `center` param needed)
+- `CrossSection.square`: like cube, defaults to first-quadrant placement. `center=true` → centered.
 
 ## Common Errors
 
