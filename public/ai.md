@@ -40,11 +40,17 @@ mainifold.exportSTL()         // Download STL
     "z50": {"z":0,"area":100,"contours":1},
     "z75": {"z":2.5,"area":100,"contours":1}
   },
-  "executionTimeMs": 12
+  "executionTimeMs": 12,
+  "codeHash": "a1b2c3d4"
 }
 ```
 
-On error: `{"status":"error","error":"...","executionTimeMs":2}`
+On error: `{"status":"error","error":"...","executionTimeMs":2,"codeHash":"..."}`
+
+### Common errors
+- `Code must return a Manifold object` → forgot `return` statement
+- `function _Cylinder called with N arguments` → wrong arg count
+- Geometry looks wrong → check `isManifold` and `componentCount` (failed booleans = extra components)
 
 ## Writing model code
 
@@ -58,15 +64,13 @@ const { Manifold, CrossSection } = api;
 ### Primitive origins and orientations
 
 ```
-cube([x,y,z])         → spans [0,0,0] to [x,y,z]
-cube([x,y,z], true)   → centered at origin: [-x/2..x/2, -y/2..y/2, -z/2..z/2]
+cube([x,y,z])         → spans [0,0,0] to [x,y,z]. center=true → centered at origin
 sphere(r, n?)         → centered at origin
-cylinder(h, rLow, rHigh?, n?) → Z-axis aligned, base at z=0, top at z=h
-                         rHigh defaults to rLow. Set to 0 for cone.
-tetrahedron()          → vertices at ~[1,1,1],[1,-1,-1],[-1,1,-1],[-1,-1,1]
-                         centered near origin, ~2-unit bbox. Scale to desired size.
-extrude(cs, h)         → extrudes CrossSection along Z from z=0 to z=h
-revolve(cs, n?)        → revolves CrossSection around Y axis
+cylinder(h,rLo,rHi?,n?) → Z-axis, base z=0, top z=h. rHi=0 for cone
+tetrahedron()          → vertices at [1,1,1],[1,-1,-1],[-1,1,-1],[-1,-1,1]. Scale to size.
+extrude(cs, h)         → along Z, z=0 to z=h
+revolve(cs, n?)        → around Y axis
+Segments guide: 6-8 low-poly, 32-48 smooth, 64+ high quality
 ```
 
 ### All constructors
@@ -82,7 +86,8 @@ CrossSection: square, circle, ofPolygons (CCW outer, CW holes),
 
 ```
 Booleans:   .add(other)  .subtract(other)  .intersect(other)  .hull()
-Transforms: .translate([x,y,z])  .rotate([rx,ry,rz])  .scale(s)  .mirror([x,y,z])
+Transforms: .translate([x,y,z])  .rotate([rx,ry,rz]) (degrees, applied X→Y→Z)
+            .scale(s) or .scale([x,y,z])  .mirror([nx,ny,nz]) (plane normal)
             .warp(fn)  .transform(mat4x3)
 Mesh ops:   .refine(n)  .simplify()  .smoothOut()  .calculateNormals(idx, angle?)
 Queries:    .volume()  .surfaceArea()  .genus()  .numVert()  .numTri()  .isEmpty()

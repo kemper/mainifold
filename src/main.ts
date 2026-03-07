@@ -30,7 +30,15 @@ function createGeometryDataElement(): HTMLElement {
   return el;
 }
 
-function updateGeometryData(executionTimeMs?: number) {
+function simpleHash(str: string): string {
+  let h = 0;
+  for (let i = 0; i < str.length; i++) {
+    h = ((h << 5) - h + str.charCodeAt(i)) | 0;
+  }
+  return (h >>> 0).toString(16).padStart(8, '0');
+}
+
+function updateGeometryData(executionTimeMs?: number, sourceCode?: string) {
   if (!currentManifold || !currentMeshData) {
     geometryDataEl.textContent = JSON.stringify({ status: 'error', error: 'No geometry' });
     return;
@@ -106,6 +114,7 @@ function updateGeometryData(executionTimeMs?: number) {
     componentCount,
     crossSections: quartileSlices,
     executionTimeMs: executionTimeMs ?? null,
+    codeHash: sourceCode ? simpleHash(sourceCode) : null,
   };
 
   geometryDataEl.textContent = JSON.stringify(data, null, 2);
@@ -258,7 +267,7 @@ async function main() {
 
     if (result.error) {
       setStatus(statusBar, 'error', result.error);
-      geometryDataEl.textContent = JSON.stringify({ status: 'error', error: result.error, executionTimeMs: elapsed });
+      geometryDataEl.textContent = JSON.stringify({ status: 'error', error: result.error, executionTimeMs: elapsed, codeHash: simpleHash(src) });
       return;
     }
 
@@ -267,7 +276,7 @@ async function main() {
       currentManifold = result.manifold;
       updateMesh(result.mesh);
       updateMultiView(result.mesh);
-      updateGeometryData(elapsed);
+      updateGeometryData(elapsed, src);
       updateSectionSlider(sectionPanel);
       setStatus(statusBar, 'ready', 'Ready');
     }

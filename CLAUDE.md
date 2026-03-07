@@ -57,12 +57,12 @@ Manifold.cylinder(height, radiusLow, radiusHigh?, segments?)
 // Base at z=0, top at z=height.
 // radiusLow = radius at z=0, radiusHigh = radius at z=height.
 // radiusHigh defaults to radiusLow. Set to 0 for a cone.
-// segments defaults to ~22 (circular resolution).
+// segments defaults to ~22. Guide: 6-8 for low-poly, 32-48 for smooth, 64+ for high quality.
 
 Manifold.tetrahedron()
-// Regular tetrahedron. Vertices approximately at:
+// Regular tetrahedron. Vertices at:
 // [1,1,1], [1,-1,-1], [-1,1,-1], [-1,-1,1]
-// Centered near origin, fits in a ~2-unit bounding box.
+// Centroid at origin, fits in a 2-unit bounding box.
 // Scale it to desired size.
 
 Manifold.extrude(crossSection, height)
@@ -92,9 +92,11 @@ manifold.hull()                  // Convex hull of self
 
 // Transforms (return new Manifold — original unchanged)
 manifold.translate([x, y, z])
-manifold.rotate([xDeg, yDeg, zDeg])  // Euler angles in degrees
-manifold.scale([x, y, z])       // or scale(uniform)
-manifold.mirror([x, y, z])      // Mirror across plane through origin
+manifold.rotate([xDeg, yDeg, zDeg])  // Euler angles in degrees, applied X then Y then Z
+manifold.scale([x, y, z])       // or scale(s) for uniform scaling
+manifold.mirror([nx, ny, nz])   // Mirror across plane through origin with given normal
+                                // e.g. mirror([1,0,0]) reflects across YZ plane (flips X)
+                                //      mirror([0,0,1]) reflects across XY plane (flips Z)
 manifold.transform(matrix4x3)   // Arbitrary affine transform
 manifold.warp(fn)                // Per-vertex warp function (fn receives [x,y,z])
 
@@ -144,6 +146,15 @@ CrossSection.ofPolygons(polygons)
 // Array of polygon contours. Each contour is an array of [x,y] points.
 // First contour = outer boundary (CCW winding).
 // Subsequent contours = holes (CW winding).
+// Example — triangle: CrossSection.ofPolygons([[[0,0], [10,0], [5,8]]])
+// Example — square with circular hole approximation:
+//   const outer = [[0,0],[10,0],[10,10],[0,10]];     // CCW
+//   const hole = [];                                   // CW
+//   for (let i = 0; i < 16; i++) {
+//     const a = -i/16 * 2 * Math.PI;                  // negative = CW
+//     hole.push([5 + 2*Math.cos(a), 5 + 2*Math.sin(a)]);
+//   }
+//   CrossSection.ofPolygons([outer, hole])
 
 CrossSection.compose(sections[])
 CrossSection.union(sections[])
@@ -151,6 +162,16 @@ CrossSection.difference(sections[])
 CrossSection.intersection(sections[])
 CrossSection.hull(sections[])
 ```
+
+## Common Errors
+
+| Error | Cause |
+|-------|-------|
+| `Code must return a Manifold object. Did you forget to 'return'?` | Code didn't `return` anything, or returned undefined/null |
+| `Manifold.cube is not a function` | Engine not initialized (WASM still loading) |
+| `function _Cylinder called with N arguments, expected M` | Wrong number of arguments to a constructor |
+| `Missing field: "x"` | Passed an array where an object was expected, or vice versa |
+| Geometry renders but looks wrong | Check `isManifold` and `componentCount` in geometry-data — failed booleans often produce extra components |
 
 ## Console API (window.mainifold)
 
@@ -216,16 +237,20 @@ mainifold.getModule()
     "z50": { "z": 0, "area": 100, "contours": 1 },
     "z75": { "z": 2.5, "area": 100, "contours": 1 }
   },
-  "executionTimeMs": 12
+  "executionTimeMs": 12,
+  "codeHash": "a1b2c3d4"
 }
 ```
+
+`codeHash` is a hash of the source code that produced the geometry. Use it to confirm the displayed stats correspond to the code you submitted (detect stale data from a previous run).
 
 On error:
 ```json
 {
   "status": "error",
   "error": "Code must return a Manifold object.",
-  "executionTimeMs": 2
+  "executionTimeMs": 2,
+  "codeHash": "e5f6g7h8"
 }
 ```
 
