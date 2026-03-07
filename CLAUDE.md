@@ -121,7 +121,8 @@ manifold.calculateNormals(normalIdx, minSharpAngle?)
 // Queries
 manifold.volume()
 manifold.surfaceArea()
-manifold.genus()                 // Topological genus (0 = sphere-like, 1 = torus-like)
+manifold.genus()                 // Topological genus: 0 = solid block, +1 per through-hole
+                                 // A plate with 4 bolt holes has genus 4
 manifold.numVert()
 manifold.numTri()
 manifold.numEdge()
@@ -238,6 +239,22 @@ const vase = Manifold.revolve(CrossSection.ofPolygons([profile]), 64);
 // Extrude with twist (e.g., twisted column)
 const star = CrossSection.ofPolygons([/* star shape */]);
 const column = star.extrude(20, 10, 90); // 10 divisions, 90-degree twist
+
+// 2D fillet on an inner corner (replace sharp corner with arc)
+// For a corner at (cx, cy), fillet center offset by radius inward:
+const filletR = 3, cx = 5, cy = 5;
+const fcx = cx + filletR, fcy = cy + filletR;
+const arcPts = [];
+for (let i = 0; i <= 8; i++) {
+  const a = -Math.PI/2 - (i/8) * (Math.PI/2); // -90° to -180°
+  arcPts.push([fcx + filletR*Math.cos(a), fcy + filletR*Math.sin(a)]);
+}
+// Insert arcPts in place of the sharp corner point in your profile
+
+// Through-holes via cylinder subtraction
+const plate = Manifold.cube([40, 30, 5]);
+const hole = Manifold.cylinder(5, 2, 2, 32).translate([20, 15, 0]);
+const result = plate.subtract(hole); // genus = 1 per through-hole
 ```
 
 ### Memory Management
