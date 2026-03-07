@@ -94,15 +94,19 @@ export function renderViewsToContainer(container: HTMLElement, meshData: MeshDat
     const ctx = canvas.getContext('2d')!;
     ctx.drawImage(renderer.domElement, 0, 0);
 
-    // Label
-    ctx.fillStyle = 'rgba(0, 0, 0, 0.55)';
-    ctx.fillRect(0, 0, viewSize, 20);
-    ctx.fillStyle = '#a0a0b0';
-    ctx.font = '12px monospace';
-    ctx.fillText(view.name, 4, 14);
+    // Label as caption below canvas, not overlaid
+    const wrapper = document.createElement('div');
+    wrapper.className = 'flex flex-col min-h-0';
 
-    canvas.className = 'w-full h-full block object-contain';
-    grid.appendChild(canvas);
+    canvas.className = 'w-full flex-1 block object-contain min-h-0';
+    wrapper.appendChild(canvas);
+
+    const label = document.createElement('div');
+    label.className = 'text-center text-xs text-zinc-500 font-mono py-0.5 bg-zinc-800 shrink-0';
+    label.textContent = view.name;
+    wrapper.appendChild(label);
+
+    grid.appendChild(wrapper);
   }
 
   container.appendChild(grid);
@@ -138,9 +142,11 @@ export function renderCompositeCanvas(meshData: MeshData): HTMLCanvasElement {
   const camera = new THREE.PerspectiveCamera(40, 1, 0.1, 1000);
   const renderer = getOffscreenRenderer(viewSize);
 
+  const labelHeight = 28;
+  const cellHeight = viewSize + labelHeight;
   const compositeCanvas = document.createElement('canvas');
   compositeCanvas.width = 2 * viewSize;
-  compositeCanvas.height = 2 * viewSize;
+  compositeCanvas.height = 2 * cellHeight;
   const ctx = compositeCanvas.getContext('2d')!;
   ctx.fillStyle = '#f0f0f0';
   ctx.fillRect(0, 0, compositeCanvas.width, compositeCanvas.height);
@@ -156,13 +162,19 @@ export function renderCompositeCanvas(meshData: MeshData): HTMLCanvasElement {
     camera.updateProjectionMatrix();
 
     renderer.render(scene, camera);
-    ctx.drawImage(renderer.domElement, col * viewSize, row * viewSize);
 
-    ctx.fillStyle = 'rgba(0, 0, 0, 0.6)';
-    ctx.fillRect(col * viewSize, row * viewSize, 160, 24);
-    ctx.fillStyle = '#ffffff';
+    const x = col * viewSize;
+    const y = row * cellHeight;
+    ctx.drawImage(renderer.domElement, x, y);
+
+    // Label below the view, not overlaid
+    ctx.fillStyle = '#e0e0e0';
+    ctx.fillRect(x, y + viewSize, viewSize, labelHeight);
+    ctx.fillStyle = '#333333';
     ctx.font = '13px monospace';
-    ctx.fillText(view.name, col * viewSize + 8, row * viewSize + 17);
+    ctx.textAlign = 'center';
+    ctx.fillText(view.name, x + viewSize / 2, y + viewSize + 18);
+    ctx.textAlign = 'start';
   });
 
   geometry.dispose();

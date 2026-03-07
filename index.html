@@ -10,14 +10,15 @@
 <body class="bg-zinc-900 w-screen h-screen overflow-hidden">
   <div id="app" class="flex flex-col h-screen w-screen"></div>
 
-  <details id="ai-help" style="position:fixed;bottom:0;left:0;z-index:100;max-width:420px;max-height:50vh;overflow:auto;font-size:12px;line-height:1.5;font-family:monospace;">
+  <details id="ai-help" style="position:fixed;bottom:0;left:0;z-index:100;max-width:480px;max-height:50vh;overflow:auto;font-size:12px;line-height:1.5;font-family:monospace;">
     <summary style="background:#27272a;color:#71717a;padding:4px 10px;cursor:pointer;font-size:11px;">AI Instructions</summary>
     <div style="background:#18181b;color:#d4d4d8;padding:12px;border:1px solid #3f3f46;">
-      <p><strong>mAInifold</strong> — AI-driven browser CAD tool. <a href="/ai.md" style="color:#60a5fa;">Full docs: /ai.md</a></p>
+      <p><strong>mAInifold</strong> — AI-driven browser CAD. Coordinate system: right-handed, Z-up. <a href="/ai.md" style="color:#60a5fa;">Full docs: /ai.md</a></p>
 
       <p style="margin-top:8px;color:#a1a1aa;"><strong>Console API</strong> — <code style="color:#4ade80;">window.mainifold</code></p>
       <pre style="background:#09090b;padding:8px;margin:4px 0;overflow-x:auto;color:#e4e4e7;font-size:11px;">mainifold.run(code?)        // Run code, returns geometry stats
-mainifold.getGeometryData() // Current stats as object
+mainifold.validate(code)    // Check without render → {valid, error?}
+mainifold.getGeometryData() // Current stats {status, volume, ...}
 mainifold.getCode()         // Read editor
 mainifold.setCode(code)     // Set editor (no auto-run)
 mainifold.sliceAtZ(z)       // Cross-section → polygons + area
@@ -25,27 +26,38 @@ mainifold.getBoundingBox()  // → {min:[x,y,z], max:[x,y,z]}
 mainifold.exportGLB()       // Download GLB
 mainifold.exportSTL()       // Download STL</pre>
 
-      <p style="margin-top:8px;color:#a1a1aa;"><strong>Code pattern</strong></p>
+      <p style="margin-top:8px;color:#a1a1aa;"><strong>Code pattern</strong> — must <code style="color:#f87171;">return</code> a Manifold. All transforms are immutable.</p>
       <pre style="background:#09090b;padding:8px;margin:4px 0;overflow-x:auto;color:#e4e4e7;font-size:11px;">const { Manifold, CrossSection } = api;
 const box = Manifold.cube([10,10,10], true);
 const hole = Manifold.cylinder(12, 3, 3, 32);
-return box.subtract(hole); // MUST return a Manifold</pre>
+return box.subtract(hole);</pre>
+
+      <p style="margin-top:8px;color:#a1a1aa;"><strong>Primitive origins</strong></p>
+      <pre style="background:#09090b;padding:8px;margin:4px 0;overflow-x:auto;color:#e4e4e7;font-size:11px;">cube([x,y,z])       → [0,0,0] to [x,y,z]. center=true → centered
+sphere(r, n?)       → centered at origin
+cylinder(h,rLo,rHi?,n?) → Z-axis, base z=0, top z=h. rHi=0 for cone
+tetrahedron()       → ~2-unit bbox at origin. Scale to size.
+extrude(cs, h)      → along Z, z=0 to z=h
+revolve(cs, n?)     → around Y axis</pre>
 
       <p style="margin-top:8px;color:#a1a1aa;"><strong>Constructors:</strong>
       <span style="color:#e4e4e7;">cube, sphere, cylinder, tetrahedron, extrude, revolve, union, difference, intersection, hull, compose, smooth, levelSet, ofMesh</span></p>
 
       <p style="margin-top:4px;color:#a1a1aa;"><strong>Transforms:</strong>
-      <span style="color:#e4e4e7;">translate, rotate, scale, mirror, warp, transform</span></p>
+      <span style="color:#e4e4e7;">translate, rotate (degrees), scale, mirror, warp, transform</span></p>
 
       <p style="margin-top:4px;color:#a1a1aa;"><strong>Booleans:</strong>
       <span style="color:#e4e4e7;">add, subtract, intersect, hull</span></p>
 
       <p style="margin-top:4px;color:#a1a1aa;"><strong>Queries:</strong>
-      <span style="color:#e4e4e7;">volume, surfaceArea, genus, numVert, numTri, isEmpty, boundingBox, slice, project, getMesh</span></p>
+      <span style="color:#e4e4e7;">volume, surfaceArea, genus, numVert, numTri, isEmpty, boundingBox, status (0=valid), slice, project, getMesh, decompose</span></p>
 
-      <p style="margin-top:8px;color:#a1a1aa;"><strong>Structured data:</strong> <code style="color:#4ade80;">document.getElementById("geometry-data").textContent</code> → JSON with vertexCount, triangleCount, boundingBox, volume, surfaceArea, genus, crossSectionAtMidZ</p>
+      <p style="margin-top:4px;color:#a1a1aa;"><strong>CrossSection:</strong>
+      <span style="color:#e4e4e7;">square, circle, ofPolygons (CCW outer, CW holes), hull, compose, union, difference, intersection</span></p>
 
-      <p style="margin-top:8px;color:#a1a1aa;"><strong>Tip:</strong> Add <code style="color:#4ade80;">?view=ai</code> to URL for 4 isometric views on load.</p>
+      <p style="margin-top:8px;color:#a1a1aa;"><strong>#geometry-data</strong> JSON includes: status, vertexCount, triangleCount, boundingBox (with dimensions), centroid, volume, surfaceArea, genus, isManifold, componentCount, crossSections (z25/z50/z75), executionTimeMs. On error: status:"error" + error message.</p>
+
+      <p style="margin-top:8px;color:#a1a1aa;"><strong>Tip:</strong> Add <code style="color:#4ade80;">?view=ai</code> for 4 isometric views on load.</p>
     </div>
   </details>
 

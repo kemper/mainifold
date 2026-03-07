@@ -30,15 +30,13 @@ function createGeometryDataElement(): HTMLElement {
   return el;
 }
 
-function updateGeometryData() {
+function updateGeometryData(executionTimeMs?: number) {
   if (!currentManifold || !currentMeshData) {
-    geometryDataEl.textContent = JSON.stringify({ error: 'No geometry' });
+    geometryDataEl.textContent = JSON.stringify({ status: 'error', error: 'No geometry' });
     return;
   }
 
   const bbox = getBoundingBox(currentManifold);
-  const midZ = bbox ? (bbox.min[2] + bbox.max[2]) / 2 : 0;
-  const midSlice = bbox ? sliceAtZ(currentManifold, midZ) : null;
 
   let volume = 0;
   let surfaceArea = 0;
@@ -49,22 +47,65 @@ function updateGeometryData() {
     // fallback if methods unavailable
   }
 
+  // Centroid approximation from bounding box center
+  const centroid = bbox
+    ? [(bbox.min[0] + bbox.max[0]) / 2, (bbox.min[1] + bbox.max[1]) / 2, (bbox.min[2] + bbox.max[2]) / 2]
+    : null;
+
+  // Dimensions
+  const dimensions = bbox
+    ? [bbox.max[0] - bbox.min[0], bbox.max[1] - bbox.min[1], bbox.max[2] - bbox.min[2]]
+    : null;
+
+  // Component count
+  let componentCount = 1;
+  try {
+    const parts = currentManifold.decompose();
+    componentCount = parts.length;
+    for (const p of parts) p.delete();
+  } catch {
+    // fallback
+  }
+
+  // Is manifold (status 0 = ok)
+  let isManifold = true;
+  try {
+    isManifold = currentManifold.status() === 0;
+  } catch {
+    // fallback
+  }
+
+  // Cross-sections at quartiles
+  const quartileSlices: Record<string, { z: number; area: number; contours: number }> = {};
+  if (bbox) {
+    const zRange = bbox.max[2] - bbox.min[2];
+    for (const pct of [25, 50, 75]) {
+      const z = bbox.min[2] + zRange * (pct / 100);
+      const s = sliceAtZ(currentManifold, z);
+      if (s) {
+        quartileSlices[`z${pct}`] = { z, area: s.area, contours: s.polygons.length };
+      }
+    }
+  }
+
   const data = {
+    status: 'ok' as const,
     vertexCount: currentMeshData.numVert,
     triangleCount: currentMeshData.numTri,
     boundingBox: bbox ? {
       x: [bbox.min[0], bbox.max[0]],
       y: [bbox.min[1], bbox.max[1]],
       z: [bbox.min[2], bbox.max[2]],
+      dimensions,
     } : null,
+    centroid,
     volume,
     surfaceArea,
     genus: (() => { try { return currentManifold.genus(); } catch { return null; } })(),
-    crossSectionAtMidZ: midSlice ? {
-      z: midZ,
-      area: midSlice.area,
-      contours: midSlice.polygons.length,
-    } : null,
+    isManifold,
+    componentCount,
+    crossSections: quartileSlices,
+    executionTimeMs: executionTimeMs ?? null,
   };
 
   geometryDataEl.textContent = JSON.stringify(data, null, 2);
@@ -175,6 +216,13 @@ async function main() {
     exportSTL() {
       if (currentMeshData) exportSTL(currentMeshData);
     },
+
+    /** Validate code without rendering. Returns { valid, error? } */
+    validate(code: string): { valid: boolean; error?: string } {
+      const result = executeCode(code);
+      if (result.error) return { valid: false, error: result.error };
+      return { valid: true };
+    },
   };
 
   (window as unknown as Record<string, unknown>).mainifold = mainifoldAPI;
@@ -183,8 +231,8 @@ async function main() {
   console.log(
     '%c[mAInifold]%c Console API available at %cwindow.mainifold%c\n' +
     'Methods: .run(code?), .getGeometryData(), .getCode(), .setCode(code),\n' +
-    '         .sliceAtZ(z), .getBoundingBox(), .getModule(),\n' +
-    '         .exportGLB(), .exportSTL()\n' +
+    '         .sliceAtZ(z), .getBoundingBox(), .validate(code),\n' +
+    '         .getModule(), .exportGLB(), .exportSTL()\n' +
     'Structured data: document.getElementById("geometry-data").textContent',
     'color: #4ade80; font-weight: bold',
     'color: inherit',
@@ -204,11 +252,13 @@ async function main() {
   }
 
   function runCodeSync(src: string) {
+    const t0 = performance.now();
     const result = executeCode(src);
+    const elapsed = Math.round(performance.now() - t0);
 
     if (result.error) {
       setStatus(statusBar, 'error', result.error);
-      geometryDataEl.textContent = JSON.stringify({ error: result.error });
+      geometryDataEl.textContent = JSON.stringify({ status: 'error', error: result.error, executionTimeMs: elapsed });
       return;
     }
 
@@ -217,7 +267,7 @@ async function main() {
       currentManifold = result.manifold;
       updateMesh(result.mesh);
       updateMultiView(result.mesh);
-      updateGeometryData();
+      updateGeometryData(elapsed);
       updateSectionSlider(sectionPanel);
       setStatus(statusBar, 'ready', 'Ready');
     }
