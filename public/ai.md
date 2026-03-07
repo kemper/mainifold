@@ -39,6 +39,7 @@ mainifold.getGalleryUrl()               // → URL for gallery view (human revie
 mainifold.getSessionUrl()               // → URL for this session
 await mainifold.listSessions()          // → [{id, name, updated}]
 await mainifold.openSession(id)         // Open existing session
+await mainifold.clearAllSessions()      // Delete all sessions & versions
 ```
 
 ## #geometry-data schema

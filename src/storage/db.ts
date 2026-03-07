@@ -179,3 +179,16 @@ export async function getVersionCount(sessionId: string): Promise<number> {
   const index = store.index('sessionId');
   return reqToPromise(index.count(IDBKeyRange.only(sessionId)));
 }
+
+// === Database reset ===
+
+export async function clearAllData(): Promise<void> {
+  const db = await openDB();
+  const txn = db.transaction(['sessions', 'versions'], 'readwrite');
+  txn.objectStore('sessions').clear();
+  txn.objectStore('versions').clear();
+  await new Promise<void>((resolve, reject) => {
+    txn.oncomplete = () => resolve();
+    txn.onerror = () => reject(txn.error);
+  });
+}

@@ -10,6 +10,7 @@ import {
   getLatestVersion,
   getVersionByIndex,
   getVersionCount,
+  clearAllData,
   type Session,
   type Version,
 } from './db';
@@ -211,6 +212,15 @@ export function getGalleryUrl(): string {
   if (!currentState.session) return window.location.href;
   const base = window.location.origin + window.location.pathname;
   return `${base}?session=${currentState.session.id}&gallery`;
+}
+
+// === Clear all data ===
+
+export async function clearAllSessions(): Promise<void> {
+  await clearAllData();
+  currentState = { session: null, currentVersion: null, versionCount: 0 };
+  updateURL();
+  notify();
 }
 
 // === Export / Import ===

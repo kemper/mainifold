@@ -406,6 +406,7 @@ mainifold.getSessionState()           // → {session, currentVersion, versionCo
 const data = await mainifold.exportSession()     // Export current session as JSON
 const data = await mainifold.exportSession(id)   // Export specific session
 await mainifold.importSession(data)              // Import JSON, regenerates thumbnails
+await mainifold.clearAllSessions()               // Delete ALL sessions & versions from IndexedDB
 ```
 
 **URL parameters:**

@@ -7,6 +7,7 @@ import {
   openSession,
   exportSession,
   importSession,
+  clearAllSessions,
   type Session,
   type ExportedSession,
 } from '../storage/sessionManager';
@@ -79,6 +80,17 @@ export async function showSessionList(): Promise<void> {
     input.click();
   });
   headerActions.appendChild(importBtn);
+
+  const clearBtn = document.createElement('button');
+  clearBtn.className = 'px-3 py-1 rounded text-xs bg-red-900/50 hover:bg-red-800 text-red-300 transition-colors';
+  clearBtn.textContent = 'Clear All';
+  clearBtn.addEventListener('click', async () => {
+    if (confirm('Delete ALL sessions and versions? This cannot be undone.')) {
+      await clearAllSessions();
+      closeModal();
+    }
+  });
+  headerActions.appendChild(clearBtn);
 
   const newBtn = document.createElement('button');
   newBtn.className = 'px-3 py-1 rounded text-xs bg-blue-600 hover:bg-blue-500 text-white transition-colors';

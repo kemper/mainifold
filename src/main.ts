@@ -33,6 +33,7 @@ import {
   getGalleryUrl,
   exportSession,
   importSession,
+  clearAllSessions,
   type ExportedSession,
 } from './storage/sessionManager';
 
@@ -488,6 +489,11 @@ async function main() {
       }
       return { id: session.id, name: session.name };
     },
+
+    /** Clear all sessions and versions from IndexedDB */
+    async clearAllSessions() {
+      await clearAllSessions();
+    },
   };
 
   (window as unknown as Record<string, unknown>).mainifold = mainifoldAPI;
@@ -502,7 +508,7 @@ async function main() {
     'Sessions: .createSession(name?), .saveVersion(label?), .runAndSave(code, label?),\n' +
     '          .listSessions(), .openSession(id), .listVersions(), .loadVersion(idx),\n' +
     '          .getGalleryUrl(), .getSessionUrl(), .getSessionState(),\n' +
-    '          .exportSession(id?), .importSession(data)\n' +
+    '          .exportSession(id?), .importSession(data), .clearAllSessions()\n' +
     'Structured data: document.getElementById("geometry-data").textContent',
     'color: #4ade80; font-weight: bold',
     'color: inherit',
