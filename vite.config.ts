@@ -2,6 +2,7 @@ import { defineConfig } from 'vite';
 import tailwindcss from '@tailwindcss/vite';
 
 export default defineConfig({
+  base: '/mainifold/',
   plugins: [tailwindcss()],
   optimizeDeps: {
     exclude: ['manifold-3d']
