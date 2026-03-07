@@ -52,13 +52,17 @@ function updateURL() {
     params.set('session', currentState.session.id);
     if (currentState.currentVersion) {
       params.set('v', String(currentState.currentVersion.index));
+    } else {
+      params.delete('v');
     }
   } else {
     params.delete('session');
     params.delete('v');
+    params.delete('gallery');
   }
-  const newUrl = params.toString()
-    ? `${window.location.pathname}?${params}`
+  const qs = params.toString().replace(/=(?=&|$)/g, '');
+  const newUrl = qs
+    ? `${window.location.pathname}?${qs}`
     : window.location.pathname;
   window.history.replaceState(null, '', newUrl);
 }
