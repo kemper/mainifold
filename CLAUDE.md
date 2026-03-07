@@ -25,6 +25,8 @@ Static site, no backend. Vanilla TypeScript + Vite.
 - `src/geometry/crossSection.ts` — Z-slice to SVG/polygons
 - `src/export/gltf.ts` — GLB export
 - `src/export/stl.ts` — STL export
+- `src/export/obj.ts` — OBJ export
+- `src/export/threemf.ts` — 3MF export (ZIP-packaged XML)
 
 ## Coordinate System
 
@@ -358,6 +360,8 @@ mainifold.getClipState()       // Current state
 // Exports
 await mainifold.exportGLB()
 mainifold.exportSTL()
+mainifold.exportOBJ()
+mainifold.export3MF()
 
 // Raw manifold-3d module for advanced use
 mainifold.getModule()

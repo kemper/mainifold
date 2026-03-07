@@ -26,6 +26,8 @@ mainifold.setClipZ(z)         // Set clip height → {enabled, z, min, max}
 mainifold.getClipState()      // → {enabled, z, min, max}
 await mainifold.exportGLB()   // Download GLB
 mainifold.exportSTL()         // Download STL
+mainifold.exportOBJ()         // Download OBJ
+mainifold.export3MF()         // Download 3MF
 
 // Sessions — save/compare design iterations
 await mainifold.createSession(name?)    // → {id, url}

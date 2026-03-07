@@ -12,6 +12,8 @@ import { createGalleryView, refreshGallery } from './ui/gallery';
 import { initSessionList, showSessionList } from './ui/sessionList';
 import { exportGLB } from './export/gltf';
 import { exportSTL } from './export/stl';
+import { exportOBJ } from './export/obj';
+import { export3MF } from './export/threemf';
 import type { MeshData } from './geometry/types';
 import {
   getSessionIdFromURL,
@@ -178,6 +180,12 @@ async function main() {
     onExportSTL: () => {
       if (currentMeshData) exportSTL(currentMeshData);
     },
+    onExportOBJ: () => {
+      if (currentMeshData) exportOBJ(currentMeshData);
+    },
+    onExport3MF: () => {
+      if (currentMeshData) export3MF(currentMeshData);
+    },
     onExampleSelect: (code: string) => {
       setValue(code);
       runCode(code);
@@ -307,6 +315,16 @@ async function main() {
     /** Export current model as STL download */
     exportSTL() {
       if (currentMeshData) exportSTL(currentMeshData);
+    },
+
+    /** Export current model as OBJ download */
+    exportOBJ() {
+      if (currentMeshData) exportOBJ(currentMeshData);
+    },
+
+    /** Export current model as 3MF download */
+    export3MF() {
+      if (currentMeshData) export3MF(currentMeshData);
     },
 
     /** Validate code without rendering. Returns { valid, error? } */
@@ -452,7 +470,7 @@ async function main() {
     'Methods: .run(code?), .getGeometryData(), .getCode(), .setCode(code),\n' +
     '         .sliceAtZ(z), .getBoundingBox(), .validate(code),\n' +
     '         .toggleClip(on?), .setClipZ(z), .getClipState(),\n' +
-    '         .getModule(), .exportGLB(), .exportSTL()\n' +
+    '         .getModule(), .exportGLB(), .exportSTL(), .exportOBJ(), .export3MF()\n' +
     'Sessions: .createSession(name?), .saveVersion(label?), .runAndSave(code, label?),\n' +
     '          .listSessions(), .openSession(id), .listVersions(), .loadVersion(idx),\n' +
     '          .getGalleryUrl(), .getSessionUrl(), .getSessionState()\n' +

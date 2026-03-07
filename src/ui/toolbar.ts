@@ -2,6 +2,8 @@ export interface ToolbarCallbacks {
   onRun: () => void;
   onExportGLB: () => void;
   onExportSTL: () => void;
+  onExportOBJ: () => void;
+  onExport3MF: () => void;
   onExampleSelect: (code: string) => void;
 }
 
@@ -83,8 +85,22 @@ export function createToolbar(
     callbacks.onExportSTL();
   });
 
+  const objOpt = createDropdownItem('OBJ');
+  objOpt.addEventListener('click', () => {
+    dropdown.classList.add('hidden');
+    callbacks.onExportOBJ();
+  });
+
+  const threemfOpt = createDropdownItem('3MF');
+  threemfOpt.addEventListener('click', () => {
+    dropdown.classList.add('hidden');
+    callbacks.onExport3MF();
+  });
+
   dropdown.appendChild(glbOpt);
   dropdown.appendChild(stlOpt);
+  dropdown.appendChild(objOpt);
+  dropdown.appendChild(threemfOpt);
   exportWrapper.appendChild(dropdown);
 
   btnExport.addEventListener('click', () => {
