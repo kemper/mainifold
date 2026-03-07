@@ -150,6 +150,11 @@ export async function saveVersion(
 ): Promise<Version | null> {
   if (!currentState.session) return null;
 
+  // Skip if code is identical to the current version
+  if (currentState.currentVersion && currentState.currentVersion.code === code) {
+    return null;
+  }
+
   const version = await dbSaveVersion(
     currentState.session.id,
     code,
