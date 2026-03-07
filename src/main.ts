@@ -31,6 +31,9 @@ import {
   getState,
   getSessionUrl,
   getGalleryUrl,
+  exportSession,
+  importSession,
+  type ExportedSession,
 } from './storage/sessionManager';
 
 // Load examples as raw text
@@ -224,10 +227,16 @@ async function main() {
   });
 
   // Init session list
-  initSessionList((code: string) => {
-    setValue(code);
-    runCode(code);
-  });
+  initSessionList(
+    (code: string) => {
+      setValue(code);
+      runCode(code);
+    },
+    async (code: string) => {
+      runCodeSync(code);
+      return captureThumbnail();
+    },
+  );
 
   // Init geometry engine
   setStatus(statusBar, 'loading', 'Loading WASM...');
@@ -460,6 +469,25 @@ async function main() {
         versionCount: state.versionCount,
       };
     },
+
+    /** Export a session as JSON (defaults to current session) */
+    async exportSession(sessionId?: string) {
+      return exportSession(sessionId);
+    },
+
+    /** Import a session from JSON data, regenerating thumbnails */
+    async importSession(data: ExportedSession) {
+      const session = await importSession(data, async (code: string) => {
+        runCodeSync(code);
+        return captureThumbnail();
+      });
+      const version = await openSession(session.id);
+      if (version) {
+        setValue(version.code);
+        runCodeSync(version.code);
+      }
+      return { id: session.id, name: session.name };
+    },
   };
 
   (window as unknown as Record<string, unknown>).mainifold = mainifoldAPI;
@@ -473,7 +501,8 @@ async function main() {
     '         .getModule(), .exportGLB(), .exportSTL(), .exportOBJ(), .export3MF()\n' +
     'Sessions: .createSession(name?), .saveVersion(label?), .runAndSave(code, label?),\n' +
     '          .listSessions(), .openSession(id), .listVersions(), .loadVersion(idx),\n' +
-    '          .getGalleryUrl(), .getSessionUrl(), .getSessionState()\n' +
+    '          .getGalleryUrl(), .getSessionUrl(), .getSessionState(),\n' +
+    '          .exportSession(id?), .importSession(data)\n' +
     'Structured data: document.getElementById("geometry-data").textContent',
     'color: #4ade80; font-weight: bold',
     'color: inherit',

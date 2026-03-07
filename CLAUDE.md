@@ -401,6 +401,11 @@ await mainifold.navigateVersion('prev')
 await mainifold.navigateVersion('next')
 await mainifold.saveVersion("label")  // Save current state as version
 mainifold.getSessionState()           // → {session, currentVersion, versionCount}
+
+// Export / Import (sharing sessions between users)
+const data = await mainifold.exportSession()     // Export current session as JSON
+const data = await mainifold.exportSession(id)   // Export specific session
+await mainifold.importSession(data)              // Import JSON, regenerates thumbnails
 ```
 
 **URL parameters:**

@@ -14,6 +14,18 @@ import {
   type Version,
 } from './db';
 
+export interface ExportedSession {
+  mainifold: string;
+  session: { name: string; created: number; updated: number };
+  versions: {
+    index: number;
+    code: string;
+    label: string;
+    geometryData: Record<string, unknown> | null;
+    timestamp: number;
+  }[];
+}
+
 export type { Session, Version } from './db';
 
 export interface SessionState {
@@ -199,4 +211,50 @@ export function getGalleryUrl(): string {
   if (!currentState.session) return window.location.href;
   const base = window.location.origin + window.location.pathname;
   return `${base}?session=${currentState.session.id}&gallery`;
+}
+
+// === Export / Import ===
+
+export async function exportSession(sessionId?: string): Promise<ExportedSession | null> {
+  const id = sessionId ?? currentState.session?.id;
+  if (!id) return null;
+
+  const session = await getSession(id);
+  if (!session) return null;
+
+  const versions = await dbListVersions(id);
+
+  return {
+    mainifold: '1.0',
+    session: { name: session.name, created: session.created, updated: session.updated },
+    versions: versions.map(v => ({
+      index: v.index,
+      code: v.code,
+      label: v.label,
+      geometryData: v.geometryData,
+      timestamp: v.timestamp,
+    })),
+  };
+}
+
+export async function importSession(
+  data: ExportedSession,
+  regenerateThumbnail?: (code: string) => Promise<Blob | null>,
+): Promise<Session> {
+  const session = await dbCreateSession(data.session.name);
+
+  for (const v of data.versions) {
+    let thumbnail: Blob | null = null;
+    if (regenerateThumbnail) {
+      thumbnail = await regenerateThumbnail(v.code);
+    }
+    await dbSaveVersion(session.id, v.code, v.geometryData, thumbnail, v.label);
+  }
+
+  const count = await getVersionCount(session.id);
+  const latest = await getLatestVersion(session.id);
+  currentState = { session, currentVersion: latest, versionCount: count };
+  updateURL();
+  notify();
+  return session;
 }

@@ -5,15 +5,23 @@ import {
   createSession,
   deleteSession,
   openSession,
+  exportSession,
+  importSession,
   type Session,
+  type ExportedSession,
 } from '../storage/sessionManager';
 import { getVersionCount } from '../storage/db';
 
 let modalEl: HTMLElement | null = null;
 let onLoadVersion: ((code: string) => void) | null = null;
+let regenerateThumbnailFn: ((code: string) => Promise<Blob | null>) | null = null;
 
-export function initSessionList(loadCode: (code: string) => void): void {
+export function initSessionList(
+  loadCode: (code: string) => void,
+  regenerateThumbnail?: (code: string) => Promise<Blob | null>,
+): void {
   onLoadVersion = loadCode;
+  regenerateThumbnailFn = regenerateThumbnail ?? null;
 }
 
 export async function showSessionList(): Promise<void> {
@@ -42,6 +50,35 @@ export async function showSessionList(): Promise<void> {
 
   const headerActions = document.createElement('div');
   headerActions.className = 'flex gap-2';
+
+  const importBtn = document.createElement('button');
+  importBtn.className = 'px-3 py-1 rounded text-xs bg-zinc-600 hover:bg-zinc-500 text-white transition-colors';
+  importBtn.textContent = 'Import';
+  importBtn.addEventListener('click', () => {
+    const input = document.createElement('input');
+    input.type = 'file';
+    input.accept = '.json';
+    input.addEventListener('change', async () => {
+      const file = input.files?.[0];
+      if (!file) return;
+      try {
+        const text = await file.text();
+        const data = JSON.parse(text) as ExportedSession;
+        if (!data.mainifold || !data.session || !Array.isArray(data.versions)) {
+          alert('Invalid session file.');
+          return;
+        }
+        const session = await importSession(data, regenerateThumbnailFn ?? undefined);
+        const version = await openSession(session.id);
+        if (version && onLoadVersion) onLoadVersion(version.code);
+        closeModal();
+      } catch (e) {
+        alert('Failed to import session: ' + (e as Error).message);
+      }
+    });
+    input.click();
+  });
+  headerActions.appendChild(importBtn);
 
   const newBtn = document.createElement('button');
   newBtn.className = 'px-3 py-1 rounded text-xs bg-blue-600 hover:bg-blue-500 text-white transition-colors';
@@ -124,6 +161,23 @@ async function createSessionRow(session: Session): Promise<HTMLElement> {
   info.appendChild(meta);
 
   row.appendChild(info);
+
+  // Export button
+  const expBtn = document.createElement('button');
+  expBtn.className = 'px-2 py-1 rounded text-zinc-500 hover:text-blue-400 hover:bg-zinc-700 text-xs transition-colors';
+  expBtn.textContent = 'Export';
+  expBtn.addEventListener('click', async (e) => {
+    e.stopPropagation();
+    const data = await exportSession(session.id);
+    if (!data) return;
+    const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+    const link = document.createElement('a');
+    link.href = URL.createObjectURL(blob);
+    link.download = `${session.name.replace(/[^a-zA-Z0-9_-]/g, '_')}.mainifold.json`;
+    link.click();
+    URL.revokeObjectURL(link.href);
+  });
+  row.appendChild(expBtn);
 
   // Delete button
   const delBtn = document.createElement('button');
