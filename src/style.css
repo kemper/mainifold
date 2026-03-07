@@ -1,0 +1,8 @@
+@import "tailwindcss";
+
+/* Three.js canvas must be sized by ResizeObserver, not Tailwind */
+.viewport-canvas {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
