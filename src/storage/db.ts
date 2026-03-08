@@ -5,6 +5,16 @@ export interface Session {
   name: string;
   created: number;
   updated: number;
+  referenceImages?: ReferenceImagesData | null;
+}
+
+export interface ReferenceImagesData {
+  front?: string;
+  right?: string;
+  back?: string;
+  left?: string;
+  top?: string;
+  perspective?: string;
 }
 
 export interface Version {
@@ -89,7 +99,7 @@ export async function listSessions(): Promise<Session[]> {
   return sessions.sort((a, b) => b.updated - a.updated);
 }
 
-export async function updateSession(id: string, updates: Partial<Pick<Session, 'name' | 'updated'>>): Promise<void> {
+export async function updateSession(id: string, updates: Partial<Pick<Session, 'name' | 'updated' | 'referenceImages'>>): Promise<void> {
   const store = await tx('sessions', 'readwrite');
   const session = await reqToPromise(store.get(id)) as Session | null;
   if (!session) return;

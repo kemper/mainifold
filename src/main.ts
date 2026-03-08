@@ -34,7 +34,10 @@ import {
   exportSession,
   importSession,
   clearAllSessions,
+  saveReferenceImages as persistReferenceImages,
+  getReferenceImagesFromSession,
   type ExportedSession,
+  type ReferenceImagesData,
 } from './storage/sessionManager';
 
 // Load examples as raw text
@@ -338,6 +341,22 @@ async function main() {
       refreshGallery();
     },
     onOpenSessionList: () => showSessionList(),
+    onLoadReferenceImages: (images: Record<string, string>) => {
+      _setRefImages(images as ReferenceImages);
+      persistReferenceImages(images as ReferenceImagesData);
+      if (currentMeshData) {
+        renderElevationsToContainer(
+          document.getElementById('elevations-container')!,
+          currentMeshData,
+        );
+      }
+    },
+    onNewSession: () => {
+      const freshCode = '// New session\nconst { Manifold } = api;\nreturn Manifold.cube([10, 10, 10], true);';
+      setValue(freshCode);
+      runCode(freshCode);
+      _clearRefImages();
+    },
   });
 
   // Create layout
@@ -352,6 +371,11 @@ async function main() {
     runCode(code);
     switchTab('interactive');
   });
+
+  // Refresh gallery whenever the gallery tab is selected
+  window.addEventListener('tab-switched', ((e: CustomEvent) => {
+    if (e.detail.tab === 'gallery') refreshGallery();
+  }) as EventListener);
 
   // Init session list
   initSessionList(
@@ -388,6 +412,11 @@ async function main() {
     if (version) {
       setValue(version.code);
       runCode(version.code);
+      // Restore reference images from session
+      const refImages = await getReferenceImagesFromSession();
+      if (refImages) {
+        _setRefImages(refImages as ReferenceImages);
+      }
       if (isGalleryMode()) {
         switchTab('gallery');
         refreshGallery();
@@ -541,9 +570,12 @@ async function main() {
     // === Reference image API ===
 
     /** Load reference images for side-by-side comparison in Elevations tab.
-     *  Keys: front, right, back, left, top, perspective. Values: data URLs or image URLs. */
+     *  Keys: front, right, back, left, top, perspective. Values: data URLs or image URLs.
+     *  If a session is active, also persists to IndexedDB. */
     setReferenceImages(images: ReferenceImages): void {
       _setRefImages(images);
+      // Persist to session if one is active
+      persistReferenceImages(images as ReferenceImagesData);
       // Re-render elevations with reference images if we have mesh data
       if (currentMeshData) {
         renderElevationsToContainer(
@@ -556,6 +588,8 @@ async function main() {
     /** Clear all reference images */
     clearReferenceImages(): void {
       _clearRefImages();
+      // Clear from session if one is active
+      persistReferenceImages(null);
       if (currentMeshData) {
         renderElevationsToContainer(
           document.getElementById('elevations-container')!,
@@ -583,12 +617,25 @@ async function main() {
       return sessions.map(s => ({ id: s.id, name: s.name, updated: s.updated }));
     },
 
-    /** Open an existing session (loads latest version) */
+    /** Open an existing session (loads latest version, restores reference images) */
     async openSession(id: string) {
       const version = await openSession(id);
       if (version) {
         setValue(version.code);
         runCodeSync(version.code);
+      }
+      // Restore reference images from session
+      const refImages = await getReferenceImagesFromSession();
+      if (refImages) {
+        _setRefImages(refImages as ReferenceImages);
+        if (currentMeshData) {
+          renderElevationsToContainer(
+            document.getElementById('elevations-container')!,
+            currentMeshData,
+          );
+        }
+      } else {
+        _clearRefImages();
       }
       return version ? { id: version.id, index: version.index, label: version.label } : null;
     },
@@ -716,6 +763,17 @@ async function main() {
       if (version) {
         setValue(version.code);
         runCodeSync(version.code);
+      }
+      // Restore reference images from imported session
+      const refImages = await getReferenceImagesFromSession();
+      if (refImages) {
+        _setRefImages(refImages as ReferenceImages);
+        if (currentMeshData) {
+          renderElevationsToContainer(
+            document.getElementById('elevations-container')!,
+            currentMeshData,
+          );
+        }
       }
       return { id: session.id, name: session.name };
     },

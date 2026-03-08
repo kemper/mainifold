@@ -41,6 +41,15 @@ function getOffscreenRenderer(size: number): THREE.WebGLRenderer {
   return offRenderer;
 }
 
+/** Dispose scene contents (meshes, materials, lights) to prevent WebGL memory leaks */
+function disposeScene(scene: THREE.Scene): void {
+  scene.traverse((obj) => {
+    if (obj instanceof THREE.Mesh) {
+      obj.material?.dispose?.();
+    }
+  });
+}
+
 export function renderViewsToContainer(container: HTMLElement, meshData: MeshData): void {
   container.innerHTML = '';
 
@@ -110,6 +119,7 @@ export function renderViewsToContainer(container: HTMLElement, meshData: MeshDat
   }
 
   container.appendChild(grid);
+  disposeScene(scene);
   geometry.dispose();
 }
 
@@ -177,6 +187,7 @@ export function renderCompositeCanvas(meshData: MeshData): HTMLCanvasElement {
     ctx.textAlign = 'start';
   });
 
+  disposeScene(scene);
   geometry.dispose();
   return compositeCanvas;
 }
@@ -281,9 +292,14 @@ function setupOrthoCamera(
 }
 
 /** Render orthographic elevation views (front, right, back, left, top) to a container.
- *  When reference images are loaded, shows them side-by-side with each elevation. */
+ *  When reference images are loaded, shows them in a compact row above the model elevations. */
 export function renderElevationsToContainer(container: HTMLElement, meshData: MeshData): void {
   container.innerHTML = '';
+
+  // Wrapper div handles flex layout so we don't set inline display on the container
+  // (which would override the 'hidden' class when other tabs are active)
+  const outerWrap = document.createElement('div');
+  outerWrap.className = 'flex flex-col w-full h-full';
 
   const geometry = meshDataToGeometry(meshData);
   const scene = createElevationScene(geometry, 0x1e1e2e);
@@ -298,17 +314,52 @@ export function renderElevationsToContainer(container: HTMLElement, meshData: Me
   const renderer = getOffscreenRenderer(viewSize);
   const hasRef = _referenceImages !== null;
 
-  // Grid layout: 3 columns without refs, 3x2 (ref|model pairs) with refs
-  const grid = document.createElement('div');
-  grid.className = 'grid gap-1 w-full h-full';
+  // Compact reference images row (above the elevation grid)
   if (hasRef) {
-    // Each "cell" is a ref+model pair side by side, still 3 columns
-    grid.style.gridTemplateColumns = 'repeat(3, 1fr)';
-    grid.style.gridTemplateRows = 'repeat(2, 1fr)';
-  } else {
-    grid.style.gridTemplateColumns = 'repeat(3, 1fr)';
-    grid.style.gridTemplateRows = 'repeat(2, 1fr)';
+    const refSection = document.createElement('div');
+    refSection.className = 'pb-1 border-b border-zinc-700 shrink-0';
+
+    const refRow = document.createElement('div');
+    refRow.className = 'flex gap-1.5 items-center overflow-x-auto';
+
+    const refLabel = document.createElement('span');
+    refLabel.className = 'text-xs text-zinc-500 font-mono shrink-0 px-1';
+    refLabel.textContent = 'Refs:';
+    refRow.appendChild(refLabel);
+
+    const refKeys: (keyof ReferenceImages)[] = ['perspective', 'front', 'right', 'back', 'left', 'top'];
+    for (const key of refKeys) {
+      const src = _referenceImages![key];
+      if (!src) continue;
+
+      const refImg = document.createElement('img');
+      refImg.src = src;
+      refImg.className = 'h-16 object-contain rounded bg-zinc-950 border border-blue-500/30 cursor-pointer hover:border-blue-400 transition-colors shrink-0';
+      refImg.title = `${key.charAt(0).toUpperCase() + key.slice(1)} — click to enlarge`;
+      refImg.addEventListener('click', () => {
+        const overlay = document.createElement('div');
+        overlay.className = 'fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm';
+        overlay.addEventListener('click', (e) => { if (e.target === overlay) overlay.remove(); });
+        const img = document.createElement('img');
+        img.src = src;
+        img.className = 'max-w-[90vw] max-h-[90vh] object-contain rounded-lg shadow-2xl';
+        overlay.appendChild(img);
+        document.body.appendChild(overlay);
+        const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') { overlay.remove(); document.removeEventListener('keydown', onKey); } };
+        document.addEventListener('keydown', onKey);
+      });
+      refRow.appendChild(refImg);
+    }
+
+    refSection.appendChild(refRow);
+    outerWrap.appendChild(refSection);
   }
+
+  // Elevation grid: 3 columns, fills remaining space
+  const grid = document.createElement('div');
+  grid.className = 'grid gap-1 flex-1 min-h-0';
+  grid.style.gridTemplateColumns = 'repeat(3, 1fr)';
+  grid.style.gridTemplateRows = 'repeat(2, 1fr)';
 
   for (const elev of ELEVATIONS) {
     const camera = setupOrthoCamera(bsize, center, elev, 1.3);
@@ -323,34 +374,18 @@ export function renderElevationsToContainer(container: HTMLElement, meshData: Me
     const wrapper = document.createElement('div');
     wrapper.className = 'flex flex-col min-h-0';
 
-    if (hasRef && _referenceImages![elev.refKey]) {
-      // Side-by-side: reference image on left, model render on right
-      const pairRow = document.createElement('div');
-      pairRow.className = 'flex flex-1 min-h-0 gap-px';
-
-      const refImg = document.createElement('img');
-      refImg.src = _referenceImages![elev.refKey]!;
-      refImg.className = 'w-1/2 object-contain min-h-0 bg-zinc-950 border border-blue-500/30';
-      refImg.title = `Reference: ${elev.name}`;
-      pairRow.appendChild(refImg);
-
-      canvas.className = 'w-1/2 block object-contain min-h-0';
-      pairRow.appendChild(canvas);
-      wrapper.appendChild(pairRow);
-    } else {
-      canvas.className = 'w-full flex-1 block object-contain min-h-0';
-      wrapper.appendChild(canvas);
-    }
+    canvas.className = 'w-full flex-1 block object-contain min-h-0';
+    wrapper.appendChild(canvas);
 
     const label = document.createElement('div');
     label.className = 'text-center text-xs text-zinc-500 font-mono py-0.5 bg-zinc-800 shrink-0';
-    label.textContent = hasRef && _referenceImages![elev.refKey] ? `${elev.name} (Ref | Model)` : elev.name;
+    label.textContent = elev.name;
     wrapper.appendChild(label);
 
     grid.appendChild(wrapper);
   }
 
-  // 6th slot: isometric view, or perspective reference if available
+  // 6th slot: isometric view
   {
     const isoCamera = new THREE.PerspectiveCamera(40, 1, 0.1, 1000);
     const maxDim = Math.max(bsize.x, bsize.y, bsize.z);
@@ -370,33 +405,20 @@ export function renderElevationsToContainer(container: HTMLElement, meshData: Me
     const wrapper = document.createElement('div');
     wrapper.className = 'flex flex-col min-h-0';
 
-    if (hasRef && _referenceImages!.perspective) {
-      const pairRow = document.createElement('div');
-      pairRow.className = 'flex flex-1 min-h-0 gap-px';
-
-      const refImg = document.createElement('img');
-      refImg.src = _referenceImages!.perspective!;
-      refImg.className = 'w-1/2 object-contain min-h-0 bg-zinc-950 border border-blue-500/30';
-      refImg.title = 'Reference: Perspective';
-      pairRow.appendChild(refImg);
-
-      canvas.className = 'w-1/2 block object-contain min-h-0';
-      pairRow.appendChild(canvas);
-      wrapper.appendChild(pairRow);
-    } else {
-      canvas.className = 'w-full flex-1 block object-contain min-h-0';
-      wrapper.appendChild(canvas);
-    }
+    canvas.className = 'w-full flex-1 block object-contain min-h-0';
+    wrapper.appendChild(canvas);
 
     const label = document.createElement('div');
     label.className = 'text-center text-xs text-zinc-500 font-mono py-0.5 bg-zinc-800 shrink-0';
-    label.textContent = hasRef && _referenceImages!.perspective ? 'Isometric (Ref | Model)' : 'Isometric';
+    label.textContent = 'Isometric';
     wrapper.appendChild(label);
 
     grid.appendChild(wrapper);
   }
 
-  container.appendChild(grid);
+  outerWrap.appendChild(grid);
+  container.appendChild(outerWrap);
+  disposeScene(scene);
   geometry.dispose();
 }
 
@@ -457,6 +479,7 @@ export function renderSingleView(meshData: MeshData, options: {
   const ctx = canvas.getContext('2d')!;
   ctx.drawImage(renderer.domElement, 0, 0);
 
+  disposeScene(scene);
   geometry.dispose();
   return canvas.toDataURL('image/png');
 }

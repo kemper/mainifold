@@ -121,6 +121,14 @@ export function createLayout(appContainer: HTMLElement): LayoutElements {
 
     viewActions.classList.toggle('hidden', tab !== 'ai' && tab !== 'elevations');
 
+    // Hide editor pane on AI-oriented tabs to maximize view area
+    const hideEditor = tab === 'ai' || tab === 'elevations';
+    editorPane.classList.toggle('hidden', hideEditor);
+    splitter.classList.toggle('hidden', hideEditor);
+
+    // Notify listeners (e.g. gallery refresh)
+    window.dispatchEvent(new CustomEvent('tab-switched', { detail: { tab } }));
+
     // Update URL to reflect current tab
     const params = new URLSearchParams(window.location.search);
     if (tab === 'ai') {
@@ -172,6 +180,11 @@ export function createLayout(appContainer: HTMLElement): LayoutElements {
       }
     }
     viewActions.classList.toggle('hidden', tab !== 'ai' && tab !== 'elevations');
+    const hideEditor = tab === 'ai' || tab === 'elevations';
+    editorPane.classList.toggle('hidden', hideEditor);
+    splitter.classList.toggle('hidden', hideEditor);
+    // Dispatch event so listeners (e.g. gallery refresh) can react
+    window.dispatchEvent(new CustomEvent('tab-switched', { detail: { tab } }));
     window.dispatchEvent(new Event('resize'));
   }
 

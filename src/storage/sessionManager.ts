@@ -11,13 +11,15 @@ import {
   getVersionByIndex,
   getVersionCount,
   clearAllData,
+  updateSession as dbUpdateSession,
   type Session,
   type Version,
+  type ReferenceImagesData,
 } from './db';
 
 export interface ExportedSession {
   mainifold: string;
-  session: { name: string; created: number; updated: number };
+  session: { name: string; created: number; updated: number; referenceImages?: ReferenceImagesData | null };
   versions: {
     index: number;
     code: string;
@@ -27,7 +29,7 @@ export interface ExportedSession {
   }[];
 }
 
-export type { Session, Version } from './db';
+export type { Session, Version, ReferenceImagesData } from './db';
 
 export interface SessionState {
   session: Session | null;
@@ -219,6 +221,29 @@ export function getGalleryUrl(): string {
   return `${base}?session=${currentState.session.id}&gallery`;
 }
 
+// === Reference images ===
+
+export async function saveReferenceImages(images: ReferenceImagesData | null): Promise<void> {
+  if (!currentState.session) return;
+  await dbUpdateSession(currentState.session.id, {
+    referenceImages: images,
+    updated: Date.now(),
+  });
+  // Update local state so getState() reflects the change
+  currentState = {
+    ...currentState,
+    session: { ...currentState.session, referenceImages: images },
+  };
+  notify();
+}
+
+export async function getReferenceImagesFromSession(): Promise<ReferenceImagesData | null> {
+  if (!currentState.session) return null;
+  // Refresh from DB in case it was updated externally
+  const session = await getSession(currentState.session.id);
+  return session?.referenceImages ?? null;
+}
+
 // === Clear all data ===
 
 export async function clearAllSessions(): Promise<void> {
@@ -241,7 +266,7 @@ export async function exportSession(sessionId?: string): Promise<ExportedSession
 
   return {
     mainifold: '1.0',
-    session: { name: session.name, created: session.created, updated: session.updated },
+    session: { name: session.name, created: session.created, updated: session.updated, referenceImages: session.referenceImages ?? null },
     versions: versions.map(v => ({
       index: v.index,
       code: v.code,
@@ -257,6 +282,11 @@ export async function importSession(
   regenerateThumbnail?: (code: string) => Promise<Blob | null>,
 ): Promise<Session> {
   const session = await dbCreateSession(data.session.name);
+
+  // Restore reference images if present in the exported data
+  if (data.session.referenceImages) {
+    await dbUpdateSession(session.id, { referenceImages: data.session.referenceImages });
+  }
 
   for (const v of data.versions) {
     let thumbnail: Blob | null = null;
