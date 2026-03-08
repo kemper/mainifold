@@ -30,9 +30,14 @@ mainifold.exportGLB()       // Download GLB
 mainifold.exportSTL()       // Download STL
 mainifold.exportOBJ()       // Download OBJ
 mainifold.export3MF()       // Download 3MF
+// Isolated execution &amp; assertions
+await mainifold.runIsolated(code)  // Test without side effects
+await mainifold.runAndAssert(code, {minVolume, isManifold, ...})
+mainifold.isRunning()       // Check execution state
 // Sessions
 await mainifold.createSession(name?)
-await mainifold.runAndSave(code, label?)
+await mainifold.runAndSave(code, label?)  // Returns stat diff
+await mainifold.createSessionWithVersions(name, [{code,label},...])
 mainifold.getGalleryUrl()   // Gallery for human review</pre>
 
       <p style="margin-top:8px;color:#a1a1aa;"><strong>Code pattern</strong> — must <code style="color:#f87171;">return</code> a Manifold. All transforms are immutable.</p>

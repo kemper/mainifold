@@ -65,19 +65,15 @@ function simpleHash(str: string): string {
   return (h >>> 0).toString(16).padStart(8, '0');
 }
 
-function updateGeometryData(executionTimeMs?: number, sourceCode?: string) {
-  if (!currentManifold || !currentMeshData) {
-    geometryDataEl.textContent = JSON.stringify({ status: 'error', error: 'No geometry' });
-    return;
-  }
-
-  const bbox = getBoundingBox(currentManifold);
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function computeGeometryStats(manifold: any, meshData: MeshData, executionTimeMs?: number, sourceCode?: string): Record<string, unknown> {
+  const bbox = getBoundingBox(manifold);
 
   let volume = 0;
   let surfaceArea = 0;
   try {
-    volume = currentManifold.volume();
-    surfaceArea = currentManifold.surfaceArea();
+    volume = manifold.volume();
+    surfaceArea = manifold.surfaceArea();
   } catch {
     // fallback if methods unavailable
   }
@@ -92,7 +88,7 @@ function updateGeometryData(executionTimeMs?: number, sourceCode?: string) {
 
   let componentCount = 1;
   try {
-    const parts = currentManifold.decompose();
+    const parts = manifold.decompose();
     componentCount = parts.length;
     for (const p of parts) p.delete();
   } catch {
@@ -101,7 +97,7 @@ function updateGeometryData(executionTimeMs?: number, sourceCode?: string) {
 
   let isManifold = true;
   try {
-    isManifold = currentManifold.status() === 0;
+    isManifold = manifold.status() === 0;
   } catch {
     // fallback
   }
@@ -111,17 +107,17 @@ function updateGeometryData(executionTimeMs?: number, sourceCode?: string) {
     const zRange = bbox.max[2] - bbox.min[2];
     for (const pct of [25, 50, 75]) {
       const z = bbox.min[2] + zRange * (pct / 100);
-      const s = sliceAtZ(currentManifold, z);
+      const s = sliceAtZ(manifold, z);
       if (s) {
         quartileSlices[`z${pct}`] = { z, area: s.area, contours: s.polygons.length };
       }
     }
   }
 
-  const data = {
+  return {
     status: 'ok' as const,
-    vertexCount: currentMeshData.numVert,
-    triangleCount: currentMeshData.numTri,
+    vertexCount: meshData.numVert,
+    triangleCount: meshData.numTri,
     boundingBox: bbox ? {
       x: [bbox.min[0], bbox.max[0]],
       y: [bbox.min[1], bbox.max[1]],
@@ -131,14 +127,104 @@ function updateGeometryData(executionTimeMs?: number, sourceCode?: string) {
     centroid,
     volume,
     surfaceArea,
-    genus: (() => { try { return currentManifold.genus(); } catch { return null; } })(),
+    genus: (() => { try { return manifold.genus(); } catch { return null; } })(),
     isManifold,
     componentCount,
     crossSections: quartileSlices,
     executionTimeMs: executionTimeMs ?? null,
     codeHash: sourceCode ? simpleHash(sourceCode) : null,
   };
+}
 
+function computeStatDiff(prev: Record<string, unknown>, next: Record<string, unknown>): Record<string, unknown> {
+  const diff: Record<string, unknown> = {};
+
+  const numericFields = ['volume', 'surfaceArea', 'vertexCount', 'triangleCount', 'genus', 'componentCount'];
+  for (const field of numericFields) {
+    const from = prev[field] as number;
+    const to = next[field] as number;
+    if (from !== undefined && to !== undefined) {
+      const delta = to - from;
+      if (delta === 0) {
+        diff[field] = { from, to, delta: 'unchanged' };
+      } else {
+        const pct = from !== 0 ? ((delta / from) * 100).toFixed(1) : null;
+        diff[field] = {
+          from, to,
+          delta: `${delta > 0 ? '+' : ''}${Math.round(delta)}${pct ? ` (${delta > 0 ? '+' : ''}${pct}%)` : ''}`,
+        };
+      }
+    }
+  }
+
+  const prevBB = prev.boundingBox as Record<string, unknown> | null;
+  const nextBB = next.boundingBox as Record<string, unknown> | null;
+  if (prevBB?.dimensions && nextBB?.dimensions) {
+    diff.boundingBox = { dimensions: { from: prevBB.dimensions, to: nextBB.dimensions } };
+  }
+
+  return diff;
+}
+
+interface GeometryAssertions {
+  minVolume?: number;
+  maxVolume?: number;
+  isManifold?: boolean;
+  maxComponents?: number;
+  genus?: number;
+  minBounds?: [number, number, number];
+  maxBounds?: [number, number, number];
+  minTriangles?: number;
+  maxTriangles?: number;
+}
+
+function checkAssertions(stats: Record<string, unknown>, assertions: GeometryAssertions): string[] {
+  const failures: string[] = [];
+  const v = stats.volume as number;
+  const tc = stats.triangleCount as number;
+  const cc = stats.componentCount as number;
+  const g = stats.genus as number | null;
+  const im = stats.isManifold as boolean;
+  const bb = stats.boundingBox as { dimensions?: number[] } | null;
+
+  if (assertions.minVolume !== undefined && v < assertions.minVolume)
+    failures.push(`volume ${v.toFixed(1)} < minVolume ${assertions.minVolume}`);
+  if (assertions.maxVolume !== undefined && v > assertions.maxVolume)
+    failures.push(`volume ${v.toFixed(1)} > maxVolume ${assertions.maxVolume}`);
+  if (assertions.isManifold !== undefined && im !== assertions.isManifold)
+    failures.push(`isManifold is ${im}, expected ${assertions.isManifold}`);
+  if (assertions.maxComponents !== undefined && cc > assertions.maxComponents)
+    failures.push(`componentCount ${cc} > maxComponents ${assertions.maxComponents}`);
+  if (assertions.genus !== undefined && g !== assertions.genus)
+    failures.push(`genus ${g} !== expected ${assertions.genus}`);
+  if (assertions.minTriangles !== undefined && tc < assertions.minTriangles)
+    failures.push(`triangleCount ${tc} < minTriangles ${assertions.minTriangles}`);
+  if (assertions.maxTriangles !== undefined && tc > assertions.maxTriangles)
+    failures.push(`triangleCount ${tc} > maxTriangles ${assertions.maxTriangles}`);
+  if (assertions.minBounds && bb?.dimensions) {
+    const d = bb.dimensions;
+    for (let i = 0; i < 3; i++) {
+      if (d[i] < assertions.minBounds[i])
+        failures.push(`dimension ${['X', 'Y', 'Z'][i]} ${d[i].toFixed(1)} < minBounds ${assertions.minBounds[i]}`);
+    }
+  }
+  if (assertions.maxBounds && bb?.dimensions) {
+    const d = bb.dimensions;
+    for (let i = 0; i < 3; i++) {
+      if (d[i] > assertions.maxBounds[i])
+        failures.push(`dimension ${['X', 'Y', 'Z'][i]} ${d[i].toFixed(1)} > maxBounds ${assertions.maxBounds[i]}`);
+    }
+  }
+  return failures;
+}
+
+function updateGeometryData(executionTimeMs?: number, sourceCode?: string) {
+  if (!currentManifold || !currentMeshData) {
+    geometryDataEl.textContent = JSON.stringify({ status: 'error', error: 'No geometry' });
+    return;
+  }
+
+  const data = computeGeometryStats(currentManifold, currentMeshData, executionTimeMs, sourceCode);
   geometryDataEl.textContent = JSON.stringify(data, null, 2);
 }
 
@@ -275,6 +361,30 @@ async function main() {
     runCode(defaultCode);
   }
 
+  // === Execution state ===
+  let _running = false;
+
+  function executeIsolated(code: string) {
+    const t0 = performance.now();
+    const result = executeCode(code);
+    const elapsed = Math.round(performance.now() - t0);
+
+    if (result.error) {
+      return {
+        geometryData: { status: 'error' as const, error: result.error, executionTimeMs: elapsed, codeHash: simpleHash(code) },
+        meshData: null as MeshData | null,
+        manifold: null as unknown,
+      };
+    }
+
+    const stats = computeGeometryStats(result.manifold, result.mesh!, elapsed, code);
+    return {
+      geometryData: stats,
+      meshData: result.mesh,
+      manifold: result.manifold,
+    };
+  }
+
   // === Expose window.mainifold console API ===
   const mainifoldAPI = {
     /** Run code string and update all views. Returns geometry data object. */
@@ -341,6 +451,8 @@ async function main() {
     validate(code: string): { valid: boolean; error?: string } {
       const result = executeCode(code);
       if (result.error) return { valid: false, error: result.error };
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      try { (result.manifold as any)?.delete?.(); } catch { /* ignore */ }
       return { valid: true };
     },
 
@@ -439,15 +551,25 @@ async function main() {
       return version ? { id: version.id, index: version.index, label: version.label } : null;
     },
 
-    /** Run code and save as a new version in one call */
+    /** Run code and save as a new version in one call. Returns stat diff vs previous version. */
     async runAndSave(code: string, label?: string) {
+      const prevGeoData = getState().currentVersion?.geometryData as Record<string, unknown> | null;
+
       setValue(code);
       runCodeSync(code);
+      const newGeoData = JSON.parse(geometryDataEl.textContent || '{}');
       const thumbnail = await captureThumbnail();
       const version = await saveVersion(code, getGeometryDataObj(), thumbnail, label);
+
+      let diff = null;
+      if (prevGeoData && prevGeoData.status === 'ok' && newGeoData.status === 'ok') {
+        diff = computeStatDiff(prevGeoData, newGeoData);
+      }
+
       return {
-        geometry: JSON.parse(geometryDataEl.textContent || '{}'),
+        geometry: newGeoData,
         version: version ? { id: version.id, index: version.index, label: version.label } : null,
+        diff,
       };
     },
 
@@ -494,6 +616,76 @@ async function main() {
     async clearAllSessions() {
       await clearAllSessions();
     },
+
+    // === Isolated execution & assertions ===
+
+    /** Check if geometry code is currently executing */
+    isRunning(): boolean {
+      return _running;
+    },
+
+    /** Run code without mutating editor, viewport, or session state. Returns geometry stats + thumbnail. */
+    async runIsolated(code: string) {
+      const { geometryData, meshData, manifold } = executeIsolated(code);
+
+      let thumbnail: string | null = null;
+      if (meshData) {
+        try {
+          const canvas = renderCompositeCanvas(meshData);
+          thumbnail = canvas.toDataURL('image/png');
+        } catch { /* ignore */ }
+      }
+
+      // Clean up manifold to prevent memory leaks
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      try { (manifold as any)?.delete?.(); } catch { /* ignore */ }
+
+      return { geometryData, thumbnail };
+    },
+
+    /** Run code and check geometry against assertions. Does not mutate global state. */
+    async runAndAssert(code: string, assertions: GeometryAssertions) {
+      const { geometryData, manifold } = executeIsolated(code);
+
+      // Clean up manifold
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      try { (manifold as any)?.delete?.(); } catch { /* ignore */ }
+
+      if (geometryData.status === 'error') {
+        return { passed: false, failures: [geometryData.error as string], stats: geometryData };
+      }
+
+      const failures = checkAssertions(geometryData, assertions);
+      return {
+        passed: failures.length === 0,
+        failures: failures.length > 0 ? failures : undefined,
+        stats: geometryData,
+      };
+    },
+
+    /** Create a session and populate it with multiple versions in one call */
+    async createSessionWithVersions(name: string, versions: { code: string; label?: string }[]) {
+      const session = await createSession(name);
+      const results = [];
+
+      for (const v of versions) {
+        setValue(v.code);
+        runCodeSync(v.code);
+        const thumbnail = await captureThumbnail();
+        const geoData = getGeometryDataObj();
+        const version = await saveVersion(v.code, geoData, thumbnail, v.label);
+        results.push({
+          version: version ? { id: version.id, index: version.index, label: version.label } : null,
+          geometry: geoData,
+        });
+      }
+
+      return {
+        session: { id: session.id, name: session.name },
+        versions: results,
+        galleryUrl: getGalleryUrl(),
+      };
+    },
   };
 
   (window as unknown as Record<string, unknown>).mainifold = mainifoldAPI;
@@ -505,7 +697,9 @@ async function main() {
     '         .sliceAtZ(z), .getBoundingBox(), .validate(code),\n' +
     '         .toggleClip(on?), .setClipZ(z), .getClipState(),\n' +
     '         .getModule(), .exportGLB(), .exportSTL(), .exportOBJ(), .export3MF()\n' +
+    'Isolated: .runIsolated(code), .runAndAssert(code, assertions), .isRunning()\n' +
     'Sessions: .createSession(name?), .saveVersion(label?), .runAndSave(code, label?),\n' +
+    '          .createSessionWithVersions(name, [{code,label},...]),\n' +
     '          .listSessions(), .openSession(id), .listVersions(), .loadVersion(idx),\n' +
     '          .getGalleryUrl(), .getSessionUrl(), .getSessionState(),\n' +
     '          .exportSession(id?), .importSession(data), .clearAllSessions()\n' +
@@ -528,9 +722,11 @@ async function main() {
   }
 
   function runCodeSync(src: string) {
+    _running = true;
     const t0 = performance.now();
     const result = executeCode(src);
     const elapsed = Math.round(performance.now() - t0);
+    _running = false;
 
     if (result.error) {
       setStatus(statusBar, 'error', result.error);

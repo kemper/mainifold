@@ -29,9 +29,15 @@ mainifold.exportSTL()         // Download STL
 mainifold.exportOBJ()         // Download OBJ
 mainifold.export3MF()         // Download 3MF
 
+// Isolated execution — test code without changing editor/viewport state
+await mainifold.runIsolated(code)       // → {geometryData, thumbnail}
+await mainifold.runAndAssert(code, assertions) // → {passed, failures?, stats}
+mainifold.isRunning()                   // → boolean (is code executing?)
+
 // Sessions — save/compare design iterations
 await mainifold.createSession(name?)    // → {id, url}
-await mainifold.runAndSave(code, label?) // Run + save as version → {geometry, version}
+await mainifold.runAndSave(code, label?) // Run + save + stat diff → {geometry, version, diff}
+await mainifold.createSessionWithVersions(name, [{code, label},...]) // Batch create
 await mainifold.saveVersion(label?)     // Save current state as version
 await mainifold.listVersions()          // → [{id, index, label, timestamp, status}]
 await mainifold.loadVersion(index)      // Load specific version
@@ -129,6 +135,71 @@ Queries:    .area()  .isEmpty()  .numVert()  .numContour()  .bounds()
 Output:     .toPolygons()  .decompose()  .delete()
 ```
 
+## Iteration Workflow
+
+### Testing without side effects
+
+Use `runIsolated` to test code variations without changing the editor or viewport:
+```js
+const r = await mainifold.runIsolated(code);
+// r.geometryData = full stats (same schema as #geometry-data)
+// r.thumbnail = data:image/png base64 string (4 isometric views)
+```
+
+### Assertions — structured validation
+
+Check geometry against expectations in one call:
+```js
+const r = await mainifold.runAndAssert(code, {
+  minVolume: 1000,      // volume bounds
+  maxVolume: 50000,
+  isManifold: true,     // must be valid manifold
+  maxComponents: 1,     // detect failed booleans
+  genus: 0,             // topological genus (0 = solid, N = N holes)
+  minBounds: [10,10,5], // minimum bounding box dimensions [X,Y,Z]
+  maxBounds: [50,50,30],
+  minTriangles: 100,    // mesh complexity bounds
+  maxTriangles: 50000,
+});
+// r.passed = true/false
+// r.failures = ["volume 500.0 < minVolume 1000"] (only if failed)
+// r.stats = full geometry stats
+```
+
+### Stat diffing
+
+`runAndSave` returns a diff against the previous version:
+```js
+const r = await mainifold.runAndSave(code, "v2 - added towers");
+// r.diff = {
+//   volume: { from: 18200, to: 24500, delta: "+6300 (+34.6%)" },
+//   componentCount: { from: 1, to: 1, delta: "unchanged" },
+//   ...
+// }
+```
+
+### Batch session creation
+
+Create a complete session with multiple versions in one call:
+```js
+const r = await mainifold.createSessionWithVersions("Castle", [
+  { code: v1Code, label: "v1 - walls" },
+  { code: v2Code, label: "v2 - towers" },
+  { code: v3Code, label: "v3 - gate" },
+]);
+// r.session = {id, name}
+// r.versions = [{version, geometry}, ...]
+// r.galleryUrl = "http://localhost:5173/?session=abc&gallery"
+```
+
+### Recommended iteration pattern
+
+1. Write initial code, test with `runAndAssert(code, {isManifold: true, maxComponents: 1})`
+2. If assertions pass, save: `runAndSave(code, "v1 - base")`
+3. Modify code, test with `runIsolated(modifiedCode)` — check stats without committing
+4. When satisfied, save: `runAndSave(modifiedCode, "v2 - improvements")` — check the diff
+5. Repeat. Hand off `getGalleryUrl()` for human review.
+
 ## Verification
 
 1. Read `#geometry-data` — check `status:"ok"`, volume, dimensions, componentCount, isManifold
@@ -136,3 +207,4 @@ Output:     .toPolygons()  .decompose()  .delete()
 3. Use `mainifold.sliceAtZ(z)` for specific heights
 4. Screenshot with `?view=ai` — 4 isometric angles show every face
 5. Use `mainifold.validate(code)` for quick syntax checks
+6. Use `mainifold.runAndAssert(code, assertions)` for structured validation

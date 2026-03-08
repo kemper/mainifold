@@ -367,6 +367,35 @@ mainifold.export3MF()
 mainifold.getModule()
 ```
 
+### Isolated Execution & Assertions
+
+Test code without changing the editor, viewport, or session state:
+
+```javascript
+// Run code in isolation — no side effects on editor/viewport/session
+const result = await mainifold.runIsolated(code)
+// → { geometryData: {...stats...}, thumbnail: "data:image/png;base64,..." }
+
+// Run code and check geometry against assertions
+const result = await mainifold.runAndAssert(code, {
+  minVolume: 1000,       // volume bounds
+  maxVolume: 50000,
+  isManifold: true,      // must be a valid manifold
+  maxComponents: 1,      // detect failed booleans (extra disconnected pieces)
+  genus: 0,              // topological genus (0 = solid, N = N through-holes)
+  minBounds: [10, 10, 5],  // minimum bounding box dimensions [X, Y, Z]
+  maxBounds: [50, 50, 30],
+  minTriangles: 100,     // mesh complexity bounds
+  maxTriangles: 50000,
+})
+// → { passed: true, stats: {...} }
+// → { passed: false, failures: ["volume 500.0 < minVolume 1000"], stats: {...} }
+
+// Check if code is currently executing
+mainifold.isRunning()
+// → boolean
+```
+
 ### Session & Versioning API
 
 Sessions let you (or an AI agent) save multiple versions of a design, then compare them in a gallery view.
@@ -375,15 +404,26 @@ Sessions let you (or an AI agent) save multiple versions of a design, then compa
 // Create a session and iterate on a design
 const { id, url } = await mainifold.createSession("Gear variations");
 
-// Run code and save as version in one call
-await mainifold.runAndSave(`
+// Run code and save as version in one call (returns stat diff vs previous version)
+const r = await mainifold.runAndSave(`
   const { Manifold } = api;
   return Manifold.cylinder(10, 8, 8, 32);
 `, "v1 - basic cylinder");
+// r.geometry = {...stats...}
+// r.version = {id, index, label}
+// r.diff = {volume: {from, to, delta}, ...} (null for first version)
 
-// Run more variations
+// Run more variations — each returns diff against previous
 await mainifold.runAndSave(variant2Code, "v2 - added teeth");
 await mainifold.runAndSave(variant3Code, "v3 - wider base");
+
+// Or create a complete session with all versions in one call
+await mainifold.createSessionWithVersions("Gear variations", [
+  { code: v1Code, label: "v1 - basic cylinder" },
+  { code: v2Code, label: "v2 - added teeth" },
+  { code: v3Code, label: "v3 - wider base" },
+]);
+// → { session: {id, name}, versions: [{version, geometry},...], galleryUrl }
 
 // Get gallery URL for human review
 mainifold.getGalleryUrl()
@@ -469,6 +509,15 @@ After modifying geometry code:
 3. Use `mainifold.sliceAtZ(z)` for additional cross-sections at specific heights
 4. Take a screenshot — with `?view=ai`, the 4 isometric views fill the right panel (alternating cube corners, every face visible in 2+ views)
 5. Use `mainifold.validate(code)` for quick syntax checks before committing to a full run
+6. Use `mainifold.runAndAssert(code, assertions)` for structured validation with pass/fail
+
+### Recommended iteration pattern
+
+1. Write initial code, test with `runAndAssert(code, {isManifold: true, maxComponents: 1})`
+2. If assertions pass, save: `runAndSave(code, "v1 - base shape")` — check returned stats
+3. Modify code, test with `runIsolated(modifiedCode)` — check stats without committing to viewport
+4. When satisfied, save: `runAndSave(modifiedCode, "v2 - improvements")` — check the `diff` field
+5. Repeat. Hand off `getGalleryUrl()` for human review.
 
 ## Examples
 
