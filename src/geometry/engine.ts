@@ -62,7 +62,21 @@ export function executeCode(jsCode: string): MeshResult {
       error: null,
     };
   } catch (e: unknown) {
-    const msg = e instanceof Error ? e.message : String(e);
+    let msg = e instanceof Error ? e.message : String(e);
+
+    // Enhance common WASM error messages with actionable hints
+    if (msg.includes('BindingError') && msg.includes('deleted object')) {
+      msg += '\n💡 Hint: A Manifold or CrossSection was used after being deleted. Avoid calling .delete() on objects you still need, or store intermediate results before cleanup.';
+    } else if (msg.includes('function _Cylinder called with')) {
+      msg += '\n💡 Hint: Manifold.cylinder(height, radiusLow, radiusHigh?, segments?) — check argument count and order.';
+    } else if (msg.includes('function _Cube called with')) {
+      msg += '\n💡 Hint: Manifold.cube([x, y, z], center?) — first arg must be an array of 3 numbers.';
+    } else if (msg.includes('Missing field')) {
+      msg += '\n💡 Hint: You may have passed an array where an object was expected, or vice versa. Check the API signature.';
+    } else if (msg.includes('unreachable') || msg.includes('RuntimeError')) {
+      msg += '\n💡 Hint: WASM runtime error — likely caused by degenerate geometry (zero-area face, self-intersection, or invalid boolean). Try simplifying the operation or checking input dimensions.';
+    }
+
     return { mesh: null, manifold: null, error: msg };
   }
 }

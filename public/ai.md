@@ -32,12 +32,14 @@ mainifold.export3MF()         // Download 3MF
 // Isolated execution — test code without changing editor/viewport state
 await mainifold.runIsolated(code)       // → {geometryData, thumbnail}
 await mainifold.runAndAssert(code, assertions) // → {passed, failures?, stats}
-await mainifold.runAndExplain(code)     // → {stats, components[], hint} (debug disconnects)
+await mainifold.runAndExplain(code)     // → {stats, components[], hints[]} (debug disconnects)
+await mainifold.modifyAndTest(patchFn, assertions?) // Modify current code + test in isolation
+mainifold.query({sliceAt?, decompose?, boundingBox?}) // Multi-query current geometry in one call
 mainifold.isRunning()                   // → boolean (is code executing?)
 
 // Sessions — save/compare design iterations
 await mainifold.createSession(name?)    // → {id, url, galleryUrl}
-await mainifold.runAndSave(code, label?) // Run + save + stat diff → {geometry, version, diff, galleryUrl}
+await mainifold.runAndSave(code, label?, assertions?) // Assert+save in one call → {passed?, geometry, version, diff, galleryUrl}
 await mainifold.createSessionWithVersions(name, [{code, label},...]) // Batch create
 await mainifold.saveVersion(label?)     // Save current state as version
 await mainifold.listVersions()          // → [{id, index, label, timestamp, status}]
@@ -206,15 +208,50 @@ const r = await mainifold.runAndAssert(code, {
 // r.stats = full geometry stats
 ```
 
-### Stat diffing
+### Assert + save in one call
 
-`runAndSave` returns a diff against the previous version:
+`runAndSave` accepts optional assertions. If provided, validates in isolation first — fails fast
+without saving if assertions don't pass. On success, saves the version and returns stat diff:
 ```js
-const r = await mainifold.runAndSave(code, "v2 - added towers");
-// r.geometry   = full geometry stats
-// r.version    = { id, index, label }
-// r.diff       = { volume: { from, to, delta }, componentCount: ..., ... }
-// r.galleryUrl = "http://localhost:5173/?session=abc&gallery"
+const r = await mainifold.runAndSave(code, "v2 - added towers", {
+  isManifold: true, maxComponents: 1
+});
+// If assertions fail: r.passed = false, r.failures = [...], version NOT saved
+// If assertions pass (or no assertions given):
+// r.passed       = true (only present when assertions provided)
+// r.geometry     = full geometry stats
+// r.version      = { id, index, label }
+// r.diff         = { volume: { from, to, delta }, componentCount: ..., ... }
+// r.galleryUrl   = gallery URL for human review
+```
+
+### Modify and test
+
+Modify current editor code with a transform function and test the result without committing:
+```js
+const r = await mainifold.modifyAndTest(
+  code => code.replace('towerH = 28', 'towerH = 35'),
+  { isManifold: true, maxComponents: 1 }
+);
+// r.modifiedCode = the transformed code string
+// r.stats        = geometry stats of the modified code
+// r.passed       = true/false (only if assertions given)
+// r.failures     = [...] (only if failed)
+```
+
+### Multi-query current geometry
+
+Query multiple properties of the already-computed geometry in a single call:
+```js
+const r = mainifold.query({
+  sliceAt: [5, 10, 15, 20],  // cross-sections at these Z heights
+  decompose: true,             // component breakdown
+  boundingBox: true,           // bounding box
+});
+// r.slices     = { z5: {area, contours, ...}, z10: {...}, ... }
+// r.components = [{ index, volume, centroid, boundingBox }, ...]
+// r.boundingBox = { min: [...], max: [...] }
+// r.stats      = current geometry-data stats
 ```
 
 ### Batch session creation
@@ -233,11 +270,11 @@ const r = await mainifold.createSessionWithVersions("Castle", [
 
 ### Recommended iteration pattern
 
-1. Write initial code, test with `runAndAssert(code, {isManifold: true, maxComponents: 1})`
-2. If assertions pass, save: `runAndSave(code, "v1 - base")`
-3. Modify code, test with `runIsolated(modifiedCode)` — check stats without committing
-4. When satisfied, save: `runAndSave(modifiedCode, "v2 - improvements")` — check the diff
-5. Repeat. Hand off `getGalleryUrl()` for human review.
+1. Write initial code, assert+save in one call: `runAndSave(code, "v1 - base", {isManifold: true, maxComponents: 1})`
+2. Modify code, test with `modifyAndTest(patchFn)` or `runIsolated(code)` — no side effects
+3. When satisfied, save: `runAndSave(modifiedCode, "v2 - improvements", assertions)` — check the diff
+4. Use `query({sliceAt: [...], decompose: true})` for follow-up inspection without re-running
+5. Repeat. Gallery URL is in `#geometry-data` or the `runAndSave` return value.
 
 ## Verification
 

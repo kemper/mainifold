@@ -96,9 +96,14 @@ function computeGeometryStats(manifold: any, meshData: MeshData, executionTimeMs
   }
 
   let isManifold = true;
+  let manifoldStatus: string | null = null;
   try {
     const s = manifold.status();
     isManifold = s === 0 || s === 'NoError';
+    if (!isManifold) {
+      // Surface the actual status for diagnostics
+      manifoldStatus = String(s);
+    }
   } catch {
     // fallback
   }
@@ -130,6 +135,7 @@ function computeGeometryStats(manifold: any, meshData: MeshData, executionTimeMs
     surfaceArea,
     genus: (() => { try { return manifold.genus(); } catch { return null; } })(),
     isManifold,
+    ...(manifoldStatus ? { manifoldStatus } : {}),
     componentCount,
     crossSections: quartileSlices,
     executionTimeMs: executionTimeMs ?? null,
@@ -232,6 +238,13 @@ function updateGeometryData(executionTimeMs?: number, sourceCode?: string) {
   }
 
   const data = computeGeometryStats(currentManifold, currentMeshData, executionTimeMs, sourceCode);
+  // Surface session URLs in geometry-data so they're accessible even when getGalleryUrl() is sandbox-blocked
+  const state = getState();
+  if (state.session) {
+    (data as Record<string, unknown>).sessionId = state.session.id;
+    (data as Record<string, unknown>).sessionUrl = getSessionUrl();
+    (data as Record<string, unknown>).galleryUrl = getGalleryUrl();
+  }
   geometryDataEl.textContent = JSON.stringify(data, null, 2);
 }
 
@@ -558,8 +571,23 @@ async function main() {
       return version ? { id: version.id, index: version.index, label: version.label } : null;
     },
 
-    /** Run code and save as a new version in one call. Returns stat diff vs previous version. */
-    async runAndSave(code: string, label?: string) {
+    /** Run code and save as a new version in one call. Returns stat diff vs previous version.
+     *  Optional assertions — if provided, validates before saving. Fails fast without saving if assertions don't pass. */
+    async runAndSave(code: string, label?: string, assertions?: GeometryAssertions) {
+      // If assertions provided, validate in isolation first (no side effects if it fails)
+      if (assertions) {
+        const { geometryData: testData, manifold: testManifold } = executeIsolated(code);
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        try { (testManifold as any)?.delete?.(); } catch { /* ignore */ }
+        if (testData.status === 'error') {
+          return { passed: false, failures: [testData.error as string], geometry: testData, version: null, diff: null, galleryUrl: getGalleryUrl() };
+        }
+        const failures = checkAssertions(testData, assertions);
+        if (failures.length > 0) {
+          return { passed: false, failures, geometry: testData, version: null, diff: null, galleryUrl: getGalleryUrl() };
+        }
+      }
+
       const prevGeoData = getState().currentVersion?.geometryData as Record<string, unknown> | null;
 
       setValue(code);
@@ -574,6 +602,7 @@ async function main() {
       }
 
       return {
+        ...(assertions ? { passed: true } : {}),
         geometry: newGeoData,
         version: version ? { id: version.id, index: version.index, label: version.label } : null,
         diff,
@@ -708,12 +737,38 @@ async function main() {
       const hints: string[] = [];
       if (components && components.length > 1) {
         const sorted = [...components].sort((a, b) => b.volume - a.volume);
-        const mainVol = sorted[0].volume;
-        const small = sorted.filter(c => c.volume < mainVol * 0.01);
-        if (small.length > 0) {
-          hints.push(`${small.length} tiny disconnected component(s) detected — likely floating attachments that failed to union. Check overlap at centroids: ${small.map(c => `[${c.centroid}]`).join(', ')}`);
-        } else {
-          hints.push(`${components.length} components of similar size — major geometry sections are not connected`);
+        const mainBody = sorted[0];
+        const mainVol = mainBody.volume;
+        const floaters = sorted.filter(c => c.volume < mainVol * 0.01);
+        const mediumParts = sorted.filter(c => c.volume >= mainVol * 0.01 && c !== mainBody);
+
+        // Identify main body
+        hints.push(`Main body: component ${mainBody.index} (volume: ${mainBody.volume}, centroid: [${mainBody.centroid}])`);
+
+        if (floaters.length > 0) {
+          hints.push(`${floaters.length} tiny disconnected component(s) detected — likely floating attachments that failed to union:`);
+          for (const f of floaters) {
+            // Suggest fix: find which face of main body is closest to the floater
+            const fc = f.centroid;
+            const mb = mainBody.boundingBox;
+            const axes = ['X', 'Y', 'Z'];
+            let closestAxis = '';
+            let closestDist = Infinity;
+            let closestDir = '';
+            for (let ax = 0; ax < 3; ax++) {
+              const distToMin = Math.abs(fc[ax] - mb.min[ax]);
+              const distToMax = Math.abs(fc[ax] - mb.max[ax]);
+              if (distToMin < closestDist) { closestDist = distToMin; closestAxis = axes[ax]; closestDir = 'min'; }
+              if (distToMax < closestDist) { closestDist = distToMax; closestAxis = axes[ax]; closestDir = 'max'; }
+            }
+            const suggestion = closestDist <= 1.0
+              ? ` — sits on ${closestDir} ${closestAxis}-face of main body. Try .translate() to overlap by 0.5 units along ${closestAxis}.`
+              : ` — ${closestDist.toFixed(1)} units from main body. May need repositioning.`;
+            hints.push(`  Component ${f.index}: volume ${f.volume}, centroid [${f.centroid}]${suggestion}`);
+          }
+        }
+        if (mediumParts.length > 0) {
+          hints.push(`${mediumParts.length + 1} components of similar size — major geometry sections are not connected`);
         }
 
         // Check for near-touching bounding boxes (flush placement)
@@ -739,6 +794,77 @@ async function main() {
       }
 
       return { stats: geometryData, components, hints: hints.length > 0 ? hints : undefined };
+    },
+
+    /** Modify current editor code with a transform function and test the result without committing.
+     *  The patchFn receives the current code string and returns modified code.
+     *  Runs in isolation — no side effects on editor/viewport/session. */
+    async modifyAndTest(patchFn: (code: string) => string, assertions?: GeometryAssertions) {
+      const currentCode = getValue();
+      let modifiedCode: string;
+      try {
+        modifiedCode = patchFn(currentCode);
+      } catch (e: unknown) {
+        return { error: `Patch function failed: ${e instanceof Error ? e.message : String(e)}`, modifiedCode: null, stats: null };
+      }
+
+      const { geometryData, manifold } = executeIsolated(modifiedCode);
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      try { (manifold as any)?.delete?.(); } catch { /* ignore */ }
+
+      if (geometryData.status === 'error') {
+        return { error: geometryData.error, modifiedCode, stats: geometryData, ...(assertions ? { passed: false, failures: [geometryData.error as string] } : {}) };
+      }
+
+      if (assertions) {
+        const failures = checkAssertions(geometryData, assertions);
+        return { modifiedCode, stats: geometryData, passed: failures.length === 0, failures: failures.length > 0 ? failures : undefined };
+      }
+
+      return { modifiedCode, stats: geometryData };
+    },
+
+    /** Query multiple properties of the current geometry in a single call. Avoids multiple round-trips. */
+    query(opts: { sliceAt?: number[]; decompose?: boolean; boundingBox?: boolean }) {
+      const result: Record<string, unknown> = {};
+
+      if (!currentManifold) {
+        return { error: 'No geometry loaded' };
+      }
+
+      if (opts.boundingBox) {
+        result.boundingBox = getBoundingBox(currentManifold);
+      }
+
+      if (opts.sliceAt && opts.sliceAt.length > 0) {
+        const slices: Record<string, unknown> = {};
+        for (const z of opts.sliceAt) {
+          const s = sliceAtZ(currentManifold, z);
+          slices[`z${z}`] = s ?? { error: `No cross-section at z=${z}` };
+        }
+        result.slices = slices;
+      }
+
+      if (opts.decompose) {
+        try {
+          const parts = currentManifold.decompose();
+          result.components = parts.map((p: any, i: number) => {
+            const bb = getBoundingBox(p);
+            const vol = (() => { try { return p.volume(); } catch { return 0; } })();
+            const sa = (() => { try { return p.surfaceArea(); } catch { return 0; } })();
+            const centroid = bb
+              ? [(bb.min[0] + bb.max[0]) / 2, (bb.min[1] + bb.max[1]) / 2, (bb.min[2] + bb.max[2]) / 2]
+              : [0, 0, 0];
+            p.delete();
+            return { index: i, volume: Math.round(vol * 100) / 100, surfaceArea: Math.round(sa * 100) / 100, centroid, boundingBox: bb ?? { min: [0, 0, 0], max: [0, 0, 0] } };
+          });
+        } catch { /* ignore */ }
+      }
+
+      // Include current stats for convenience
+      result.stats = JSON.parse(geometryDataEl.textContent || '{}');
+
+      return result;
     },
 
     /** Create a session and populate it with multiple versions in one call */

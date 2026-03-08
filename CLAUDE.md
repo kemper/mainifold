@@ -415,7 +415,7 @@ const result = await mainifold.runAndAssert(code, {
 mainifold.isRunning()
 // → boolean
 
-// Debug disconnected components
+// Debug disconnected components (enhanced hints with main body ID and fix suggestions)
 const result = await mainifold.runAndExplain(code)
 // → {
 //   stats: {...geometryData...},
@@ -423,11 +423,26 @@ const result = await mainifold.runAndExplain(code)
 //     { index: 0, volume: 14800, surfaceArea: 5200, centroid: [0,0,9], boundingBox: {min,max} },
 //     { index: 1, volume: 12, surfaceArea: 48, centroid: [29,29,26], boundingBox: {min,max} },
 //   ],
-//   hints: [  // diagnostics — detects flush placement, tiny floaters, etc.
-//     "1 tiny disconnected component(s) detected — likely floating attachments...",
+//   hints: [  // diagnostics — identifies main body, suggests fixes
+//     "Main body: component 0 (volume: 14800, centroid: [0,0,9])",
+//     "1 tiny disconnected component(s) detected...",
+//     "  Component 1: volume 12, centroid [29,29,26] — sits on max X-face of main body. Try .translate() to overlap by 0.5 units along X.",
 //     "Components 0 and 1 share a face (gap: 0.00) — need volumetric overlap"
 //   ]
 // }
+
+// Modify current code and test without committing (saves tokens — no need to echo unchanged code)
+const r = await mainifold.modifyAndTest(
+  code => code.replace('towerH = 28', 'towerH = 35'),
+  { isManifold: true, maxComponents: 1 }
+)
+// r.modifiedCode = transformed code, r.stats = geometry stats, r.passed = true/false
+
+// Multi-query current geometry in one call (no re-execution)
+const r = mainifold.query({ sliceAt: [5, 10, 15], decompose: true, boundingBox: true })
+// r.slices = {z5: {...}, z10: {...}, z15: {...}}
+// r.components = [{index, volume, centroid, boundingBox}, ...]
+// r.boundingBox = {min, max}, r.stats = current geometry-data
 ```
 
 ### Session & Versioning API
@@ -438,18 +453,17 @@ Sessions let you (or an AI agent) save multiple versions of a design, then compa
 // Create a session and iterate on a design
 const { id, url } = await mainifold.createSession("Gear variations");
 
-// Run code and save as version in one call (returns stat diff vs previous version)
+// Assert + save in one call — fails fast without saving if assertions don't pass
 const r = await mainifold.runAndSave(`
   const { Manifold } = api;
   return Manifold.cylinder(10, 8, 8, 32);
-`, "v1 - basic cylinder");
-// r.geometry = {...stats...}
-// r.version = {id, index, label}
-// r.diff = {volume: {from, to, delta}, ...} (null for first version)
-// r.galleryUrl = "http://localhost:5173/?session=abc&gallery"
+`, "v1 - basic cylinder", { isManifold: true, maxComponents: 1 });
+// If assertions fail: r.passed = false, r.failures = [...], version NOT saved
+// If pass: r.passed = true, r.geometry, r.version, r.diff, r.galleryUrl
+// Assertions are optional — omit the third arg for save-without-validation
 
 // Run more variations — each returns diff against previous
-await mainifold.runAndSave(variant2Code, "v2 - added teeth");
+await mainifold.runAndSave(variant2Code, "v2 - added teeth", { isManifold: true });
 await mainifold.runAndSave(variant3Code, "v3 - wider base");
 
 // Or create a complete session with all versions in one call
@@ -548,11 +562,11 @@ After modifying geometry code:
 
 ### Recommended iteration pattern
 
-1. Write initial code, test with `runAndAssert(code, {isManifold: true, maxComponents: 1})`
-2. If assertions pass, save: `runAndSave(code, "v1 - base shape")` — check returned stats
-3. Modify code, test with `runIsolated(modifiedCode)` — check stats without committing to viewport
-4. When satisfied, save: `runAndSave(modifiedCode, "v2 - improvements")` — check the `diff` field
-5. Repeat. Hand off `getGalleryUrl()` for human review.
+1. Write initial code, assert+save in one call: `runAndSave(code, "v1 - base", {isManifold: true, maxComponents: 1})`
+2. Tweak code with `modifyAndTest(patchFn, assertions)` — no side effects, saves tokens
+3. When satisfied, save: `runAndSave(modifiedCode, "v2 - improvements", assertions)` — check the diff
+4. Use `query({sliceAt: [...], decompose: true})` for follow-up inspection without re-running
+5. Gallery URL is in `#geometry-data` JSON and `runAndSave` return value (avoids sandbox-blocked `getGalleryUrl()`).
 
 ## Examples
 
