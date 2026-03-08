@@ -97,7 +97,8 @@ function computeGeometryStats(manifold: any, meshData: MeshData, executionTimeMs
 
   let isManifold = true;
   try {
-    isManifold = manifold.status() === 0;
+    const s = manifold.status();
+    isManifold = s === 0 || s === 'NoError';
   } catch {
     // fallback
   }
@@ -483,7 +484,7 @@ async function main() {
     /** Create a new session and make it active */
     async createSession(name?: string) {
       const session = await createSession(name);
-      return { id: session.id, url: getSessionUrl() };
+      return { id: session.id, url: getSessionUrl(), galleryUrl: getGalleryUrl() };
     },
 
     /** List all saved sessions */
@@ -570,6 +571,7 @@ async function main() {
         geometry: newGeoData,
         version: version ? { id: version.id, index: version.index, label: version.label } : null,
         diff,
+        galleryUrl: getGalleryUrl(),
       };
     },
 
@@ -663,6 +665,55 @@ async function main() {
       };
     },
 
+    /** Run code and decompose result into individual components for debugging. Does not mutate global state. */
+    async runAndExplain(code: string) {
+      const { geometryData, manifold } = executeIsolated(code);
+
+      if (geometryData.status === 'error' || !manifold) {
+        return { stats: geometryData, components: null };
+      }
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const m = manifold as any;
+      let components: { index: number; volume: number; surfaceArea: number; centroid: number[]; boundingBox: { min: number[]; max: number[] } }[] | null = null;
+
+      try {
+        const parts = m.decompose();
+        if (parts.length > 1) {
+          components = parts.map((p: any, i: number) => {
+            const bb = getBoundingBox(p);
+            const vol = (() => { try { return p.volume(); } catch { return 0; } })();
+            const sa = (() => { try { return p.surfaceArea(); } catch { return 0; } })();
+            const centroid = bb
+              ? [(bb.min[0] + bb.max[0]) / 2, (bb.min[1] + bb.max[1]) / 2, (bb.min[2] + bb.max[2]) / 2]
+              : [0, 0, 0];
+            p.delete();
+            return { index: i, volume: Math.round(vol * 100) / 100, surfaceArea: Math.round(sa * 100) / 100, centroid: centroid.map((c: number) => Math.round(c * 10) / 10), boundingBox: bb ?? { min: [0, 0, 0], max: [0, 0, 0] } };
+          });
+        } else {
+          for (const p of parts) p.delete();
+        }
+      } catch { /* ignore */ }
+
+      // Clean up
+      try { m.delete?.(); } catch { /* ignore */ }
+
+      // Generate hint
+      let hint: string | undefined;
+      if (components && components.length > 1) {
+        const sorted = [...components].sort((a, b) => b.volume - a.volume);
+        const mainVol = sorted[0].volume;
+        const small = sorted.filter(c => c.volume < mainVol * 0.01);
+        if (small.length > 0) {
+          hint = `${small.length} tiny disconnected component(s) detected — likely floating attachments that failed to union. Check overlap at centroids: ${small.map(c => `[${c.centroid}]`).join(', ')}`;
+        } else {
+          hint = `${components.length} components of similar size — major geometry sections are not connected`;
+        }
+      }
+
+      return { stats: geometryData, components, hint };
+    },
+
     /** Create a session and populate it with multiple versions in one call */
     async createSessionWithVersions(name: string, versions: { code: string; label?: string }[]) {
       const session = await createSession(name);
@@ -697,7 +748,8 @@ async function main() {
     '         .sliceAtZ(z), .getBoundingBox(), .validate(code),\n' +
     '         .toggleClip(on?), .setClipZ(z), .getClipState(),\n' +
     '         .getModule(), .exportGLB(), .exportSTL(), .exportOBJ(), .export3MF()\n' +
-    'Isolated: .runIsolated(code), .runAndAssert(code, assertions), .isRunning()\n' +
+    'Isolated: .runIsolated(code), .runAndAssert(code, assertions),\n' +
+    '          .runAndExplain(code), .isRunning()\n' +
     'Sessions: .createSession(name?), .saveVersion(label?), .runAndSave(code, label?),\n' +
     '          .createSessionWithVersions(name, [{code,label},...]),\n' +
     '          .listSessions(), .openSession(id), .listVersions(), .loadVersion(idx),\n' +

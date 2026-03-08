@@ -32,10 +32,11 @@ mainifold.export3MF()         // Download 3MF
 // Isolated execution — test code without changing editor/viewport state
 await mainifold.runIsolated(code)       // → {geometryData, thumbnail}
 await mainifold.runAndAssert(code, assertions) // → {passed, failures?, stats}
+await mainifold.runAndExplain(code)     // → {stats, components[], hint} (debug disconnects)
 mainifold.isRunning()                   // → boolean (is code executing?)
 
 // Sessions — save/compare design iterations
-await mainifold.createSession(name?)    // → {id, url}
+await mainifold.createSession(name?)    // → {id, url, galleryUrl}
 await mainifold.runAndSave(code, label?) // Run + save + stat diff → {geometry, version, diff}
 await mainifold.createSessionWithVersions(name, [{code, label},...]) // Batch create
 await mainifold.saveVersion(label?)     // Save current state as version
@@ -133,6 +134,40 @@ Booleans:   .add(other)  .subtract(other)  .intersect(other)  .hull()
 Modify:     .offset(delta, joinType?, miterLimit?, segments?)  .simplify(epsilon?)
 Queries:    .area()  .isEmpty()  .numVert()  .numContour()  .bounds()
 Output:     .toPolygons()  .decompose()  .delete()
+```
+
+## Common Pitfalls for Boolean Operations
+
+### Always use volumetric overlap, never flush placement
+Shapes that merely touch at a face will NOT union correctly — they stay as separate components. Offset joining geometry by at least 0.5 units along the joining axis.
+```js
+// BAD — merlon sits exactly on wall top, stays disconnected
+merlon.translate([x, y, wallTopZ])
+
+// GOOD — merlon overlaps 0.5 units into wall body
+merlon.translate([x, y, wallTopZ - 0.5])
+```
+
+### Spires on hollow shapes need a base wider than the inner void
+A cone on top of a hollow cylinder/box floats inside the void unless its base radius exceeds the inner hollow radius, ensuring it intersects the wall material.
+```js
+// Keep outer half-width = 10, inner hollow half-width = 8
+// Spire base radius must be > 8 to touch wall ring
+Manifold.cylinder(spireH, 11, 0, 24).translate([0, 0, keepH - 0.5])
+```
+
+### Flag poles on cone tips need to start inside the cone body
+A cylinder placed at the exact tip of a cone (where radius = 0) has nothing to union with. Start the pole 1–2 units below the tip so it overlaps solid cone geometry.
+
+### Debugging disconnected components
+When `componentCount > 1`, use `runAndExplain(code)` to identify which pieces are floating:
+```js
+const r = await mainifold.runAndExplain(code);
+// r.components = [
+//   { index: 0, volume: 14800, centroid: [0, 0, 9], boundingBox: {...} },
+//   { index: 1, volume: 12,    centroid: [29, 29, 26], boundingBox: {...} },
+// ]
+// r.hint = "1 tiny disconnected component(s) detected — likely floating attachments..."
 ```
 
 ## Iteration Workflow

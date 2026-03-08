@@ -278,6 +278,24 @@ const container = outerCS.extrude(30)
   .subtract(innerCS.extrude(31)); // +1 ensures open top
 ```
 
+### Boolean Operation Pitfalls
+
+**Shapes must volumetrically overlap to union.** Shapes that merely share a face (flush placement) will silently stay as separate components. Always offset by at least 0.5 units:
+
+```javascript
+// BAD — merlon sits exactly on wall top, stays disconnected
+merlon.translate([x, y, wallTopZ])
+
+// GOOD — merlon overlaps 0.5 into wall body
+merlon.translate([x, y, wallTopZ - 0.5])
+```
+
+**Spires on hollow shapes** need a base wider than the inner void — otherwise the cone sits inside the hollow and doesn't touch wall material.
+
+**Flag poles on cone tips** need to start inside the cone body (1-2 units below tip), not at the exact tip where radius = 0.
+
+**Debugging disconnected components:** Use `mainifold.runAndExplain(code)` to decompose the result and identify which pieces are floating, with bounding boxes and centroids for each.
+
 ### Performance Tips
 
 - Prefer `Manifold.union(array)` over chaining `.add()` calls — the batch version is optimized.
@@ -394,6 +412,17 @@ const result = await mainifold.runAndAssert(code, {
 // Check if code is currently executing
 mainifold.isRunning()
 // → boolean
+
+// Debug disconnected components
+const result = await mainifold.runAndExplain(code)
+// → {
+//   stats: {...geometryData...},
+//   components: [  // null if only 1 component
+//     { index: 0, volume: 14800, surfaceArea: 5200, centroid: [0,0,9], boundingBox: {min,max} },
+//     { index: 1, volume: 12, surfaceArea: 48, centroid: [29,29,26], boundingBox: {min,max} },
+//   ],
+//   hint: "1 tiny disconnected component(s) detected — likely floating attachments..."
+// }
 ```
 
 ### Session & Versioning API
@@ -412,6 +441,7 @@ const r = await mainifold.runAndSave(`
 // r.geometry = {...stats...}
 // r.version = {id, index, label}
 // r.diff = {volume: {from, to, delta}, ...} (null for first version)
+// r.galleryUrl = "http://localhost:5173/?session=abc&gallery"
 
 // Run more variations — each returns diff against previous
 await mainifold.runAndSave(variant2Code, "v2 - added teeth");
