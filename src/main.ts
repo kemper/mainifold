@@ -2,7 +2,7 @@ import './style.css';
 import { initEngine, executeCode, getModule } from './geometry/engine';
 import { sliceAtZ, getBoundingBox } from './geometry/crossSection';
 import { initViewport, updateMesh, setClipping, setClipZ, getClipState } from './renderer/viewport';
-import { renderCompositeCanvas, renderElevationsToContainer, renderSingleView, renderSliceSVG } from './renderer/multiview';
+import { renderCompositeCanvas, renderElevationsToContainer, renderSingleView, renderSliceSVG, setReferenceImages as _setRefImages, clearReferenceImages as _clearRefImages, getReferenceImages as _getRefImages, type ReferenceImages } from './renderer/multiview';
 import { initEditor, setValue, getValue } from './editor/codeEditor';
 import { createLayout } from './ui/layout';
 import { createToolbar } from './ui/toolbar';
@@ -185,6 +185,12 @@ interface GeometryAssertions {
   maxBounds?: [number, number, number];
   minTriangles?: number;
   maxTriangles?: number;
+  /** Proportion range assertions: { widthToDepth: [min, max], widthToHeight: [min, max], depthToHeight: [min, max] } */
+  boundsRatio?: {
+    widthToDepth?: [number, number];
+    widthToHeight?: [number, number];
+    depthToHeight?: [number, number];
+  };
 }
 
 function checkAssertions(stats: Record<string, unknown>, assertions: GeometryAssertions): string[] {
@@ -226,6 +232,20 @@ function checkAssertions(stats: Record<string, unknown>, assertions: GeometryAss
     for (let i = 0; i < 3; i++) {
       if (d[i] > assertions.maxBounds[i])
         failures.push(`dimension ${['X', 'Y', 'Z'][i]} ${d[i].toFixed(1)} > maxBounds ${assertions.maxBounds[i]}`);
+    }
+  }
+  if (assertions.boundsRatio && bb?.dimensions) {
+    const [w, dep, h] = bb.dimensions;
+    const ratios: { name: string; value: number; range?: [number, number] }[] = [
+      { name: 'widthToDepth', value: w / dep, range: assertions.boundsRatio.widthToDepth },
+      { name: 'widthToHeight', value: w / h, range: assertions.boundsRatio.widthToHeight },
+      { name: 'depthToHeight', value: dep / h, range: assertions.boundsRatio.depthToHeight },
+    ];
+    for (const r of ratios) {
+      if (r.range) {
+        if (r.value < r.range[0]) failures.push(`${r.name} ratio ${r.value.toFixed(2)} < min ${r.range[0]}`);
+        if (r.value > r.range[1]) failures.push(`${r.name} ratio ${r.value.toFixed(2)} > max ${r.range[1]}`);
+      }
     }
   }
   return failures;
@@ -516,6 +536,37 @@ async function main() {
       if (!s) return null;
       const svg = renderSliceSVG(s.polygons as [number, number][][], s.boundingBox);
       return { svg, area: s.area, contours: s.polygons.length };
+    },
+
+    // === Reference image API ===
+
+    /** Load reference images for side-by-side comparison in Elevations tab.
+     *  Keys: front, right, back, left, top, perspective. Values: data URLs or image URLs. */
+    setReferenceImages(images: ReferenceImages): void {
+      _setRefImages(images);
+      // Re-render elevations with reference images if we have mesh data
+      if (currentMeshData) {
+        renderElevationsToContainer(
+          document.getElementById('elevations-container')!,
+          currentMeshData,
+        );
+      }
+    },
+
+    /** Clear all reference images */
+    clearReferenceImages(): void {
+      _clearRefImages();
+      if (currentMeshData) {
+        renderElevationsToContainer(
+          document.getElementById('elevations-container')!,
+          currentMeshData,
+        );
+      }
+    },
+
+    /** Get currently loaded reference images (or null if none) */
+    getReferenceImages(): ReferenceImages | null {
+      return _getRefImages();
     },
 
     // === Session API ===

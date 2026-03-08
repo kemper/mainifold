@@ -181,6 +181,31 @@ export function renderCompositeCanvas(meshData: MeshData): HTMLCanvasElement {
   return compositeCanvas;
 }
 
+// === Reference images for comparison ===
+
+export interface ReferenceImages {
+  front?: string;
+  right?: string;
+  back?: string;
+  left?: string;
+  top?: string;
+  perspective?: string;
+}
+
+let _referenceImages: ReferenceImages | null = null;
+
+export function setReferenceImages(images: ReferenceImages): void {
+  _referenceImages = images;
+}
+
+export function clearReferenceImages(): void {
+  _referenceImages = null;
+}
+
+export function getReferenceImages(): ReferenceImages | null {
+  return _referenceImages;
+}
+
 // === Orthographic elevation views ===
 
 interface ElevationConfig {
@@ -188,14 +213,15 @@ interface ElevationConfig {
   // Camera direction: where the camera looks FROM (multiplied by distance)
   direction: [number, number, number];
   up: [number, number, number];
+  refKey: keyof ReferenceImages; // which reference image to show alongside
 }
 
 const ELEVATIONS: ElevationConfig[] = [
-  { name: 'Front',  direction: [0, -1, 0],  up: [0, 0, 1] },  // looking from -Y toward +Y
-  { name: 'Right',  direction: [1, 0, 0],   up: [0, 0, 1] },  // looking from +X toward -X
-  { name: 'Back',   direction: [0, 1, 0],   up: [0, 0, 1] },  // looking from +Y toward -Y
-  { name: 'Left',   direction: [-1, 0, 0],  up: [0, 0, 1] },  // looking from -X toward +X
-  { name: 'Top',    direction: [0, 0, 1],   up: [0, 1, 0] },  // looking from +Z down
+  { name: 'Front',  direction: [0, -1, 0],  up: [0, 0, 1], refKey: 'front' },
+  { name: 'Right',  direction: [1, 0, 0],   up: [0, 0, 1], refKey: 'right' },
+  { name: 'Back',   direction: [0, 1, 0],   up: [0, 0, 1], refKey: 'back' },
+  { name: 'Left',   direction: [-1, 0, 0],  up: [0, 0, 1], refKey: 'left' },
+  { name: 'Top',    direction: [0, 0, 1],   up: [0, 1, 0], refKey: 'top' },
 ];
 
 function createElevationScene(geometry: THREE.BufferGeometry, bgColor: number): THREE.Scene {
@@ -254,7 +280,8 @@ function setupOrthoCamera(
   return camera;
 }
 
-/** Render orthographic elevation views (front, right, back, left, top) to a container */
+/** Render orthographic elevation views (front, right, back, left, top) to a container.
+ *  When reference images are loaded, shows them side-by-side with each elevation. */
 export function renderElevationsToContainer(container: HTMLElement, meshData: MeshData): void {
   container.innerHTML = '';
 
@@ -269,12 +296,19 @@ export function renderElevationsToContainer(container: HTMLElement, meshData: Me
 
   const viewSize = 300;
   const renderer = getOffscreenRenderer(viewSize);
+  const hasRef = _referenceImages !== null;
 
-  // Use a grid: top row = Front, Right, Back; bottom row = Left, Top, (empty or isometric)
+  // Grid layout: 3 columns without refs, 3x2 (ref|model pairs) with refs
   const grid = document.createElement('div');
   grid.className = 'grid gap-1 w-full h-full';
-  grid.style.gridTemplateColumns = 'repeat(3, 1fr)';
-  grid.style.gridTemplateRows = 'repeat(2, 1fr)';
+  if (hasRef) {
+    // Each "cell" is a ref+model pair side by side, still 3 columns
+    grid.style.gridTemplateColumns = 'repeat(3, 1fr)';
+    grid.style.gridTemplateRows = 'repeat(2, 1fr)';
+  } else {
+    grid.style.gridTemplateColumns = 'repeat(3, 1fr)';
+    grid.style.gridTemplateRows = 'repeat(2, 1fr)';
+  }
 
   for (const elev of ELEVATIONS) {
     const camera = setupOrthoCamera(bsize, center, elev, 1.3);
@@ -288,18 +322,35 @@ export function renderElevationsToContainer(container: HTMLElement, meshData: Me
 
     const wrapper = document.createElement('div');
     wrapper.className = 'flex flex-col min-h-0';
-    canvas.className = 'w-full flex-1 block object-contain min-h-0';
-    wrapper.appendChild(canvas);
+
+    if (hasRef && _referenceImages![elev.refKey]) {
+      // Side-by-side: reference image on left, model render on right
+      const pairRow = document.createElement('div');
+      pairRow.className = 'flex flex-1 min-h-0 gap-px';
+
+      const refImg = document.createElement('img');
+      refImg.src = _referenceImages![elev.refKey]!;
+      refImg.className = 'w-1/2 object-contain min-h-0 bg-zinc-950 border border-blue-500/30';
+      refImg.title = `Reference: ${elev.name}`;
+      pairRow.appendChild(refImg);
+
+      canvas.className = 'w-1/2 block object-contain min-h-0';
+      pairRow.appendChild(canvas);
+      wrapper.appendChild(pairRow);
+    } else {
+      canvas.className = 'w-full flex-1 block object-contain min-h-0';
+      wrapper.appendChild(canvas);
+    }
 
     const label = document.createElement('div');
     label.className = 'text-center text-xs text-zinc-500 font-mono py-0.5 bg-zinc-800 shrink-0';
-    label.textContent = elev.name;
+    label.textContent = hasRef && _referenceImages![elev.refKey] ? `${elev.name} (Ref | Model)` : elev.name;
     wrapper.appendChild(label);
 
     grid.appendChild(wrapper);
   }
 
-  // Add one isometric view in the 6th slot for context
+  // 6th slot: isometric view, or perspective reference if available
   {
     const isoCamera = new THREE.PerspectiveCamera(40, 1, 0.1, 1000);
     const maxDim = Math.max(bsize.x, bsize.y, bsize.z);
@@ -318,12 +369,28 @@ export function renderElevationsToContainer(container: HTMLElement, meshData: Me
 
     const wrapper = document.createElement('div');
     wrapper.className = 'flex flex-col min-h-0';
-    canvas.className = 'w-full flex-1 block object-contain min-h-0';
-    wrapper.appendChild(canvas);
+
+    if (hasRef && _referenceImages!.perspective) {
+      const pairRow = document.createElement('div');
+      pairRow.className = 'flex flex-1 min-h-0 gap-px';
+
+      const refImg = document.createElement('img');
+      refImg.src = _referenceImages!.perspective!;
+      refImg.className = 'w-1/2 object-contain min-h-0 bg-zinc-950 border border-blue-500/30';
+      refImg.title = 'Reference: Perspective';
+      pairRow.appendChild(refImg);
+
+      canvas.className = 'w-1/2 block object-contain min-h-0';
+      pairRow.appendChild(canvas);
+      wrapper.appendChild(pairRow);
+    } else {
+      canvas.className = 'w-full flex-1 block object-contain min-h-0';
+      wrapper.appendChild(canvas);
+    }
 
     const label = document.createElement('div');
     label.className = 'text-center text-xs text-zinc-500 font-mono py-0.5 bg-zinc-800 shrink-0';
-    label.textContent = 'Isometric';
+    label.textContent = hasRef && _referenceImages!.perspective ? 'Isometric (Ref | Model)' : 'Isometric';
     wrapper.appendChild(label);
 
     grid.appendChild(wrapper);

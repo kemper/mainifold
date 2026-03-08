@@ -383,6 +383,11 @@ mainifold.export3MF()
 
 // Raw manifold-3d module for advanced use
 mainifold.getModule()
+
+// Reference images — side-by-side comparison in Elevations tab
+mainifold.setReferenceImages({ front?, right?, back?, left?, top?, perspective? })
+mainifold.clearReferenceImages()
+mainifold.getReferenceImages()   // → ReferenceImages | null
 ```
 
 ### Isolated Execution & Assertions
@@ -407,6 +412,11 @@ const result = await mainifold.runAndAssert(code, {
   maxBounds: [50, 50, 30],
   minTriangles: 100,     // mesh complexity bounds
   maxTriangles: 50000,
+  boundsRatio: {          // proportion range assertions
+    widthToDepth: [1.2, 1.8],   // X/Y ratio must be in this range
+    widthToHeight: [1.5, 2.5],  // X/Z ratio must be in this range
+    depthToHeight: [0.8, 1.5],  // Y/Z ratio must be in this range
+  },
 })
 // → { passed: true, stats: {...} }
 // → { passed: false, failures: ["volume 500.0 < minVolume 1000"], stats: {...} }
@@ -567,6 +577,47 @@ After modifying geometry code:
 3. When satisfied, save: `runAndSave(modifiedCode, "v2 - improvements", assertions)` — check the diff
 4. Use `query({sliceAt: [...], decompose: true})` for follow-up inspection without re-running
 5. Gallery URL is in `#geometry-data` JSON and `runAndSave` return value (avoids sandbox-blocked `getGalleryUrl()`).
+
+## Photo-to-Model Workflow
+
+To recreate a building or object from a reference photo:
+
+### 1. Analyze the reference
+Use the Gemini-powered analysis script:
+```bash
+node scripts/generate-views.js /path/to/photo.jpg
+```
+This produces a JSON analysis with mass decomposition, proportions, roof style, feature positions, and elevation descriptions.
+
+### 2. Load reference images
+If you have reference photos for specific angles, load them for side-by-side comparison:
+```javascript
+mainifold.setReferenceImages({
+  front: 'data:image/jpeg;base64,...',
+  right: 'data:image/jpeg;base64,...',
+  perspective: 'data:image/jpeg;base64,...',  // original photo
+})
+// Elevations tab now shows Ref | Model side-by-side for each view
+```
+
+### 3. Build major masses first
+Decompose the building into volumes and build largest-to-smallest:
+1. Main body (walls + floors) — get overall proportions right
+2. Roof (use hull-based approach) — verify with side elevation
+3. Wings/extensions (garage, additions)
+4. Porches/decks
+5. Detail features (windows, doors, trim)
+
+Use `boundsRatio` assertions to enforce proportion targets from the analysis:
+```javascript
+await mainifold.runAndAssert(code, {
+  isManifold: true, maxComponents: 1,
+  boundsRatio: { widthToDepth: [1.2, 1.8], widthToHeight: [1.5, 2.5] }
+});
+```
+
+### 4. Compare at each step
+After every structural change, check the Elevations tab (`?view=elevations`). With reference images loaded, each panel shows the reference alongside the model at the same angle.
 
 ## Examples
 
