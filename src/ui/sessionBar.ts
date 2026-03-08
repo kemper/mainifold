@@ -73,12 +73,15 @@ function render(state: SessionState) {
     prevBtn.className += state.currentVersion.index <= 1 ? ' opacity-30 cursor-default' : '';
     barEl.appendChild(prevBtn);
 
+    const versionText = state.currentVersion.label
+      ? `v${state.currentVersion.index}/${state.versionCount} — ${state.currentVersion.label}`
+      : `v${state.currentVersion.index}/${state.versionCount}`;
     const versionLabel = el(
       'span',
-      'text-zinc-400 font-mono tabular-nums',
-      `v${state.currentVersion.index}/${state.versionCount}`,
+      'text-zinc-400 font-mono tabular-nums truncate max-w-64',
+      versionText,
     );
-    versionLabel.title = state.currentVersion.label;
+    versionLabel.title = state.currentVersion.label || `Version ${state.currentVersion.index}`;
     barEl.appendChild(versionLabel);
 
     const nextBtn = btn('▶', async () => {

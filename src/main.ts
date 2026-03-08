@@ -173,6 +173,8 @@ interface GeometryAssertions {
   isManifold?: boolean;
   maxComponents?: number;
   genus?: number;
+  minGenus?: number;
+  maxGenus?: number;
   minBounds?: [number, number, number];
   maxBounds?: [number, number, number];
   minTriangles?: number;
@@ -198,6 +200,10 @@ function checkAssertions(stats: Record<string, unknown>, assertions: GeometryAss
     failures.push(`componentCount ${cc} > maxComponents ${assertions.maxComponents}`);
   if (assertions.genus !== undefined && g !== assertions.genus)
     failures.push(`genus ${g} !== expected ${assertions.genus}`);
+  if (assertions.minGenus !== undefined && (g === null || g < assertions.minGenus))
+    failures.push(`genus ${g} < minGenus ${assertions.minGenus}`);
+  if (assertions.maxGenus !== undefined && (g === null || g > assertions.maxGenus))
+    failures.push(`genus ${g} > maxGenus ${assertions.maxGenus}`);
   if (assertions.minTriangles !== undefined && tc < assertions.minTriangles)
     failures.push(`triangleCount ${tc} < minTriangles ${assertions.minTriangles}`);
   if (assertions.maxTriangles !== undefined && tc > assertions.maxTriangles)
@@ -698,20 +704,41 @@ async function main() {
       // Clean up
       try { m.delete?.(); } catch { /* ignore */ }
 
-      // Generate hint
-      let hint: string | undefined;
+      // Generate hints
+      const hints: string[] = [];
       if (components && components.length > 1) {
         const sorted = [...components].sort((a, b) => b.volume - a.volume);
         const mainVol = sorted[0].volume;
         const small = sorted.filter(c => c.volume < mainVol * 0.01);
         if (small.length > 0) {
-          hint = `${small.length} tiny disconnected component(s) detected — likely floating attachments that failed to union. Check overlap at centroids: ${small.map(c => `[${c.centroid}]`).join(', ')}`;
+          hints.push(`${small.length} tiny disconnected component(s) detected — likely floating attachments that failed to union. Check overlap at centroids: ${small.map(c => `[${c.centroid}]`).join(', ')}`);
         } else {
-          hint = `${components.length} components of similar size — major geometry sections are not connected`;
+          hints.push(`${components.length} components of similar size — major geometry sections are not connected`);
+        }
+
+        // Check for near-touching bounding boxes (flush placement)
+        const TOUCH_TOL = 1.0;
+        for (let i = 0; i < components.length; i++) {
+          for (let j = i + 1; j < components.length; j++) {
+            const a = components[i].boundingBox;
+            const b = components[j].boundingBox;
+            // Check if bounding boxes are within tolerance on any axis
+            // (close enough to suggest they were meant to be joined)
+            const gaps = [0, 1, 2].map(ax => {
+              const gap = Math.max(a.min[ax] - b.max[ax], b.min[ax] - a.max[ax]);
+              return gap; // negative = overlapping, 0 = flush, positive = gap
+            });
+            const minGap = Math.min(...gaps);
+            const maxGap = Math.max(...gaps);
+            // If boxes overlap on 2 axes and are flush/near-flush on the third
+            if (minGap < 0 && maxGap >= -0.01 && maxGap <= TOUCH_TOL) {
+              hints.push(`Components ${i} and ${j} share a face or near-touch (gap: ${maxGap.toFixed(2)}) — they likely need volumetric overlap (offset by 0.5+ units) to union correctly`);
+            }
+          }
         }
       }
 
-      return { stats: geometryData, components, hint };
+      return { stats: geometryData, components, hints: hints.length > 0 ? hints : undefined };
     },
 
     /** Create a session and populate it with multiple versions in one call */

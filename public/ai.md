@@ -167,7 +167,10 @@ const r = await mainifold.runAndExplain(code);
 //   { index: 0, volume: 14800, centroid: [0, 0, 9], boundingBox: {...} },
 //   { index: 1, volume: 12,    centroid: [29, 29, 26], boundingBox: {...} },
 // ]
-// r.hint = "1 tiny disconnected component(s) detected — likely floating attachments..."
+// r.hints = [
+//   "1 tiny disconnected component(s) detected — likely floating attachments...",
+//   "Components 0 and 1 share a face or near-touch (gap: 0.00) — need volumetric overlap"
+// ]
 ```
 
 ## Iteration Workflow
@@ -190,7 +193,9 @@ const r = await mainifold.runAndAssert(code, {
   maxVolume: 50000,
   isManifold: true,     // must be valid manifold
   maxComponents: 1,     // detect failed booleans
-  genus: 0,             // topological genus (0 = solid, N = N holes)
+  genus: 0,             // exact topological genus (0 = solid, N = N holes)
+  minGenus: 1,          // genus range — useful when exact count is unpredictable
+  maxGenus: 20,
   minBounds: [10,10,5], // minimum bounding box dimensions [X,Y,Z]
   maxBounds: [50,50,30],
   minTriangles: 100,    // mesh complexity bounds

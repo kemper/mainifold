@@ -49,7 +49,7 @@ If it fails and `componentCount > 1`, use `runAndExplain` to find which pieces a
 ```js
 const e = await mainifold.runAndExplain(code)
 // e.components shows each piece's centroid and volume
-// e.hint tells you what's likely wrong
+// e.hints tells you what's likely wrong (detects flush placement too)
 ```
 
 ### Version 2 — Battlements
@@ -71,7 +71,7 @@ Add to the v2 code:
 - Arrow slit windows on walls — narrow vertical rectangles subtracted from walls
 - Small windows on towers — subtract small cubes or cylinders
 
-Test with `runAndAssert` — volume should decrease (subtractions), genus should increase (through-holes). Still 1 component. Save as "v3 - gate and windows".
+Test with `runAndAssert` — volume should decrease (subtractions), genus should increase (through-holes). Use `minGenus: 1` instead of an exact genus value since the hole count depends on geometry overlap. Still 1 component. Save as "v3 - gate and windows".
 
 ### Version 4 — Keep and spires
 
