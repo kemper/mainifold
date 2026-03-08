@@ -35,6 +35,8 @@ await mainifold.runAndAssert(code, assertions) // → {passed, failures?, stats}
 await mainifold.runAndExplain(code)     // → {stats, components[], hints[]} (debug disconnects)
 await mainifold.modifyAndTest(patchFn, assertions?) // Modify current code + test in isolation
 mainifold.query({sliceAt?, decompose?, boundingBox?}) // Multi-query current geometry in one call
+mainifold.renderView({elevation?, azimuth?, ortho?, size?}) // Render from any angle → data URL
+mainifold.sliceAtZVisual(z)            // Cross-section SVG at height z → {svg, area, contours}
 mainifold.isRunning()                   // → boolean (is code executing?)
 
 // Sessions — save/compare design iterations
@@ -271,16 +273,49 @@ const r = await mainifold.createSessionWithVersions("Castle", [
 ### Recommended iteration pattern
 
 1. Write initial code, assert+save in one call: `runAndSave(code, "v1 - base", {isManifold: true, maxComponents: 1})`
-2. Modify code, test with `modifyAndTest(patchFn)` or `runIsolated(code)` — no side effects
-3. When satisfied, save: `runAndSave(modifiedCode, "v2 - improvements", assertions)` — check the diff
-4. Use `query({sliceAt: [...], decompose: true})` for follow-up inspection without re-running
-5. Repeat. Gallery URL is in `#geometry-data` or the `runAndSave` return value.
+2. **Visually verify** — switch to Elevations tab (`?view=elevations`) and screenshot. Check Front/Side views.
+3. Modify code, test with `modifyAndTest(patchFn)` or `runIsolated(code)` — no side effects
+4. When satisfied, save: `runAndSave(modifiedCode, "v2 - improvements", assertions)` — check the diff
+5. Use `query({sliceAt: [...], decompose: true})` for follow-up inspection without re-running
+6. Repeat. Gallery URL is in `#geometry-data` or the `runAndSave` return value.
 
-## Verification
+## Visual Verification
+
+**CRITICAL: Stats alone cannot catch visual defects.** A roof can be mangled, a spire twisted,
+or proportions wrong — all while volume, componentCount, and genus look correct. After every
+structural change:
+
+1. **Check the Elevations tab** (`?view=elevations`) — shows Front, Right, Back, Left, Top views.
+   Side elevations immediately reveal roof profiles, wall alignment, and symmetry issues that
+   isometric views can hide.
+2. **Use `renderView()` for specific angles:**
+```js
+mainifold.renderView({ elevation: 0, azimuth: 0, ortho: true })   // front elevation
+mainifold.renderView({ elevation: 0, azimuth: 90, ortho: true })  // right side elevation
+mainifold.renderView({ elevation: 90, ortho: true })               // top-down plan view
+mainifold.renderView({ elevation: 30, azimuth: 315 })              // isometric (default)
+```
+3. **Use `sliceAtZVisual(z)` for cross-section thumbnails:**
+```js
+const s = mainifold.sliceAtZVisual(10);  // returns {svg, area, contours}
+// svg = visual rendering of the cross-section profile at z=10
+```
+4. **Feature-specific checks:**
+   - Added a roof? Check side elevation — should be a clean triangle/gable profile.
+   - Cut a door/window? Check front elevation — opening should be visible.
+   - Added a tower? Check top-down — should be circular, properly positioned.
+   - Made something hollow? Slice at mid-height — should show wall ring, not solid fill.
+
+### View tabs
+
+- `?view=ai` — 4 isometric views (alternating cube corners)
+- `?view=elevations` — Front, Right, Back, Left, Top orthographic + 1 isometric (6 views)
+- Use Elevations for shape verification, AI Views for overall appearance.
+
+## Stat-Based Verification
 
 1. Read `#geometry-data` — check `status:"ok"`, volume, dimensions, componentCount, isManifold
 2. Check `crossSections` quartiles (z25/z50/z75) for expected profile
 3. Use `mainifold.sliceAtZ(z)` for specific heights
-4. Screenshot with `?view=ai` — 4 isometric angles show every face
-5. Use `mainifold.validate(code)` for quick syntax checks
+4. Use `mainifold.validate(code)` for quick syntax checks
 6. Use `mainifold.runAndAssert(code, assertions)` for structured validation

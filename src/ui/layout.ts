@@ -3,10 +3,11 @@ export interface LayoutElements {
   editorContainer: HTMLElement;
   viewportPane: HTMLElement;
   viewsContainer: HTMLElement;
+  elevationsContainer: HTMLElement;
   galleryContainer: HTMLElement;
   statusBar: HTMLElement;
   clipControls: HTMLElement;
-  switchTab: (tab: 'interactive' | 'ai' | 'gallery') => void;
+  switchTab: (tab: 'interactive' | 'ai' | 'elevations' | 'gallery') => void;
 }
 
 export function createLayout(appContainer: HTMLElement): LayoutElements {
@@ -54,6 +55,7 @@ export function createLayout(appContainer: HTMLElement): LayoutElements {
 
   const tabInteractive = createTab('Interactive', true);
   const tabAI = createTab('AI Views', false);
+  const tabElevations = createTab('Elevations', false);
   const tabGallery = createTab('Gallery', false);
 
   // Copy / Download buttons (shown only on AI Views tab)
@@ -75,6 +77,7 @@ export function createLayout(appContainer: HTMLElement): LayoutElements {
 
   tabBar.appendChild(tabInteractive);
   tabBar.appendChild(tabAI);
+  tabBar.appendChild(tabElevations);
   tabBar.appendChild(tabGallery);
   tabBar.appendChild(viewActions);
 
@@ -91,16 +94,20 @@ export function createLayout(appContainer: HTMLElement): LayoutElements {
   viewsContainer.id = 'views-container';
   viewsContainer.className = 'flex-1 min-h-0 overflow-auto bg-zinc-900 hidden p-2';
 
+  const elevationsContainer = document.createElement('div');
+  elevationsContainer.id = 'elevations-container';
+  elevationsContainer.className = 'flex-1 min-h-0 overflow-auto bg-zinc-900 hidden p-2';
+
   const galleryContainer = document.createElement('div');
   galleryContainer.id = 'gallery-container';
   galleryContainer.className = 'flex-1 min-h-0 overflow-auto bg-zinc-900 hidden p-4';
 
-  const allTabs = [tabInteractive, tabAI, tabGallery];
-  const allPanes = [viewportPane, viewsContainer, galleryContainer];
+  const allTabs = [tabInteractive, tabAI, tabElevations, tabGallery];
+  const allPanes = [viewportPane, viewsContainer, elevationsContainer, galleryContainer];
 
   // Tab switching
-  function switchTab(tab: 'interactive' | 'ai' | 'gallery') {
-    const idx = tab === 'interactive' ? 0 : tab === 'ai' ? 1 : 2;
+  function switchTab(tab: 'interactive' | 'ai' | 'elevations' | 'gallery') {
+    const idx = tab === 'interactive' ? 0 : tab === 'ai' ? 1 : tab === 'elevations' ? 2 : 3;
 
     for (let i = 0; i < allPanes.length; i++) {
       if (i === idx) {
@@ -112,12 +119,15 @@ export function createLayout(appContainer: HTMLElement): LayoutElements {
       }
     }
 
-    viewActions.classList.toggle('hidden', tab !== 'ai');
+    viewActions.classList.toggle('hidden', tab !== 'ai' && tab !== 'elevations');
 
     // Update URL to reflect current tab
     const params = new URLSearchParams(window.location.search);
     if (tab === 'ai') {
       params.set('view', 'ai');
+      params.delete('gallery');
+    } else if (tab === 'elevations') {
+      params.set('view', 'elevations');
       params.delete('gallery');
     } else if (tab === 'gallery') {
       params.set('gallery', '');
@@ -136,19 +146,22 @@ export function createLayout(appContainer: HTMLElement): LayoutElements {
 
   tabInteractive.addEventListener('click', () => switchTab('interactive'));
   tabAI.addEventListener('click', () => switchTab('ai'));
+  tabElevations.addEventListener('click', () => switchTab('elevations'));
   tabGallery.addEventListener('click', () => switchTab('gallery'));
 
   // Restore tab from URL on initial load (without re-writing the URL)
   const initParams = new URLSearchParams(window.location.search);
   if (initParams.has('gallery')) {
     activateTab('gallery');
+  } else if (initParams.get('view') === 'elevations') {
+    activateTab('elevations');
   } else if (initParams.get('view') === 'ai') {
     activateTab('ai');
   }
 
   // Activate tab visually without touching the URL (for initial load)
-  function activateTab(tab: 'interactive' | 'ai' | 'gallery') {
-    const idx = tab === 'interactive' ? 0 : tab === 'ai' ? 1 : 2;
+  function activateTab(tab: 'interactive' | 'ai' | 'elevations' | 'gallery') {
+    const idx = tab === 'interactive' ? 0 : tab === 'ai' ? 1 : tab === 'elevations' ? 2 : 3;
     for (let i = 0; i < allPanes.length; i++) {
       if (i === idx) {
         allPanes[i].classList.remove('hidden');
@@ -158,13 +171,14 @@ export function createLayout(appContainer: HTMLElement): LayoutElements {
         allTabs[i].className = 'px-4 py-1.5 text-xs font-medium text-zinc-500 hover:text-zinc-300 border-b-2 border-transparent';
       }
     }
-    viewActions.classList.toggle('hidden', tab !== 'ai');
+    viewActions.classList.toggle('hidden', tab !== 'ai' && tab !== 'elevations');
     window.dispatchEvent(new Event('resize'));
   }
 
   rightPane.appendChild(tabBar);
   rightPane.appendChild(viewportPane);
   rightPane.appendChild(viewsContainer);
+  rightPane.appendChild(elevationsContainer);
   rightPane.appendChild(galleryContainer);
 
   main.appendChild(editorPane);
@@ -173,7 +187,7 @@ export function createLayout(appContainer: HTMLElement): LayoutElements {
 
   appContainer.appendChild(main);
 
-  return { editorPane, editorContainer, viewportPane, viewsContainer, galleryContainer, statusBar, clipControls, switchTab };
+  return { editorPane, editorContainer, viewportPane, viewsContainer, elevationsContainer, galleryContainer, statusBar, clipControls, switchTab };
 }
 
 function createTab(label: string, active: boolean): HTMLButtonElement {

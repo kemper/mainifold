@@ -2,7 +2,7 @@ import './style.css';
 import { initEngine, executeCode, getModule } from './geometry/engine';
 import { sliceAtZ, getBoundingBox } from './geometry/crossSection';
 import { initViewport, updateMesh, setClipping, setClipZ, getClipState } from './renderer/viewport';
-import { renderCompositeCanvas } from './renderer/multiview';
+import { renderCompositeCanvas, renderElevationsToContainer, renderSingleView, renderSliceSVG } from './renderer/multiview';
 import { initEditor, setValue, getValue } from './editor/codeEditor';
 import { createLayout } from './ui/layout';
 import { createToolbar } from './ui/toolbar';
@@ -321,7 +321,7 @@ async function main() {
   });
 
   // Create layout
-  const { editorContainer, viewportPane, viewsContainer, galleryContainer, statusBar, clipControls, switchTab } = createLayout(app);
+  const { editorContainer, viewportPane, viewsContainer, elevationsContainer, galleryContainer, statusBar, clipControls, switchTab } = createLayout(app);
 
   // Init views panel
   initViewsPanel(viewsContainer);
@@ -496,6 +496,26 @@ async function main() {
     /** Get current clip state */
     getClipState() {
       return getClipState();
+    },
+
+    // === View rendering API ===
+
+    /** Render a single view from any camera angle. Returns a data URL (PNG).
+     *  elevation: degrees, 0 = horizon, 90 = top-down. Default 30.
+     *  azimuth: degrees, 0 = front (-Y), 90 = right (+X). Default 315.
+     *  ortho: true for orthographic projection. Default false. */
+    renderView(options?: { elevation?: number; azimuth?: number; ortho?: boolean; size?: number }): string | null {
+      if (!currentMeshData) return null;
+      return renderSingleView(currentMeshData, options ?? {});
+    },
+
+    /** Render a cross-section at Z height as an SVG string for visual verification */
+    sliceAtZVisual(z: number): { svg: string; area: number; contours: number } | null {
+      if (!currentManifold) return null;
+      const s = sliceAtZ(currentManifold, z);
+      if (!s) return null;
+      const svg = renderSliceSVG(s.polygons as [number, number][][], s.boundingBox);
+      return { svg, area: s.area, contours: s.polygons.length };
     },
 
     // === Session API ===
@@ -944,6 +964,7 @@ async function main() {
       currentManifold = result.manifold;
       updateMesh(result.mesh);
       updateMultiView(result.mesh);
+      renderElevationsToContainer(elevationsContainer, result.mesh);
       updateGeometryData(elapsed, src);
       syncClipSliderBounds();
       setStatus(statusBar, 'ready', 'Ready');
