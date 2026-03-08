@@ -731,7 +731,7 @@ async function main() {
             const minGap = Math.min(...gaps);
             const maxGap = Math.max(...gaps);
             // If boxes overlap on 2 axes and are flush/near-flush on the third
-            if (minGap < 0 && maxGap >= -0.01 && maxGap <= TOUCH_TOL) {
+            if (minGap <= 0 && maxGap >= -0.01 && maxGap <= TOUCH_TOL) {
               hints.push(`Components ${i} and ${j} share a face or near-touch (gap: ${maxGap.toFixed(2)}) — they likely need volumetric overlap (offset by 0.5+ units) to union correctly`);
             }
           }

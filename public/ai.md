@@ -37,7 +37,7 @@ mainifold.isRunning()                   // → boolean (is code executing?)
 
 // Sessions — save/compare design iterations
 await mainifold.createSession(name?)    // → {id, url, galleryUrl}
-await mainifold.runAndSave(code, label?) // Run + save + stat diff → {geometry, version, diff}
+await mainifold.runAndSave(code, label?) // Run + save + stat diff → {geometry, version, diff, galleryUrl}
 await mainifold.createSessionWithVersions(name, [{code, label},...]) // Batch create
 await mainifold.saveVersion(label?)     // Save current state as version
 await mainifold.listVersions()          // → [{id, index, label, timestamp, status}]
@@ -211,11 +211,10 @@ const r = await mainifold.runAndAssert(code, {
 `runAndSave` returns a diff against the previous version:
 ```js
 const r = await mainifold.runAndSave(code, "v2 - added towers");
-// r.diff = {
-//   volume: { from: 18200, to: 24500, delta: "+6300 (+34.6%)" },
-//   componentCount: { from: 1, to: 1, delta: "unchanged" },
-//   ...
-// }
+// r.geometry   = full geometry stats
+// r.version    = { id, index, label }
+// r.diff       = { volume: { from, to, delta }, componentCount: ..., ... }
+// r.galleryUrl = "http://localhost:5173/?session=abc&gallery"
 ```
 
 ### Batch session creation
