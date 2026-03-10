@@ -7,7 +7,7 @@ npm run dev          # Start dev server at http://localhost:5173
 npm run build        # Production build to dist/
 ```
 
-Open `http://localhost:5173/?view=ai` to start with the 4 isometric views visible (instead of the interactive viewport). This is the recommended URL for AI agents — all views are visible on page load without clicking any tabs.
+Open `http://localhost:5173/mainifold/?view=ai` to start with the 4 isometric views visible (instead of the interactive viewport). This is the recommended URL for AI agents — all views are visible on page load without clicking any tabs.
 
 Requires COEP/COOP headers (configured in vite.config.ts) for SharedArrayBuffer / WASM threads.
 
@@ -29,12 +29,22 @@ The `examples/` directory is for hand-curated demos shipped with the app. User-r
    ```
 3. **Hand the user a gallery URL** so they can visually compare versions.
 
-### Browser access required
+### Browser access via Playwright MCP
 
-The session API lives at `window.mainifold` in the browser. To call it from a terminal agent:
+The session API lives at `window.mainifold` in the browser. Use the **Playwright MCP** to call it from Claude Code. It launches its own browser — no Chrome remote debugging setup needed.
 
-- **Chrome DevTools MCP (preferred):** If available, use it to call `mainifold.createSession()`, `mainifold.runAndSave()`, etc. directly.
-- **No browser access (fallback):** Write the geometry code, then tell the user to paste it into the editor at `http://localhost:5173/?view=ai`. Do NOT create files in `examples/` — that directory is not for user-requested work.
+**Setup** (one-time):
+```bash
+claude mcp add playwright -s user -- npx -y @playwright/mcp
+```
+
+**Usage:** Navigate to the app with `browser_navigate`, then call `window.mainifold` methods via `browser_evaluate` or `browser_run_code`. Example flow:
+1. `browser_navigate` → `http://localhost:5173/mainifold/?view=ai`
+2. `browser_evaluate` → `async () => await window.mainifold.createSession("My design")`
+3. `browser_run_code` → pass geometry code to `window.mainifold.runAndSave(code, label, assertions)`
+4. `browser_take_screenshot` → verify the result visually
+
+**If Playwright MCP is not available:** Write the geometry code inline and tell the user to paste it into the editor. Do NOT create files in `examples/` — that directory is not for user-requested work.
 
 ### Anti-patterns
 
@@ -368,7 +378,7 @@ All meaningful UI state must be reflected in the URL via query parameters so tha
 
 ## Console API (window.mainifold)
 
-When using this tool via DevTools MCP or browser automation:
+When using this tool via Playwright MCP or browser automation:
 
 ```javascript
 // Run code and get geometry stats back
@@ -517,7 +527,7 @@ await mainifold.createSessionWithVersions("Gear variations", [
 
 // Get gallery URL for human review
 mainifold.getGalleryUrl()
-// → "http://localhost:5173/?session=abc123&gallery"
+// → "http://localhost:5173/mainifold/?session=abc123&gallery"
 
 // Session management
 await mainifold.listSessions()        // → [{id, name, updated}]
@@ -590,7 +600,7 @@ On error:
 
 ## Verification Workflow
 
-Navigate to `http://localhost:5173/?view=ai` to start with isometric views visible.
+Navigate to `http://localhost:5173/mainifold/?view=ai` to start with isometric views visible.
 
 After modifying geometry code:
 

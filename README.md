@@ -20,7 +20,7 @@ npm install
 npm run dev
 ```
 
-Open [http://localhost:5173](http://localhost:5173) for the interactive viewport, or [http://localhost:5173/?view=ai](http://localhost:5173/?view=ai) to start with all 4 isometric views visible (recommended for AI agents).
+Open [http://localhost:5173/mainifold/](http://localhost:5173/mainifold/) for the interactive viewport, or [http://localhost:5173/mainifold/?view=ai](http://localhost:5173/mainifold/?view=ai) to start with all 4 isometric views visible (recommended for AI agents).
 
 ## How it works
 
@@ -42,6 +42,19 @@ Manifold.cube([10, 10, 10], true)
   .subtract(Manifold.cylinder(12, 3, 3, 32))
   .translate([0, 0, 5]);
 ```
+
+## AI Agent Setup
+
+AI agents (Claude Code, etc.) interact with the app via `window.mainifold` in the browser. The **Playwright MCP** provides browser access — it launches its own browser, no Chrome remote debugging needed.
+
+**One-time setup:**
+```bash
+claude mcp add playwright -s user -- npx -y @playwright/mcp
+```
+
+Then restart your Claude Code session. The agent can navigate to the app, create sessions, run geometry code, take screenshots, and iterate — all through MCP tools.
+
+See `CLAUDE.md` for the full AI agent workflow and API reference.
 
 ## Console API
 
