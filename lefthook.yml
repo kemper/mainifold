@@ -1,0 +1,7 @@
+pre-commit:
+  parallel: true
+  commands:
+    gitleaks:
+      run: gitleaks protect --staged --verbose --redact
+    trufflehog:
+      run: trufflehog git file://. --since-commit HEAD --only-verified --fail
