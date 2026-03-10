@@ -11,6 +11,37 @@ Open `http://localhost:5173/?view=ai` to start with the 4 isometric views visibl
 
 Requires COEP/COOP headers (configured in vite.config.ts) for SharedArrayBuffer / WASM threads.
 
+## AI Agent Workflow
+
+**When a user asks you to design, build, or iterate on geometry, always use a session — never create example files.**
+
+The `examples/` directory is for hand-curated demos shipped with the app. User-requested designs go through the session system, which tracks versions, generates thumbnails, and produces a gallery URL for human review.
+
+### How to create geometry
+
+1. **Write the geometry code** as a string (the same code that goes in the editor — must `return` a Manifold).
+2. **Create a session** and save versions via the `window.mainifold` console API:
+   ```javascript
+   await mainifold.createSession("Walkway shield variations");
+   await mainifold.runAndSave(code, "v1 - basic C-channel", { isManifold: true, maxComponents: 1 });
+   // iterate...
+   await mainifold.runAndSave(v2Code, "v2 - added grip ribs");
+   ```
+3. **Hand the user a gallery URL** so they can visually compare versions.
+
+### Browser access required
+
+The session API lives at `window.mainifold` in the browser. To call it from a terminal agent:
+
+- **Chrome DevTools MCP (preferred):** If available, use it to call `mainifold.createSession()`, `mainifold.runAndSave()`, etc. directly.
+- **No browser access (fallback):** Write the geometry code, then tell the user to paste it into the editor at `http://localhost:5173/?view=ai`. Do NOT create files in `examples/` — that directory is not for user-requested work.
+
+### Anti-patterns
+
+- Creating files in `examples/` for user-requested geometry
+- Writing standalone `.js` scripts for the user to run manually
+- Skipping sessions and just dumping code in the chat
+
 ## Architecture
 
 Static site, no backend. Vanilla TypeScript + Vite.
