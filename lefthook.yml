@@ -5,3 +5,21 @@ pre-commit:
       run: gitleaks protect --staged --verbose --redact
     trufflehog:
       run: trufflehog git file://. --since-commit HEAD --only-verified --fail
+    prompt-log:
+      run: |
+        # Skip if only prompt files are being committed
+        non_prompt=$(git diff --cached --name-only --diff-filter=ACM | grep -v '^prompts/' || true)
+        if [ -z "$non_prompt" ]; then
+          exit 0
+        fi
+
+        # Require at least one prompt file in the commit
+        prompt_files=$(git diff --cached --name-only --diff-filter=ACM | grep '^prompts/.*\.md$' || true)
+        if [ -z "$prompt_files" ]; then
+          echo "No prompt log found. Add a file in prompts/ documenting this session."
+          echo "See prompts/PROMPTLOG.md for the format."
+          exit 1
+        fi
+      skip:
+        - merge
+        - rebase
