@@ -33,3 +33,9 @@ says "a retroactive log captures intent and provenance, not a verbatim transcrip
 **Sanitization**: The original prompts were clean of secrets/PII. Redacted
 specific downloaded file paths and customer-identifiable content. Kept all
 technical substance and decision rationale.
+
+**Content review guard**: Explored running `claude -p` as a lefthook pre-commit
+hook to review prompt files for sensitive content. Abandoned because `claude -p`
+can't run inside a Claude Code session (nested session error) and the latency
+wasn't worth it. Instead added a pre-commit review checklist directly to the
+promptlog skill — Claude checks its own output before staging, no extra tooling.

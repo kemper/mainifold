@@ -133,6 +133,18 @@ When something is ambiguous — a colleague's name, an internal project codename
 
 When in doubt, redact.
 
+## Pre-commit content review
+
+Before staging any prompt file, re-read it and check for:
+
+- **PII**: Real names of non-public individuals, email addresses, phone numbers, account numbers
+- **Internal URLs**: Hostnames or IPs that aren't `localhost` or `example.com`
+- **Credentials**: Passwords, tokens, API keys — even if they look fake or expired
+- **Unprofessional tone**: Frustrated rants, insults, or complaints about specific people or companies
+- **Confidential details**: Customer names, revenue figures, internal project codenames, business metrics
+
+If you find any of these, fix the prompt file before staging. Tell the user what you redacted and why.
+
 ## Committing
 
 Add `prompts/` to the same commit as the code changes. If a session produces multiple commits, each one includes only the prompts that led to it.
