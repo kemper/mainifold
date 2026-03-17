@@ -242,6 +242,19 @@ export async function listNotes(sessionId: string): Promise<SessionNote[]> {
   return notes.sort((a, b) => a.timestamp - b.timestamp);
 }
 
+export async function deleteNote(id: string): Promise<void> {
+  const store = await tx('notes', 'readwrite');
+  await reqToPromise(store.delete(id));
+}
+
+export async function updateNote(id: string, text: string): Promise<void> {
+  const store = await tx('notes', 'readwrite');
+  const note = await reqToPromise(store.get(id)) as SessionNote | null;
+  if (!note) return;
+  note.text = text;
+  await reqToPromise(store.put(note));
+}
+
 // === Database reset ===
 
 export async function clearAllData(): Promise<void> {

@@ -41,13 +41,24 @@ design context.
 
 ## Human
 
-I'd also like to add my own notes via the UI.
+I'd also like to add my own notes via the UI. Rather than have the gallery
+hold the notes, create a new tab next to Gallery for listing notes in order
+and allowing creating/editing/deleting of notes.
 
 ## Assistant
 
 ### Key decisions
 
-**Gallery note input**: Added a sticky input bar at the bottom of the gallery
-timeline. Type a note, press Enter or click Add, and it appears in the
-timeline immediately. The gallery refreshes after each note is added so the
-timeline stays current. Input is disabled during save to prevent double-adds.
+**Dedicated Notes tab**: Created a new "Notes" tab alongside Gallery rather
+than embedding notes in the gallery timeline. Gallery stays focused on version
+comparison; Notes tab provides full CRUD (create, edit, delete) for session
+notes. Edit mode uses a textarea with Cmd+Enter to save, Escape to cancel.
+
+**Tab system extension**: Added `TabName` union type and `notesContainer` to
+`LayoutElements`. URL state uses `?notes` parameter. Notes tab refreshes on
+switch via the existing `tab-switched` event pattern.
+
+**DB operations for edit/delete**: Added `deleteNote(id)` and
+`updateNote(id, text)` to db.ts. Notes panel imports these directly rather
+than routing through sessionManager, keeping the manager focused on
+session-level operations.

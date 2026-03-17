@@ -10,6 +10,7 @@ import { createToolbar } from './ui/toolbar';
 import { initViewsPanel, updateMultiView } from './ui/panels';
 import { createSessionBar } from './ui/sessionBar';
 import { createGalleryView, refreshGallery } from './ui/gallery';
+import { createNotesView, refreshNotes } from './ui/notes';
 import { initSessionList, showSessionList } from './ui/sessionList';
 import { exportGLB } from './export/gltf';
 import { exportSTL } from './export/stl';
@@ -372,7 +373,7 @@ async function main() {
   });
 
   // Create layout
-  const { editorContainer, viewportPane, viewsContainer, elevationsContainer, galleryContainer, statusBar, clipControls, switchTab } = createLayout(app);
+  const { editorContainer, viewportPane, viewsContainer, elevationsContainer, galleryContainer, notesContainer, statusBar, clipControls, switchTab } = createLayout(app);
 
   // Init views panel
   initViewsPanel(viewsContainer);
@@ -384,9 +385,13 @@ async function main() {
     switchTab('interactive');
   });
 
-  // Refresh gallery whenever the gallery tab is selected
+  // Init notes panel
+  createNotesView(notesContainer);
+
+  // Refresh gallery/notes whenever their tabs are selected
   window.addEventListener('tab-switched', ((e: CustomEvent) => {
     if (e.detail.tab === 'gallery') refreshGallery();
+    if (e.detail.tab === 'notes') refreshNotes();
   }) as EventListener);
 
   // Init session list
@@ -1120,7 +1125,7 @@ async function main() {
     },
 
     /** Programmatic tab switching */
-    setView(tab: 'interactive' | 'ai' | 'elevations' | 'gallery'): void {
+    setView(tab: 'interactive' | 'ai' | 'elevations' | 'gallery' | 'notes'): void {
       switchTab(tab);
     },
 

@@ -1,6 +1,6 @@
 // Gallery view — grid of version thumbnails for comparing iterations
 
-import { listCurrentVersions, loadVersionByIndex, getReferenceImagesFromSession, listSessionNotes, addSessionNote, getState, type Version, type SessionNote, type ReferenceImagesData } from '../storage/sessionManager';
+import { listCurrentVersions, loadVersionByIndex, getReferenceImagesFromSession, type Version, type ReferenceImagesData } from '../storage/sessionManager';
 
 let galleryEl: HTMLElement | null = null;
 let onLoadCode: ((code: string) => void) | null = null;
@@ -14,7 +14,6 @@ export async function refreshGallery(): Promise<void> {
   if (!galleryEl) return;
 
   const versions = await listCurrentVersions();
-  const notes = await listSessionNotes();
   const refImages = await getReferenceImagesFromSession();
   galleryEl.innerHTML = '';
 
@@ -23,58 +22,23 @@ export async function refreshGallery(): Promise<void> {
     galleryEl.appendChild(createReferenceImagesSection(refImages));
   }
 
-  if (versions.length === 0 && notes.length === 0) {
+  if (versions.length === 0) {
     const empty = document.createElement('div');
-    empty.className = 'flex items-center justify-center flex-1 text-zinc-500 text-sm';
+    empty.className = 'flex items-center justify-center h-full text-zinc-500 text-sm';
     empty.textContent = 'No versions saved yet. Click "Save" to capture a version.';
     galleryEl.appendChild(empty);
-    if (getState().session) {
-      galleryEl.appendChild(createNoteInput());
-    }
     return;
   }
 
-  // Build timeline: interleave notes and versions by timestamp
-  type TimelineEntry = { type: 'version'; data: Version } | { type: 'note'; data: SessionNote };
-  const timeline: TimelineEntry[] = [
-    ...versions.map(v => ({ type: 'version' as const, data: v })),
-    ...notes.map(n => ({ type: 'note' as const, data: n })),
-  ].sort((a, b) => a.data.timestamp - b.data.timestamp);
+  const grid = document.createElement('div');
+  grid.className = 'grid gap-3';
+  grid.style.gridTemplateColumns = 'repeat(auto-fill, minmax(220px, 1fr))';
 
-  const container = document.createElement('div');
-  container.className = 'space-y-3';
-
-  // Collect consecutive versions into grids, notes break the flow
-  let pendingVersions: Version[] = [];
-
-  function flushVersionGrid() {
-    if (pendingVersions.length === 0) return;
-    const grid = document.createElement('div');
-    grid.className = 'grid gap-3';
-    grid.style.gridTemplateColumns = 'repeat(auto-fill, minmax(220px, 1fr))';
-    for (const v of pendingVersions) {
-      grid.appendChild(createTile(v));
-    }
-    container.appendChild(grid);
-    pendingVersions = [];
+  for (const version of versions) {
+    grid.appendChild(createTile(version));
   }
 
-  for (const entry of timeline) {
-    if (entry.type === 'note') {
-      flushVersionGrid();
-      container.appendChild(createNoteCard(entry.data));
-    } else {
-      pendingVersions.push(entry.data);
-    }
-  }
-  flushVersionGrid();
-
-  galleryEl.appendChild(container);
-
-  // Note input bar at the bottom
-  if (getState().session) {
-    galleryEl.appendChild(createNoteInput());
-  }
+  galleryEl.appendChild(grid);
 }
 
 const REF_LABELS: { key: keyof ReferenceImagesData; label: string }[] = [
@@ -224,73 +188,6 @@ function createTile(version: Version): HTMLElement {
 
   tile.appendChild(info);
   return tile;
-}
-
-function createNoteInput(): HTMLElement {
-  const wrapper = document.createElement('div');
-  wrapper.className = 'sticky bottom-0 pt-3 mt-3 border-t border-zinc-700 bg-zinc-900';
-
-  const form = document.createElement('form');
-  form.className = 'flex gap-2';
-
-  const input = document.createElement('input');
-  input.type = 'text';
-  input.placeholder = 'Add a note...';
-  input.className = 'flex-1 bg-zinc-800 border border-zinc-600 rounded-lg px-3 py-2 text-sm text-zinc-200 placeholder-zinc-500 focus:outline-none focus:border-blue-500 font-mono';
-
-  const btn = document.createElement('button');
-  btn.type = 'submit';
-  btn.textContent = 'Add';
-  btn.className = 'px-3 py-2 bg-blue-600 hover:bg-blue-500 text-white text-sm rounded-lg font-medium transition-colors disabled:opacity-40 disabled:cursor-not-allowed';
-  btn.disabled = true;
-
-  input.addEventListener('input', () => {
-    btn.disabled = input.value.trim().length === 0;
-  });
-
-  form.addEventListener('submit', async (e) => {
-    e.preventDefault();
-    const text = input.value.trim();
-    if (!text) return;
-    btn.disabled = true;
-    input.disabled = true;
-    await addSessionNote(text);
-    input.value = '';
-    input.disabled = false;
-    input.focus();
-    await refreshGallery();
-  });
-
-  form.appendChild(input);
-  form.appendChild(btn);
-  wrapper.appendChild(form);
-  return wrapper;
-}
-
-function createNoteCard(note: SessionNote): HTMLElement {
-  const card = document.createElement('div');
-  card.className = 'bg-zinc-800/60 border border-zinc-700 rounded-lg px-4 py-3 flex gap-3 items-start';
-
-  const icon = document.createElement('div');
-  icon.className = 'text-blue-400 text-sm shrink-0 mt-0.5 font-mono';
-  icon.textContent = '\u25B6'; // right-pointing triangle
-  card.appendChild(icon);
-
-  const body = document.createElement('div');
-  body.className = 'flex-1 min-w-0';
-
-  const text = document.createElement('div');
-  text.className = 'text-sm text-zinc-300 whitespace-pre-wrap';
-  text.textContent = note.text;
-  body.appendChild(text);
-
-  const time = document.createElement('div');
-  time.className = 'text-xs text-zinc-500 font-mono mt-1';
-  time.textContent = formatTime(note.timestamp);
-  body.appendChild(time);
-
-  card.appendChild(body);
-  return card;
 }
 
 function showLightbox(src: string, label: string): void {
