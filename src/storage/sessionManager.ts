@@ -12,8 +12,11 @@ import {
   getVersionCount,
   clearAllData,
   updateSession as dbUpdateSession,
+  addNote as dbAddNote,
+  listNotes as dbListNotes,
   type Session,
   type Version,
+  type SessionNote,
   type ReferenceImagesData,
 } from './db';
 
@@ -26,10 +29,12 @@ export interface ExportedSession {
     label: string;
     geometryData: Record<string, unknown> | null;
     timestamp: number;
+    notes?: string;
   }[];
+  notes?: { text: string; timestamp: number }[];
 }
 
-export type { Session, Version, ReferenceImagesData } from './db';
+export type { Session, Version, SessionNote, ReferenceImagesData } from './db';
 
 export interface SessionState {
   session: Session | null;
@@ -157,6 +162,7 @@ export async function saveVersion(
   geometryData: Record<string, unknown> | null,
   thumbnail: Blob | null,
   label?: string,
+  notes?: string,
 ): Promise<Version | null> {
   if (!currentState.session) return null;
 
@@ -171,6 +177,7 @@ export async function saveVersion(
     geometryData,
     thumbnail,
     label,
+    notes,
   );
 
   currentState = {
@@ -252,6 +259,18 @@ export async function getReferenceImagesFromSession(): Promise<ReferenceImagesDa
   return session?.referenceImages ?? null;
 }
 
+// === Notes ===
+
+export async function addSessionNote(text: string): Promise<SessionNote | null> {
+  if (!currentState.session) return null;
+  return dbAddNote(currentState.session.id, text);
+}
+
+export async function listSessionNotes(): Promise<SessionNote[]> {
+  if (!currentState.session) return [];
+  return dbListNotes(currentState.session.id);
+}
+
 // === Clear all data ===
 
 export async function clearAllSessions(): Promise<void> {
@@ -271,6 +290,7 @@ export async function exportSession(sessionId?: string): Promise<ExportedSession
   if (!session) return null;
 
   const versions = await dbListVersions(id);
+  const notes = await dbListNotes(id);
 
   return {
     mainifold: '1.0',
@@ -281,7 +301,9 @@ export async function exportSession(sessionId?: string): Promise<ExportedSession
       label: v.label,
       geometryData: v.geometryData,
       timestamp: v.timestamp,
+      ...(v.notes ? { notes: v.notes } : {}),
     })),
+    ...(notes.length > 0 ? { notes: notes.map(n => ({ text: n.text, timestamp: n.timestamp })) } : {}),
   };
 }
 
@@ -301,7 +323,14 @@ export async function importSession(
     if (regenerateThumbnail) {
       thumbnail = await regenerateThumbnail(v.code);
     }
-    await dbSaveVersion(session.id, v.code, v.geometryData, thumbnail, v.label);
+    await dbSaveVersion(session.id, v.code, v.geometryData, thumbnail, v.label, v.notes);
+  }
+
+  // Restore session notes
+  if (data.notes) {
+    for (const n of data.notes) {
+      await dbAddNote(session.id, n.text);
+    }
   }
 
   const count = await getVersionCount(session.id);

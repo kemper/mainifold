@@ -26,10 +26,18 @@ export interface Version {
   thumbnail: Blob | null;
   label: string;
   timestamp: number;
+  notes?: string;
+}
+
+export interface SessionNote {
+  id: string;
+  sessionId: string;
+  text: string;
+  timestamp: number;
 }
 
 const DB_NAME = 'mainifold';
-const DB_VERSION = 1;
+const DB_VERSION = 2;
 
 let dbPromise: Promise<IDBDatabase> | null = null;
 
@@ -46,6 +54,10 @@ function openDB(): Promise<IDBDatabase> {
         const store = db.createObjectStore('versions', { keyPath: 'id' });
         store.createIndex('sessionId', 'sessionId', { unique: false });
         store.createIndex('sessionId_index', ['sessionId', 'index'], { unique: true });
+      }
+      if (!db.objectStoreNames.contains('notes')) {
+        const store = db.createObjectStore('notes', { keyPath: 'id' });
+        store.createIndex('sessionId', 'sessionId', { unique: false });
       }
     };
     req.onsuccess = () => resolve(req.result);
@@ -109,15 +121,15 @@ export async function updateSession(id: string, updates: Partial<Pick<Session, '
 
 export async function deleteSession(id: string): Promise<void> {
   const db = await openDB();
-  const txn = db.transaction(['sessions', 'versions'], 'readwrite');
+  const txn = db.transaction(['sessions', 'versions', 'notes'], 'readwrite');
   txn.objectStore('sessions').delete(id);
   // Delete all versions for this session
   const versionStore = txn.objectStore('versions');
-  const index = versionStore.index('sessionId');
-  const req = index.openCursor(IDBKeyRange.only(id));
+  const vIdx = versionStore.index('sessionId');
+  const vReq = vIdx.openCursor(IDBKeyRange.only(id));
   await new Promise<void>((resolve, reject) => {
-    req.onsuccess = () => {
-      const cursor = req.result;
+    vReq.onsuccess = () => {
+      const cursor = vReq.result;
       if (cursor) {
         cursor.delete();
         cursor.continue();
@@ -125,7 +137,23 @@ export async function deleteSession(id: string): Promise<void> {
         resolve();
       }
     };
-    req.onerror = () => reject(req.error);
+    vReq.onerror = () => reject(vReq.error);
+  });
+  // Delete all notes for this session
+  const noteStore = txn.objectStore('notes');
+  const nIdx = noteStore.index('sessionId');
+  const nReq = nIdx.openCursor(IDBKeyRange.only(id));
+  await new Promise<void>((resolve, reject) => {
+    nReq.onsuccess = () => {
+      const cursor = nReq.result;
+      if (cursor) {
+        cursor.delete();
+        cursor.continue();
+      } else {
+        resolve();
+      }
+    };
+    nReq.onerror = () => reject(nReq.error);
   });
 }
 
@@ -137,6 +165,7 @@ export async function saveVersion(
   geometryData: Record<string, unknown> | null,
   thumbnail: Blob | null,
   label?: string,
+  notes?: string,
 ): Promise<Version> {
   const versions = await listVersions(sessionId);
   const nextIndex = versions.length > 0 ? Math.max(...versions.map(v => v.index)) + 1 : 1;
@@ -150,6 +179,7 @@ export async function saveVersion(
     thumbnail,
     label: label || `v${nextIndex}`,
     timestamp: Date.now(),
+    ...(notes ? { notes } : {}),
   };
 
   const store = await tx('versions', 'readwrite');
@@ -190,13 +220,36 @@ export async function getVersionCount(sessionId: string): Promise<number> {
   return reqToPromise(index.count(IDBKeyRange.only(sessionId)));
 }
 
+// === Notes ===
+
+export async function addNote(sessionId: string, text: string): Promise<SessionNote> {
+  const note: SessionNote = {
+    id: generateId(),
+    sessionId,
+    text,
+    timestamp: Date.now(),
+  };
+  const store = await tx('notes', 'readwrite');
+  await reqToPromise(store.put(note));
+  await updateSession(sessionId, { updated: Date.now() });
+  return note;
+}
+
+export async function listNotes(sessionId: string): Promise<SessionNote[]> {
+  const store = await tx('notes', 'readonly');
+  const index = store.index('sessionId');
+  const notes = await reqToPromise(index.getAll(IDBKeyRange.only(sessionId))) as SessionNote[];
+  return notes.sort((a, b) => a.timestamp - b.timestamp);
+}
+
 // === Database reset ===
 
 export async function clearAllData(): Promise<void> {
   const db = await openDB();
-  const txn = db.transaction(['sessions', 'versions'], 'readwrite');
+  const txn = db.transaction(['sessions', 'versions', 'notes'], 'readwrite');
   txn.objectStore('sessions').clear();
   txn.objectStore('versions').clear();
+  txn.objectStore('notes').clear();
   await new Promise<void>((resolve, reject) => {
     txn.oncomplete = () => resolve();
     txn.onerror = () => reject(txn.error);

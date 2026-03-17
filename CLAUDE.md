@@ -54,25 +54,34 @@ claude mcp add playwright -s user -- npx -y @playwright/mcp
 
 ### Design context logging
 
-Capture the design story alongside geometry versions so sessions are useful for review weeks later. Use version labels and notes to record *why* each iteration happened, not just *what* changed.
+Capture the design story alongside geometry versions so sessions are useful for review weeks later. Use session notes and version notes to record *why* each iteration happened, not just *what* changed.
 
-**Before the first version:** Log the user's requirements and constraints as context.
+**Before the first version:** Log the user's requirements and constraints as a session note.
 ```javascript
-// Summarize the design brief when creating the session
 await mainifold.createSession("Walkway shield - snap-on board caps");
-// First version label should describe the starting point
-await mainifold.runAndSave(code, "v1 - C-channel with screw holes, 6in segments", assertions);
+// Log the design brief so the gallery tells the full story
+await mainifold.addSessionNote("Requirements: 5.5x5.5x36in boards, snap-on C-channel shield, screw holes, print without supports opening-down, fuzzy skin texture on top");
+await mainifold.runAndSave(code, "v1 - C-channel with screw holes, 6in segments", { isManifold: true });
 ```
 
-**On each version save:** Include what changed and why in the label. Be specific — "v2 - widened tongue to full top width per user feedback" is better than "v2 - updated".
-
-**When the user gives feedback:** Incorporate their words into the next version label so the gallery tells the story:
+**On each version save:** Include what changed and why in the label. Optionally add detailed notes:
 ```javascript
-// User said: "the groove looks too shallow, make the tongue insert fully"
-await mainifold.runAndSave(code, "v3 - full-depth groove (15mm) per feedback", assertions);
+await mainifold.runAndSave(code, "v2 - widened tongue to full top width per user feedback", {
+  isManifold: true,
+  notes: "User wanted tongue to insert fully across the top surface. Changed tabW from 20mm to outerW - 2*wallT."
+});
 ```
 
-**Key decisions and constraints** that affect the design should appear in at least one version label — dimensions, materials, print orientation, tolerance values, physical constraints (e.g., "right wall omitted for clearance against perpendicular board").
+**When the user gives feedback:** Log it as a session note, then save the next version:
+```javascript
+await mainifold.addSessionNote("User feedback: the groove looks too shallow, make the tongue insert fully");
+await mainifold.runAndSave(code, "v3 - full-depth groove (15mm) per feedback", { isManifold: true });
+```
+
+**Key decisions and constraints** should be logged as session notes — dimensions, materials, print orientation, tolerance values, physical constraints:
+```javascript
+await mainifold.addSessionNote("Decision: right wall omitted on end pieces for clearance against perpendicular 5.5in boards");
+```
 
 ## Architecture
 
@@ -652,7 +661,19 @@ mainifold.getSessionState()           // → {session, currentVersion, versionCo
 await mainifold.renameSession('New name')        // Rename active session
 await mainifold.renameSession('New name', id)    // Rename specific session
 
-// Export / Import (sharing sessions between users)
+// Session notes — log requirements, feedback, decisions alongside versions
+await mainifold.addSessionNote("User wants snap-on C-channel shields for 5.5in boards")
+// → { id, text, timestamp }
+await mainifold.listSessionNotes()
+// → [{ id, text, timestamp }, ...]
+
+// Version notes — attach design rationale to a specific version
+await mainifold.runAndSave(code, "v2 - thicker walls", {
+  isManifold: true,
+  notes: "Changed wallT from 3 to 5 per user request for rigidity"
+});
+
+// Export / Import (sharing sessions between users — includes notes)
 const data = await mainifold.exportSession()     // Export current session as JSON
 const data = await mainifold.exportSession(id)   // Export specific session
 await mainifold.importSession(data)              // Import JSON, regenerates thumbnails
@@ -665,7 +686,7 @@ await mainifold.clearAllSessions()               // Delete ALL sessions & versio
 - `?session=<id>&gallery` — Open gallery view
 - `?view=ai` — Works with any of the above
 
-**Gallery view:** Grid of version tiles with isometric thumbnails, geometry stats (volume, dimensions), and status indicators. Click any tile to load that version. Ideal for AI to produce N variations, then hand off a gallery URL for human review.
+**Gallery view:** Timeline of version tiles and session notes with isometric thumbnails, geometry stats (volume, dimensions), and status indicators. Notes appear interleaved with versions chronologically, showing the design story. Click any version tile to load it. Ideal for AI to produce N variations with context, then hand off a gallery URL for human review.
 
 ## Structured Geometry Data
 

@@ -43,6 +43,8 @@ import {
   clearAllSessions,
   saveReferenceImages as persistReferenceImages,
   getReferenceImagesFromSession,
+  addSessionNote,
+  listSessionNotes,
   type ExportedSession,
   type ReferenceImagesData,
 } from './storage/sessionManager';
@@ -202,6 +204,8 @@ interface GeometryAssertions {
     widthToHeight?: [number, number];
     depthToHeight?: [number, number];
   };
+  /** Optional notes to attach to this version (design rationale, user feedback, etc.) */
+  notes?: string;
 }
 
 function checkAssertions(stats: Record<string, unknown>, assertions: GeometryAssertions): string[] {
@@ -723,7 +727,7 @@ async function main() {
       runCodeSync(code);
       const newGeoData = JSON.parse(geometryDataEl.textContent || '{}');
       const thumbnail = await captureThumbnail();
-      const version = await saveVersion(code, getGeometryDataObj(), thumbnail, label);
+      const version = await saveVersion(code, getGeometryDataObj(), thumbnail, label, assertions?.notes);
 
       let diff = null;
       if (prevGeoData && prevGeoData.status === 'ok' && newGeoData.status === 'ok') {
@@ -757,6 +761,19 @@ async function main() {
         currentVersion: state.currentVersion ? { index: state.currentVersion.index, label: state.currentVersion.label } : null,
         versionCount: state.versionCount,
       };
+    },
+
+    /** Add a standalone note to the current session (requirements, feedback, decisions) */
+    async addSessionNote(text: string) {
+      const note = await addSessionNote(text);
+      if (!note) return { error: 'No active session' };
+      return { id: note.id, text: note.text, timestamp: note.timestamp };
+    },
+
+    /** List all notes in the current session */
+    async listSessionNotes() {
+      const notes = await listSessionNotes();
+      return notes.map(n => ({ id: n.id, text: n.text, timestamp: n.timestamp }));
     },
 
     /** Export a session as JSON (defaults to current session) */

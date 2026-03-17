@@ -1,6 +1,6 @@
 // Gallery view — grid of version thumbnails for comparing iterations
 
-import { listCurrentVersions, loadVersionByIndex, getReferenceImagesFromSession, type Version, type ReferenceImagesData } from '../storage/sessionManager';
+import { listCurrentVersions, loadVersionByIndex, getReferenceImagesFromSession, listSessionNotes, type Version, type SessionNote, type ReferenceImagesData } from '../storage/sessionManager';
 
 let galleryEl: HTMLElement | null = null;
 let onLoadCode: ((code: string) => void) | null = null;
@@ -14,6 +14,7 @@ export async function refreshGallery(): Promise<void> {
   if (!galleryEl) return;
 
   const versions = await listCurrentVersions();
+  const notes = await listSessionNotes();
   const refImages = await getReferenceImagesFromSession();
   galleryEl.innerHTML = '';
 
@@ -22,7 +23,7 @@ export async function refreshGallery(): Promise<void> {
     galleryEl.appendChild(createReferenceImagesSection(refImages));
   }
 
-  if (versions.length === 0) {
+  if (versions.length === 0 && notes.length === 0) {
     const empty = document.createElement('div');
     empty.className = 'flex items-center justify-center h-full text-zinc-500 text-sm';
     empty.textContent = 'No versions saved yet. Click "Save" to capture a version.';
@@ -30,15 +31,42 @@ export async function refreshGallery(): Promise<void> {
     return;
   }
 
-  const grid = document.createElement('div');
-  grid.className = 'grid gap-3';
-  grid.style.gridTemplateColumns = 'repeat(auto-fill, minmax(220px, 1fr))';
+  // Build timeline: interleave notes and versions by timestamp
+  type TimelineEntry = { type: 'version'; data: Version } | { type: 'note'; data: SessionNote };
+  const timeline: TimelineEntry[] = [
+    ...versions.map(v => ({ type: 'version' as const, data: v })),
+    ...notes.map(n => ({ type: 'note' as const, data: n })),
+  ].sort((a, b) => a.data.timestamp - b.data.timestamp);
 
-  for (const version of versions) {
-    grid.appendChild(createTile(version));
+  const container = document.createElement('div');
+  container.className = 'space-y-3';
+
+  // Collect consecutive versions into grids, notes break the flow
+  let pendingVersions: Version[] = [];
+
+  function flushVersionGrid() {
+    if (pendingVersions.length === 0) return;
+    const grid = document.createElement('div');
+    grid.className = 'grid gap-3';
+    grid.style.gridTemplateColumns = 'repeat(auto-fill, minmax(220px, 1fr))';
+    for (const v of pendingVersions) {
+      grid.appendChild(createTile(v));
+    }
+    container.appendChild(grid);
+    pendingVersions = [];
   }
 
-  galleryEl.appendChild(grid);
+  for (const entry of timeline) {
+    if (entry.type === 'note') {
+      flushVersionGrid();
+      container.appendChild(createNoteCard(entry.data));
+    } else {
+      pendingVersions.push(entry.data);
+    }
+  }
+  flushVersionGrid();
+
+  galleryEl.appendChild(container);
 }
 
 const REF_LABELS: { key: keyof ReferenceImagesData; label: string }[] = [
@@ -177,8 +205,43 @@ function createTile(version: Version): HTMLElement {
     info.appendChild(stats);
   }
 
+  // Version notes (design rationale)
+  if (version.notes) {
+    const notesEl = document.createElement('div');
+    notesEl.className = 'text-xs text-zinc-400 mt-1 line-clamp-2';
+    notesEl.textContent = version.notes;
+    notesEl.title = version.notes;
+    info.appendChild(notesEl);
+  }
+
   tile.appendChild(info);
   return tile;
+}
+
+function createNoteCard(note: SessionNote): HTMLElement {
+  const card = document.createElement('div');
+  card.className = 'bg-zinc-800/60 border border-zinc-700 rounded-lg px-4 py-3 flex gap-3 items-start';
+
+  const icon = document.createElement('div');
+  icon.className = 'text-blue-400 text-sm shrink-0 mt-0.5 font-mono';
+  icon.textContent = '\u25B6'; // right-pointing triangle
+  card.appendChild(icon);
+
+  const body = document.createElement('div');
+  body.className = 'flex-1 min-w-0';
+
+  const text = document.createElement('div');
+  text.className = 'text-sm text-zinc-300 whitespace-pre-wrap';
+  text.textContent = note.text;
+  body.appendChild(text);
+
+  const time = document.createElement('div');
+  time.className = 'text-xs text-zinc-500 font-mono mt-1';
+  time.textContent = formatTime(note.timestamp);
+  body.appendChild(time);
+
+  card.appendChild(body);
+  return card;
 }
 
 function showLightbox(src: string, label: string): void {
