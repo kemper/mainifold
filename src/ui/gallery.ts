@@ -1,6 +1,6 @@
 // Gallery view — grid of version thumbnails for comparing iterations
 
-import { listCurrentVersions, loadVersionByIndex, getReferenceImagesFromSession, listSessionNotes, type Version, type SessionNote, type ReferenceImagesData } from '../storage/sessionManager';
+import { listCurrentVersions, loadVersionByIndex, getReferenceImagesFromSession, listSessionNotes, addSessionNote, getState, type Version, type SessionNote, type ReferenceImagesData } from '../storage/sessionManager';
 
 let galleryEl: HTMLElement | null = null;
 let onLoadCode: ((code: string) => void) | null = null;
@@ -25,9 +25,12 @@ export async function refreshGallery(): Promise<void> {
 
   if (versions.length === 0 && notes.length === 0) {
     const empty = document.createElement('div');
-    empty.className = 'flex items-center justify-center h-full text-zinc-500 text-sm';
+    empty.className = 'flex items-center justify-center flex-1 text-zinc-500 text-sm';
     empty.textContent = 'No versions saved yet. Click "Save" to capture a version.';
     galleryEl.appendChild(empty);
+    if (getState().session) {
+      galleryEl.appendChild(createNoteInput());
+    }
     return;
   }
 
@@ -67,6 +70,11 @@ export async function refreshGallery(): Promise<void> {
   flushVersionGrid();
 
   galleryEl.appendChild(container);
+
+  // Note input bar at the bottom
+  if (getState().session) {
+    galleryEl.appendChild(createNoteInput());
+  }
 }
 
 const REF_LABELS: { key: keyof ReferenceImagesData; label: string }[] = [
@@ -216,6 +224,47 @@ function createTile(version: Version): HTMLElement {
 
   tile.appendChild(info);
   return tile;
+}
+
+function createNoteInput(): HTMLElement {
+  const wrapper = document.createElement('div');
+  wrapper.className = 'sticky bottom-0 pt-3 mt-3 border-t border-zinc-700 bg-zinc-900';
+
+  const form = document.createElement('form');
+  form.className = 'flex gap-2';
+
+  const input = document.createElement('input');
+  input.type = 'text';
+  input.placeholder = 'Add a note...';
+  input.className = 'flex-1 bg-zinc-800 border border-zinc-600 rounded-lg px-3 py-2 text-sm text-zinc-200 placeholder-zinc-500 focus:outline-none focus:border-blue-500 font-mono';
+
+  const btn = document.createElement('button');
+  btn.type = 'submit';
+  btn.textContent = 'Add';
+  btn.className = 'px-3 py-2 bg-blue-600 hover:bg-blue-500 text-white text-sm rounded-lg font-medium transition-colors disabled:opacity-40 disabled:cursor-not-allowed';
+  btn.disabled = true;
+
+  input.addEventListener('input', () => {
+    btn.disabled = input.value.trim().length === 0;
+  });
+
+  form.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const text = input.value.trim();
+    if (!text) return;
+    btn.disabled = true;
+    input.disabled = true;
+    await addSessionNote(text);
+    input.value = '';
+    input.disabled = false;
+    input.focus();
+    await refreshGallery();
+  });
+
+  form.appendChild(input);
+  form.appendChild(btn);
+  wrapper.appendChild(form);
+  return wrapper;
 }
 
 function createNoteCard(note: SessionNote): HTMLElement {

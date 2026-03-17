@@ -38,3 +38,16 @@ exist), so existing sessions/versions survive the migration.
 **Export/import includes notes**: Both session notes and version notes are
 included in the JSON export format, so shared sessions carry their full
 design context.
+
+## Human
+
+I'd also like to add my own notes via the UI.
+
+## Assistant
+
+### Key decisions
+
+**Gallery note input**: Added a sticky input bar at the bottom of the gallery
+timeline. Type a note, press Enter or click Add, and it appears in the
+timeline immediately. The gallery refreshes after each note is added so the
+timeline stays current. Input is disabled during save to prevent double-adds.
