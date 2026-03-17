@@ -52,6 +52,28 @@ claude mcp add playwright -s user -- npx -y @playwright/mcp
 - Writing standalone `.js` scripts for the user to run manually
 - Skipping sessions and just dumping code in the chat
 
+### Design context logging
+
+Capture the design story alongside geometry versions so sessions are useful for review weeks later. Use version labels and notes to record *why* each iteration happened, not just *what* changed.
+
+**Before the first version:** Log the user's requirements and constraints as context.
+```javascript
+// Summarize the design brief when creating the session
+await mainifold.createSession("Walkway shield - snap-on board caps");
+// First version label should describe the starting point
+await mainifold.runAndSave(code, "v1 - C-channel with screw holes, 6in segments", assertions);
+```
+
+**On each version save:** Include what changed and why in the label. Be specific — "v2 - widened tongue to full top width per user feedback" is better than "v2 - updated".
+
+**When the user gives feedback:** Incorporate their words into the next version label so the gallery tells the story:
+```javascript
+// User said: "the groove looks too shallow, make the tongue insert fully"
+await mainifold.runAndSave(code, "v3 - full-depth groove (15mm) per feedback", assertions);
+```
+
+**Key decisions and constraints** that affect the design should appear in at least one version label — dimensions, materials, print orientation, tolerance values, physical constraints (e.g., "right wall omitted for clearance against perpendicular board").
+
 ## Architecture
 
 Static site, no backend. Vanilla TypeScript + Vite.
@@ -496,6 +518,90 @@ const r = mainifold.query({ sliceAt: [5, 10, 15], decompose: true, boundingBox: 
 // r.boundingBox = {min, max}, r.stats = current geometry-data
 ```
 
+### Geometry Intelligence
+
+Analyze geometry structure, probe spatial properties, and detect issues:
+
+```javascript
+// Z-Profile Feature Summary — "what's at each height"
+mainifold.analyzeProfile(sampleCount?)
+// → { features: [{ zRange, area, contourCount, contours, description }],
+//     transitions: [{ z, description }], summary: "z=0-3: disc r=150 | z=3-10: ..." }
+
+// Z-Profile in isolation (no side effects)
+mainifold.analyzeProfileIsolated(code, sampleCount?)
+// → { profile: ZProfile | null, stats: {...} }
+
+// Ray-cast probe — shoot ray down Z at XY, get all hit heights
+mainifold.measureAt([x, y])
+// → { hits: [{z, normal, entering}], zValues: [10, 0], thickness: 10, topZ: 10, bottomZ: 0 }
+
+// Distance between two 3D points
+mainifold.measureBetween([x1,y1,z1], [x2,y2,z2])
+// → 14.142
+
+// General ray query
+mainifold.probeRay([0,0,100], [0,0,-1])
+// → { hits: [{point, normal, distance}] }
+
+// Containment detection — find invisible geometry
+mainifold.checkContainment()
+// → [{ containedIndex, containingIndex, containedVolume, containedCentroid, message }]
+// Also auto-included in runAndExplain() output as containmentWarnings
+```
+
+### View State & Navigation
+
+```javascript
+// Get current view state
+mainifold.getViewState()
+// → { tab: 'elevations', camera: { azimuth: 315, elevation: 30, distance: 25, target: [0,0,5] } }
+
+// Programmatic tab switching (no clicking needed)
+mainifold.setView('interactive')  // or 'ai', 'elevations', 'gallery'
+
+// Rename active session (double-click name in UI also works)
+await mainifold.renameSession('New name')
+await mainifold.renameSession('New name', sessionId)  // rename specific session
+```
+
+### Reference/Phantom Geometry
+
+Translucent overlay geometry for fitment checking — visible in viewport, excluded from exports:
+
+```javascript
+// Set phantom geometry (code executed in isolation)
+mainifold.setReferenceGeometry(`
+  const { Manifold } = api;
+  return Manifold.cylinder(20, 50, 50, 64);  // roller ring
+`, { color: 0xff0000, opacity: 0.3 })
+// → { success: true, boundingBox, volume }
+
+mainifold.clearReferenceGeometry()
+mainifold.hasReferenceGeometry()  // → boolean
+```
+
+### Units & Scale
+
+Declare unit system (metadata only — no coordinate transformation):
+
+```javascript
+mainifold.setUnits('mm')   // 'mm' | 'cm' | 'in' | 'unitless'
+mainifold.getUnits()       // → 'mm'
+// geometry-data output includes "unit" field; 3MF export uses declared unit
+```
+
+### Interactive Measuring
+
+Click two points on the model to measure distance:
+
+```javascript
+mainifold.measureMode(true)   // activate (cursor becomes crosshair, click 2 points)
+mainifold.measureMode(false)  // deactivate
+mainifold.getMeasurement()    // → { active, point1, point2, distance }
+mainifold.measurePoints([0,0,0], [10,10,10])  // programmatic: → 17.321
+```
+
 ### Session & Versioning API
 
 Sessions let you (or an AI agent) save multiple versions of a design, then compare them in a gallery view.
@@ -541,6 +647,10 @@ await mainifold.navigateVersion('prev')
 await mainifold.navigateVersion('next')
 await mainifold.saveVersion("label")  // Save current state as version
 mainifold.getSessionState()           // → {session, currentVersion, versionCount}
+
+// Rename
+await mainifold.renameSession('New name')        // Rename active session
+await mainifold.renameSession('New name', id)    // Rename specific session
 
 // Export / Import (sharing sessions between users)
 const data = await mainifold.exportSession()     // Export current session as JSON

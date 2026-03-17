@@ -1,8 +1,9 @@
 import './style.css';
 import { initEngine, executeCode, getModule } from './geometry/engine';
 import { sliceAtZ, getBoundingBox } from './geometry/crossSection';
-import { initViewport, updateMesh, setClipping, setClipZ, getClipState } from './renderer/viewport';
+import { initViewport, updateMesh, setClipping, setClipZ, getClipState, getCameraState, getCanvas, getMeshGroup, getCamera } from './renderer/viewport';
 import { renderCompositeCanvas, renderElevationsToContainer, renderSingleView, renderSliceSVG, setReferenceImages as _setRefImages, clearReferenceImages as _clearRefImages, getReferenceImages as _getRefImages, type ReferenceImages } from './renderer/multiview';
+import { setPhantom, clearPhantom, hasPhantom, type PhantomOptions } from './renderer/phantomGeometry';
 import { initEditor, setValue, getValue } from './editor/codeEditor';
 import { createLayout } from './ui/layout';
 import { createToolbar } from './ui/toolbar';
@@ -15,6 +16,11 @@ import { exportSTL } from './export/stl';
 import { exportOBJ } from './export/obj';
 import { export3MF } from './export/threemf';
 import type { MeshData } from './geometry/types';
+import { analyzeZProfile, type ZProfile } from './geometry/profileAnalysis';
+import { probeAtXY, probeRay, measureDistance, type ProbeResult, type GeneralRayResult } from './geometry/rayCast';
+import { checkContainment, type ContainmentWarning } from './geometry/containmentCheck';
+import { setUnits as _setUnits, getUnits as _getUnits, type UnitSystem } from './geometry/units';
+import { initMeasureTool, activate as activateMeasure, deactivate as deactivateMeasure, getState as getMeasureState } from './ui/measureTool';
 import {
   getSessionIdFromURL,
   getVersionFromURL,
@@ -24,6 +30,7 @@ import {
   closeSession,
   listSessions,
   deleteSession,
+  renameSession,
   saveVersion,
   navigateVersion,
   loadVersionByIndex,
@@ -141,6 +148,7 @@ function computeGeometryStats(manifold: any, meshData: MeshData, executionTimeMs
     ...(manifoldStatus ? { manifoldStatus } : {}),
     componentCount,
     crossSections: quartileSlices,
+    unit: _getUnits(),
     executionTimeMs: executionTimeMs ?? null,
     codeHash: sourceCode ? simpleHash(sourceCode) : null,
   };
@@ -395,6 +403,9 @@ async function main() {
 
   // Init viewport
   initViewport(viewportPane);
+
+  // Init measure tool
+  initMeasureTool(getCanvas(), getCamera(), getMeshGroup(), viewportPane);
 
   // Init editor
   initEditor(editorContainer, defaultCode, (code: string) => {
@@ -859,6 +870,10 @@ async function main() {
         }
       } catch { /* ignore */ }
 
+      // Containment/occlusion check (before cleanup — needs manifold alive)
+      let containmentWarnings: ContainmentWarning[] = [];
+      try { containmentWarnings = checkContainment(m); } catch { /* ignore */ }
+
       // Clean up
       try { m.delete?.(); } catch { /* ignore */ }
 
@@ -922,7 +937,15 @@ async function main() {
         }
       }
 
-      return { stats: geometryData, components, hints: hints.length > 0 ? hints : undefined };
+      // Add containment warnings to hints
+      if (containmentWarnings.length > 0) {
+        hints.push(`WARNING: ${containmentWarnings.length} contained component(s) detected (geometrically invisible):`);
+        for (const w of containmentWarnings) {
+          hints.push(`  ${w.message}`);
+        }
+      }
+
+      return { stats: geometryData, components, hints: hints.length > 0 ? hints : undefined, containmentWarnings: containmentWarnings.length > 0 ? containmentWarnings : undefined };
     },
 
     /** Modify current editor code with a transform function and test the result without committing.
@@ -1019,6 +1042,150 @@ async function main() {
         galleryUrl: getGalleryUrl(),
       };
     },
+
+    // === Phase 1: Geometry Intelligence ===
+
+    /** Analyze Z-profile of current geometry — returns features at each height with radii, areas, positions */
+    analyzeProfile(sampleCount?: number): ZProfile | null {
+      if (!currentManifold) return null;
+      const bbox = getBoundingBox(currentManifold);
+      if (!bbox) return null;
+      return analyzeZProfile(currentManifold, bbox, sampleCount);
+    },
+
+    /** Analyze Z-profile of code in isolation — no side effects */
+    analyzeProfileIsolated(code: string, sampleCount?: number): { profile: ZProfile | null; stats: Record<string, unknown> } {
+      const { geometryData, manifold } = executeIsolated(code);
+      if (geometryData.status === 'error' || !manifold) {
+        return { profile: null, stats: geometryData };
+      }
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const m = manifold as any;
+      const bbox = getBoundingBox(m);
+      const profile = bbox ? analyzeZProfile(m, bbox, sampleCount) : null;
+      try { m.delete?.(); } catch { /* ignore */ }
+      return { profile, stats: geometryData };
+    },
+
+    /** Probe geometry at an XY coordinate — shoots ray down Z axis, returns all hit Z values */
+    measureAt(xy: [number, number]): ProbeResult | null {
+      if (!currentMeshData) return null;
+      return probeAtXY(currentMeshData, xy[0], xy[1]);
+    },
+
+    /** Euclidean distance between two 3D points */
+    measureBetween(p1: [number, number, number], p2: [number, number, number]): number {
+      return measureDistance(p1, p2);
+    },
+
+    /** General ray query — cast from origin in direction, return all hits */
+    probeRay(origin: [number, number, number], direction: [number, number, number]): GeneralRayResult | null {
+      if (!currentMeshData) return null;
+      return probeRay(currentMeshData, origin, direction);
+    },
+
+    /** Check if any component is fully contained inside another (invisible geometry) */
+    checkContainment(): ContainmentWarning[] | null {
+      if (!currentManifold) return null;
+      return checkContainment(currentManifold);
+    },
+
+    // === Phase 2: View State & Session Rename ===
+
+    /** Get current view state — active tab, camera angle, zoom */
+    getViewState(): { tab: string; camera: { azimuth: number; elevation: number; distance: number; target: [number, number, number] } } {
+      const params = new URLSearchParams(window.location.search);
+      let tab = 'interactive';
+      if (params.has('gallery')) tab = 'gallery';
+      else if (params.get('view') === 'ai') tab = 'ai';
+      else if (params.get('view') === 'elevations') tab = 'elevations';
+      return { tab, camera: getCameraState() };
+    },
+
+    /** Programmatic tab switching */
+    setView(tab: 'interactive' | 'ai' | 'elevations' | 'gallery'): void {
+      switchTab(tab);
+    },
+
+    /** Rename a session */
+    async renameSession(newName: string, id?: string): Promise<void> {
+      const targetId = id ?? getState().session?.id;
+      if (!targetId) throw new Error('No active session and no id provided');
+      await renameSession(targetId, newName);
+    },
+
+    // === Phase 3: Reference/Phantom Geometry ===
+
+    /** Set translucent reference geometry for fitment checking. Code is executed in isolation. */
+    setReferenceGeometry(code: string, options?: PhantomOptions): { success: boolean; error?: string; boundingBox?: unknown; volume?: number } {
+      const result = executeCode(code);
+      if (result.error) {
+        return { success: false, error: result.error };
+      }
+      if (!result.mesh) {
+        return { success: false, error: 'Code did not produce geometry' };
+      }
+
+      setPhantom(result.mesh, options);
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const m = result.manifold as any;
+      let volume = 0;
+      let bb = null;
+      try { volume = m.volume(); } catch { /* ignore */ }
+      try { bb = getBoundingBox(m); } catch { /* ignore */ }
+      try { m.delete?.(); } catch { /* ignore */ }
+
+      return { success: true, boundingBox: bb, volume };
+    },
+
+    /** Clear phantom/reference geometry overlay */
+    clearReferenceGeometry(): void {
+      clearPhantom();
+    },
+
+    /** Check if phantom/reference geometry is currently displayed */
+    hasReferenceGeometry(): boolean {
+      return hasPhantom();
+    },
+
+    // === Phase 4: Units & Scale ===
+
+    /** Declare the unit system (metadata only — no coordinate transformation) */
+    setUnits(unit: UnitSystem): void {
+      _setUnits(unit);
+    },
+
+    /** Get current unit system */
+    getUnits(): UnitSystem {
+      return _getUnits();
+    },
+
+    // === Phase 5: Measuring Tool ===
+
+    /** Toggle interactive measure mode — click two points to measure distance */
+    measureMode(enabled?: boolean): void {
+      const state = getMeasureState();
+      if (enabled === undefined) {
+        // Toggle
+        if (state.active) deactivateMeasure();
+        else activateMeasure();
+      } else if (enabled) {
+        activateMeasure();
+      } else {
+        deactivateMeasure();
+      }
+    },
+
+    /** Get current measurement state */
+    getMeasurement(): { active: boolean; point1: [number, number, number] | null; point2: [number, number, number] | null; distance: number | null } {
+      return getMeasureState();
+    },
+
+    /** Programmatic measurement between two 3D points (no clicking needed) */
+    measurePoints(p1: [number, number, number], p2: [number, number, number]): number {
+      return measureDistance(p1, p2);
+    },
   };
 
   (window as unknown as Record<string, unknown>).mainifold = mainifoldAPI;
@@ -1032,11 +1199,19 @@ async function main() {
     '         .getModule(), .exportGLB(), .exportSTL(), .exportOBJ(), .export3MF()\n' +
     'Isolated: .runIsolated(code), .runAndAssert(code, assertions),\n' +
     '          .runAndExplain(code), .isRunning()\n' +
+    'Intelligence: .analyzeProfile(), .analyzeProfileIsolated(code),\n' +
+    '              .measureAt([x,y]), .measureBetween(p1,p2), .probeRay(origin,dir),\n' +
+    '              .checkContainment()\n' +
+    'View: .getViewState(), .setView(tab), .setUnits(unit), .getUnits()\n' +
+    'Phantom: .setReferenceGeometry(code, opts?), .clearReferenceGeometry(),\n' +
+    '         .hasReferenceGeometry()\n' +
+    'Measure: .measureMode(enabled?), .getMeasurement(), .measurePoints(p1,p2)\n' +
     'Sessions: .createSession(name?), .saveVersion(label?), .runAndSave(code, label?),\n' +
     '          .createSessionWithVersions(name, [{code,label},...]),\n' +
     '          .listSessions(), .openSession(id), .listVersions(), .loadVersion(idx),\n' +
-    '          .getGalleryUrl(), .getSessionUrl(), .getSessionState(),\n' +
-    '          .exportSession(id?), .importSession(data), .clearAllSessions()\n' +
+    '          .renameSession(name, id?), .getGalleryUrl(), .getSessionUrl(),\n' +
+    '          .getSessionState(), .exportSession(id?), .importSession(data),\n' +
+    '          .clearAllSessions()\n' +
     'Structured data: document.getElementById("geometry-data").textContent',
     'color: #4ade80; font-weight: bold',
     'color: inherit',

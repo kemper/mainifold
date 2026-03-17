@@ -7,6 +7,7 @@ import {
   closeSession,
   saveVersion,
   navigateVersion,
+  renameSession,
   type SessionState,
 } from '../storage/sessionManager';
 import { getReferenceImages } from '../renderer/multiview';
@@ -60,9 +61,32 @@ function render(state: SessionState) {
     return;
   }
 
-  // Active session
-  const nameEl = el('span', 'text-zinc-300 font-mono font-medium truncate max-w-48', state.session.name);
-  nameEl.title = state.session.name;
+  // Active session — double-click to rename
+  const nameEl = el('span', 'text-zinc-300 font-mono font-medium truncate max-w-48 cursor-pointer', state.session.name);
+  nameEl.title = `${state.session.name} (double-click to rename)`;
+  nameEl.addEventListener('dblclick', () => {
+    if (!state.session) return;
+    const input = document.createElement('input');
+    input.type = 'text';
+    input.value = state.session.name;
+    input.className = 'bg-zinc-700 text-zinc-200 font-mono text-xs px-1 py-0.5 rounded border border-zinc-500 w-48 outline-none focus:border-blue-500';
+    nameEl.replaceWith(input);
+    input.focus();
+    input.select();
+    const commit = async () => {
+      const newName = input.value.trim();
+      if (newName && newName !== state.session!.name) {
+        await renameSession(state.session!.id, newName);
+      } else {
+        render(getState());
+      }
+    };
+    input.addEventListener('blur', commit);
+    input.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') input.blur();
+      if (e.key === 'Escape') render(getState());
+    });
+  });
   barEl.appendChild(nameEl);
 
   // Separator

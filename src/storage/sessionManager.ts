@@ -142,6 +142,14 @@ export async function deleteSession(id: string): Promise<void> {
   }
 }
 
+export async function renameSession(id: string, newName: string): Promise<void> {
+  await dbUpdateSession(id, { name: newName, updated: Date.now() });
+  if (currentState.session?.id === id) {
+    currentState.session = { ...currentState.session, name: newName, updated: Date.now() };
+    notify();
+  }
+}
+
 // === Version operations ===
 
 export async function saveVersion(

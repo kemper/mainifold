@@ -1,4 +1,5 @@
 import type { MeshData } from '../geometry/types';
+import { get3MFUnitString } from '../geometry/units';
 
 export function export3MF(meshData: MeshData): void {
   const { vertProperties, triVerts, numVert, numTri, numProp } = meshData;
@@ -22,7 +23,7 @@ export function export3MF(meshData: MeshData): void {
   }
 
   const modelXml = `<?xml version="1.0" encoding="UTF-8"?>
-<model unit="millimeter" xml:lang="en-US" xmlns="http://schemas.microsoft.com/3dmanufacturing/core/2015/02">
+<model unit="${get3MFUnitString()}" xml:lang="en-US" xmlns="http://schemas.microsoft.com/3dmanufacturing/core/2015/02">
   <resources>
     <object id="1" type="model">
       <mesh>

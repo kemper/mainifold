@@ -2,6 +2,8 @@ import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import type { MeshData } from '../geometry/types';
 import { createDefaultMaterial, createWireframeMaterial } from './materials';
+import { initPhantomGroup } from './phantomGeometry';
+import { initMeasureOverlay } from './measureOverlay';
 
 let renderer: THREE.WebGLRenderer;
 let camera: THREE.PerspectiveCamera;
@@ -72,6 +74,12 @@ export function initViewport(container: HTMLElement): {
 
   meshGroup = new THREE.Group();
   scene.add(meshGroup);
+
+  // Phantom geometry group (for reference/fitment overlays)
+  initPhantomGroup(scene);
+
+  // Measure overlay group
+  initMeasureOverlay(scene, camera, renderer);
 
   // ResizeObserver
   const observer = new ResizeObserver(entries => {
@@ -272,6 +280,31 @@ export function getCamera(): THREE.PerspectiveCamera {
 
 export function getRenderer(): THREE.WebGLRenderer {
   return renderer;
+}
+
+export function getCameraState(): { azimuth: number; elevation: number; distance: number; target: [number, number, number] } {
+  const dir = camera.position.clone().sub(controls.target);
+  const distance = Math.round(dir.length() * 100) / 100;
+  const elevation = Math.round(Math.asin(dir.z / dir.length()) * 180 / Math.PI * 100) / 100;
+  const azimuth = Math.round((((Math.atan2(dir.x, -dir.y) * 180 / Math.PI) % 360) + 360) % 360 * 100) / 100;
+  return {
+    azimuth,
+    elevation,
+    distance,
+    target: [
+      Math.round(controls.target.x * 100) / 100,
+      Math.round(controls.target.y * 100) / 100,
+      Math.round(controls.target.z * 100) / 100,
+    ],
+  };
+}
+
+export function getCanvas(): HTMLCanvasElement {
+  return renderer.domElement;
+}
+
+export function getMeshGroup(): THREE.Group {
+  return meshGroup;
 }
 
 export function dispose(): void {
