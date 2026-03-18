@@ -8,6 +8,10 @@ let onLoadCode: ((code: string) => void) | null = null;
 export function createGalleryView(container: HTMLElement, loadCode: (code: string) => void): void {
   galleryEl = container;
   onLoadCode = loadCode;
+
+  window.addEventListener('session-changed', () => {
+    if (galleryEl && !galleryEl.classList.contains('hidden')) refreshGallery();
+  });
 }
 
 export async function refreshGallery(): Promise<void> {

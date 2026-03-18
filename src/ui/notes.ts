@@ -7,6 +7,10 @@ let notesEl: HTMLElement | null = null;
 
 export function createNotesView(container: HTMLElement): void {
   notesEl = container;
+
+  window.addEventListener('session-changed', () => {
+    if (notesEl && !notesEl.classList.contains('hidden')) refreshNotes();
+  });
 }
 
 export async function refreshNotes(): Promise<void> {

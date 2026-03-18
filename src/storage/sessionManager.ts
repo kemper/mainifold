@@ -54,6 +54,7 @@ const listeners: StateChangeListener[] = [];
 
 function notify() {
   for (const fn of listeners) fn(currentState);
+  window.dispatchEvent(new CustomEvent('session-changed', { detail: currentState }));
 }
 
 export function onStateChange(fn: StateChangeListener): void {

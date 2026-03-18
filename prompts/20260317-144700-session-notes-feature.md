@@ -62,3 +62,18 @@ switch via the existing `tab-switched` event pattern.
 `updateNote(id, text)` to db.ts. Notes panel imports these directly rather
 than routing through sessionManager, keeping the manager focused on
 session-level operations.
+
+## Human
+
+Notes view doesn't refresh when opening a session. Improve eventing so
+components auto-refresh on session state changes.
+
+## Assistant
+
+### Key decisions
+
+**`session-changed` DOM event**: Added a single `window.dispatchEvent` call
+in the session manager's `notify()` function. Gallery and Notes panels
+listen for it and self-refresh when visible (checking `!classList.contains('hidden')`).
+No new event bus or abstraction — just a CustomEvent on window. Future
+components get reactive session updates for free by listening to the same event.
