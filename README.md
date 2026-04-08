@@ -136,6 +136,12 @@ src/
 
 Requires `Cross-Origin-Embedder-Policy` and `Cross-Origin-Opener-Policy` headers for SharedArrayBuffer / WASM threads (configured in `vite.config.ts`).
 
+## Security
+
+mAInifold is designed to be controlled by AI agents, which means you're trusting the app not to embed hidden instructions that trick your AI into doing something harmful. See [SECURITY.md](SECURITY.md) for the full trust model, what the app can and can't do, and how to verify it yourself.
+
+**TL;DR:** No backend, no outbound network requests, no analytics, no hidden DOM instructions, 7 well-known dependencies, enforced Content Security Policy.
+
 ## Coordinate system
 
 Right-handed, Z-up. The XY plane is the ground, Z points up. Units are arbitrary — use consistent scale.
