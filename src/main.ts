@@ -6,7 +6,7 @@ import { renderCompositeCanvas, renderElevationsToContainer, renderSingleView, r
 import { setPhantom, clearPhantom, hasPhantom, type PhantomOptions } from './renderer/phantomGeometry';
 import { initEditor, setValue, getValue } from './editor/codeEditor';
 import { createLayout } from './ui/layout';
-import { createToolbar } from './ui/toolbar';
+import { createToolbar, isAutoRun } from './ui/toolbar';
 import { createLandingPage } from './ui/landing';
 import { createHelpPage } from './ui/help';
 import { initViewsPanel, updateMultiView } from './ui/panels';
@@ -556,9 +556,9 @@ async function main() {
   // Init measure tool
   initMeasureTool(getCanvas(), getCamera(), getMeshGroup(), viewportPane);
 
-  // Init editor
+  // Init editor — only auto-run if auto-run is enabled
   initEditor(editorContainer, defaultCode, (code: string) => {
-    runCode(code);
+    if (isAutoRun()) runCode(code);
   });
 
   // Wire up clip controls

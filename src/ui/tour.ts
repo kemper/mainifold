@@ -17,9 +17,9 @@ const STEPS: TourStep[] = [
     placement: 'right',
   },
   {
-    target: '#btn-run',
-    title: 'Run Your Code',
-    description: 'Click Run to execute your code and render the 3D model in the viewport.',
+    target: '#btn-auto-run',
+    title: 'Live Rendering',
+    description: 'Code re-renders automatically as you type. Click to pause auto-render if your model gets complex.',
     placement: 'bottom',
   },
   {
