@@ -56,6 +56,15 @@ mainifold.getSessionUrl()               // → URL for this session
 await mainifold.listSessions()          // → [{id, name, updated}]
 await mainifold.openSession(id)         // Open existing session
 await mainifold.clearAllSessions()      // Delete all sessions & versions
+
+// Notes — track design context, decisions, and measurements
+await mainifold.addSessionNote(text)    // → {id, text, timestamp}
+await mainifold.listSessionNotes()      // → [{id, text, timestamp}, ...]
+await mainifold.updateSessionNote(noteId, text) // Edit a note
+await mainifold.deleteSessionNote(noteId)       // Remove a note
+
+// Session context — get everything in one call (for resuming sessions)
+await mainifold.getSessionContext()     // → {session, versions[], notes[], currentVersion, versionCount}
 ```
 
 ## #geometry-data schema
@@ -343,6 +352,55 @@ const r = await mainifold.createSessionWithVersions("Castle", [
 // r.versions = [{version, geometry}, ...]
 // r.galleryUrl = "http://localhost:5173/editor?session=abc&gallery"
 ```
+
+### Session notes — tracking design context
+
+Use session notes to build a persistent record of the design story. This enables any agent (or human) resuming the session later to understand what happened and why.
+
+**When to log notes:**
+- Before first version: log the user's requirements and constraints
+- On each version: include rationale in the label and optional `notes` field
+- When the user gives feedback: log it as a note, then save the next version
+- On key decisions: log dimensions, materials, constraints, tradeoffs
+- On failed attempts: log what didn't work and why
+
+**Prefix conventions** (so notes are scannable):
+```js
+await mainifold.addSessionNote("[REQUIREMENT] 5.5x5.5x36in boards, snap-on C-channel, screw holes");
+await mainifold.addSessionNote("[FEEDBACK] User: groove looks too shallow, wants full tongue insertion");
+await mainifold.addSessionNote("[DECISION] Omitted right wall on end pieces for clearance");
+await mainifold.addSessionNote("[MEASUREMENT] Tongue width = outerW - 2*wallT = 133.7mm");
+await mainifold.addSessionNote("[ATTEMPT] v2 tried 3mm walls but too flimsy. Increased to 5mm in v3");
+await mainifold.addSessionNote("[TODO] Add chamfer to bottom edge for easier print removal");
+```
+
+Version-level notes go in the `runAndSave` assertions object:
+```js
+await mainifold.runAndSave(code, "v2 - widened tongue per feedback", {
+  isManifold: true,
+  notes: "Changed tabW from 20mm to outerW - 2*wallT per user request"
+});
+```
+
+### Resuming a session
+
+When opening a session you haven't worked on (or returning after time away), **always call `getSessionContext()` first**:
+```js
+await mainifold.openSession(sessionId);
+const ctx = await mainifold.getSessionContext();
+// ctx.session    — {id, name, created, updated}
+// ctx.versions   — [{index, label, timestamp, notes?, geometrySummary: {volume, boundingBox, ...}}]
+// ctx.notes      — [{id, text, timestamp}]  (all session notes)
+// ctx.currentVersion — {index, label}
+// ctx.versionCount
+```
+
+Read the notes and version history before making changes. The notes tell you:
+- What the user originally asked for (`[REQUIREMENT]` notes)
+- What was tried and why (`[DECISION]` and `[ATTEMPT]` notes)
+- What feedback the user gave (`[FEEDBACK]` notes)
+- What measurements or constraints matter (`[MEASUREMENT]` notes)
+- What still needs to be done (`[TODO]` notes)
 
 ### Recommended iteration pattern
 

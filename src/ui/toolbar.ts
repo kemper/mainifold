@@ -116,7 +116,7 @@ export function createToolbar(
 
   const dropdown = document.createElement('div');
   dropdown.id = 'export-dropdown';
-  dropdown.className = 'absolute right-0 top-full mt-1 bg-zinc-800 border border-zinc-600 rounded shadow-lg py-1 hidden z-10 min-w-32';
+  dropdown.className = 'absolute right-0 top-full mt-1 bg-zinc-800 border border-zinc-600 rounded shadow-lg py-1 hidden z-20 min-w-32';
 
   const glbOpt = createDropdownItem('GLB (recommended)');
   glbOpt.addEventListener('click', () => {
