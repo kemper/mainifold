@@ -20,10 +20,6 @@ export function initMeasureOverlay(
   scene.add(measureGroup);
 }
 
-export function getMeasureGroup(): THREE.Group | null {
-  return measureGroup;
-}
-
 export function showMeasurement(
   p1: THREE.Vector3,
   p2: THREE.Vector3,

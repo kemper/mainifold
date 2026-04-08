@@ -128,6 +128,7 @@ function createSessionTile(
     const img = document.createElement('img');
     img.className = 'w-full h-full object-contain';
     img.src = URL.createObjectURL(latestVersion.thumbnail);
+    img.addEventListener('load', () => URL.revokeObjectURL(img.src));
     thumbContainer.appendChild(img);
   } else {
     const placeholder = document.createElement('span');
