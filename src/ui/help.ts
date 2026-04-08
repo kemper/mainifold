@@ -52,7 +52,7 @@ export function createHelpPage(
     },
     {
       heading: 'AI agent workflow',
-      body: 'mAInifold is designed to be driven by AI agents. An agent navigates to the app, writes geometry code, and uses the <code class="text-emerald-400 bg-zinc-800 px-1 rounded">window.mainifold</code> console API to create sessions, run code, validate results, and save versions — all programmatically. The agent can produce a gallery URL for human review. <a href="/mainifold/ai.md" class="text-blue-400 hover:underline">Full agent instructions \u2192</a>',
+      body: 'mAInifold is designed to be driven by AI agents. An agent navigates to the app, writes geometry code, and uses the <code class="text-emerald-400 bg-zinc-800 px-1 rounded">window.mainifold</code> console API to create sessions, run code, validate results, and save versions — all programmatically. The agent can produce a gallery URL for human review. <a href="/ai.md" class="text-blue-400 hover:underline">Full agent instructions \u2192</a>',
     },
     {
       heading: 'Connecting an AI agent',
@@ -82,7 +82,7 @@ export function createHelpPage(
   // Footer with agent link
   const footer = document.createElement('div');
   footer.className = 'mt-12 pt-6 border-t border-zinc-800 text-xs text-zinc-600';
-  footer.innerHTML = 'Full AI agent documentation: <a href="/mainifold/ai.md" class="text-zinc-500 hover:text-zinc-300 transition-colors">/ai.md</a>';
+  footer.innerHTML = 'Full AI agent documentation: <a href="/ai.md" class="text-zinc-500 hover:text-zinc-300 transition-colors">/ai.md</a>';
   content.appendChild(footer);
 
   page.appendChild(content);

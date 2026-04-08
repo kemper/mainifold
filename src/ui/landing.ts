@@ -101,7 +101,7 @@ export async function createLandingPage(
   footer.className = 'pb-8 text-center';
   const agentLink = document.createElement('a');
   agentLink.className = 'text-xs text-zinc-600 hover:text-zinc-400 transition-colors';
-  agentLink.href = '/mainifold/ai.md';
+  agentLink.href = '/ai.md';
   agentLink.textContent = 'Using mAInifold with an AI agent? See the agent instructions';
   footer.appendChild(agentLink);
   page.appendChild(footer);

@@ -74,12 +74,13 @@
 ## CI/CD & Deployment
 
 **Hosting:**
-- GitHub Pages (static site hosting)
-- Base URL: `/mainifold/` (configured in `vite.config.ts`)
+- Cloudflare Pages (static site hosting with SPA routing)
+- Base URL: `/` (configured in `vite.config.ts`)
+- `_redirects` file provides SPA catch-all (`/* /index.html 200`)
+- `_headers` file provides native COOP/COEP headers
 
 **CI Pipeline:**
-- GitHub Actions (`.github/workflows/deploy.yml`)
-- Trigger: Push to `main` branch or manual `workflow_dispatch`
+- Cloudflare Pages auto-builds on push to `main` branch
 - Steps:
   1. Checkout code
   2. Setup Node.js 20 with npm cache

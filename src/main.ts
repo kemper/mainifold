@@ -306,20 +306,17 @@ function getGeometryDataObj(): Record<string, unknown> | null {
   }
 }
 
-// Base path for the app (matches vite.config.ts base)
-const BASE_PATH = '/mainifold';
-
 // Determine which page to show based on URL path and query params
 function shouldShowLanding(): boolean {
   const path = window.location.pathname;
   const params = new URLSearchParams(window.location.search);
   // Landing if at root path AND no query params that indicate a specific view
-  const isRootPath = path === `${BASE_PATH}/` || path === BASE_PATH;
+  const isRootPath = path === '/' || path === '';
   return isRootPath && !params.has('view') && !params.has('session') && !params.has('gallery') && !params.has('notes');
 }
 
 function shouldShowHelp(): boolean {
-  return window.location.pathname === `${BASE_PATH}/help`;
+  return window.location.pathname === '/help';
 }
 
 
@@ -469,11 +466,11 @@ async function main() {
             // Go back to landing
             helpEl?.classList.add('hidden');
             landingEl.classList.remove('hidden');
-            window.history.replaceState(null, '', `${BASE_PATH}/`);
+            window.history.replaceState(null, '', '/');
           } else {
             // Go back to editor
             transitionToEditor();
-            window.history.replaceState(null, '', `${BASE_PATH}/editor`);
+            window.history.replaceState(null, '', '/editor');
           }
         },
       });
@@ -482,7 +479,7 @@ async function main() {
     editorUI.classList.add('hidden');
     if (landingEl) landingEl.classList.add('hidden');
     helpEl.classList.remove('hidden');
-    window.history.replaceState(null, '', `${BASE_PATH}/help`);
+    window.history.replaceState(null, '', '/help');
   }
 
   // Expose showHelp for toolbar
@@ -502,7 +499,7 @@ async function main() {
         await ensureEditorReady();
         setStatus(statusBar, 'ready', 'Ready');
         runCode(defaultCode);
-        window.history.replaceState(null, '', `${BASE_PATH}/editor`);
+        window.history.replaceState(null, '', '/editor');
       },
       onOpenHelp: showHelp,
       onOpenSession: async (sid) => {
@@ -515,7 +512,7 @@ async function main() {
           const refImages = await getReferenceImagesFromSession();
           if (refImages) _setRefImages(refImages as ReferenceImages);
         }
-        window.history.replaceState(null, '', `${BASE_PATH}/editor?session=${sid}`);
+        window.history.replaceState(null, '', `/editor?session=${sid}`);
       },
     });
   } else if (showHelpPage) {
@@ -526,7 +523,7 @@ async function main() {
       onBack: () => {
         helpEl?.classList.add('hidden');
         transitionToEditor();
-        window.history.replaceState(null, '', `${BASE_PATH}/editor`);
+        window.history.replaceState(null, '', '/editor');
       },
     });
   }

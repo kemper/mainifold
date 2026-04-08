@@ -138,7 +138,7 @@ mainifold/
 - `src/main.ts`: Application bootstrap, console API, execution orchestration
 
 **Configuration:**
-- `vite.config.ts`: Build config, Tailwind plugin, COOP/COEP dev server headers, base path `/mainifold/`
+- `vite.config.ts`: Build config, Tailwind plugin, COOP/COEP dev server headers
 - `tsconfig.json`: Strict TypeScript, ES2020 target, bundler module resolution
 - `package.json`: Dependencies, `npm run dev` / `npm run build` / `npm run preview`
 

@@ -138,8 +138,8 @@ export function createLayout(appContainer: HTMLElement): LayoutElements {
     // Notify listeners (e.g. gallery refresh)
     window.dispatchEvent(new CustomEvent('tab-switched', { detail: { tab } }));
 
-    // Update URL to reflect current tab — always use /mainifold/editor as base
-    const basePath = '/mainifold/editor';
+    // Update URL to reflect current tab
+    const basePath = '/editor';
     const params = new URLSearchParams(window.location.search);
     if (tab === 'ai') {
       params.set('view', 'ai');

@@ -69,8 +69,7 @@ export function getState(): SessionState {
 
 function updateURL() {
   const params = new URLSearchParams(window.location.search);
-  // Always use /mainifold/editor as the base path when a session is active
-  const basePath = '/mainifold/editor';
+  const basePath = '/editor';
   if (currentState.session) {
     params.set('session', currentState.session.id);
     if (currentState.currentVersion) {
@@ -229,13 +228,13 @@ export async function listCurrentVersions(): Promise<Version[]> {
 
 export function getSessionUrl(): string {
   if (!currentState.session) return window.location.href;
-  const base = window.location.origin + '/mainifold/editor';
+  const base = window.location.origin + '/editor';
   return `${base}?session=${currentState.session.id}`;
 }
 
 export function getGalleryUrl(): string {
   if (!currentState.session) return window.location.href;
-  const base = window.location.origin + '/mainifold/editor';
+  const base = window.location.origin + '/editor';
   return `${base}?session=${currentState.session.id}&gallery`;
 }
 

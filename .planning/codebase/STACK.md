@@ -70,7 +70,7 @@
 - Includes only `src/` directory
 
 **Vite (`vite.config.ts`):**
-- Base path: `/mainifold/` (for GitHub Pages deployment under subpath)
+- Base path: `/` (Cloudflare Pages hosting at root)
 - Plugins: `@tailwindcss/vite`
 - `manifold-3d` excluded from dependency optimization (WASM module needs special handling)
 - Dev server sets COEP/COOP headers for SharedArrayBuffer:

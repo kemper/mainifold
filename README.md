@@ -20,7 +20,7 @@ npm install
 npm run dev
 ```
 
-Open [http://localhost:5173/mainifold/](http://localhost:5173/mainifold/) for the landing page, or [http://localhost:5173/mainifold/editor?view=ai](http://localhost:5173/mainifold/editor?view=ai) to start with all 4 isometric views visible (recommended for AI agents).
+Open [http://localhost:5173/](http://localhost:5173/) for the landing page, or [http://localhost:5173/editor?view=ai](http://localhost:5173/editor?view=ai) to start with all 4 isometric views visible (recommended for AI agents).
 
 ## How it works
 
@@ -75,7 +75,7 @@ Best for: automated/headless workflows, CI pipelines, or when you don't want to 
 
 ### The workflow
 
-Whichever option you use, the AI agent navigates to `http://localhost:5173/mainifold/editor?view=ai`, then uses the `window.mainifold` console API to create sessions, write geometry code, validate results with assertions, save versions, and hand you a gallery URL for review.
+Whichever option you use, the AI agent navigates to `http://localhost:5173/editor?view=ai`, then uses the `window.mainifold` console API to create sessions, write geometry code, validate results with assertions, save versions, and hand you a gallery URL for review.
 
 See `CLAUDE.md` for the full API reference and recommended iteration patterns.
 
