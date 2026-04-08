@@ -116,6 +116,23 @@ The toolbar dropdown includes built-in examples:
 | Desk Organizer | Rounded rectangles, hollowing |
 | Christmas Tree | Stacked cones with ornaments |
 
+## Deployment
+
+The app deploys via [Cloudflare Pages](https://pages.cloudflare.com/) with branch-based environments:
+
+| Branch | Environment | URL |
+|--------|-------------|-----|
+| `staging` | Preview | `staging.mainifold.pages.dev` |
+| `main` | Production | `mainifold.pages.dev` |
+
+**Workflow:**
+
+1. Develop on a feature branch
+2. Merge to `staging` — auto-deploys for verification
+3. Once validated, PR from `staging` → `main` for production release
+
+`main` is protected and requires PR review. A GitHub Action automatically syncs `main` back into `staging` after every production deploy, so staging never falls behind.
+
 ## Architecture
 
 Static site — vanilla TypeScript + Vite, no backend or framework.

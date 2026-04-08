@@ -11,6 +11,19 @@ Open `http://localhost:5173/editor?view=ai` to start with the 4 isometric views 
 
 Requires COEP/COOP headers (configured in vite.config.ts) for SharedArrayBuffer / WASM threads.
 
+## Deployment
+
+The app deploys via Cloudflare Pages with branch-based environments:
+
+- **`staging`** branch → preview deploy at `staging.mainifold.pages.dev`
+- **`main`** branch → production deploy (protected, requires PR review)
+
+**All work should be merged to `staging` first.** Do not push directly to `main`. The workflow is:
+
+1. Create a feature branch, develop and test locally
+2. Merge to `staging` — auto-deploys for verification
+3. Once validated on staging, open a PR from `staging` → `main` for production release
+
 ## Smoke Test — Verifying the App Works
 
 After any changes that touch routing, Vite config, index.html, or initialization code, verify these things still work:
