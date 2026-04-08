@@ -45,22 +45,29 @@ The `examples/` directory is for hand-curated demos shipped with the app. User-r
    ```
 3. **Hand the user a gallery URL** so they can visually compare versions.
 
-### Browser access via Playwright MCP
+### Browser access
 
-The session API lives at `window.mainifold` in the browser. Use the **Playwright MCP** to call it from Claude Code. It launches its own browser — no Chrome remote debugging setup needed.
+The session API lives at `window.mainifold` in the browser. There are several ways to give an AI agent browser access:
 
-**Setup** (one-time):
+**Option 1: Claude in Chrome extension** — Best for interactive sessions. The extension lets Claude Desktop control the active Chrome tab directly (screenshots, JS execution, DOM reading). No MCP setup needed — just install the extension.
+
+**Option 2: Chrome DevTools MCP** — Best when using your existing browser. Enable remote debugging in Chrome settings (or launch with `--remote-debugging-port=9222`), then:
+```bash
+claude mcp add chrome-devtools -s user -- npx -y @anthropic-ai/chrome-devtools-mcp-server
+```
+
+**Option 3: Playwright MCP** — Best for automated/headless workflows. Launches its own browser, no Chrome setup needed:
 ```bash
 claude mcp add playwright -s user -- npx -y @playwright/mcp
 ```
 
-**Usage:** Navigate to the app with `browser_navigate`, then call `window.mainifold` methods via `browser_evaluate` or `browser_run_code`. Example flow:
-1. `browser_navigate` → `http://localhost:5173/mainifold/editor?view=ai`
-2. `browser_evaluate` → `async () => await window.mainifold.createSession("My design")`
-3. `browser_run_code` → pass geometry code to `window.mainifold.runAndSave(code, label, assertions)`
-4. `browser_take_screenshot` → verify the result visually
+**Usage (any option):** Navigate to the app, then call `window.mainifold` methods via JavaScript evaluation. Example flow:
+1. Navigate → `http://localhost:5173/mainifold/editor?view=ai`
+2. JS eval → `await window.mainifold.createSession("My design")`
+3. JS eval → `await window.mainifold.runAndSave(code, label, assertions)`
+4. Screenshot → verify the result visually
 
-**If Playwright MCP is not available:** Write the geometry code inline and tell the user to paste it into the editor. Do NOT create files in `examples/` — that directory is not for user-requested work.
+**If no browser MCP is available:** Write the geometry code inline and tell the user to paste it into the editor. Do NOT create files in `examples/` — that directory is not for user-requested work.
 
 ### Anti-patterns
 

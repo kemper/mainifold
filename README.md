@@ -45,16 +45,39 @@ Manifold.cube([10, 10, 10], true)
 
 ## AI Agent Setup
 
-AI agents (Claude Code, etc.) interact with the app via `window.mainifold` in the browser. The **Playwright MCP** provides browser access — it launches its own browser, no Chrome remote debugging needed.
+AI agents (Claude Code, etc.) interact with the app via `window.mainifold` in the browser. There are several ways to give an AI agent browser access:
 
-**One-time setup:**
+### Option 1: Claude in Chrome extension (recommended)
+
+The [Claude in Chrome](https://chromewebstore.google.com/detail/claude-in-chrome/ifjdokaooeocjpmoijgkndfhkmnbobkp) extension lets Claude Desktop control your active Chrome tab directly — screenshots, JavaScript execution, and DOM reading all work. No extra setup beyond installing the extension.
+
+Best for: interactive sessions where you want to see what the AI is doing in real time.
+
+### Option 2: Chrome DevTools MCP
+
+If Chrome is running with remote debugging enabled (there's a Chrome setting for this, or launch with `--remote-debugging-port=9222`), Claude Desktop can connect via the DevTools protocol.
+
+```bash
+claude mcp add chrome-devtools -s user -- npx -y @anthropic-ai/chrome-devtools-mcp-server
+```
+
+Best for: using your existing browser with all your sessions/data intact.
+
+### Option 3: Playwright MCP
+
+Launches a separate browser instance — no Chrome setup needed.
+
 ```bash
 claude mcp add playwright -s user -- npx -y @playwright/mcp
 ```
 
-Then restart your Claude Code session. The agent can navigate to the app, create sessions, run geometry code, take screenshots, and iterate — all through MCP tools.
+Best for: automated/headless workflows, CI pipelines, or when you don't want to use your main browser.
 
-See `CLAUDE.md` for the full AI agent workflow and API reference.
+### The workflow
+
+Whichever option you use, the AI agent navigates to `http://localhost:5173/mainifold/editor?view=ai`, then uses the `window.mainifold` console API to create sessions, write geometry code, validate results with assertions, save versions, and hand you a gallery URL for review.
+
+See `CLAUDE.md` for the full API reference and recommended iteration patterns.
 
 ## Console API
 

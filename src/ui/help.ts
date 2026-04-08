@@ -55,6 +55,13 @@ export function createHelpPage(
       body: 'mAInifold is designed to be driven by AI agents. An agent navigates to the app, writes geometry code, and uses the <code class="text-emerald-400 bg-zinc-800 px-1 rounded">window.mainifold</code> console API to create sessions, run code, validate results, and save versions — all programmatically. The agent can produce a gallery URL for human review. <a href="/mainifold/ai.md" class="text-blue-400 hover:underline">Full agent instructions \u2192</a>',
     },
     {
+      heading: 'Connecting an AI agent',
+      body: 'There are three ways to give an AI agent browser access:<br><br>' +
+        '<strong class="text-zinc-300">Claude in Chrome extension</strong> — Install the extension and Claude Desktop can control your active tab directly. Best for interactive sessions.<br><br>' +
+        '<strong class="text-zinc-300">Chrome DevTools MCP</strong> — Enable remote debugging in Chrome settings, then add the MCP server to Claude. Uses your existing browser session.<br><br>' +
+        '<strong class="text-zinc-300">Playwright MCP</strong> — Launches a separate browser, no Chrome setup needed. Best for automated or headless workflows.',
+    },
+    {
       heading: 'Quick example',
       body: '<pre class="bg-zinc-800 rounded-lg p-4 text-xs leading-relaxed overflow-x-auto mt-2"><code class="text-zinc-300">const { Manifold } = api;\n\n// Create a box and subtract a cylinder\nconst box = Manifold.cube([20, 20, 10], true);\nconst hole = Manifold.cylinder(12, 4, 4, 32);\n\nreturn box.subtract(hole);</code></pre>',
     },
