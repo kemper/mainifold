@@ -13,3 +13,4 @@ The guided tour button on the help page doesn't open the editor first, so the to
 
 - `src/ui/help.ts`: Added `onStartTour` callback to `HelpCallbacks`, replaced inline tour-start logic with callback invocation, removed unused tour imports.
 - `src/main.ts`: Both `createHelpPage` call sites now provide `onStartTour` that transitions to editor, awaits readiness, and starts the tour.
+- `package.json`: Added missing `deploy` script for Cloudflare Pages build command.
