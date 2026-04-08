@@ -273,6 +273,21 @@ export async function listSessionNotes(): Promise<SessionNote[]> {
   return dbListNotes(currentState.session.id);
 }
 
+// === Cleanup ===
+
+/** Delete a session if it has no versions and no notes (used for auto-created empty sessions) */
+export async function deleteIfEmpty(sessionId: string): Promise<boolean> {
+  const count = await getVersionCount(sessionId);
+  if (count > 0) return false;
+  const notes = await dbListNotes(sessionId);
+  if (notes.length > 0) return false;
+  await dbDeleteSession(sessionId);
+  if (currentState.session?.id === sessionId) {
+    currentState = { session: null, currentVersion: null, versionCount: 0 };
+  }
+  return true;
+}
+
 // === Clear all data ===
 
 export async function clearAllSessions(): Promise<void> {

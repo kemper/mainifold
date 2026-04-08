@@ -48,6 +48,7 @@ import {
   getReferenceImagesFromSession,
   addSessionNote,
   listSessionNotes,
+  deleteIfEmpty,
   type ExportedSession,
   type ReferenceImagesData,
 } from './storage/sessionManager';
@@ -468,9 +469,17 @@ async function main() {
             landingEl.classList.remove('hidden');
             window.history.replaceState(null, '', '/');
           } else {
-            // Go back to editor
+            // Go back to editor — preserve session URL params
             transitionToEditor();
-            window.history.replaceState(null, '', '/editor');
+            const state = getState();
+            if (state.session) {
+              const params = new URLSearchParams();
+              params.set('session', state.session.id);
+              if (state.currentVersion) params.set('v', String(state.currentVersion.index));
+              window.history.replaceState(null, '', `/editor?${params}`);
+            } else {
+              window.history.replaceState(null, '', '/editor');
+            }
           }
         },
       });
@@ -497,9 +506,9 @@ async function main() {
       onOpenEditor: async () => {
         transitionToEditor();
         await ensureEditorReady();
+        await createSession();
         setStatus(statusBar, 'ready', 'Ready');
         runCode(defaultCode);
-        window.history.replaceState(null, '', '/editor');
       },
       onOpenHelp: showHelp,
       onOpenSession: async (sid) => {
@@ -520,10 +529,14 @@ async function main() {
     editorUI.classList.add('hidden');
     overlayContainer.classList.remove('hidden');
     helpEl = createHelpPage(overlayContainer, {
-      onBack: () => {
+      onBack: async () => {
         helpEl?.classList.add('hidden');
         transitionToEditor();
-        window.history.replaceState(null, '', '/editor');
+        await ensureEditorReady();
+        if (!getState().session) {
+          await createSession();
+          runCode(defaultCode);
+        }
       },
     });
   }
@@ -584,14 +597,24 @@ async function main() {
           refreshGallery();
         }
       } else {
+        await createSession();
         setStatus(statusBar, 'ready', 'Ready');
         runCode(defaultCode);
       }
     } else {
+      await createSession();
       setStatus(statusBar, 'ready', 'Ready');
       runCode(defaultCode);
     }
   }
+
+  // Clean up empty auto-created sessions when leaving the page
+  window.addEventListener('beforeunload', () => {
+    const state = getState();
+    if (state.session && state.versionCount === 0) {
+      deleteIfEmpty(state.session.id);
+    }
+  });
 
   // === Execution state ===
   let _running = false;
@@ -867,6 +890,12 @@ async function main() {
         if (failures.length > 0) {
           return { passed: false, failures, geometry: testData, version: null, diff: null, galleryUrl: getGalleryUrl() };
         }
+      }
+
+      // Auto-create session if none exists (e.g. AI agent calling runAndSave without createSession)
+      if (!getState().session) {
+        const sessionName = label || `AI Session ${new Date().toLocaleDateString()}`;
+        await createSession(sessionName);
       }
 
       const prevGeoData = getState().currentVersion?.geometryData as Record<string, unknown> | null;
