@@ -1,4 +1,4 @@
 User-agent: *
 Allow: /
 
-Sitemap: https://mainifold.com/sitemap.xml
+Sitemap: https://mainifold.pages.dev/sitemap.xml

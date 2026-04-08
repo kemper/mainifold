@@ -11,6 +11,16 @@ Open `http://localhost:5173/editor?view=ai` to start with the 4 isometric views 
 
 Requires COEP/COOP headers (configured in vite.config.ts) for SharedArrayBuffer / WASM threads.
 
+## Deployment
+
+Hosted on **Cloudflare Pages** at `mainifold.pages.dev`. Cloudflare builds from the `main` branch automatically.
+
+- **Build command:** `npm run build`
+- **Output directory:** `dist/`
+- **SPA routing:** `public/_redirects` (`/* /index.html 200`)
+- **Headers:** `public/_headers` (COEP, COOP, CSP) — Cloudflare Pages serves these automatically
+- **Environment variable:** Set `SITE_URL` in Cloudflare Pages dashboard (Settings > Environment variables) to the production URL (e.g., `https://mainifold.pages.dev`). This is used at build time by the `absoluteUrls` Vite plugin to make Open Graph image URLs and canonical links absolute. If `SITE_URL` is not set, the plugin falls back to `CF_PAGES_URL` (provided automatically by Cloudflare Pages for each deployment).
+
 ## Smoke Test — Verifying the App Works
 
 After any changes that touch routing, Vite config, index.html, or initialization code, verify these things still work:

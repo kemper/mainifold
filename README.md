@@ -136,6 +136,14 @@ src/
 
 Requires `Cross-Origin-Embedder-Policy` and `Cross-Origin-Opener-Policy` headers for SharedArrayBuffer / WASM threads (configured in `vite.config.ts`).
 
+## Deployment
+
+Hosted on [Cloudflare Pages](https://pages.cloudflare.com/) at [mainifold.pages.dev](https://mainifold.pages.dev). Builds automatically from the `main` branch.
+
+- Build: `npm run build` → `dist/`
+- SPA routing via `_redirects`, COEP/COOP/CSP headers via `_headers`
+- Set `SITE_URL` env var in Cloudflare Pages dashboard for absolute OG/canonical URLs (falls back to `CF_PAGES_URL`)
+
 ## Coordinate system
 
 Right-handed, Z-up. The XY plane is the ground, Z points up. Units are arbitrary — use consistent scale.

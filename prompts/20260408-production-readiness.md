@@ -21,7 +21,7 @@ identify and implement other production-readiness improvements.
 4. **Loading splash** — Inline HTML spinner visible before JS loads, removed
    on app mount. Uses inline styles (no Tailwind dependency).
 5. **Canonical URL + og:url** — With Vite plugin to resolve to absolute URLs
-   at build time using Netlify's SITE_URL/URL env var.
+   at build time using SITE_URL/CF_PAGES_URL env vars (Cloudflare Pages).
 6. **JSON-LD structured data** — SoftwareApplication schema for Google.
 7. **404 page** — Route check for unrecognized paths, simple centered page
    with "Go home" button. Prevents unknown URLs from loading the editor.

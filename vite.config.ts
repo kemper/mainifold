@@ -2,12 +2,12 @@ import { defineConfig, type Plugin } from 'vite';
 import tailwindcss from '@tailwindcss/vite';
 
 // Resolve relative paths to absolute URLs at build time.
-// Uses SITE_URL env var (Netlify sets URL automatically).
+// Checks SITE_URL (custom env var) then CF_PAGES_URL (Cloudflare Pages built-in).
 function absoluteUrls(): Plugin {
   return {
     name: 'absolute-urls',
     transformIndexHtml(html) {
-      const siteUrl = (process.env.SITE_URL || process.env.URL || '').replace(/\/$/, '');
+      const siteUrl = (process.env.SITE_URL || process.env.CF_PAGES_URL || '').replace(/\/$/, '');
       if (!siteUrl) return html;
       return html
         // OG/Twitter image + og:url meta tags
