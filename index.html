@@ -3,13 +3,64 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>mAInifold</title>
+  <title>mAInifold — AI-Driven Parametric CAD in Your Browser</title>
+  <meta name="description" content="Browser-based parametric CAD powered by manifold-3d WebAssembly. Write JavaScript to construct 3D geometry with boolean operations, driven by AI agents or by hand." />
+
+  <!-- Open Graph (Slack, Discord, Facebook, LinkedIn, etc.) -->
+  <meta property="og:type" content="website" />
+  <meta property="og:title" content="mAInifold — AI-Driven Parametric CAD" />
+  <meta property="og:description" content="Browser-based parametric CAD powered by manifold-3d WebAssembly. Write JavaScript to construct 3D geometry with boolean operations." />
+  <meta property="og:image" content="/og-image.png" />
+  <meta property="og:image:width" content="1200" />
+  <meta property="og:image:height" content="630" />
+  <meta property="og:image:alt" content="mAInifold — AI-driven parametric CAD in your browser" />
+
+  <!-- Canonical + og:url -->
+  <link rel="canonical" href="/" />
+  <meta property="og:url" content="/" />
+
+  <!-- Twitter / X Card -->
+  <meta name="twitter:card" content="summary_large_image" />
+  <meta name="twitter:title" content="mAInifold — AI-Driven Parametric CAD" />
+  <meta name="twitter:description" content="Browser-based parametric CAD powered by manifold-3d WebAssembly. Write JavaScript to construct 3D geometry with boolean operations." />
+  <meta name="twitter:image" content="/og-image.png" />
+
+  <!-- Structured data -->
+  <script type="application/ld+json">
+  {
+    "@context": "https://schema.org",
+    "@type": "SoftwareApplication",
+    "name": "mAInifold",
+    "url": "/",
+    "description": "AI-driven parametric CAD in your browser. Write JavaScript to construct 3D geometry with boolean operations, powered by manifold-3d WebAssembly.",
+    "applicationCategory": "DesignApplication",
+    "operatingSystem": "Any (browser-based)",
+    "offers": { "@type": "Offer", "price": "0", "priceCurrency": "USD" }
+  }
+  </script>
+
+  <!-- Favicon -->
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+  <link rel="icon" href="/favicon-32.png" sizes="32x32" type="image/png" />
+  <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
+
+  <!-- Theme -->
+  <meta name="theme-color" content="#18181b" />
+  <link rel="manifest" href="/manifest.json" />
+
   <link rel="stylesheet" href="/src/style.css" />
   <script src="coi-serviceworker.js"></script>
   <link rel="ai-instructions" href="ai.md" type="text/markdown" />
 </head>
 <body class="bg-zinc-900 w-screen h-screen overflow-hidden">
-  <div id="app" class="flex flex-col h-screen w-screen"></div>
+  <div id="app" class="flex flex-col h-screen w-screen">
+    <!-- Splash screen — visible until JS mounts, then removed -->
+    <div id="loading-splash" style="display:flex;align-items:center;justify-content:center;flex-direction:column;height:100vh;width:100vw;background:#18181b;gap:24px">
+      <div style="font-family:system-ui,-apple-system,sans-serif;font-size:28px;font-weight:700;color:#fafafa;letter-spacing:-0.5px">m<span style="color:#60a5fa">AI</span>nifold</div>
+      <div style="width:24px;height:24px;border:2.5px solid #3f3f46;border-top-color:#60a5fa;border-radius:50%;animation:splash-spin .8s linear infinite"></div>
+      <style>@keyframes splash-spin{to{transform:rotate(360deg)}}</style>
+    </div>
+  </div>
 
   <script type="module" src="/src/main.ts"></script>
 </body>
