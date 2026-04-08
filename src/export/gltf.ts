@@ -1,8 +1,9 @@
 import { getScene } from '../renderer/viewport';
 import { getPhantomGroup } from '../renderer/phantomGeometry';
 import { GLTFExporter } from 'three/addons/exporters/GLTFExporter.js';
+import { downloadBlob, getExportFilename } from './download';
 
-export async function exportGLB(): Promise<void> {
+export async function exportGLB(customName?: string): Promise<void> {
   const scene = getScene();
   const exporter = new GLTFExporter();
 
@@ -17,14 +18,5 @@ export async function exportGLB(): Promise<void> {
   if (phantom) phantom.visible = wasVisible;
 
   const blob = new Blob([result as ArrayBuffer], { type: 'model/gltf-binary' });
-  downloadBlob(blob, 'model.glb');
-}
-
-function downloadBlob(blob: Blob, filename: string) {
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement('a');
-  a.href = url;
-  a.download = filename;
-  a.click();
-  URL.revokeObjectURL(url);
+  downloadBlob(blob, getExportFilename('glb', customName));
 }

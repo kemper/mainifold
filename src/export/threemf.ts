@@ -1,7 +1,8 @@
 import type { MeshData } from '../geometry/types';
 import { get3MFUnitString } from '../geometry/units';
+import { downloadBlob, getExportFilename, getExportTitle } from './download';
 
-export function export3MF(meshData: MeshData): void {
+export function export3MF(meshData: MeshData, customName?: string): void {
   const { vertProperties, triVerts, numVert, numTri, numProp } = meshData;
 
   // Build vertices XML
@@ -22,8 +23,13 @@ export function export3MF(meshData: MeshData): void {
     triangles.push(`          <triangle v1="${v1}" v2="${v2}" v3="${v3}" />`);
   }
 
+  // Escape XML special chars in title
+  const title = getExportTitle().replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+
   const modelXml = `<?xml version="1.0" encoding="UTF-8"?>
 <model unit="${get3MFUnitString()}" xml:lang="en-US" xmlns="http://schemas.microsoft.com/3dmanufacturing/core/2015/02">
+  <metadata name="Title">${title}</metadata>
+  <metadata name="Application">mAInifold</metadata>
   <resources>
     <object id="1" type="model">
       <mesh>
@@ -60,12 +66,7 @@ ${triangles.join('\n')}
   ]);
 
   const blob = new Blob([zip], { type: 'application/vnd.ms-package.3dmanufacturing' });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement('a');
-  a.href = url;
-  a.download = 'model.3mf';
-  a.click();
-  URL.revokeObjectURL(url);
+  downloadBlob(blob, getExportFilename('3mf', customName));
 }
 
 // Minimal ZIP builder — no compression (STORE method), sufficient for 3MF
