@@ -57,10 +57,15 @@ export function createLayout(appContainer: HTMLElement): LayoutElements {
   tabBar.className = 'flex items-center bg-zinc-800 border-b border-zinc-700 shrink-0';
 
   const tabInteractive = createTab('Interactive', true);
+  tabInteractive.title = 'Live 3D viewport \u2014 orbit, zoom, and inspect';
   const tabAI = createTab('AI Views', false);
+  tabAI.title = '4 isometric views for AI agent analysis';
   const tabElevations = createTab('Elevations', false);
+  tabElevations.title = 'Orthographic views with optional reference image overlay';
   const tabGallery = createTab('Gallery', false);
+  tabGallery.title = 'Compare saved versions side-by-side';
   const tabNotes = createTab('Notes', false);
+  tabNotes.title = 'Session notes and design decisions log';
 
   // Copy / Download buttons (shown only on AI Views tab)
   const viewActions = document.createElement('div');
@@ -240,11 +245,19 @@ function createClipControls(): HTMLElement {
   container.id = 'clip-controls';
   container.className = 'absolute top-2 right-2 z-10 flex items-center gap-2';
 
+  // Measure toggle button
+  const measureBtn = document.createElement('button');
+  measureBtn.id = 'measure-toggle';
+  measureBtn.className = 'px-2 py-1 rounded text-xs bg-zinc-800/80 backdrop-blur text-zinc-400 hover:text-zinc-200 hover:bg-zinc-700/80 transition-colors border border-zinc-600/50';
+  measureBtn.textContent = '\uD83D\uDCCF Measure';
+  measureBtn.title = 'Measure distance between two points on your model';
+  container.appendChild(measureBtn);
+
   // Clip toggle button
   const toggleBtn = document.createElement('button');
   toggleBtn.id = 'clip-toggle';
   toggleBtn.className = 'px-2 py-1 rounded text-xs bg-zinc-800/80 backdrop-blur text-zinc-400 hover:text-zinc-200 hover:bg-zinc-700/80 transition-colors border border-zinc-600/50';
-  toggleBtn.textContent = '✂ Clip';
+  toggleBtn.textContent = '\u2702 Cross Section';
   toggleBtn.title = 'Toggle cross-section clipping plane';
   container.appendChild(toggleBtn);
 

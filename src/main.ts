@@ -24,6 +24,7 @@ import { probeAtXY, probeRay, measureDistance, type ProbeResult, type GeneralRay
 import { checkContainment, type ContainmentWarning } from './geometry/containmentCheck';
 import { setUnits as _setUnits, getUnits as _getUnits, type UnitSystem } from './geometry/units';
 import { initMeasureTool, activate as activateMeasure, deactivate as deactivateMeasure, getState as getMeasureState } from './ui/measureTool';
+import { maybeStartTour } from './ui/tour';
 import {
   getSessionIdFromURL,
   getVersionFromURL,
@@ -563,8 +564,16 @@ async function main() {
   // Wire up clip controls
   initClipControls(clipControls);
 
+  // Wire up measure toggle
+  initMeasureToggle(clipControls);
+
   editorReady = true;
   editorReadyResolve();
+
+  // Start guided tour on first visit (after editor fully renders)
+  if (!showLanding && !showHelpPage) {
+    maybeStartTour();
+  }
 
   // If not on landing/help, load session or default code now
   if (!showLanding && !showHelpPage && engineOk) {
@@ -1481,6 +1490,25 @@ async function main() {
         syncClipUI();
       }
     }
+  }
+
+  function initMeasureToggle(container: HTMLElement) {
+    const measureBtn = container.querySelector('#measure-toggle') as HTMLButtonElement;
+    if (!measureBtn) return;
+
+    const inactiveClass = 'px-2 py-1 rounded text-xs bg-zinc-800/80 backdrop-blur text-zinc-400 hover:text-zinc-200 hover:bg-zinc-700/80 transition-colors border border-zinc-600/50';
+    const activeClass = 'px-2 py-1 rounded text-xs bg-blue-500/20 backdrop-blur text-blue-400 hover:bg-blue-500/30 transition-colors border border-blue-500/30';
+
+    measureBtn.addEventListener('click', () => {
+      const state = getMeasureState();
+      if (state.active) {
+        deactivateMeasure();
+        measureBtn.className = inactiveClass;
+      } else {
+        activateMeasure();
+        measureBtn.className = activeClass;
+      }
+    });
   }
 }
 

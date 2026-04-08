@@ -1,3 +1,5 @@
+import { resetTour, startTour } from './tour';
+
 export interface ToolbarCallbacks {
   onRun: () => void;
   onExportGLB: () => void;
@@ -127,6 +129,18 @@ export function createToolbar(
     if (showHelp) showHelp();
   });
   toolbar.appendChild(helpBtn);
+
+  // Tour re-entry button
+  const tourBtn = document.createElement('button');
+  tourBtn.id = 'btn-retake-tour';
+  tourBtn.className = 'flex items-center justify-center w-6 h-6 rounded-full text-zinc-500 hover:text-zinc-200 hover:bg-zinc-700 transition-colors text-xs ml-1';
+  tourBtn.textContent = '\uD83C\uDFAF';
+  tourBtn.title = 'Take the guided tour';
+  tourBtn.addEventListener('click', () => {
+    resetTour();
+    startTour();
+  });
+  toolbar.appendChild(tourBtn);
 
   container.appendChild(toolbar);
 

@@ -134,7 +134,7 @@ function render(state: SessionState) {
 
   // Save version (with guard against double-click)
   let saving = false;
-  const saveBtn = btn('💾 Save', async () => {
+  const saveBtn = btn('\uD83D\uDCBE Save', async () => {
     if (saving) return;
     saving = true;
     saveBtn.disabled = true;
@@ -147,10 +147,12 @@ function render(state: SessionState) {
       saving = false;
     }
   });
+  saveBtn.id = 'btn-save-version';
   barEl.appendChild(saveBtn);
 
   // Gallery
-  const galleryBtn = btn('▦ Gallery', () => callbacks.onOpenGallery());
+  const galleryBtn = btn('\u25A6 Gallery', () => callbacks.onOpenGallery());
+  galleryBtn.id = 'btn-gallery';
   barEl.appendChild(galleryBtn);
 
   // Reference images indicator + loader
@@ -195,6 +197,7 @@ const ANGLE_KEYS = ['front', 'right', 'back', 'left', 'top', 'perspective'] as c
 
 function createRefLoader(): HTMLElement {
   const wrapper = document.createElement('span');
+  wrapper.id = 'btn-ref-upload';
   wrapper.className = 'relative';
 
   const input = document.createElement('input');
@@ -224,8 +227,11 @@ function createRefLoader(): HTMLElement {
     input.value = '';
   });
 
-  const button = btn('Load Refs', () => input.click());
-  button.title = 'Load reference images. Name files with angle (front.jpg, right.png, etc.) or load a single photo as perspective.';
+  const button = document.createElement('button');
+  button.className = 'px-2 py-0.5 rounded text-xs bg-blue-500/10 border border-blue-500/30 text-blue-400 hover:bg-blue-500/20 hover:text-blue-300 transition-colors cursor-pointer';
+  button.textContent = '\uD83D\uDCF7 Refs';
+  button.title = 'Upload reference images. Name files by angle (front.jpg, right.png, etc.) for multi-view comparison, or load a single photo as perspective.';
+  button.addEventListener('click', () => input.click());
 
   wrapper.appendChild(input);
   wrapper.appendChild(button);
