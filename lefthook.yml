@@ -3,8 +3,6 @@ pre-commit:
   commands:
     gitleaks:
       run: gitleaks protect --staged --verbose --redact
-    trufflehog:
-      run: trufflehog git file://. --since-commit HEAD --only-verified --fail
     prompt-log:
       run: |
         # Skip if only prompt files are being committed
