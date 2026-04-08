@@ -1322,6 +1322,7 @@ async function main() {
       const params = new URLSearchParams(window.location.search);
       let tab = 'interactive';
       if (params.has('gallery')) tab = 'gallery';
+      else if (params.has('notes')) tab = 'notes';
       else if (params.get('view') === 'ai') tab = 'ai';
       else if (params.get('view') === 'elevations') tab = 'elevations';
       return { tab, camera: getCameraState() };

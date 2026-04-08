@@ -109,6 +109,9 @@ export function updateMesh(meshData: MeshData): void {
     meshGroup.remove(child);
     if (child instanceof THREE.Mesh) {
       child.geometry.dispose();
+      const mat = child.material;
+      if (Array.isArray(mat)) mat.forEach(m => m.dispose());
+      else if (mat) mat.dispose();
     }
   }
 
@@ -214,10 +217,6 @@ export function getClipState(): { enabled: boolean; z: number; min: number; max:
   return { enabled: clippingEnabled, z: clipZ, min: modelBounds.min, max: modelBounds.max };
 }
 
-export function isClipping(): boolean {
-  return clippingEnabled;
-}
-
 function updateClipPlaneVisual() {
   removeClipPlaneVisual();
 
@@ -236,11 +235,9 @@ function updateClipPlaneVisual() {
   });
   clipPlaneHelper = new THREE.Mesh(planeGeo, planeMat);
   clipPlaneHelper.name = 'clip-plane-helper';
-  clipPlaneHelper.position.set(
-    (modelBounds.min + modelBounds.max) / 2, // rough center — will be off but acceptable
-    (modelBounds.min + modelBounds.max) / 2,
-    clipZ,
-  );
+  const box = new THREE.Box3().setFromObject(meshGroup);
+  const center = box.getCenter(new THREE.Vector3());
+  clipPlaneHelper.position.set(center.x, center.y, clipZ);
   // The disc lies in XY plane by default, which is what we want for Z-clipping
   scene.add(clipPlaneHelper);
 }

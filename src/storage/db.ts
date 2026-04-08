@@ -155,6 +155,11 @@ export async function deleteSession(id: string): Promise<void> {
     };
     nReq.onerror = () => reject(nReq.error);
   });
+  // Wait for the entire transaction to commit
+  await new Promise<void>((resolve, reject) => {
+    txn.oncomplete = () => resolve();
+    txn.onerror = () => reject(txn.error);
+  });
 }
 
 // === Versions ===
@@ -189,11 +194,6 @@ export async function saveVersion(
   await updateSession(sessionId, { updated: Date.now() });
 
   return version;
-}
-
-export async function getVersion(id: string): Promise<Version | null> {
-  const store = await tx('versions', 'readonly');
-  return reqToPromise(store.get(id)) as Promise<Version | null>;
 }
 
 export async function listVersions(sessionId: string): Promise<Version[]> {
@@ -252,6 +252,7 @@ export async function updateNote(id: string, text: string): Promise<void> {
   const note = await reqToPromise(store.get(id)) as SessionNote | null;
   if (!note) return;
   note.text = text;
+  note.timestamp = Date.now();
   await reqToPromise(store.put(note));
 }
 
