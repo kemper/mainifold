@@ -1,9 +1,8 @@
 // Help page — explains what mAInifold is and how to use it
 
-import { resetTour, startTour } from './tour';
-
 export interface HelpCallbacks {
   onBack: () => void;
+  onStartTour: () => void;
 }
 
 export function createHelpPage(
@@ -110,12 +109,7 @@ export function createHelpPage(
   tourBtn.className = 'px-4 py-1.5 rounded text-xs bg-blue-600 hover:bg-blue-500 text-white transition-colors shrink-0 ml-4';
   tourBtn.textContent = 'Take the guided tour';
   tourBtn.addEventListener('click', () => {
-    callbacks.onBack();
-    // Small delay to let the editor render before starting tour
-    setTimeout(() => {
-      resetTour();
-      startTour();
-    }, 300);
+    callbacks.onStartTour();
   });
   tourCTA.appendChild(tourBtn);
   content.appendChild(tourCTA);
