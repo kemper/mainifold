@@ -9,6 +9,7 @@ import { createLayout } from './ui/layout';
 import { createToolbar, isAutoRun } from './ui/toolbar';
 import { createLandingPage } from './ui/landing';
 import { createHelpPage } from './ui/help';
+import { createNotFoundPage } from './ui/notFound';
 import { initViewsPanel, updateMultiView } from './ui/panels';
 import { createSessionBar } from './ui/sessionBar';
 import { createGalleryView, refreshGallery } from './ui/gallery';
@@ -324,6 +325,11 @@ function shouldShowHelp(): boolean {
   return window.location.pathname === '/help';
 }
 
+function shouldShow404(): boolean {
+  const path = window.location.pathname;
+  return path !== '/' && path !== '' && path !== '/help' && path !== '/editor';
+}
+
 
 // Hide landing/help and show the editor UI
 function showEditorUI(landingEl: HTMLElement | null, helpEl: HTMLElement | null, editorUI: HTMLElement) {
@@ -333,6 +339,9 @@ function showEditorUI(landingEl: HTMLElement | null, helpEl: HTMLElement | null,
 }
 
 async function main() {
+  // Remove loading splash as soon as JS takes over
+  document.getElementById('loading-splash')?.remove();
+
   const app = document.getElementById('app')!;
   geometryDataEl = createGeometryDataElement();
 
@@ -498,9 +507,10 @@ async function main() {
   // Expose showHelp for toolbar
   (window as unknown as Record<string, unknown>).__mainifoldShowHelp = showHelp;
 
-  // Check if we should show landing or help page before loading heavy resources
+  // Check which page to show before loading heavy resources
   const showLanding = shouldShowLanding();
   const showHelpPage = shouldShowHelp();
+  const show404 = shouldShow404();
 
   if (showLanding) {
     // Show landing page immediately — hide editor UI
@@ -541,6 +551,15 @@ async function main() {
           await createSession();
           runCode(defaultCode);
         }
+      },
+    });
+  } else if (show404) {
+    // Show 404 page — hide editor UI entirely
+    editorUI.classList.add('hidden');
+    overlayContainer.classList.remove('hidden');
+    createNotFoundPage(overlayContainer, {
+      onGoHome: () => {
+        window.location.href = '/';
       },
     });
   }
@@ -587,12 +606,12 @@ async function main() {
   editorReadyResolve();
 
   // Start guided tour on first visit (after editor fully renders)
-  if (!showLanding && !showHelpPage) {
+  if (!showLanding && !showHelpPage && !show404) {
     maybeStartTour();
   }
 
-  // If not on landing/help, load session or default code now
-  if (!showLanding && !showHelpPage && engineOk) {
+  // If not on landing/help/404, load session or default code now
+  if (!showLanding && !showHelpPage && !show404 && engineOk) {
     const sessionId = getSessionIdFromURL();
     if (sessionId) {
       const versionIndex = getVersionFromURL();
