@@ -1,5 +1,7 @@
 // Help page — explains what mAInifold is and how to use it
 
+import { resetTour, startTour } from './tour';
+
 export interface HelpCallbacks {
   onBack: () => void;
 }
@@ -78,6 +80,29 @@ export function createHelpPage(
     p.innerHTML = section.body;
     content.appendChild(p);
   }
+
+  // Tour CTA
+  const tourCTA = document.createElement('div');
+  tourCTA.className = 'mt-10 p-4 rounded-lg bg-zinc-800 border border-zinc-700 flex items-center justify-between';
+
+  const tourText = document.createElement('span');
+  tourText.className = 'text-sm text-zinc-300';
+  tourText.textContent = 'New to the editor? Walk through the key features.';
+  tourCTA.appendChild(tourText);
+
+  const tourBtn = document.createElement('button');
+  tourBtn.className = 'px-4 py-1.5 rounded text-xs bg-blue-600 hover:bg-blue-500 text-white transition-colors shrink-0 ml-4';
+  tourBtn.textContent = 'Take the guided tour';
+  tourBtn.addEventListener('click', () => {
+    callbacks.onBack();
+    // Small delay to let the editor render before starting tour
+    setTimeout(() => {
+      resetTour();
+      startTour();
+    }, 300);
+  });
+  tourCTA.appendChild(tourBtn);
+  content.appendChild(tourCTA);
 
   // Footer with agent link
   const footer = document.createElement('div');

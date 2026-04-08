@@ -25,5 +25,6 @@ editor UI developed organically and could be improved/streamlined.
   Clip to Cross Section, added tooltips to all 5 tab buttons
 - `src/ui/toolbar.ts` — Replaced Run button with auto-run toggle (ON by
   default, shows manual Run when paused), added tour re-entry button
+- `src/ui/help.ts` — Added "Take the guided tour" CTA card
 - `src/main.ts` — Tour integration (maybeStartTour after editor init),
   measure toggle wiring, auto-run gate on editor onChange
