@@ -7,9 +7,25 @@ npm run dev          # Start dev server at http://localhost:5173
 npm run build        # Production build to dist/
 ```
 
-Open `http://localhost:5173/mainifold/?view=ai` to start with the 4 isometric views visible (instead of the interactive viewport). This is the recommended URL for AI agents — all views are visible on page load without clicking any tabs.
+Open `http://localhost:5173/mainifold/editor?view=ai` to start with the 4 isometric views visible (instead of the interactive viewport). This is the recommended URL for AI agents — all views are visible on page load without clicking any tabs.
 
 Requires COEP/COOP headers (configured in vite.config.ts) for SharedArrayBuffer / WASM threads.
+
+## Smoke Test — Verifying the App Works
+
+After any changes that touch routing, Vite config, index.html, or initialization code, verify these things still work:
+
+1. **Landing page**: Navigate to `http://localhost:5173/mainifold/` — should show the hero section ("mAInifold", "AI-driven parametric CAD in your browser"), CTA buttons, and a Recent Sessions grid (or empty state).
+2. **Non-slash redirect**: `http://localhost:5173/mainifold` (no trailing slash) should 301-redirect to `/mainifold/`.
+3. **Open Editor**: Click "Open Editor" on the landing page — URL should change to `/mainifold/editor`, status should show "Ready" (green), the code editor should appear on the left with a default example, and a 3D model should render in the viewport on the right.
+4. **WASM engine loads**: The status indicator (between editor header and tabs) should say "Ready" in green, NOT "Loading WASM..." or "WASM failed". If it shows "WASM failed", check:
+   - `coi-serviceworker.js` loads without 404 (check Network tab)
+   - `manifold.wasm` loads without 403 (check Network tab) — if 403, check `server.fs.strict` in vite.config.ts
+   - COEP/COOP headers are present on responses (check Response Headers)
+5. **Help page**: Click the `?` icon in the toolbar — should navigate to `/mainifold/help` and show the help content. "Back" should return to the editor.
+6. **AI agent bypass**: `http://localhost:5173/mainifold/editor?view=ai` should skip the landing page and go straight to the editor with AI Views tab selected.
+7. **Session loading**: Click a session tile on the landing page — should load the session code in the editor, show the session name in the session bar, and update the URL to `/mainifold/editor?session=<id>`.
+8. **Build**: `npm run build` should succeed with no TypeScript errors.
 
 ## AI Agent Workflow
 
@@ -39,7 +55,7 @@ claude mcp add playwright -s user -- npx -y @playwright/mcp
 ```
 
 **Usage:** Navigate to the app with `browser_navigate`, then call `window.mainifold` methods via `browser_evaluate` or `browser_run_code`. Example flow:
-1. `browser_navigate` → `http://localhost:5173/mainifold/?view=ai`
+1. `browser_navigate` → `http://localhost:5173/mainifold/editor?view=ai`
 2. `browser_evaluate` → `async () => await window.mainifold.createSession("My design")`
 3. `browser_run_code` → pass geometry code to `window.mainifold.runAndSave(code, label, assertions)`
 4. `browser_take_screenshot` → verify the result visually
@@ -389,13 +405,22 @@ Intermediate Manifold/CrossSection objects consume WASM memory. For simple scrip
 
 ### URL State
 
-All meaningful UI state must be reflected in the URL via query parameters so that views are linkable and shareable. When adding a new feature that changes what the user sees (tabs, modes, panels, filters, etc.), update the URL with `history.replaceState`. Current URL parameters:
+The app uses path-based routing for top-level pages and query parameters for view state within the editor.
 
+**Paths:**
+- `/mainifold/` — Landing page (hero + recent sessions grid)
+- `/mainifold/editor` — Editor view (code + viewport)
+- `/mainifold/help` — Help/docs page
+
+**Query parameters** (on `/mainifold/editor`):
 - `?view=ai` — AI Views tab
+- `?view=elevations` — Elevations tab
 - `?gallery` — Gallery tab
+- `?notes` — Notes tab
 - `?session=<id>` — Active session
 - `?session=<id>&v=3` — Specific version
-- Tab switching is handled in `src/ui/layout.ts` (`switchTab`). Session/version state is handled in `src/storage/sessionManager.ts` (`updateURL`).
+
+AI agent URLs like `/mainifold/editor?view=ai` bypass the landing page entirely. Tab switching is handled in `src/ui/layout.ts` (`switchTab`). Session/version state is handled in `src/storage/sessionManager.ts` (`updateURL`). Page-level routing is in `src/main.ts`.
 
 ## Common Errors
 
@@ -642,7 +667,7 @@ await mainifold.createSessionWithVersions("Gear variations", [
 
 // Get gallery URL for human review
 mainifold.getGalleryUrl()
-// → "http://localhost:5173/mainifold/?session=abc123&gallery"
+// → "http://localhost:5173/mainifold/editor?session=abc123&gallery"
 
 // Session management
 await mainifold.listSessions()        // → [{id, name, updated}]
@@ -680,7 +705,7 @@ await mainifold.importSession(data)              // Import JSON, regenerates thu
 await mainifold.clearAllSessions()               // Delete ALL sessions & versions from IndexedDB
 ```
 
-**URL parameters:**
+**URL parameters** (on `/mainifold/editor`):
 - `?session=<id>` — Load session, resume latest version
 - `?session=<id>&v=3` — Load specific version
 - `?session=<id>&gallery` — Open gallery view
@@ -731,7 +756,7 @@ On error:
 
 ## Verification Workflow
 
-Navigate to `http://localhost:5173/mainifold/?view=ai` to start with isometric views visible.
+Navigate to `http://localhost:5173/mainifold/editor?view=ai` to start with isometric views visible.
 
 After modifying geometry code:
 

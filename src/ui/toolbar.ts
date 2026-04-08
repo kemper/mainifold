@@ -115,6 +115,19 @@ export function createToolbar(
   });
 
   toolbar.appendChild(exportWrapper);
+
+  // Help button
+  const helpBtn = document.createElement('button');
+  helpBtn.id = 'btn-help';
+  helpBtn.className = 'flex items-center justify-center w-6 h-6 rounded-full text-zinc-500 hover:text-zinc-200 hover:bg-zinc-700 transition-colors text-xs font-bold ml-2';
+  helpBtn.textContent = '?';
+  helpBtn.title = 'Help';
+  helpBtn.addEventListener('click', () => {
+    const showHelp = (window as unknown as Record<string, unknown>).__mainifoldShowHelp as (() => void) | undefined;
+    if (showHelp) showHelp();
+  });
+  toolbar.appendChild(helpBtn);
+
   container.appendChild(toolbar);
 
   return toolbar;

@@ -138,7 +138,8 @@ export function createLayout(appContainer: HTMLElement): LayoutElements {
     // Notify listeners (e.g. gallery refresh)
     window.dispatchEvent(new CustomEvent('tab-switched', { detail: { tab } }));
 
-    // Update URL to reflect current tab
+    // Update URL to reflect current tab — always use /mainifold/editor as base
+    const basePath = '/mainifold/editor';
     const params = new URLSearchParams(window.location.search);
     if (tab === 'ai') {
       params.set('view', 'ai');
@@ -162,8 +163,8 @@ export function createLayout(appContainer: HTMLElement): LayoutElements {
       params.delete('notes');
     }
     const newUrl = params.toString()
-      ? `${window.location.pathname}?${params.toString().replace(/=(?=&|$)/g, '')}`
-      : window.location.pathname;
+      ? `${basePath}?${params.toString().replace(/=(?=&|$)/g, '')}`
+      : basePath;
     window.history.replaceState(null, '', newUrl);
 
     window.dispatchEvent(new Event('resize'));

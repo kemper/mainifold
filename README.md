@@ -20,7 +20,7 @@ npm install
 npm run dev
 ```
 
-Open [http://localhost:5173/mainifold/](http://localhost:5173/mainifold/) for the interactive viewport, or [http://localhost:5173/mainifold/?view=ai](http://localhost:5173/mainifold/?view=ai) to start with all 4 isometric views visible (recommended for AI agents).
+Open [http://localhost:5173/mainifold/](http://localhost:5173/mainifold/) for the landing page, or [http://localhost:5173/mainifold/editor?view=ai](http://localhost:5173/mainifold/editor?view=ai) to start with all 4 isometric views visible (recommended for AI agents).
 
 ## How it works
 

@@ -7,6 +7,8 @@ import { setPhantom, clearPhantom, hasPhantom, type PhantomOptions } from './ren
 import { initEditor, setValue, getValue } from './editor/codeEditor';
 import { createLayout } from './ui/layout';
 import { createToolbar } from './ui/toolbar';
+import { createLandingPage } from './ui/landing';
+import { createHelpPage } from './ui/help';
 import { initViewsPanel, updateMultiView } from './ui/panels';
 import { createSessionBar } from './ui/sessionBar';
 import { createGalleryView, refreshGallery } from './ui/gallery';
@@ -304,9 +306,46 @@ function getGeometryDataObj(): Record<string, unknown> | null {
   }
 }
 
+// Base path for the app (matches vite.config.ts base)
+const BASE_PATH = '/mainifold';
+
+// Determine which page to show based on URL path and query params
+function shouldShowLanding(): boolean {
+  const path = window.location.pathname;
+  const params = new URLSearchParams(window.location.search);
+  // Landing if at root path AND no query params that indicate a specific view
+  const isRootPath = path === `${BASE_PATH}/` || path === BASE_PATH;
+  return isRootPath && !params.has('view') && !params.has('session') && !params.has('gallery') && !params.has('notes');
+}
+
+function shouldShowHelp(): boolean {
+  return window.location.pathname === `${BASE_PATH}/help`;
+}
+
+
+// Hide landing/help and show the editor UI
+function showEditorUI(landingEl: HTMLElement | null, helpEl: HTMLElement | null, editorUI: HTMLElement) {
+  if (landingEl) landingEl.classList.add('hidden');
+  if (helpEl) helpEl.classList.add('hidden');
+  editorUI.classList.remove('hidden');
+}
+
 async function main() {
   const app = document.getElementById('app')!;
   geometryDataEl = createGeometryDataElement();
+
+  // Overlay container for landing/help pages (sits above the editor UI)
+  const overlayContainer = document.createElement('div');
+  overlayContainer.id = 'overlay-container';
+  overlayContainer.className = 'flex flex-col flex-1 min-h-0 w-full hidden';
+
+  // Wrapper for the main editor UI (toolbar + session bar + layout)
+  const editorUI = document.createElement('div');
+  editorUI.id = 'editor-ui';
+  editorUI.className = 'flex flex-col flex-1 min-h-0 w-full';
+
+  let landingEl: HTMLElement | null = null;
+  let helpEl: HTMLElement | null = null;
 
   // Load examples
   const examples: Record<string, string> = {};
@@ -318,7 +357,7 @@ async function main() {
   const defaultCode = examples[defaultExampleKey] ?? '// Write your manifold code here\nconst { Manifold } = api;\nreturn Manifold.cube([5,5,5], true);';
 
   // Create toolbar
-  createToolbar(app, examples, {
+  createToolbar(editorUI, examples, {
     onRun: () => runCode(),
     onExportGLB: async () => {
       try { await exportGLB(); } catch (e) { console.error('GLB export error:', e); }
@@ -339,7 +378,7 @@ async function main() {
   });
 
   // Create session bar
-  createSessionBar(app, {
+  createSessionBar(editorUI, {
     onSaveVersion: async () => ({
       code: getValue(),
       geometryData: getGeometryDataObj(),
@@ -373,7 +412,7 @@ async function main() {
   });
 
   // Create layout
-  const { editorContainer, viewportPane, viewsContainer, elevationsContainer, galleryContainer, notesContainer, statusBar, clipControls, switchTab } = createLayout(app);
+  const { editorContainer, viewportPane, viewsContainer, elevationsContainer, galleryContainer, notesContainer, statusBar, clipControls, switchTab } = createLayout(editorUI);
 
   // Init views panel
   initViewsPanel(viewsContainer);
@@ -406,9 +445,112 @@ async function main() {
     },
   );
 
-  // Init geometry engine
+  // Assemble DOM early so landing/help pages can render before WASM loads
+  app.appendChild(editorUI);
+  app.appendChild(overlayContainer);
+
+  // Helper to transition from landing/help to editor
+  function transitionToEditor() {
+    showEditorUI(landingEl, helpEl, editorUI);
+    overlayContainer.classList.add('hidden');
+    window.dispatchEvent(new Event('resize'));
+  }
+
+  // Track whether user came from landing (for help back navigation)
+  let cameFromLanding = false;
+
+  // Helper to show help page
+  function showHelp() {
+    cameFromLanding = landingEl != null && !landingEl.classList.contains('hidden');
+    if (!helpEl) {
+      helpEl = createHelpPage(overlayContainer, {
+        onBack: () => {
+          if (cameFromLanding && landingEl) {
+            // Go back to landing
+            helpEl?.classList.add('hidden');
+            landingEl.classList.remove('hidden');
+            window.history.replaceState(null, '', `${BASE_PATH}/`);
+          } else {
+            // Go back to editor
+            transitionToEditor();
+            window.history.replaceState(null, '', `${BASE_PATH}/editor`);
+          }
+        },
+      });
+    }
+    overlayContainer.classList.remove('hidden');
+    editorUI.classList.add('hidden');
+    if (landingEl) landingEl.classList.add('hidden');
+    helpEl.classList.remove('hidden');
+    window.history.replaceState(null, '', `${BASE_PATH}/help`);
+  }
+
+  // Expose showHelp for toolbar
+  (window as unknown as Record<string, unknown>).__mainifoldShowHelp = showHelp;
+
+  // Check if we should show landing or help page before loading heavy resources
+  const showLanding = shouldShowLanding();
+  const showHelpPage = shouldShowHelp();
+
+  if (showLanding) {
+    // Show landing page immediately — hide editor UI
+    editorUI.classList.add('hidden');
+    overlayContainer.classList.remove('hidden');
+    landingEl = await createLandingPage(overlayContainer, {
+      onOpenEditor: async () => {
+        transitionToEditor();
+        await ensureEditorReady();
+        setStatus(statusBar, 'ready', 'Ready');
+        runCode(defaultCode);
+        window.history.replaceState(null, '', `${BASE_PATH}/editor`);
+      },
+      onOpenHelp: showHelp,
+      onOpenSession: async (sid) => {
+        transitionToEditor();
+        await ensureEditorReady();
+        const version = await openSession(sid);
+        if (version) {
+          setValue(version.code);
+          runCode(version.code);
+          const refImages = await getReferenceImagesFromSession();
+          if (refImages) _setRefImages(refImages as ReferenceImages);
+        }
+        window.history.replaceState(null, '', `${BASE_PATH}/editor?session=${sid}`);
+      },
+    });
+  } else if (showHelpPage) {
+    // Show help page immediately
+    editorUI.classList.add('hidden');
+    overlayContainer.classList.remove('hidden');
+    helpEl = createHelpPage(overlayContainer, {
+      onBack: () => {
+        helpEl?.classList.add('hidden');
+        transitionToEditor();
+        window.history.replaceState(null, '', `${BASE_PATH}/editor`);
+      },
+    });
+  }
+
+  // Init engine, viewport, editor (in background if landing/help is showing)
+  let editorReady = false;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  let editorReadyResolve: (() => void) = () => {};
+  const editorReadyPromise = new Promise<void>(resolve => { editorReadyResolve = resolve; });
+
+  async function ensureEditorReady() {
+    if (!editorReady) await editorReadyPromise;
+  }
+
+  // Init geometry engine — wrapped in try/catch so editor/viewport still init on failure
+  let engineOk = false;
   setStatus(statusBar, 'loading', 'Loading WASM...');
-  await initEngine();
+  try {
+    await initEngine();
+    engineOk = true;
+  } catch (e) {
+    console.error('WASM engine failed to load:', e);
+    setStatus(statusBar, 'error', 'WASM failed');
+  }
 
   // Init viewport
   initViewport(viewportPane);
@@ -424,30 +566,34 @@ async function main() {
   // Wire up clip controls
   initClipControls(clipControls);
 
-  // Load session from URL if present
-  const sessionId = getSessionIdFromURL();
-  if (sessionId) {
-    const versionIndex = getVersionFromURL();
-    const version = await openSession(sessionId, versionIndex ?? undefined);
-    if (version) {
-      setValue(version.code);
-      runCode(version.code);
-      // Restore reference images from session
-      const refImages = await getReferenceImagesFromSession();
-      if (refImages) {
-        _setRefImages(refImages as ReferenceImages);
-      }
-      if (isGalleryMode()) {
-        switchTab('gallery');
-        refreshGallery();
+  editorReady = true;
+  editorReadyResolve();
+
+  // If not on landing/help, load session or default code now
+  if (!showLanding && !showHelpPage && engineOk) {
+    const sessionId = getSessionIdFromURL();
+    if (sessionId) {
+      const versionIndex = getVersionFromURL();
+      const version = await openSession(sessionId, versionIndex ?? undefined);
+      if (version) {
+        setValue(version.code);
+        runCode(version.code);
+        const refImages = await getReferenceImagesFromSession();
+        if (refImages) {
+          _setRefImages(refImages as ReferenceImages);
+        }
+        if (isGalleryMode()) {
+          switchTab('gallery');
+          refreshGallery();
+        }
+      } else {
+        setStatus(statusBar, 'ready', 'Ready');
+        runCode(defaultCode);
       }
     } else {
       setStatus(statusBar, 'ready', 'Ready');
       runCode(defaultCode);
     }
-  } else {
-    setStatus(statusBar, 'ready', 'Ready');
-    runCode(defaultCode);
   }
 
   // === Execution state ===

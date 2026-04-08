@@ -6,7 +6,7 @@ Browser-based parametric CAD tool powered by manifold-3d (WASM). Write JavaScrip
 
 ## How to use this tool
 
-1. Navigate with `?view=ai` to see 4 isometric views (e.g. `http://localhost:5173/?view=ai`)
+1. Navigate with `?view=ai` to see 4 isometric views (e.g. `http://localhost:5173/mainifold/editor?view=ai`)
 2. Use `window.mainifold` in the browser console to interact programmatically
 3. Read `document.getElementById("geometry-data").textContent` for structured stats (JSON)
 
@@ -341,7 +341,7 @@ const r = await mainifold.createSessionWithVersions("Castle", [
 ]);
 // r.session = {id, name}
 // r.versions = [{version, geometry}, ...]
-// r.galleryUrl = "http://localhost:5173/?session=abc&gallery"
+// r.galleryUrl = "http://localhost:5173/mainifold/editor?session=abc&gallery"
 ```
 
 ### Recommended iteration pattern
