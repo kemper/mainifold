@@ -1,3 +1,5 @@
+import { resetTour, startTour } from './tour';
+
 export interface ToolbarCallbacks {
   onRun: () => void;
   onExportGLB: () => void;
@@ -6,6 +8,15 @@ export interface ToolbarCallbacks {
   onExport3MF: () => void;
   onExampleSelect: (code: string) => void;
 }
+
+let _autoRun = true;
+let _onAutoRunChange: ((on: boolean) => void) | null = null;
+
+/** Whether auto-run on edit is enabled */
+export function isAutoRun(): boolean { return _autoRun; }
+
+/** Register a callback for when auto-run state changes */
+export function onAutoRunChange(cb: (on: boolean) => void): void { _onAutoRunChange = cb; }
 
 export function createToolbar(
   container: HTMLElement,
@@ -21,10 +32,44 @@ export function createToolbar(
   logo.textContent = 'mAInifold';
   toolbar.appendChild(logo);
 
-  // Run button
+  // Auto-run toggle + manual Run button
+  const runGroup = document.createElement('div');
+  runGroup.className = 'flex items-center gap-1';
+
+  const autoRunBtn = document.createElement('button');
+  autoRunBtn.id = 'btn-auto-run';
+  autoRunBtn.title = 'Auto-render is ON — code re-renders as you type. Click to pause.';
+
   const btnRun = createButton('btn-run', '\u25B6 Run');
   btnRun.addEventListener('click', callbacks.onRun);
-  toolbar.appendChild(btnRun);
+  btnRun.classList.add('hidden');
+
+  function syncAutoRunUI() {
+    if (_autoRun) {
+      autoRunBtn.className = 'flex items-center gap-1 px-2 py-1 rounded text-xs text-emerald-400 hover:bg-zinc-700 transition-colors';
+      autoRunBtn.textContent = '\u23F8 Auto';
+      autoRunBtn.title = 'Auto-render is ON \u2014 code re-renders as you type. Click to pause.';
+      btnRun.classList.add('hidden');
+    } else {
+      autoRunBtn.className = 'flex items-center gap-1 px-2 py-1 rounded text-xs text-zinc-500 hover:bg-zinc-700 hover:text-zinc-300 transition-colors';
+      autoRunBtn.textContent = '\u25B6 Auto';
+      autoRunBtn.title = 'Auto-render is OFF \u2014 click to resume, or use the Run button.';
+      btnRun.classList.remove('hidden');
+    }
+  }
+
+  autoRunBtn.addEventListener('click', () => {
+    _autoRun = !_autoRun;
+    syncAutoRunUI();
+    if (_onAutoRunChange) _onAutoRunChange(_autoRun);
+    // If re-enabling auto-run, trigger an immediate render
+    if (_autoRun) callbacks.onRun();
+  });
+
+  syncAutoRunUI();
+  runGroup.appendChild(autoRunBtn);
+  runGroup.appendChild(btnRun);
+  toolbar.appendChild(runGroup);
 
   // Spacer
   const spacer = document.createElement('div');
@@ -127,6 +172,18 @@ export function createToolbar(
     if (showHelp) showHelp();
   });
   toolbar.appendChild(helpBtn);
+
+  // Tour re-entry button
+  const tourBtn = document.createElement('button');
+  tourBtn.id = 'btn-retake-tour';
+  tourBtn.className = 'flex items-center justify-center w-6 h-6 rounded-full text-zinc-500 hover:text-zinc-200 hover:bg-zinc-700 transition-colors text-xs ml-1';
+  tourBtn.textContent = '\uD83C\uDFAF';
+  tourBtn.title = 'Take the guided tour';
+  tourBtn.addEventListener('click', () => {
+    resetTour();
+    startTour();
+  });
+  toolbar.appendChild(tourBtn);
 
   container.appendChild(toolbar);
 
