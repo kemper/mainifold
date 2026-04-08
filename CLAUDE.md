@@ -78,11 +78,18 @@ claude mcp add playwright -s user -- npx -y @playwright/mcp
 
 Capture the design story alongside geometry versions so sessions are useful for review weeks later. Use session notes and version notes to record *why* each iteration happened, not just *what* changed.
 
-**Before the first version:** Log the user's requirements and constraints as a session note.
+**Use prefix conventions** so notes are scannable:
+- `[REQUIREMENT]` — Original user requirements and constraints
+- `[DECISION]` — Design choices and rationale ("chose X because Y")
+- `[FEEDBACK]` — Direct user feedback, quoted or paraphrased
+- `[MEASUREMENT]` — Critical dimensions, tolerances, fit measurements
+- `[ATTEMPT]` — What was tried and didn't work, and why
+- `[TODO]` — Known issues or future improvements
+
+**Before the first version:** Log requirements as a session note.
 ```javascript
 await mainifold.createSession("Walkway shield - snap-on board caps");
-// Log the design brief so the gallery tells the full story
-await mainifold.addSessionNote("Requirements: 5.5x5.5x36in boards, snap-on C-channel shield, screw holes, print without supports opening-down, fuzzy skin texture on top");
+await mainifold.addSessionNote("[REQUIREMENT] 5.5x5.5x36in boards, snap-on C-channel shield, screw holes, print without supports opening-down, fuzzy skin texture on top");
 await mainifold.runAndSave(code, "v1 - C-channel with screw holes, 6in segments", { isManifold: true });
 ```
 
@@ -94,16 +101,33 @@ await mainifold.runAndSave(code, "v2 - widened tongue to full top width per user
 });
 ```
 
-**When the user gives feedback:** Log it as a session note, then save the next version:
+**When the user gives feedback:** Log it, then save the next version:
 ```javascript
-await mainifold.addSessionNote("User feedback: the groove looks too shallow, make the tongue insert fully");
+await mainifold.addSessionNote("[FEEDBACK] User: the groove looks too shallow, make the tongue insert fully");
 await mainifold.runAndSave(code, "v3 - full-depth groove (15mm) per feedback", { isManifold: true });
 ```
 
-**Key decisions and constraints** should be logged as session notes — dimensions, materials, print orientation, tolerance values, physical constraints:
+**Key decisions, measurements, and failed attempts:**
 ```javascript
-await mainifold.addSessionNote("Decision: right wall omitted on end pieces for clearance against perpendicular 5.5in boards");
+await mainifold.addSessionNote("[DECISION] Right wall omitted on end pieces for clearance against perpendicular 5.5in boards");
+await mainifold.addSessionNote("[MEASUREMENT] Tongue width = outerW - 2*wallT = 139.7 - 2*3 = 133.7mm");
+await mainifold.addSessionNote("[ATTEMPT] v2 tried 3mm walls but too flimsy for snap-on. Increased to 5mm in v3");
 ```
+
+### Resuming a session
+
+When opening a session you haven't worked on (or returning after time away), **always call `getSessionContext()` first** to understand what happened:
+
+```javascript
+await mainifold.openSession(sessionId);
+const ctx = await mainifold.getSessionContext();
+// ctx.session    — {id, name, created, updated}
+// ctx.versions   — [{index, label, timestamp, notes?, geometrySummary: {volume, boundingBox, ...}}]
+// ctx.notes      — [{id, text, timestamp}]
+// ctx.currentVersion — {index, label}
+```
+
+Read the notes and version history before making changes. The notes tell you what was required, what was tried, what feedback was given, and what measurements matter. Continue the note-logging pattern as you work.
 
 ## Architecture
 
@@ -693,10 +717,19 @@ await mainifold.renameSession('New name')        // Rename active session
 await mainifold.renameSession('New name', id)    // Rename specific session
 
 // Session notes — log requirements, feedback, decisions alongside versions
-await mainifold.addSessionNote("User wants snap-on C-channel shields for 5.5in boards")
+await mainifold.addSessionNote("[REQUIREMENT] snap-on C-channel shields for 5.5in boards")
 // → { id, text, timestamp }
 await mainifold.listSessionNotes()
 // → [{ id, text, timestamp }, ...]
+await mainifold.updateSessionNote(noteId, "corrected text")
+await mainifold.deleteSessionNote(noteId)
+
+// Full session context — one call to get everything (for resuming sessions)
+const ctx = await mainifold.getSessionContext()
+// → { session: {id, name, created, updated},
+//     versions: [{index, label, timestamp, notes?, geometrySummary: {volume, surfaceArea, boundingBox, ...}}],
+//     notes: [{id, text, timestamp}],
+//     currentVersion: {index, label}, versionCount }
 
 // Version notes — attach design rationale to a specific version
 await mainifold.runAndSave(code, "v2 - thicker walls", {

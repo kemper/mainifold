@@ -14,6 +14,8 @@ import {
   updateSession as dbUpdateSession,
   addNote as dbAddNote,
   listNotes as dbListNotes,
+  deleteNote as dbDeleteNote,
+  updateNote as dbUpdateNote,
   type Session,
   type Version,
   type SessionNote,
@@ -271,6 +273,77 @@ export async function addSessionNote(text: string): Promise<SessionNote | null> 
 export async function listSessionNotes(): Promise<SessionNote[]> {
   if (!currentState.session) return [];
   return dbListNotes(currentState.session.id);
+}
+
+export async function deleteSessionNote(noteId: string): Promise<void> {
+  await dbDeleteNote(noteId);
+}
+
+export async function updateSessionNote(noteId: string, text: string): Promise<void> {
+  await dbUpdateNote(noteId, text);
+}
+
+// === Session context (single call for AI agents) ===
+
+export interface SessionContext {
+  session: { id: string; name: string; created: number; updated: number };
+  versions: {
+    index: number;
+    label: string;
+    timestamp: number;
+    notes?: string;
+    geometrySummary: {
+      volume?: number;
+      surfaceArea?: number;
+      boundingBox?: { dimensions: number[] };
+      componentCount?: number;
+      genus?: number;
+      isManifold?: boolean;
+    } | null;
+  }[];
+  notes: { id: string; text: string; timestamp: number }[];
+  currentVersion: { index: number; label: string } | null;
+  versionCount: number;
+}
+
+export async function getSessionContext(): Promise<SessionContext | null> {
+  if (!currentState.session) return null;
+
+  const session = currentState.session;
+  const versions = await dbListVersions(session.id);
+  const notes = await dbListNotes(session.id);
+
+  return {
+    session: {
+      id: session.id,
+      name: session.name,
+      created: session.created,
+      updated: session.updated,
+    },
+    versions: versions.map(v => {
+      const geo = v.geometryData as Record<string, unknown> | null;
+      const bb = geo?.boundingBox as Record<string, unknown> | undefined;
+      return {
+        index: v.index,
+        label: v.label,
+        timestamp: v.timestamp,
+        ...(v.notes ? { notes: v.notes } : {}),
+        geometrySummary: geo && geo.status === 'ok' ? {
+          volume: geo.volume as number | undefined,
+          surfaceArea: geo.surfaceArea as number | undefined,
+          boundingBox: bb?.dimensions ? { dimensions: bb.dimensions as number[] } : undefined,
+          componentCount: geo.componentCount as number | undefined,
+          genus: geo.genus as number | undefined,
+          isManifold: geo.isManifold as boolean | undefined,
+        } : null,
+      };
+    }),
+    notes: notes.map(n => ({ id: n.id, text: n.text, timestamp: n.timestamp })),
+    currentVersion: currentState.currentVersion
+      ? { index: currentState.currentVersion.index, label: currentState.currentVersion.label }
+      : null,
+    versionCount: currentState.versionCount,
+  };
 }
 
 // === Cleanup ===

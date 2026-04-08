@@ -50,6 +50,9 @@ import {
   addSessionNote,
   listSessionNotes,
   deleteIfEmpty,
+  deleteSessionNote,
+  updateSessionNote,
+  getSessionContext,
   type ExportedSession,
   type ReferenceImagesData,
 } from './storage/sessionManager';
@@ -962,6 +965,25 @@ async function main() {
       return notes.map(n => ({ id: n.id, text: n.text, timestamp: n.timestamp }));
     },
 
+    /** Delete a session note by ID */
+    async deleteSessionNote(noteId: string) {
+      await deleteSessionNote(noteId);
+      return { success: true };
+    },
+
+    /** Update a session note's text by ID */
+    async updateSessionNote(noteId: string, text: string) {
+      await updateSessionNote(noteId, text);
+      return { success: true };
+    },
+
+    /** Get full session context — everything an AI agent needs to understand this session */
+    async getSessionContext() {
+      const ctx = await getSessionContext();
+      if (!ctx) return { error: 'No active session' };
+      return ctx;
+    },
+
     /** Export a session as JSON (defaults to current session) */
     async exportSession(sessionId?: string) {
       return exportSession(sessionId);
@@ -1413,8 +1435,10 @@ async function main() {
     '          .createSessionWithVersions(name, [{code,label},...]),\n' +
     '          .listSessions(), .openSession(id), .listVersions(), .loadVersion(idx),\n' +
     '          .renameSession(name, id?), .getGalleryUrl(), .getSessionUrl(),\n' +
-    '          .getSessionState(), .exportSession(id?), .importSession(data),\n' +
-    '          .clearAllSessions()\n' +
+    '          .getSessionState(), .getSessionContext(),\n' +
+    '          .exportSession(id?), .importSession(data), .clearAllSessions()\n' +
+    'Notes: .addSessionNote(text), .listSessionNotes(),\n' +
+    '       .updateSessionNote(noteId, text), .deleteSessionNote(noteId)\n' +
     'Structured data: document.getElementById("geometry-data").textContent',
     'color: #4ade80; font-weight: bold',
     'color: inherit',
