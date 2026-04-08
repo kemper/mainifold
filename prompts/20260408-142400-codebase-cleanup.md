@@ -29,4 +29,5 @@ console API completeness. Found 17 issues across 8 files:
 
 Fixed all issues. Added development guidelines to CLAUDE.md covering resource
 lifecycle, URL state consistency, dead code hygiene, transaction safety, and
-keeping documentation in sync with code.
+keeping documentation in sync with code. Guidelines distill the categories of
+issues found into general rules (not issue-specific) so they prevent recurrence.
