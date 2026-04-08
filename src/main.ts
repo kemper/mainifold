@@ -694,24 +694,24 @@ async function main() {
       return getModule();
     },
 
-    /** Export current model as GLB download */
-    async exportGLB() {
-      await exportGLB();
+    /** Export current model as GLB download. Optional filename override. */
+    async exportGLB(filename?: string) {
+      await exportGLB(filename);
     },
 
-    /** Export current model as STL download */
-    exportSTL() {
-      if (currentMeshData) exportSTL(currentMeshData);
+    /** Export current model as STL download. Optional filename override. */
+    exportSTL(filename?: string) {
+      if (currentMeshData) exportSTL(currentMeshData, filename);
     },
 
-    /** Export current model as OBJ download */
-    exportOBJ() {
-      if (currentMeshData) exportOBJ(currentMeshData);
+    /** Export current model as OBJ download. Optional filename override. */
+    exportOBJ(filename?: string) {
+      if (currentMeshData) exportOBJ(currentMeshData, filename);
     },
 
-    /** Export current model as 3MF download */
-    export3MF() {
-      if (currentMeshData) export3MF(currentMeshData);
+    /** Export current model as 3MF download. Optional filename override. */
+    export3MF(filename?: string) {
+      if (currentMeshData) export3MF(currentMeshData, filename);
     },
 
     /** Validate code without rendering. Returns { valid, error? } */
