@@ -27,9 +27,16 @@ export function createToolbar(
   toolbar.className = 'flex items-center gap-1 px-3 py-1.5 bg-zinc-900 border-b border-zinc-700 text-sm shrink-0';
 
   // Logo
-  const logo = document.createElement('span');
-  logo.className = 'text-zinc-100 font-semibold mr-4';
-  logo.textContent = 'mAInifold';
+  const logo = document.createElement('div');
+  logo.className = 'flex items-center gap-2 mr-4';
+  logo.innerHTML = `<svg width="20" height="20" viewBox="0 0 64 64" fill="none" xmlns="http://www.w3.org/2000/svg">
+    <defs><linearGradient id="tg" x1="0" y1="0" x2="64" y2="64"><stop offset="0%" stop-color="#60a5fa"/><stop offset="100%" stop-color="#818cf8"/></linearGradient></defs>
+    <circle cx="32" cy="32" r="26" fill="none" stroke="url(#tg)" stroke-width="2.5"/>
+    <ellipse cx="32" cy="32" rx="26" ry="8" fill="none" stroke="#60a5fa" stroke-width="1.5" opacity="0.6"/>
+    <ellipse cx="32" cy="24" rx="22" ry="6" fill="none" stroke="#60a5fa" stroke-width="1.2" opacity="0.4"/>
+    <ellipse cx="32" cy="40" rx="22" ry="6" fill="none" stroke="#60a5fa" stroke-width="1.2" opacity="0.4"/>
+    <ellipse cx="32" cy="32" rx="8" ry="26" fill="none" stroke="#60a5fa" stroke-width="1.5" opacity="0.6"/>
+  </svg><span class="text-zinc-100 font-semibold">m<span class="text-blue-400">AI</span>nifold</span>`;
   toolbar.appendChild(logo);
 
   // Auto-run toggle + manual Run button
