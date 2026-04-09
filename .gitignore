@@ -25,3 +25,11 @@ dist-ssr
 
 # Claude Code worktrees
 .claude/worktrees/
+
+# Playwright MCP artifacts
+.playwright-mcp/
+
+# Top-level screenshots/images from testing
+/*.png
+/*.jpg
+/*.jpeg

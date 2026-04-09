@@ -30,3 +30,10 @@ CSP and a meta tag CSP exist, browsers enforce the most restrictive intersection
 Fixed `public/_headers` and removed the redundant meta tag from `index.html` —
 the `_headers` file is the single source of truth for production CSP.
 
+**Cleanup:** Removed 57 tracked junk files from the staging branch:
+- `.playwright-mcp/` screenshots and exported models from testing
+- 40+ top-level PNG files (lowpoly cat renders, gemini/claude comparison images)
+- Test reference images in `public/` (freddy-ref.jpg, lowpoly-cat, ref-right.jpg)
+- Chrome extension feedback docs (`docs/feedback-from-claude-chrome-extension*.md`)
+Updated `.gitignore` to prevent future accumulation.
+
