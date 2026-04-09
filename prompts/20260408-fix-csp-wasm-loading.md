@@ -20,7 +20,13 @@ in `src/geometry/engine.ts`, which requires `'unsafe-eval'` in the CSP's
 `script-src` directive. Without it, the Function constructor is blocked by the
 browser's CSP enforcement.
 
-**Fix:** Added `'unsafe-eval'` to the `script-src` directive in both:
+**Fix (round 1):** Added `'unsafe-eval'` to the `script-src` directive in both:
 - `index.html` (meta tag, used in production)
 - `vite.config.ts` (server headers, used in local dev)
+
+**Fix (round 2):** The staging `_headers` file (served by Cloudflare Pages as
+HTTP headers) had its own CSP without `'unsafe-eval'`. When both an HTTP header
+CSP and a meta tag CSP exist, browsers enforce the most restrictive intersection.
+Fixed `public/_headers` and removed the redundant meta tag from `index.html` —
+the `_headers` file is the single source of truth for production CSP.
 
