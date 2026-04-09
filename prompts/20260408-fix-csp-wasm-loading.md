@@ -37,3 +37,4 @@ the `_headers` file is the single source of truth for production CSP.
 - Chrome extension feedback docs (`docs/feedback-from-claude-chrome-extension*.md`)
 Updated `.gitignore` to prevent future accumulation.
 
+

@@ -29,6 +29,9 @@ dist-ssr
 # Playwright MCP artifacts
 .playwright-mcp/
 
+# Interstitial planning files
+.plans/
+
 # Top-level screenshots/images from testing
 /*.png
 /*.jpg

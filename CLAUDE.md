@@ -452,6 +452,10 @@ Intermediate Manifold/CrossSection objects consume WASM memory. For simple scrip
 
 ## Development Guidelines
 
+### Planning Files
+
+Write interstitial planning, design, and brainstorming documents to `.plans/` (gitignored). Do **not** write plan files to `docs/` — that directory is reserved for user-facing documentation that ships with the project.
+
 ### URL State
 
 The app uses path-based routing for top-level pages and query parameters for view state within the editor.
