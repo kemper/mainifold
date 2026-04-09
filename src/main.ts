@@ -25,7 +25,7 @@ import { probeAtXY, probeRay, measureDistance, type ProbeResult, type GeneralRay
 import { checkContainment, type ContainmentWarning } from './geometry/containmentCheck';
 import { setUnits as _setUnits, getUnits as _getUnits, type UnitSystem } from './geometry/units';
 import { initMeasureTool, activate as activateMeasure, deactivate as deactivateMeasure, getState as getMeasureState } from './ui/measureTool';
-import { maybeStartTour } from './ui/tour';
+import { maybeStartTour, resetTour, startTour } from './ui/tour';
 import {
   getSessionIdFromURL,
   getVersionFromURL,
@@ -495,6 +495,18 @@ async function main() {
             }
           }
         },
+        onStartTour: async () => {
+          // Always go to editor (not landing), wait for it to be ready, then start tour
+          transitionToEditor();
+          await ensureEditorReady();
+          if (!getState().session) {
+            await createSession();
+            runCode(defaultCode);
+          }
+          window.history.replaceState(null, '', '/editor');
+          resetTour();
+          startTour();
+        },
       });
     }
     overlayContainer.classList.remove('hidden');
@@ -551,6 +563,18 @@ async function main() {
           await createSession();
           runCode(defaultCode);
         }
+      },
+      onStartTour: async () => {
+        helpEl?.classList.add('hidden');
+        transitionToEditor();
+        await ensureEditorReady();
+        if (!getState().session) {
+          await createSession();
+          runCode(defaultCode);
+        }
+        window.history.replaceState(null, '', '/editor');
+        resetTour();
+        startTour();
       },
     });
   } else if (show404) {
