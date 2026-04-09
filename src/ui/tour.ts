@@ -13,37 +13,50 @@ const STEPS: TourStep[] = [
   {
     target: '#editor-container',
     title: 'Code Editor',
-    description: 'Write JavaScript to create 3D geometry using primitives, booleans, and transforms.',
+    description:
+      'Write JavaScript to create 3D geometry using primitives, booleans, and transforms. When an AI agent is driving, it writes and updates code here automatically.',
     placement: 'right',
   },
   {
     target: '#btn-auto-run',
     title: 'Live Rendering',
-    description: 'Code re-renders automatically as you type. Click to pause auto-render if your model gets complex.',
+    description:
+      'Code re-renders automatically as you type. Click to pause auto-render if your model gets complex. AI agents trigger renders via the console API without needing this button.',
     placement: 'bottom',
   },
   {
     target: '#viewport-container',
     title: '3D Viewport',
-    description: 'Orbit (drag), zoom (scroll), and pan (right-drag) to inspect your model from any angle.',
+    description:
+      'Orbit (drag), zoom (scroll), and pan (right-drag) to inspect your model from any angle. AI agents use the isometric views and elevation tabs for visual verification instead.',
     placement: 'left',
   },
   {
     target: '#session-bar',
     title: 'Sessions & Versions',
-    description: 'Create sessions to track iterations. Save versions and navigate between them.',
+    description:
+      'Create sessions to track iterations. Save versions and navigate between them. AI agents create sessions and save versions automatically as they iterate on your design.',
     placement: 'bottom',
   },
   {
     target: '#btn-ref-upload',
     title: 'Reference Images',
-    description: 'Upload reference photos for AI to match. Name files by angle (front.jpg, right.png) for multi-view comparison.',
+    description:
+      'Upload reference photos for AI to match. Name files by angle (front.jpg, right.png) for multi-view comparison in the Elevations tab.',
+    placement: 'bottom',
+  },
+  {
+    target: '[data-tab="Notes"]',
+    title: 'Design Notes',
+    description:
+      'Log requirements, decisions, feedback, and measurements alongside your design. AI agents write notes automatically to capture the design story — review them to see why each change was made.',
     placement: 'bottom',
   },
   {
     target: '[data-tab="Gallery"]',
     title: 'Compare Versions',
-    description: 'View saved versions side-by-side in the Gallery to track your design evolution.',
+    description:
+      'View saved versions and notes side-by-side in the Gallery to track your design evolution. AI agents generate a gallery URL so you can review all iterations at a glance.',
     placement: 'bottom',
   },
   {
