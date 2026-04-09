@@ -23,3 +23,4 @@ browser's CSP enforcement.
 **Fix:** Added `'unsafe-eval'` to the `script-src` directive in both:
 - `index.html` (meta tag, used in production)
 - `vite.config.ts` (server headers, used in local dev)
+
