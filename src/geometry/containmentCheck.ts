@@ -47,7 +47,7 @@ export function checkContainment(manifold: any): ContainmentWarning[] {
   // Collect component info — keep manifold references alive for intersection check
   const components: ComponentInfo[] = [];
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  for (let i = 0; i < parts.length && i < 10; i++) {
+  for (let i = 0; i < parts.length && i < 25; i++) {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const p = parts[i] as any;
     try {
@@ -69,7 +69,7 @@ export function checkContainment(manifold: any): ContainmentWarning[] {
   }
   // Delete remaining parts beyond the limit
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  for (let i = 10; i < parts.length; i++) {
+  for (let i = 25; i < parts.length; i++) {
     try { (parts[i] as any).delete(); } catch { /* ignore */ }
   }
 

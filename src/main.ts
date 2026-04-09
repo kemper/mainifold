@@ -9,6 +9,7 @@ import { createLayout } from './ui/layout';
 import { createToolbar, isAutoRun } from './ui/toolbar';
 import { createLandingPage } from './ui/landing';
 import { createHelpPage } from './ui/help';
+import { createNotFoundPage } from './ui/notFound';
 import { initViewsPanel, updateMultiView } from './ui/panels';
 import { createSessionBar } from './ui/sessionBar';
 import { createGalleryView, refreshGallery } from './ui/gallery';
@@ -24,7 +25,7 @@ import { probeAtXY, probeRay, measureDistance, type ProbeResult, type GeneralRay
 import { checkContainment, type ContainmentWarning } from './geometry/containmentCheck';
 import { setUnits as _setUnits, getUnits as _getUnits, type UnitSystem } from './geometry/units';
 import { initMeasureTool, activate as activateMeasure, deactivate as deactivateMeasure, getState as getMeasureState } from './ui/measureTool';
-import { maybeStartTour } from './ui/tour';
+import { maybeStartTour, resetTour, startTour } from './ui/tour';
 import {
   getSessionIdFromURL,
   getVersionFromURL,
@@ -324,6 +325,11 @@ function shouldShowHelp(): boolean {
   return window.location.pathname === '/help';
 }
 
+function shouldShow404(): boolean {
+  const path = window.location.pathname;
+  return path !== '/' && path !== '' && path !== '/help' && path !== '/editor';
+}
+
 
 // Hide landing/help and show the editor UI
 function showEditorUI(landingEl: HTMLElement | null, helpEl: HTMLElement | null, editorUI: HTMLElement) {
@@ -333,6 +339,9 @@ function showEditorUI(landingEl: HTMLElement | null, helpEl: HTMLElement | null,
 }
 
 async function main() {
+  // Remove loading splash as soon as JS takes over
+  document.getElementById('loading-splash')?.remove();
+
   const app = document.getElementById('app')!;
   geometryDataEl = createGeometryDataElement();
 
@@ -486,6 +495,18 @@ async function main() {
             }
           }
         },
+        onStartTour: async () => {
+          // Always go to editor (not landing), wait for it to be ready, then start tour
+          transitionToEditor();
+          await ensureEditorReady();
+          if (!getState().session) {
+            await createSession();
+            runCode(defaultCode);
+          }
+          window.history.replaceState(null, '', '/editor');
+          resetTour();
+          startTour();
+        },
       });
     }
     overlayContainer.classList.remove('hidden');
@@ -498,9 +519,10 @@ async function main() {
   // Expose showHelp for toolbar
   (window as unknown as Record<string, unknown>).__mainifoldShowHelp = showHelp;
 
-  // Check if we should show landing or help page before loading heavy resources
+  // Check which page to show before loading heavy resources
   const showLanding = shouldShowLanding();
   const showHelpPage = shouldShowHelp();
+  const show404 = shouldShow404();
 
   if (showLanding) {
     // Show landing page immediately — hide editor UI
@@ -541,6 +563,27 @@ async function main() {
           await createSession();
           runCode(defaultCode);
         }
+      },
+      onStartTour: async () => {
+        helpEl?.classList.add('hidden');
+        transitionToEditor();
+        await ensureEditorReady();
+        if (!getState().session) {
+          await createSession();
+          runCode(defaultCode);
+        }
+        window.history.replaceState(null, '', '/editor');
+        resetTour();
+        startTour();
+      },
+    });
+  } else if (show404) {
+    // Show 404 page — hide editor UI entirely
+    editorUI.classList.add('hidden');
+    overlayContainer.classList.remove('hidden');
+    createNotFoundPage(overlayContainer, {
+      onGoHome: () => {
+        window.location.href = '/';
       },
     });
   }
@@ -587,12 +630,12 @@ async function main() {
   editorReadyResolve();
 
   // Start guided tour on first visit (after editor fully renders)
-  if (!showLanding && !showHelpPage) {
+  if (!showLanding && !showHelpPage && !show404) {
     maybeStartTour();
   }
 
-  // If not on landing/help, load session or default code now
-  if (!showLanding && !showHelpPage && engineOk) {
+  // If not on landing/help/404, load session or default code now
+  if (!showLanding && !showHelpPage && !show404 && engineOk) {
     const sessionId = getSessionIdFromURL();
     if (sessionId) {
       const versionIndex = getVersionFromURL();
@@ -694,24 +737,24 @@ async function main() {
       return getModule();
     },
 
-    /** Export current model as GLB download */
-    async exportGLB() {
-      await exportGLB();
+    /** Export current model as GLB download. Optional filename override. */
+    async exportGLB(filename?: string) {
+      await exportGLB(filename);
     },
 
-    /** Export current model as STL download */
-    exportSTL() {
-      if (currentMeshData) exportSTL(currentMeshData);
+    /** Export current model as STL download. Optional filename override. */
+    exportSTL(filename?: string) {
+      if (currentMeshData) exportSTL(currentMeshData, filename);
     },
 
-    /** Export current model as OBJ download */
-    exportOBJ() {
-      if (currentMeshData) exportOBJ(currentMeshData);
+    /** Export current model as OBJ download. Optional filename override. */
+    exportOBJ(filename?: string) {
+      if (currentMeshData) exportOBJ(currentMeshData, filename);
     },
 
-    /** Export current model as 3MF download */
-    export3MF() {
-      if (currentMeshData) export3MF(currentMeshData);
+    /** Export current model as 3MF download. Optional filename override. */
+    export3MF(filename?: string) {
+      if (currentMeshData) export3MF(currentMeshData, filename);
     },
 
     /** Validate code without rendering. Returns { valid, error? } */
@@ -1322,6 +1365,7 @@ async function main() {
       const params = new URLSearchParams(window.location.search);
       let tab = 'interactive';
       if (params.has('gallery')) tab = 'gallery';
+      else if (params.has('notes')) tab = 'notes';
       else if (params.get('view') === 'ai') tab = 'ai';
       else if (params.get('view') === 'elevations') tab = 'elevations';
       return { tab, camera: getCameraState() };

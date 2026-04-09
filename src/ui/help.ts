@@ -1,9 +1,8 @@
 // Help page — explains what mAInifold is and how to use it
 
-import { resetTour, startTour } from './tour';
-
 export interface HelpCallbacks {
   onBack: () => void;
+  onStartTour: () => void;
 }
 
 export function createHelpPage(
@@ -54,7 +53,7 @@ export function createHelpPage(
     },
     {
       heading: 'AI agent workflow',
-      body: 'mAInifold is designed to be driven by AI agents. An agent navigates to the app, writes geometry code, and uses the <code class="text-emerald-400 bg-zinc-800 px-1 rounded">window.mainifold</code> console API to create sessions, run code, validate results, and save versions — all programmatically. The agent can produce a gallery URL for human review. <a href="/mainifold/ai.md" class="text-blue-400 hover:underline">Full agent instructions \u2192</a>',
+      body: 'mAInifold is designed to be driven by AI agents. An agent navigates to the app, writes geometry code, and uses the <code class="text-emerald-400 bg-zinc-800 px-1 rounded">window.mainifold</code> console API to create sessions, run code, validate results, and save versions — all programmatically. The agent can produce a gallery URL for human review. <a href="/ai.md" class="text-blue-400 hover:underline">Full agent instructions \u2192</a>',
     },
     {
       heading: 'Connecting an AI agent',
@@ -69,8 +68,8 @@ export function createHelpPage(
         const origin = window.location.origin;
         return 'Copy and paste this prompt into Claude Code, ChatGPT, or any AI agent with browser access to verify everything works end-to-end:' +
           '<pre class="bg-zinc-800 rounded-lg p-4 text-xs leading-relaxed overflow-x-auto mt-3 mb-3 whitespace-pre-wrap"><code class="text-zinc-300">' +
-          `Read the AI agent instructions at ${origin}/mainifold/ai.md to understand how to use this tool.\n\n` +
-          `Then navigate to ${origin}/mainifold/editor?view=ai and use the window.mainifold console API to:\n\n` +
+          `Read the AI agent instructions at ${origin}/ai.md to understand how to use this tool.\n\n` +
+          `Then navigate to ${origin}/editor?view=ai and use the window.mainifold console API to:\n\n` +
           '1. Create a session called "Standard Lego Brick"\n' +
           '2. Build a standard 2x4 Lego brick (approximately 31.8mm x 15.8mm x 11.4mm with studs on top and hollow underside with tubes)\n' +
           '3. Save each major step as a version (e.g. v1 - base block, v2 - add studs, v3 - hollow underside with tubes)\n' +
@@ -110,12 +109,7 @@ export function createHelpPage(
   tourBtn.className = 'px-4 py-1.5 rounded text-xs bg-blue-600 hover:bg-blue-500 text-white transition-colors shrink-0 ml-4';
   tourBtn.textContent = 'Take the guided tour';
   tourBtn.addEventListener('click', () => {
-    callbacks.onBack();
-    // Small delay to let the editor render before starting tour
-    setTimeout(() => {
-      resetTour();
-      startTour();
-    }, 300);
+    callbacks.onStartTour();
   });
   tourCTA.appendChild(tourBtn);
   content.appendChild(tourCTA);
@@ -123,7 +117,7 @@ export function createHelpPage(
   // Footer with agent link
   const footer = document.createElement('div');
   footer.className = 'mt-12 pt-6 border-t border-zinc-800 text-xs text-zinc-600';
-  footer.innerHTML = 'Full AI agent documentation: <a href="/mainifold/ai.md" class="text-zinc-500 hover:text-zinc-300 transition-colors">/ai.md</a>';
+  footer.innerHTML = 'Full AI agent documentation: <a href="/ai.md" class="text-zinc-500 hover:text-zinc-300 transition-colors">/ai.md</a>';
   content.appendChild(footer);
 
   page.appendChild(content);

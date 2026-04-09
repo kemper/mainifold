@@ -119,10 +119,9 @@ export function createLayout(appContainer: HTMLElement): LayoutElements {
   const allTabs = [tabInteractive, tabAI, tabElevations, tabGallery, tabNotes];
   const allPanes = [viewportPane, viewsContainer, elevationsContainer, galleryContainer, notesContainer];
 
-  // Tab switching
-  function switchTab(tab: TabName) {
+  // Shared tab activation logic (DOM toggling, editor visibility, events)
+  function applyTab(tab: TabName) {
     const idx = tab === 'interactive' ? 0 : tab === 'ai' ? 1 : tab === 'elevations' ? 2 : tab === 'gallery' ? 3 : 4;
-
     for (let i = 0; i < allPanes.length; i++) {
       if (i === idx) {
         allPanes[i].classList.remove('hidden');
@@ -132,18 +131,18 @@ export function createLayout(appContainer: HTMLElement): LayoutElements {
         allTabs[i].className = 'px-4 py-1.5 text-xs font-medium text-zinc-500 hover:text-zinc-300 border-b-2 border-transparent';
       }
     }
-
     viewActions.classList.toggle('hidden', tab !== 'ai' && tab !== 'elevations');
-
-    // Hide editor pane on AI-oriented tabs to maximize view area
     const hideEditor = tab === 'ai' || tab === 'elevations';
     editorPane.classList.toggle('hidden', hideEditor);
     splitter.classList.toggle('hidden', hideEditor);
-
-    // Notify listeners (e.g. gallery refresh)
     window.dispatchEvent(new CustomEvent('tab-switched', { detail: { tab } }));
+    window.dispatchEvent(new Event('resize'));
+  }
 
-    // Update URL to reflect current tab
+  // Tab switching — updates URL to reflect current tab
+  function switchTab(tab: TabName) {
+    applyTab(tab);
+
     const basePath = '/editor';
     const params = new URLSearchParams(window.location.search);
     if (tab === 'ai') {
@@ -171,8 +170,6 @@ export function createLayout(appContainer: HTMLElement): LayoutElements {
       ? `${basePath}?${params.toString().replace(/=(?=&|$)/g, '')}`
       : basePath;
     window.history.replaceState(null, '', newUrl);
-
-    window.dispatchEvent(new Event('resize'));
   }
 
   tabInteractive.addEventListener('click', () => switchTab('interactive'));
@@ -184,34 +181,13 @@ export function createLayout(appContainer: HTMLElement): LayoutElements {
   // Restore tab from URL on initial load (without re-writing the URL)
   const initParams = new URLSearchParams(window.location.search);
   if (initParams.has('notes')) {
-    activateTab('notes');
+    applyTab('notes');
   } else if (initParams.has('gallery')) {
-    activateTab('gallery');
+    applyTab('gallery');
   } else if (initParams.get('view') === 'elevations') {
-    activateTab('elevations');
+    applyTab('elevations');
   } else if (initParams.get('view') === 'ai') {
-    activateTab('ai');
-  }
-
-  // Activate tab visually without touching the URL (for initial load)
-  function activateTab(tab: TabName) {
-    const idx = tab === 'interactive' ? 0 : tab === 'ai' ? 1 : tab === 'elevations' ? 2 : tab === 'gallery' ? 3 : 4;
-    for (let i = 0; i < allPanes.length; i++) {
-      if (i === idx) {
-        allPanes[i].classList.remove('hidden');
-        allTabs[i].className = 'px-4 py-1.5 text-xs font-medium text-zinc-100 border-b-2 border-blue-500 bg-zinc-900';
-      } else {
-        allPanes[i].classList.add('hidden');
-        allTabs[i].className = 'px-4 py-1.5 text-xs font-medium text-zinc-500 hover:text-zinc-300 border-b-2 border-transparent';
-      }
-    }
-    viewActions.classList.toggle('hidden', tab !== 'ai' && tab !== 'elevations');
-    const hideEditor = tab === 'ai' || tab === 'elevations';
-    editorPane.classList.toggle('hidden', hideEditor);
-    splitter.classList.toggle('hidden', hideEditor);
-    // Dispatch event so listeners (e.g. gallery refresh) can react
-    window.dispatchEvent(new CustomEvent('tab-switched', { detail: { tab } }));
-    window.dispatchEvent(new Event('resize'));
+    applyTab('ai');
   }
 
   rightPane.appendChild(tabBar);

@@ -153,6 +153,14 @@ src/
 
 Requires `Cross-Origin-Embedder-Policy` and `Cross-Origin-Opener-Policy` headers for SharedArrayBuffer / WASM threads (configured in `vite.config.ts`).
 
+## Deployment
+
+Hosted on [Cloudflare Pages](https://pages.cloudflare.com/) at [mainifold.pages.dev](https://mainifold.pages.dev). Builds automatically from the `main` branch.
+
+- Build: `npm run build` → `dist/`
+- SPA routing via `_redirects`, COEP/COOP/CSP headers via `_headers`
+- Set `SITE_URL` env var in Cloudflare Pages dashboard for absolute OG/canonical URLs (falls back to `CF_PAGES_URL`)
+
 ## Security
 
 mAInifold is designed to be controlled by AI agents, which means you're trusting the app not to embed hidden instructions that trick your AI into doing something harmful. See [SECURITY.md](SECURITY.md) for the full trust model, what the app can and can't do, and how to verify it yourself.

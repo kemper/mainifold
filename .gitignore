@@ -22,3 +22,17 @@ dist-ssr
 *.njsproj
 *.sln
 *.sw?
+
+# Claude Code worktrees
+.claude/worktrees/
+
+# Playwright MCP artifacts
+.playwright-mcp/
+
+# Interstitial planning files
+.plans/
+
+# Top-level screenshots/images from testing
+/*.png
+/*.jpg
+/*.jpeg

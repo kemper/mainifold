@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 630" width="1200" height="630">
+  <rect width="1200" height="630" fill="#18181b"/>
+  <path d="M440 380 L480 300 L520 360 L560 300 L600 380" stroke="#34d399" stroke-width="8" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
+  <circle cx="520" cy="280" r="6" fill="#34d399"/>
+  <text x="600" y="270" text-anchor="middle" font-family="system-ui, -apple-system, sans-serif" font-size="72" font-weight="700" fill="#fafafa">mAInifold</text>
+  <text x="600" y="340" text-anchor="middle" font-family="system-ui, -apple-system, sans-serif" font-size="28" fill="#a1a1aa">AI-driven parametric CAD in your browser</text>
+</svg>

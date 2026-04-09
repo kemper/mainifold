@@ -1,9 +1,10 @@
 import type { MeshData } from '../geometry/types';
+import { downloadBlob, getExportFilename, getExportTitle } from './download';
 
-export function exportOBJ(meshData: MeshData): void {
+export function exportOBJ(meshData: MeshData, customName?: string): void {
   const { vertProperties, triVerts, numVert, numTri, numProp } = meshData;
 
-  const lines: string[] = ['# mAInifold OBJ Export'];
+  const lines: string[] = [`# ${getExportTitle()}`];
 
   // Vertices
   for (let i = 0; i < numVert; i++) {
@@ -22,10 +23,5 @@ export function exportOBJ(meshData: MeshData): void {
   }
 
   const blob = new Blob([lines.join('\n')], { type: 'text/plain' });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement('a');
-  a.href = url;
-  a.download = 'model.obj';
-  a.click();
-  URL.revokeObjectURL(url);
+  downloadBlob(blob, getExportFilename('obj', customName));
 }

@@ -1,6 +1,7 @@
 import type { MeshData } from '../geometry/types';
+import { downloadBlob, getExportFilename, getExportTitle } from './download';
 
-export function exportSTL(meshData: MeshData): void {
+export function exportSTL(meshData: MeshData, customName?: string): void {
   const { vertProperties, triVerts, numTri, numProp } = meshData;
 
   // Binary STL format
@@ -10,9 +11,9 @@ export function exportSTL(meshData: MeshData): void {
   const buffer = new ArrayBuffer(bufferSize);
   const view = new DataView(buffer);
 
-  // Header (80 bytes, can be anything)
-  const header = 'mAInifold STL Export';
-  for (let i = 0; i < header.length && i < 80; i++) {
+  // Header (80 bytes) — include session name if available
+  const header = getExportTitle();
+  for (let i = 0; i < Math.min(header.length, 80); i++) {
     view.setUint8(i, header.charCodeAt(i));
   }
 
@@ -69,10 +70,5 @@ export function exportSTL(meshData: MeshData): void {
   }
 
   const blob = new Blob([buffer], { type: 'application/octet-stream' });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement('a');
-  a.href = url;
-  a.download = 'model.stl';
-  a.click();
-  URL.revokeObjectURL(url);
+  downloadBlob(blob, getExportFilename('stl', customName));
 }
