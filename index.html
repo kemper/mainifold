@@ -3,6 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-eval' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' blob: data:; connect-src 'self'; worker-src 'self' blob:; font-src 'self'" />
   <title>mAInifold — AI-Driven Parametric CAD in Your Browser</title>
   <meta name="description" content="Browser-based parametric CAD powered by manifold-3d WebAssembly. Write JavaScript to construct 3D geometry with boolean operations, driven by AI agents or by hand." />
 
@@ -47,7 +48,6 @@
   <!-- Theme -->
   <meta name="theme-color" content="#18181b" />
   <link rel="manifest" href="/manifest.json" />
-
   <link rel="stylesheet" href="/src/style.css" />
   <script src="coi-serviceworker.js"></script>
   <link rel="ai-instructions" href="ai.md" type="text/markdown" />

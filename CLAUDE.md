@@ -13,7 +13,16 @@ Requires COEP/COOP headers (configured in vite.config.ts) for SharedArrayBuffer 
 
 ## Deployment
 
-Hosted on **Cloudflare Pages** at `mainifold.pages.dev`. Cloudflare builds from the `main` branch automatically.
+Hosted on **Cloudflare Pages** at `mainifold.pages.dev` with branch-based environments:
+
+- **`staging`** branch → preview deploy at `staging.mainifold.pages.dev`
+- **`main`** branch → production deploy (protected, requires PR review)
+
+**All work should be merged to `staging` first.** Do not push directly to `main`. The workflow is:
+
+1. Create a feature branch, develop and test locally
+2. Merge to `staging` — auto-deploys for verification
+3. Once validated on staging, open a PR from `staging` → `main` for production release
 
 - **Build command:** `npm run build`
 - **Output directory:** `dist/`

@@ -116,6 +116,23 @@ The toolbar dropdown includes built-in examples:
 | Desk Organizer | Rounded rectangles, hollowing |
 | Christmas Tree | Stacked cones with ornaments |
 
+## Deployment
+
+The app deploys via [Cloudflare Pages](https://pages.cloudflare.com/) with branch-based environments:
+
+| Branch | Environment | URL |
+|--------|-------------|-----|
+| `staging` | Preview | `staging.mainifold.pages.dev` |
+| `main` | Production | `mainifold.pages.dev` |
+
+**Workflow:**
+
+1. Develop on a feature branch
+2. Merge to `staging` — auto-deploys for verification
+3. Once validated, PR from `staging` → `main` for production release
+
+`main` is protected and requires PR review. A GitHub Action automatically syncs `main` back into `staging` after every production deploy, so staging never falls behind.
+
 ## Architecture
 
 Static site — vanilla TypeScript + Vite, no backend or framework.
@@ -143,6 +160,12 @@ Hosted on [Cloudflare Pages](https://pages.cloudflare.com/) at [mainifold.pages.
 - Build: `npm run build` → `dist/`
 - SPA routing via `_redirects`, COEP/COOP/CSP headers via `_headers`
 - Set `SITE_URL` env var in Cloudflare Pages dashboard for absolute OG/canonical URLs (falls back to `CF_PAGES_URL`)
+
+## Security
+
+mAInifold is designed to be controlled by AI agents, which means you're trusting the app not to embed hidden instructions that trick your AI into doing something harmful. See [SECURITY.md](SECURITY.md) for the full trust model, what the app can and can't do, and how to verify it yourself.
+
+**TL;DR:** No backend, no outbound network requests, no analytics, no hidden DOM instructions, 7 well-known dependencies, enforced Content Security Policy.
 
 ## Coordinate system
 
