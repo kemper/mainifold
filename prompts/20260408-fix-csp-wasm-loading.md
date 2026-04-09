@@ -38,3 +38,4 @@ the `_headers` file is the single source of truth for production CSP.
 Updated `.gitignore` to prevent future accumulation.
 
 
+
