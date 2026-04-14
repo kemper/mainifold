@@ -54,6 +54,7 @@ import {
   deleteSessionNote,
   updateSessionNote,
   getSessionContext,
+  onStateChange,
   type ExportedSession,
   type ReferenceImagesData,
 } from './storage/sessionManager';
@@ -67,6 +68,39 @@ let currentManifold: any = null;
 
 // #geometry-data element — always-updated machine-readable state
 let geometryDataEl: HTMLElement;
+
+// === Document title management ===
+// Actively manage document.title to reflect current state.
+// Some browser automation tools (MCP servers, extensions) can inadvertently
+// replace the page title with JS evaluation results; this prevents that.
+const BASE_TITLE = 'mAInifold';
+let _expectedTitle = 'mAInifold — AI-Driven Parametric CAD in Your Browser';
+
+function updateDocumentTitle(context?: { page?: 'landing' | 'editor' | 'help' | '404'; sessionName?: string | null }) {
+  if (context?.page === 'landing' || context?.page === undefined && shouldShowLanding()) {
+    _expectedTitle = `${BASE_TITLE} — AI-Driven Parametric CAD in Your Browser`;
+  } else if (context?.page === 'help') {
+    _expectedTitle = `Help — ${BASE_TITLE}`;
+  } else if (context?.page === '404') {
+    _expectedTitle = `Not Found — ${BASE_TITLE}`;
+  } else {
+    // Editor — include session name if available
+    const name = context?.sessionName ?? getState().session?.name;
+    _expectedTitle = name ? `${name} — ${BASE_TITLE}` : `Editor — ${BASE_TITLE}`;
+  }
+  document.title = _expectedTitle;
+}
+
+// Guard against external title mutations (e.g. browser automation eval results)
+function installTitleGuard() {
+  const titleEl = document.querySelector('title');
+  if (!titleEl) return;
+  new MutationObserver(() => {
+    if (document.title !== _expectedTitle) {
+      document.title = _expectedTitle;
+    }
+  }).observe(titleEl, { childList: true, characterData: true, subtree: true });
+}
 
 function createGeometryDataElement(): HTMLElement {
   const el = document.createElement('pre');
@@ -344,6 +378,7 @@ async function main() {
 
   const app = document.getElementById('app')!;
   geometryDataEl = createGeometryDataElement();
+  installTitleGuard();
 
   // Overlay container for landing/help pages (sits above the editor UI)
   const overlayContainer = document.createElement('div');
@@ -481,6 +516,7 @@ async function main() {
             helpEl?.classList.add('hidden');
             landingEl.classList.remove('hidden');
             window.history.replaceState(null, '', '/');
+            updateDocumentTitle({ page: 'landing' });
           } else {
             // Go back to editor — preserve session URL params
             transitionToEditor();
@@ -493,6 +529,7 @@ async function main() {
             } else {
               window.history.replaceState(null, '', '/editor');
             }
+            updateDocumentTitle({ page: 'editor' });
           }
         },
         onStartTour: async () => {
@@ -514,6 +551,7 @@ async function main() {
     if (landingEl) landingEl.classList.add('hidden');
     helpEl.classList.remove('hidden');
     window.history.replaceState(null, '', '/help');
+    updateDocumentTitle({ page: 'help' });
   }
 
   // Expose showHelp for toolbar
@@ -528,11 +566,13 @@ async function main() {
     // Show landing page immediately — hide editor UI
     editorUI.classList.add('hidden');
     overlayContainer.classList.remove('hidden');
+    updateDocumentTitle({ page: 'landing' });
     landingEl = await createLandingPage(overlayContainer, {
       onOpenEditor: async () => {
         transitionToEditor();
         await ensureEditorReady();
         await createSession();
+        updateDocumentTitle({ page: 'editor' });
         setStatus(statusBar, 'ready', 'Ready');
         runCode(defaultCode);
       },
@@ -547,6 +587,7 @@ async function main() {
           const refImages = await getReferenceImagesFromSession();
           if (refImages) _setRefImages(refImages as ReferenceImages);
         }
+        updateDocumentTitle({ page: 'editor' });
         window.history.replaceState(null, '', `/editor?session=${sid}`);
       },
     });
@@ -554,6 +595,7 @@ async function main() {
     // Show help page immediately
     editorUI.classList.add('hidden');
     overlayContainer.classList.remove('hidden');
+    updateDocumentTitle({ page: 'help' });
     helpEl = createHelpPage(overlayContainer, {
       onBack: async () => {
         helpEl?.classList.add('hidden');
@@ -563,6 +605,7 @@ async function main() {
           await createSession();
           runCode(defaultCode);
         }
+        updateDocumentTitle({ page: 'editor' });
       },
       onStartTour: async () => {
         helpEl?.classList.add('hidden');
@@ -581,6 +624,7 @@ async function main() {
     // Show 404 page — hide editor UI entirely
     editorUI.classList.add('hidden');
     overlayContainer.classList.remove('hidden');
+    updateDocumentTitle({ page: '404' });
     createNotFoundPage(overlayContainer, {
       onGoHome: () => {
         window.location.href = '/';
@@ -661,6 +705,16 @@ async function main() {
       setStatus(statusBar, 'ready', 'Ready');
       runCode(defaultCode);
     }
+  }
+
+  // Update document title when session state changes (create, open, close, rename)
+  onStateChange((state) => {
+    updateDocumentTitle({ page: 'editor', sessionName: state.session?.name ?? null });
+  });
+
+  // Set initial editor title if we're on the editor page
+  if (!showLanding && !showHelpPage && !show404) {
+    updateDocumentTitle({ page: 'editor' });
   }
 
   // Clean up empty auto-created sessions when leaving the page
