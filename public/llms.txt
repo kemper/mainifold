@@ -1,0 +1,7 @@
+# mAInifold
+
+> AI-driven parametric CAD in the browser. Programmatic API at window.mainifold.
+
+## Docs
+
+- [AI Agent Instructions](/ai.md): Full API reference, workflow guide, and common pitfalls

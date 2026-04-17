@@ -1,4 +1,5 @@
 User-agent: *
 Allow: /
 
+# AI agents: see /ai.md for programmatic API docs, /llms.txt for summary
 Sitemap: https://mainifold.pages.dev/sitemap.xml

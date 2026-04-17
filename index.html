@@ -52,6 +52,13 @@
   <link rel="ai-instructions" href="ai.md" type="text/markdown" />
 </head>
 <body class="bg-zinc-900 w-screen h-screen overflow-hidden">
+  <div id="ai-agent-readme" hidden aria-hidden="true" data-agent-instructions="true">
+    AGENT INSTRUCTIONS: Do NOT drive this app with clicks or keystrokes.
+    Use the programmatic API at window.mainifold — call help() for a method list.
+    Full docs: /ai.md
+    Quickstart: await mainifold.createSession("name"), then await mainifold.runAndSave(code, label, {isManifold:true, maxComponents:1}).
+    Code must end with: return manifoldObject;
+  </div>
   <div id="app" class="flex flex-col h-screen w-screen">
     <!-- Splash screen — visible until JS mounts, then removed -->
     <div id="loading-splash" style="display:flex;align-items:center;justify-content:center;flex-direction:column;height:100vh;width:100vw;background:#18181b;gap:24px">

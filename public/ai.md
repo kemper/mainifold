@@ -1,5 +1,22 @@
 # mAInifold — AI Agent Instructions
 
+## Before you start
+
+1. **Use `window.mainifold`** — that's the programmatic API. Do NOT drive the app with clicks, keystrokes, or DOM manipulation.
+2. **Code must end with `return manifoldObject;`** — a bare trailing expression won't work.
+3. **Use `runAndSave(code, label, {isManifold: true, maxComponents: 1})`** to validate and commit a version.
+4. **Log decisions with `addSessionNote("[PREFIX] ...")`** — prefixes: `[REQUIREMENT]`, `[DECISION]`, `[FEEDBACK]`, `[MEASUREMENT]`, `[ATTEMPT]`, `[TODO]`.
+
+### Common agent mistakes
+
+- **Driving the UI with clicks/keystrokes** — CodeMirror's auto-close-brackets will corrupt your code. Use `mainifold.setCode()` and `mainifold.run()` instead.
+- **Forgetting `return`** — code runs in `new Function()`, so a trailing expression is NOT automatically returned. You must write `return Manifold.cube(...)`.
+- **Skipping sessions** — always create a session (`createSession`) and save versions (`runAndSave`) so the user can review your work in the gallery.
+- **Skipping visual verification** — stats alone can't catch visual defects. After structural changes, screenshot the Elevations tab or use `renderView()`.
+- **Flush boolean placement** — shapes must overlap by at least 0.5 units to union correctly. Merely touching at a face produces disconnected components.
+
+---
+
 Browser-based parametric CAD tool powered by manifold-3d (WASM). Write JavaScript that constructs 3D geometry, returns a Manifold object, and it renders live.
 
 **Coordinate system:** Right-handed, Z-up. XY plane is the ground. Units are arbitrary.
