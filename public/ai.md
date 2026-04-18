@@ -17,6 +17,7 @@ mAInifold is a browser-based parametric CAD tool powered by manifold-3d (WASM). 
 - [Iteration workflow](#iteration-workflow)
 - [Visual verification](#visual-verification)
 - [Stat-based verification](#stat-based-verification)
+- [Resuming a session](#resuming-a-session)
 
 ## Before you start
 
@@ -191,7 +192,7 @@ Queries:    .area()  .isEmpty()  .numVert()  .numContour()  .bounds()
 Output:     .toPolygons()  .decompose()  .delete()
 ```
 
-## Common Pitfalls for Boolean Operations
+## Common pitfalls for boolean operations
 
 ### Always use volumetric overlap, never flush placement
 Shapes that merely touch at a face will NOT union correctly -- they stay as separate components. Offset joining geometry by at least 0.5 units along the joining axis.
@@ -228,7 +229,7 @@ const r = await mainifold.runAndExplain(code);
 // ]
 ```
 
-## Reference Images
+## Reference images
 
 Load reference photos to compare against your model's elevations:
 ```js
@@ -251,7 +252,7 @@ mainifold.getReferenceImages()  // -> {front?, right?, ...} or null
 
 When reference images are loaded, the Elevations tab shows each model view side-by-side with the corresponding reference image. This enables direct visual comparison for accuracy.
 
-## Photo-to-Model Workflow
+## Photo-to-model workflow
 
 > **Optional tooling.** This workflow uses `scripts/generate-views.js` and Gemini, which may not be installed in every environment. If unavailable, skip the analysis step and supply reference images manually via `setReferenceImages()`.
 
@@ -298,7 +299,7 @@ Switch to Elevations tab and compare model silhouette against reference at each 
 Add features in order of visual impact: roof -> porch -> windows/doors -> trim details.
 After each addition, verify the relevant elevation matches the reference.
 
-## Iteration Workflow
+## Iteration workflow
 
 ### Testing without side effects
 
@@ -451,7 +452,7 @@ Read the notes and version history before making changes. The notes tell you:
 5. Use `query({sliceAt: [...], decompose: true})` for follow-up inspection without re-running
 6. Repeat. Gallery URL is in `#geometry-data` or the `runAndSave` return value.
 
-## Visual Verification
+## Visual verification
 
 **CRITICAL: Stats alone cannot catch visual defects.** A roof can be mangled, a spire twisted,
 or proportions wrong -- all while volume, componentCount, and genus look correct. After every
@@ -484,10 +485,10 @@ const s = mainifold.sliceAtZVisual(10);  // returns {svg, area, contours}
 - `?view=elevations` -- Front, Right, Back, Left, Top orthographic + 1 isometric (6 views)
 - Use Elevations for shape verification, AI Views for overall appearance.
 
-## Stat-Based Verification
+## Stat-based verification
 
 1. Read `#geometry-data` -- check `status:"ok"`, volume, dimensions, componentCount, isManifold
 2. Check `crossSections` quartiles (z25/z50/z75) for expected profile
 3. Use `mainifold.sliceAtZ(z)` for specific heights
 4. Use `mainifold.validate(code)` for quick syntax checks
-6. Use `mainifold.runAndAssert(code, assertions)` for structured validation
+5. Use `mainifold.runAndAssert(code, assertions)` for structured validation

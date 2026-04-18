@@ -1538,57 +1538,55 @@ async function main() {
 
     /** Self-documenting help -- returns structured object and logs readable summary */
     help(method?: string): Record<string, unknown> {
-      const methods: Record<string, string> = {
+      const methods: Record<string, { signature: string; docs: string }> = {
         // Core
-        'run': 'run(code?) -- Run code, update views, return geometry stats',
-        'getGeometryData': 'getGeometryData() -- Current stats as JSON object',
-        'validate': 'validate(code) -- Check code without rendering -> {valid, error?}',
-        'getCode': 'getCode() -- Read editor contents',
-        'setCode': 'setCode(code) -- Set editor contents (no auto-run)',
+        'run':             { signature: 'run(code?) -- Run code, update views, return geometry stats', docs: '/ai.md#console-api--windowmainifold' },
+        'getGeometryData': { signature: 'getGeometryData() -- Current stats as JSON object', docs: '/ai.md#geometry-data' },
+        'validate':        { signature: 'validate(code) -- Check code without rendering -> {valid, error?}', docs: '/ai.md#console-api--windowmainifold' },
+        'getCode':         { signature: 'getCode() -- Read editor contents', docs: '/ai.md#console-api--windowmainifold' },
+        'setCode':         { signature: 'setCode(code) -- Set editor contents (no auto-run)', docs: '/ai.md#console-api--windowmainifold' },
         // Isolated execution
-        'runIsolated': 'await runIsolated(code) -- Test code without side effects -> {geometryData, thumbnail}',
-        'runAndAssert': 'await runAndAssert(code, assertions) -- Validate geometry -> {passed, failures?, stats}',
-        'runAndExplain': 'await runAndExplain(code) -- Debug disconnected components -> {stats, components[], hints[]}',
-        'modifyAndTest': 'await modifyAndTest(patchFn, assertions?) -- Modify + test without committing',
-        'query': 'query({sliceAt?, decompose?, boundingBox?}) -- Multi-query current geometry',
+        'runIsolated':     { signature: 'await runIsolated(code) -- Test without side effects -> {geometryData, thumbnail}', docs: '/ai.md#testing-without-side-effects' },
+        'runAndAssert':    { signature: 'await runAndAssert(code, assertions) -- Validate geometry -> {passed, failures?, stats}', docs: '/ai.md#assertions----structured-validation' },
+        'runAndExplain':   { signature: 'await runAndExplain(code) -- Debug disconnected components -> {stats, components[], hints[]}', docs: '/ai.md#debugging-disconnected-components' },
+        'modifyAndTest':   { signature: 'await modifyAndTest(patchFn, assertions?) -- Modify + test without committing', docs: '/ai.md#modify-and-test' },
+        'query':           { signature: 'query({sliceAt?, decompose?, boundingBox?}) -- Multi-query current geometry', docs: '/ai.md#multi-query-current-geometry' },
         // Sessions
-        'createSession': 'await createSession(name?) -- Create session -> {id, url, galleryUrl}',
-        'runAndSave': 'await runAndSave(code, label?, assertions?) -- Assert + save version in one call',
-        'saveVersion': 'await saveVersion(label?) -- Save current state as version',
-        'listVersions': 'await listVersions() -- List all versions in session',
-        'loadVersion': 'await loadVersion(index) -- Load specific version',
-        'openSession': 'await openSession(id) -- Open existing session',
-        'listSessions': 'await listSessions() -- List all sessions',
-        'getSessionContext': 'await getSessionContext() -- Get full session context (for resuming)',
-        'getGalleryUrl': 'getGalleryUrl() -- URL for gallery view (human review)',
+        'createSession':   { signature: 'await createSession(name?) -- Create session -> {id, url, galleryUrl}', docs: '/ai.md#console-api--windowmainifold' },
+        'runAndSave':      { signature: 'await runAndSave(code, label?, assertions?) -- Assert + save version in one call', docs: '/ai.md#assert--save-in-one-call' },
+        'saveVersion':     { signature: 'await saveVersion(label?) -- Save current state as version', docs: '/ai.md#console-api--windowmainifold' },
+        'listVersions':    { signature: 'await listVersions() -- List all versions in session', docs: '/ai.md#console-api--windowmainifold' },
+        'loadVersion':     { signature: 'await loadVersion(index) -- Load specific version', docs: '/ai.md#console-api--windowmainifold' },
+        'openSession':     { signature: 'await openSession(id) -- Open existing session', docs: '/ai.md#resuming-a-session' },
+        'listSessions':    { signature: 'await listSessions() -- List all sessions', docs: '/ai.md#console-api--windowmainifold' },
+        'getSessionContext': { signature: 'await getSessionContext() -- Get full session context (for resuming)', docs: '/ai.md#resuming-a-session' },
+        'getGalleryUrl':   { signature: 'getGalleryUrl() -- URL for gallery view (human review)', docs: '/ai.md#console-api--windowmainifold' },
         // Notes
-        'addSessionNote': 'await addSessionNote(text) -- Add note with [PREFIX] tag',
-        'listSessionNotes': 'await listSessionNotes() -- List all session notes',
+        'addSessionNote':  { signature: 'await addSessionNote(text) -- Add note with [PREFIX] tag', docs: '/ai.md#session-notes----tracking-design-context' },
+        'listSessionNotes': { signature: 'await listSessionNotes() -- List all session notes', docs: '/ai.md#session-notes----tracking-design-context' },
         // Inspection
-        'sliceAtZ': 'sliceAtZ(z) -- Cross-section at height -> {polygons, svg, area}',
-        'getBoundingBox': 'getBoundingBox() -- -> {min, max}',
-        'renderView': 'renderView({elevation?, azimuth?, ortho?, size?}) -- Render from any angle -> data URL',
-        'analyzeProfile': 'analyzeProfile(sampleCount?) -- Z-profile feature summary',
-        'measureAt': 'measureAt([x,y]) -- Ray-cast probe at XY -> {hits, thickness, topZ, bottomZ}',
+        'sliceAtZ':        { signature: 'sliceAtZ(z) -- Cross-section at height -> {polygons, svg, area}', docs: '/ai.md#console-api--windowmainifold' },
+        'getBoundingBox':  { signature: 'getBoundingBox() -- -> {min, max}', docs: '/ai.md#console-api--windowmainifold' },
+        'renderView':      { signature: 'renderView({elevation?, azimuth?, ortho?, size?}) -- Render from any angle -> data URL', docs: '/ai.md#visual-verification' },
+        'analyzeProfile':  { signature: 'analyzeProfile(sampleCount?) -- Z-profile feature summary', docs: '/ai.md#console-api--windowmainifold' },
+        'measureAt':       { signature: 'measureAt([x,y]) -- Ray-cast probe at XY -> {hits, thickness, topZ, bottomZ}', docs: '/ai.md#console-api--windowmainifold' },
         // View
-        'setView': 'setView(tab) -- Switch tab: "interactive", "ai", "elevations", "gallery"',
-        'getViewState': 'getViewState() -- Current tab and camera state',
+        'setView':         { signature: 'setView(tab) -- Switch tab: "interactive", "ai", "elevations", "gallery"', docs: '/ai.md#view-tabs' },
+        'getViewState':    { signature: 'getViewState() -- Current tab and camera state', docs: '/ai.md#view-tabs' },
         // Export
-        'exportGLB': 'await exportGLB() -- Download GLB file',
-        'exportSTL': 'exportSTL() -- Download STL file',
-        'exportOBJ': 'exportOBJ() -- Download OBJ file',
-        'export3MF': 'export3MF() -- Download 3MF file',
+        'exportGLB':       { signature: 'await exportGLB() -- Download GLB file', docs: '/ai.md#console-api--windowmainifold' },
+        'exportSTL':       { signature: 'exportSTL() -- Download STL file', docs: '/ai.md#console-api--windowmainifold' },
+        'exportOBJ':       { signature: 'exportOBJ() -- Download OBJ file', docs: '/ai.md#console-api--windowmainifold' },
+        'export3MF':       { signature: 'export3MF() -- Download 3MF file', docs: '/ai.md#console-api--windowmainifold' },
       };
 
       if (method) {
         const entry = methods[method];
         if (entry) {
-          console.log(entry);
-          return { method, description: entry };
+          console.log(`${entry.signature}\nDocs: ${entry.docs}`);
+          return { method, ...entry };
         }
-        const msg = `Unknown method "${method}". Call help() for full list.`;
-        console.log(msg);
-        return { error: msg };
+        return { error: `Unknown method "${method}". Call help() for full list.` };
       }
 
       const result = {
@@ -1618,7 +1616,7 @@ async function main() {
         '  await mainifold.runAndSave(code, "v1", {isManifold: true, maxComponents: 1})',
         '',
         'Methods:',
-        ...Object.values(methods).map(m => `  ${m}`),
+        ...Object.entries(methods).map(([, v]) => `  ${v.signature}`),
       ];
       console.log(lines.join('\n'));
 

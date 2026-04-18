@@ -7,11 +7,11 @@ tools: [claude-code]
 
 ## Human
 
-Evaluated feedback from two AI agent sessions about API discoverability issues. First agent proposed 12 changes; assessed which were worthwhile and implemented 5. Second agent (Chrome-based, security-conscious) tested the result and gave further feedback: the banner triggered security caution because it mixed a signpost with behavioral commands, and several documentation polish issues.
+Evaluated feedback from two AI agent sessions about API discoverability issues. First agent proposed 12 changes; assessed which were worthwhile and implemented 5. Second agent (Chrome-based, security-conscious) tested the result and gave further feedback across two rounds.
 
 ## Changes
 
-### Initial commit
+### Commit 1: Initial discoverability
 - `index.html`: Add hidden `#ai-agent-readme` div as first child of `<body>`
 - `public/ai.md`: Add "Before you start" TL;DR section and "Common agent mistakes" list
 - `src/main.ts`: Add `mainifold.help(method?)` self-documenting method
@@ -19,10 +19,14 @@ Evaluated feedback from two AI agent sessions about API discoverability issues. 
 - `public/llms.txt`: New file following llms.txt convention
 - `public/robots.txt`: Add comment directing AI agents to docs
 
-### Follow-up commit (agent feedback)
-- `index.html`: Shrink banner to pure signpost (no commands), add `<meta name="ai-instructions">` tag
+### Commit 2: Refinement (security-conscious agent feedback)
+- `index.html`: Shrink banner to pure signpost, add `<meta name="ai-instructions">` tag
 - `public/llms.txt`: Expand with quickstart code block and ## Docs section
-- `public/ai.md`: Restructure top with intro + table of contents, replace hardcoded ports with relative paths, replace non-ASCII chars with ASCII equivalents, add sandbox environment docs, add `notes` to assertions spec, flag photo-to-model tooling as optional, demote #geometry-data DOM reading, add "not reading session context" to common mistakes
-- `src/main.ts`: `help()` now returns structured object (not just string), console greeter replaced with concise `console.info`, add UI-input warning toast+console.warn when `?view=ai` is set and agent clicks/types
-- `vite.config.ts`: Add middleware to serve .md/.txt with charset=utf-8
-- `public/_headers`: Add Content-Type charset rules for .md and .txt files in production
+- `public/ai.md`: Restructure top, fix encoding, fix ports, add sandbox docs, add notes to assertions, flag optional tooling, demote #geometry-data, add session-context mistake
+- `src/main.ts`: `help()` returns structured object, console.info one-liner, UI-input warning
+- `vite.config.ts`: Middleware for .md/.txt charset=utf-8
+- `public/_headers`: Content-Type charset rules for production
+
+### Commit 3: Final polish (second round of agent feedback)
+- `public/ai.md`: Fix numbering gap (4->6) in Stat-Based Verification, normalize heading case to sentence case throughout, add "Resuming a session" to TOC
+- `src/main.ts`: `help()` method entries now include docs anchors (`{signature, docs}` objects instead of flat strings), per-method lookup returns signature + docs link
