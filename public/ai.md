@@ -1,73 +1,109 @@
-# mAInifold — AI Agent Instructions
+# mAInifold -- AI Agent Instructions
 
-Browser-based parametric CAD tool powered by manifold-3d (WASM). Write JavaScript that constructs 3D geometry, returns a Manifold object, and it renders live.
+mAInifold is a browser-based parametric CAD tool powered by manifold-3d (WASM). You write JavaScript that constructs 3D geometry and returns a `Manifold` object, which renders live. All interaction is via the `window.mainifold` programmatic API -- do not drive the app through clicks or keystrokes.
 
 **Coordinate system:** Right-handed, Z-up. XY plane is the ground. Units are arbitrary.
 
+## Contents
+
+- [Before you start](#before-you-start)
+- [Common agent mistakes](#common-agent-mistakes)
+- [Console API -- window.mainifold](#console-api--windowmainifold)
+- [Geometry data](#geometry-data)
+- [Writing model code](#writing-model-code)
+- [Common pitfalls for boolean operations](#common-pitfalls-for-boolean-operations)
+- [Reference images](#reference-images)
+- [Photo-to-model workflow](#photo-to-model-workflow) (optional tooling)
+- [Iteration workflow](#iteration-workflow)
+- [Visual verification](#visual-verification)
+- [Stat-based verification](#stat-based-verification)
+- [Resuming a session](#resuming-a-session)
+
+## Before you start
+
+1. **Use `window.mainifold`** -- that's the programmatic API. Do NOT drive the app with clicks, keystrokes, or DOM manipulation.
+2. **Code must end with `return manifoldObject;`** -- a bare trailing expression won't work.
+3. **Use `runAndSave(code, label, {isManifold: true, maxComponents: 1})`** to validate and commit a version.
+4. **Log decisions with `addSessionNote("[PREFIX] ...")`** -- prefixes: `[REQUIREMENT]`, `[DECISION]`, `[FEEDBACK]`, `[MEASUREMENT]`, `[ATTEMPT]`, `[TODO]`.
+
+## Common agent mistakes
+
+- **Driving the UI with clicks/keystrokes** -- CodeMirror's auto-close-brackets will corrupt your code. Use `mainifold.setCode()` and `mainifold.run()` instead.
+- **Forgetting `return`** -- code runs in `new Function()`, so a trailing expression is NOT automatically returned. You must write `return Manifold.cube(...)`.
+- **Skipping sessions** -- always create a session (`createSession`) and save versions (`runAndSave`) so the user can review your work in the gallery.
+- **Skipping visual verification** -- stats alone can't catch visual defects. After structural changes, screenshot the Elevations tab or use `renderView()`.
+- **Flush boolean placement** -- shapes must overlap by at least 0.5 units to union correctly. Merely touching at a face produces disconnected components.
+- **Not reading session context before modifying** -- when opening an existing session, always call `getSessionContext()` first and read the notes/version history before making changes. See [Resuming a session](#resuming-a-session).
+
 ## How to use this tool
 
-1. Navigate with `?view=ai` to see 4 isometric views (e.g. `http://localhost:5173/editor?view=ai`)
+1. Navigate with `?view=ai` to see 4 isometric views (e.g. `/editor?view=ai`)
 2. Use `window.mainifold` in the browser console to interact programmatically
-3. Read `document.getElementById("geometry-data").textContent` for structured stats (JSON)
+3. Call `mainifold.help()` for a full method list, or `mainifold.help('methodName')` for a specific method
+4. Use `mainifold.getGeometryData()` to read current geometry stats programmatically
 
-## Console API — window.mainifold
+## Console API -- window.mainifold
 
 ```js
 mainifold.run(code?)          // Run code, update views, return geometry stats
 mainifold.getGeometryData()   // Current stats (same as #geometry-data)
-mainifold.validate(code)      // Check code without rendering → {valid, error?}
+mainifold.validate(code)      // Check code without rendering -> {valid, error?}
 mainifold.getCode()           // Read editor contents
 mainifold.setCode(code)       // Set editor contents (no auto-run)
-mainifold.sliceAtZ(z)         // Cross-section → {polygons, svg, boundingBox, area}
-mainifold.getBoundingBox()    // → {min:[x,y,z], max:[x,y,z]}
+mainifold.sliceAtZ(z)         // Cross-section -> {polygons, svg, boundingBox, area}
+mainifold.getBoundingBox()    // -> {min:[x,y,z], max:[x,y,z]}
 mainifold.getModule()         // Raw manifold-3d WASM module
-mainifold.toggleClip(on?)     // Toggle 3D clipping plane → {enabled, z, min, max}
-mainifold.setClipZ(z)         // Set clip height → {enabled, z, min, max}
-mainifold.getClipState()      // → {enabled, z, min, max}
+mainifold.toggleClip(on?)     // Toggle 3D clipping plane -> {enabled, z, min, max}
+mainifold.setClipZ(z)         // Set clip height -> {enabled, z, min, max}
+mainifold.getClipState()      // -> {enabled, z, min, max}
 await mainifold.exportGLB()   // Download GLB
 mainifold.exportSTL()         // Download STL
 mainifold.exportOBJ()         // Download OBJ
 mainifold.export3MF()         // Download 3MF
 
-// Isolated execution — test code without changing editor/viewport state
-await mainifold.runIsolated(code)       // → {geometryData, thumbnail}
-await mainifold.runAndAssert(code, assertions) // → {passed, failures?, stats}
-await mainifold.runAndExplain(code)     // → {stats, components[], hints[]} (debug disconnects)
+// Isolated execution -- test code without changing editor/viewport state
+await mainifold.runIsolated(code)       // -> {geometryData, thumbnail}
+await mainifold.runAndAssert(code, assertions) // -> {passed, failures?, stats}
+await mainifold.runAndExplain(code)     // -> {stats, components[], hints[]} (debug disconnects)
 await mainifold.modifyAndTest(patchFn, assertions?) // Modify current code + test in isolation
 mainifold.query({sliceAt?, decompose?, boundingBox?}) // Multi-query current geometry in one call
-mainifold.renderView({elevation?, azimuth?, ortho?, size?}) // Render from any angle → data URL
-mainifold.sliceAtZVisual(z)            // Cross-section SVG at height z → {svg, area, contours}
-mainifold.isRunning()                   // → boolean (is code executing?)
+mainifold.renderView({elevation?, azimuth?, ortho?, size?}) // Render from any angle -> data URL
+mainifold.sliceAtZVisual(z)            // Cross-section SVG at height z -> {svg, area, contours}
+mainifold.isRunning()                   // -> boolean (is code executing?)
 
-// Reference images — compare model against photos
+// Reference images -- compare model against photos
 mainifold.setReferenceImages({front?, right?, back?, left?, top?, perspective?})
 mainifold.clearReferenceImages()
 mainifold.getReferenceImages()
 
-// Sessions — save/compare design iterations
-await mainifold.createSession(name?)    // → {id, url, galleryUrl}
-await mainifold.runAndSave(code, label?, assertions?) // Assert+save in one call → {passed?, geometry, version, diff, galleryUrl}
+// Sessions -- save/compare design iterations
+await mainifold.createSession(name?)    // -> {id, url, galleryUrl}
+await mainifold.runAndSave(code, label?, assertions?) // Assert+save in one call -> {passed?, geometry, version, diff, galleryUrl}
 await mainifold.createSessionWithVersions(name, [{code, label},...]) // Batch create
 await mainifold.saveVersion(label?)     // Save current state as version
-await mainifold.listVersions()          // → [{id, index, label, timestamp, status}]
+await mainifold.listVersions()          // -> [{id, index, label, timestamp, status}]
 await mainifold.loadVersion(index)      // Load specific version
-mainifold.getGalleryUrl()               // → URL for gallery view (human review)
-mainifold.getSessionUrl()               // → URL for this session
-await mainifold.listSessions()          // → [{id, name, updated}]
+mainifold.getGalleryUrl()               // -> URL for gallery view (human review)
+mainifold.getSessionUrl()               // -> URL for this session
+await mainifold.listSessions()          // -> [{id, name, updated}]
 await mainifold.openSession(id)         // Open existing session
 await mainifold.clearAllSessions()      // Delete all sessions & versions
 
-// Notes — track design context, decisions, and measurements
-await mainifold.addSessionNote(text)    // → {id, text, timestamp}
-await mainifold.listSessionNotes()      // → [{id, text, timestamp}, ...]
+// Notes -- track design context, decisions, and measurements
+await mainifold.addSessionNote(text)    // -> {id, text, timestamp}
+await mainifold.listSessionNotes()      // -> [{id, text, timestamp}, ...]
 await mainifold.updateSessionNote(noteId, text) // Edit a note
 await mainifold.deleteSessionNote(noteId)       // Remove a note
 
-// Session context — get everything in one call (for resuming sessions)
-await mainifold.getSessionContext()     // → {session, versions[], notes[], currentVersion, versionCount}
+// Session context -- get everything in one call (for resuming sessions)
+await mainifold.getSessionContext()     // -> {session, versions[], notes[], currentVersion, versionCount}
 ```
 
-## #geometry-data schema
+## Geometry data
+
+**Preferred:** Use `mainifold.getGeometryData()` to read current geometry stats programmatically.
+
+**Fallback** (if `window.mainifold` is not yet initialized): read `document.getElementById("geometry-data").textContent` -- it contains the same JSON.
 
 ```json
 {
@@ -90,31 +126,33 @@ await mainifold.getSessionContext()     // → {session, versions[], notes[], cu
 On error: `{"status":"error","error":"...","executionTimeMs":2,"codeHash":"..."}`
 
 ### Common errors
-- `Code must return a Manifold object` → forgot `return` statement
-- `function _Cylinder called with N arguments` → wrong arg count
-- Geometry looks wrong → check `isManifold` and `componentCount` (failed booleans = extra components)
+- `Code must return a Manifold object` -- forgot `return` statement
+- `function _Cylinder called with N arguments` -- wrong arg count
+- Geometry looks wrong -- check `isManifold` and `componentCount` (failed booleans = extra components)
 
 ## Writing model code
 
-Code runs in a sandbox via `new Function('api', code)`. All transforms return new immutable Manifold instances — chaining works.
+Code runs in a sandbox via `new Function('api', code)`. All transforms return new immutable Manifold instances -- chaining works.
 
 ```js
-const { Manifold, CrossSection } = api;
+const { Manifold, CrossSection, setCircularSegments } = api;
 // MUST return a Manifold object
 ```
+
+**Sandbox environment:** The `api` object provides `Manifold`, `CrossSection`, and `setCircularSegments`. Standard JavaScript globals (`Math`, `Array`, `Object`, `JSON`, `Date`, `console`, etc.) are available. There is no DOM access, no `fetch`/network, no `require`/`import`, and no file I/O. Do not attempt to load external libraries or make HTTP requests in model code.
 
 ### Primitive origins and orientations
 
 ```
-cube([x,y,z])         → spans [0,0,0] to [x,y,z]. center=true → centered at origin
-sphere(r, n?)         → centered at origin
-cylinder(h,rLo,rHi?,n?) → Z-axis, base z=0, top z=h. rHi=0 for cone
-tetrahedron()          → vertices at [1,1,1],[1,-1,-1],[-1,1,-1],[-1,-1,1]. Scale to size.
+cube([x,y,z])         -> spans [0,0,0] to [x,y,z]. center=true -> centered at origin
+sphere(r, n?)         -> centered at origin
+cylinder(h,rLo,rHi?,n?) -> Z-axis, base z=0, top z=h. rHi=0 for cone
+tetrahedron()          -> vertices at [1,1,1],[1,-1,-1],[-1,1,-1],[-1,-1,1]. Scale to size.
 extrude(cs, h, nDiv?, twist?, scaleTop?, center?)
-  → along Z, z=0 to z=h. twist=degrees, scaleTop=number or [x,y] (0 for cone point)
+  -> along Z, z=0 to z=h. twist=degrees, scaleTop=number or [x,y] (0 for cone point)
 revolve(cs, n?, degrees?)
-  → around Y axis, then remaps so result is Z-up.
-    Profile X=radial distance, Y=height → after revolve, Y becomes Z automatically.
+  -> around Y axis, then remaps so result is Z-up.
+    Profile X=radial distance, Y=height -> after revolve, Y becomes Z automatically.
     Only positive-X side used. degrees defaults to 360.
 Segments guide: 6-8 low-poly, 32-48 smooth, 64+ high quality
 ```
@@ -132,20 +170,20 @@ CrossSection: square, circle, ofPolygons (CCW outer, CW holes),
 
 ```
 Booleans:   .add(other)  .subtract(other)  .intersect(other)  .hull()
-Transforms: .translate([x,y,z])  .rotate([rx,ry,rz]) (degrees, applied X→Y→Z)
+Transforms: .translate([x,y,z])  .rotate([rx,ry,rz]) (degrees, applied X->Y->Z)
             .scale(s) or .scale([x,y,z])  .mirror([nx,ny,nz]) (plane normal)
             .warp(fn)  .transform(mat4x3)
 Mesh ops:   .refine(n)  .simplify()  .smoothOut()  .calculateNormals(idx, angle?)
 Queries:    .volume()  .surfaceArea()  .genus()  .numVert()  .numTri()  .isEmpty()
             .boundingBox()  .status() (0=valid)  .decompose()
 Slicing:    .slice(z)  .project()  .trimByPlane(n,off)  .splitByPlane(n,off)
-Output:     .getMesh() → {vertProperties, triVerts, numVert, numTri, numProp}
+Output:     .getMesh() -> {vertProperties, triVerts, numVert, numTri, numProp}
 ```
 
 ### CrossSection instance methods
 
 ```
-2D→3D:      .extrude(h, nDiv?, twist?, scaleTop?, center?)  .revolve(n?, degrees?)
+2D->3D:      .extrude(h, nDiv?, twist?, scaleTop?, center?)  .revolve(n?, degrees?)
 Transforms: .translate([x,y])  .rotate(degrees)  .scale(s or [x,y])
             .mirror([nx,ny])  .warp(fn)  .transform(mat3)
 Booleans:   .add(other)  .subtract(other)  .intersect(other)  .hull()
@@ -154,15 +192,15 @@ Queries:    .area()  .isEmpty()  .numVert()  .numContour()  .bounds()
 Output:     .toPolygons()  .decompose()  .delete()
 ```
 
-## Common Pitfalls for Boolean Operations
+## Common pitfalls for boolean operations
 
 ### Always use volumetric overlap, never flush placement
-Shapes that merely touch at a face will NOT union correctly — they stay as separate components. Offset joining geometry by at least 0.5 units along the joining axis.
+Shapes that merely touch at a face will NOT union correctly -- they stay as separate components. Offset joining geometry by at least 0.5 units along the joining axis.
 ```js
-// BAD — merlon sits exactly on wall top, stays disconnected
+// BAD -- merlon sits exactly on wall top, stays disconnected
 merlon.translate([x, y, wallTopZ])
 
-// GOOD — merlon overlaps 0.5 units into wall body
+// GOOD -- merlon overlaps 0.5 units into wall body
 merlon.translate([x, y, wallTopZ - 0.5])
 ```
 
@@ -175,7 +213,7 @@ Manifold.cylinder(spireH, 11, 0, 24).translate([0, 0, keepH - 0.5])
 ```
 
 ### Flag poles on cone tips need to start inside the cone body
-A cylinder placed at the exact tip of a cone (where radius = 0) has nothing to union with. Start the pole 1–2 units below the tip so it overlaps solid cone geometry.
+A cylinder placed at the exact tip of a cone (where radius = 0) has nothing to union with. Start the pole 1-2 units below the tip so it overlaps solid cone geometry.
 
 ### Debugging disconnected components
 When `componentCount > 1`, use `runAndExplain(code)` to identify which pieces are floating:
@@ -186,12 +224,12 @@ const r = await mainifold.runAndExplain(code);
 //   { index: 1, volume: 12,    centroid: [29, 29, 26], boundingBox: {...} },
 // ]
 // r.hints = [
-//   "1 tiny disconnected component(s) detected — likely floating attachments...",
-//   "Components 0 and 1 share a face or near-touch (gap: 0.00) — need volumetric overlap"
+//   "1 tiny disconnected component(s) detected -- likely floating attachments...",
+//   "Components 0 and 1 share a face or near-touch (gap: 0.00) -- need volumetric overlap"
 // ]
 ```
 
-## Reference Images
+## Reference images
 
 Load reference photos to compare against your model's elevations:
 ```js
@@ -209,16 +247,18 @@ mainifold.setReferenceImages({
 mainifold.clearReferenceImages()
 
 // Get current reference image state
-mainifold.getReferenceImages()  // → {front?, right?, ...} or null
+mainifold.getReferenceImages()  // -> {front?, right?, ...} or null
 ```
 
 When reference images are loaded, the Elevations tab shows each model view side-by-side with the corresponding reference image. This enables direct visual comparison for accuracy.
 
-## Photo-to-Model Workflow
+## Photo-to-model workflow
+
+> **Optional tooling.** This workflow uses `scripts/generate-views.js` and Gemini, which may not be installed in every environment. If unavailable, skip the analysis step and supply reference images manually via `setReferenceImages()`.
 
 To recreate a building or object from a photo:
 
-### 1. Analyze the reference
+### 1. Analyze the reference (optional helper)
 Use `scripts/generate-views.js` to extract structural analysis:
 ```bash
 node scripts/generate-views.js /path/to/photo.jpg
@@ -239,7 +279,7 @@ mainifold.setReferenceImages({ front: frontDataUrl, right: rightDataUrl, ... })
 ### 3. Build major masses first
 Start with the largest geometric volumes and get proportions right before adding detail:
 ```js
-// Decompose into: main body → wings → roof → porch → details
+// Decompose into: main body -> wings -> roof -> porch -> details
 // Build each mass, validate proportions against reference
 const r = await mainifold.runAndAssert(code, {
   isManifold: true, maxComponents: 1,
@@ -256,10 +296,10 @@ Switch to Elevations tab and compare model silhouette against reference at each 
 - Porch depth and column spacing
 
 ### 5. Iterate on details
-Add features in order of visual impact: roof → porch → windows/doors → trim details.
+Add features in order of visual impact: roof -> porch -> windows/doors -> trim details.
 After each addition, verify the relevant elevation matches the reference.
 
-## Iteration Workflow
+## Iteration workflow
 
 ### Testing without side effects
 
@@ -270,7 +310,7 @@ const r = await mainifold.runIsolated(code);
 // r.thumbnail = data:image/png base64 string (4 isometric views)
 ```
 
-### Assertions — structured validation
+### Assertions -- structured validation
 
 Check geometry against expectations in one call:
 ```js
@@ -280,13 +320,14 @@ const r = await mainifold.runAndAssert(code, {
   isManifold: true,     // must be valid manifold
   maxComponents: 1,     // detect failed booleans
   genus: 0,             // exact topological genus (0 = solid, N = N holes)
-  minGenus: 1,          // genus range — useful when exact count is unpredictable
+  minGenus: 1,          // genus range -- useful when exact count is unpredictable
   maxGenus: 20,
   minBounds: [10,10,5], // minimum bounding box dimensions [X,Y,Z]
   maxBounds: [50,50,30],
   minTriangles: 100,    // mesh complexity bounds
   maxTriangles: 50000,
-  boundsRatio: { widthToDepth: [1.2, 1.8], widthToHeight: [1.5, 2.5] }  // proportion ranges
+  boundsRatio: { widthToDepth: [1.2, 1.8], widthToHeight: [1.5, 2.5] },  // proportion ranges
+  notes: "Design rationale or context for this version",  // optional: attached to saved version
 });
 // r.passed = true/false
 // r.failures = ["volume 500.0 < minVolume 1000"] (only if failed)
@@ -295,7 +336,7 @@ const r = await mainifold.runAndAssert(code, {
 
 ### Assert + save in one call
 
-`runAndSave` accepts optional assertions. If provided, validates in isolation first — fails fast
+`runAndSave` accepts optional assertions. If provided, validates in isolation first -- fails fast
 without saving if assertions don't pass. On success, saves the version and returns stat diff:
 ```js
 const r = await mainifold.runAndSave(code, "v2 - added towers", {
@@ -350,10 +391,10 @@ const r = await mainifold.createSessionWithVersions("Castle", [
 ]);
 // r.session = {id, name}
 // r.versions = [{version, geometry}, ...]
-// r.galleryUrl = "http://localhost:5173/editor?session=abc&gallery"
+// r.galleryUrl = "/editor?session=abc&gallery"
 ```
 
-### Session notes — tracking design context
+### Session notes -- tracking design context
 
 Use session notes to build a persistent record of the design story. This enables any agent (or human) resuming the session later to understand what happened and why.
 
@@ -388,10 +429,10 @@ When opening a session you haven't worked on (or returning after time away), **a
 ```js
 await mainifold.openSession(sessionId);
 const ctx = await mainifold.getSessionContext();
-// ctx.session    — {id, name, created, updated}
-// ctx.versions   — [{index, label, timestamp, notes?, geometrySummary: {volume, boundingBox, ...}}]
-// ctx.notes      — [{id, text, timestamp}]  (all session notes)
-// ctx.currentVersion — {index, label}
+// ctx.session    -- {id, name, created, updated}
+// ctx.versions   -- [{index, label, timestamp, notes?, geometrySummary: {volume, boundingBox, ...}}]
+// ctx.notes      -- [{id, text, timestamp}]  (all session notes)
+// ctx.currentVersion -- {index, label}
 // ctx.versionCount
 ```
 
@@ -405,19 +446,19 @@ Read the notes and version history before making changes. The notes tell you:
 ### Recommended iteration pattern
 
 1. Write initial code, assert+save in one call: `runAndSave(code, "v1 - base", {isManifold: true, maxComponents: 1})`
-2. **Visually verify** — switch to Elevations tab (`?view=elevations`) and screenshot. Check Front/Side views.
-3. Modify code, test with `modifyAndTest(patchFn)` or `runIsolated(code)` — no side effects
-4. When satisfied, save: `runAndSave(modifiedCode, "v2 - improvements", assertions)` — check the diff
+2. **Visually verify** -- switch to Elevations tab (`?view=elevations`) and screenshot. Check Front/Side views.
+3. Modify code, test with `modifyAndTest(patchFn)` or `runIsolated(code)` -- no side effects
+4. When satisfied, save: `runAndSave(modifiedCode, "v2 - improvements", assertions)` -- check the diff
 5. Use `query({sliceAt: [...], decompose: true})` for follow-up inspection without re-running
 6. Repeat. Gallery URL is in `#geometry-data` or the `runAndSave` return value.
 
-## Visual Verification
+## Visual verification
 
 **CRITICAL: Stats alone cannot catch visual defects.** A roof can be mangled, a spire twisted,
-or proportions wrong — all while volume, componentCount, and genus look correct. After every
+or proportions wrong -- all while volume, componentCount, and genus look correct. After every
 structural change:
 
-1. **Check the Elevations tab** (`?view=elevations`) — shows Front, Right, Back, Left, Top views.
+1. **Check the Elevations tab** (`?view=elevations`) -- shows Front, Right, Back, Left, Top views.
    Side elevations immediately reveal roof profiles, wall alignment, and symmetry issues that
    isometric views can hide.
 2. **Use `renderView()` for specific angles:**
@@ -433,21 +474,21 @@ const s = mainifold.sliceAtZVisual(10);  // returns {svg, area, contours}
 // svg = visual rendering of the cross-section profile at z=10
 ```
 4. **Feature-specific checks:**
-   - Added a roof? Check side elevation — should be a clean triangle/gable profile.
-   - Cut a door/window? Check front elevation — opening should be visible.
-   - Added a tower? Check top-down — should be circular, properly positioned.
-   - Made something hollow? Slice at mid-height — should show wall ring, not solid fill.
+   - Added a roof? Check side elevation -- should be a clean triangle/gable profile.
+   - Cut a door/window? Check front elevation -- opening should be visible.
+   - Added a tower? Check top-down -- should be circular, properly positioned.
+   - Made something hollow? Slice at mid-height -- should show wall ring, not solid fill.
 
 ### View tabs
 
-- `?view=ai` — 4 isometric views (alternating cube corners)
-- `?view=elevations` — Front, Right, Back, Left, Top orthographic + 1 isometric (6 views)
+- `?view=ai` -- 4 isometric views (alternating cube corners)
+- `?view=elevations` -- Front, Right, Back, Left, Top orthographic + 1 isometric (6 views)
 - Use Elevations for shape verification, AI Views for overall appearance.
 
-## Stat-Based Verification
+## Stat-based verification
 
-1. Read `#geometry-data` — check `status:"ok"`, volume, dimensions, componentCount, isManifold
+1. Read `#geometry-data` -- check `status:"ok"`, volume, dimensions, componentCount, isManifold
 2. Check `crossSections` quartiles (z25/z50/z75) for expected profile
 3. Use `mainifold.sliceAtZ(z)` for specific heights
 4. Use `mainifold.validate(code)` for quick syntax checks
-6. Use `mainifold.runAndAssert(code, assertions)` for structured validation
+5. Use `mainifold.runAndAssert(code, assertions)` for structured validation

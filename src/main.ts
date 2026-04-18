@@ -725,6 +725,26 @@ async function main() {
     }
   });
 
+  // Warn AI agents that try to drive the UI when ?view=ai is set
+  if (new URLSearchParams(window.location.search).get('view') === 'ai') {
+    let agentUIWarningShown = false;
+    const warnAgentUI = () => {
+      if (agentUIWarningShown) return;
+      agentUIWarningShown = true;
+      const msg = 'Detected UI-driven input. This app expects programmatic control from AI agents. Use window.mainifold.runAndSave() -- see /llms.txt';
+      console.warn(msg);
+      // Show a non-blocking toast
+      const toast = document.createElement('div');
+      toast.textContent = msg;
+      toast.style.cssText = 'position:fixed;bottom:16px;left:50%;transform:translateX(-50%);background:#451a03;color:#fbbf24;padding:8px 16px;border-radius:6px;font-size:13px;z-index:9999;max-width:600px;text-align:center;pointer-events:none;';
+      document.body.appendChild(toast);
+      setTimeout(() => toast.remove(), 8000);
+    };
+    // Listen on the editor and viewport containers
+    editorUI.addEventListener('keydown', warnAgentUI, { once: true });
+    editorUI.addEventListener('click', warnAgentUI, { once: true });
+  }
+
   // === Execution state ===
   let _running = false;
 
@@ -903,6 +923,12 @@ async function main() {
     /** Create a new session and make it active */
     async createSession(name?: string) {
       const session = await createSession(name);
+      await addSessionNote(
+        '[WORKFLOW] Drive this app via window.mainifold (see /ai.md). ' +
+        'Use runAndSave(code, label, assertions) for iterations; ' +
+        'addSessionNote with [REQUIREMENT]/[DECISION]/[MEASUREMENT]/[FEEDBACK]/[ATTEMPT]/[TODO] prefixes; ' +
+        'getSessionContext() when resuming.',
+      );
       return { id: session.id, url: getSessionUrl(), galleryUrl: getGalleryUrl() };
     },
 
@@ -1509,40 +1535,99 @@ async function main() {
     measurePoints(p1: [number, number, number], p2: [number, number, number]): number {
       return measureDistance(p1, p2);
     },
+
+    /** Self-documenting help -- returns structured object and logs readable summary */
+    help(method?: string): Record<string, unknown> {
+      const methods: Record<string, { signature: string; docs: string }> = {
+        // Core
+        'run':             { signature: 'run(code?) -- Run code, update views, return geometry stats', docs: '/ai.md#console-api--windowmainifold' },
+        'getGeometryData': { signature: 'getGeometryData() -- Current stats as JSON object', docs: '/ai.md#geometry-data' },
+        'validate':        { signature: 'validate(code) -- Check code without rendering -> {valid, error?}', docs: '/ai.md#console-api--windowmainifold' },
+        'getCode':         { signature: 'getCode() -- Read editor contents', docs: '/ai.md#console-api--windowmainifold' },
+        'setCode':         { signature: 'setCode(code) -- Set editor contents (no auto-run)', docs: '/ai.md#console-api--windowmainifold' },
+        // Isolated execution
+        'runIsolated':     { signature: 'await runIsolated(code) -- Test without side effects -> {geometryData, thumbnail}', docs: '/ai.md#testing-without-side-effects' },
+        'runAndAssert':    { signature: 'await runAndAssert(code, assertions) -- Validate geometry -> {passed, failures?, stats}', docs: '/ai.md#assertions----structured-validation' },
+        'runAndExplain':   { signature: 'await runAndExplain(code) -- Debug disconnected components -> {stats, components[], hints[]}', docs: '/ai.md#debugging-disconnected-components' },
+        'modifyAndTest':   { signature: 'await modifyAndTest(patchFn, assertions?) -- Modify + test without committing', docs: '/ai.md#modify-and-test' },
+        'query':           { signature: 'query({sliceAt?, decompose?, boundingBox?}) -- Multi-query current geometry', docs: '/ai.md#multi-query-current-geometry' },
+        // Sessions
+        'createSession':   { signature: 'await createSession(name?) -- Create session -> {id, url, galleryUrl}', docs: '/ai.md#console-api--windowmainifold' },
+        'runAndSave':      { signature: 'await runAndSave(code, label?, assertions?) -- Assert + save version in one call', docs: '/ai.md#assert--save-in-one-call' },
+        'saveVersion':     { signature: 'await saveVersion(label?) -- Save current state as version', docs: '/ai.md#console-api--windowmainifold' },
+        'listVersions':    { signature: 'await listVersions() -- List all versions in session', docs: '/ai.md#console-api--windowmainifold' },
+        'loadVersion':     { signature: 'await loadVersion(index) -- Load specific version', docs: '/ai.md#console-api--windowmainifold' },
+        'openSession':     { signature: 'await openSession(id) -- Open existing session', docs: '/ai.md#resuming-a-session' },
+        'listSessions':    { signature: 'await listSessions() -- List all sessions', docs: '/ai.md#console-api--windowmainifold' },
+        'getSessionContext': { signature: 'await getSessionContext() -- Get full session context (for resuming)', docs: '/ai.md#resuming-a-session' },
+        'getGalleryUrl':   { signature: 'getGalleryUrl() -- URL for gallery view (human review)', docs: '/ai.md#console-api--windowmainifold' },
+        // Notes
+        'addSessionNote':  { signature: 'await addSessionNote(text) -- Add note with [PREFIX] tag', docs: '/ai.md#session-notes----tracking-design-context' },
+        'listSessionNotes': { signature: 'await listSessionNotes() -- List all session notes', docs: '/ai.md#session-notes----tracking-design-context' },
+        // Inspection
+        'sliceAtZ':        { signature: 'sliceAtZ(z) -- Cross-section at height -> {polygons, svg, area}', docs: '/ai.md#console-api--windowmainifold' },
+        'getBoundingBox':  { signature: 'getBoundingBox() -- -> {min, max}', docs: '/ai.md#console-api--windowmainifold' },
+        'renderView':      { signature: 'renderView({elevation?, azimuth?, ortho?, size?}) -- Render from any angle -> data URL', docs: '/ai.md#visual-verification' },
+        'analyzeProfile':  { signature: 'analyzeProfile(sampleCount?) -- Z-profile feature summary', docs: '/ai.md#console-api--windowmainifold' },
+        'measureAt':       { signature: 'measureAt([x,y]) -- Ray-cast probe at XY -> {hits, thickness, topZ, bottomZ}', docs: '/ai.md#console-api--windowmainifold' },
+        // View
+        'setView':         { signature: 'setView(tab) -- Switch tab: "interactive", "ai", "elevations", "gallery"', docs: '/ai.md#view-tabs' },
+        'getViewState':    { signature: 'getViewState() -- Current tab and camera state', docs: '/ai.md#view-tabs' },
+        // Export
+        'exportGLB':       { signature: 'await exportGLB() -- Download GLB file', docs: '/ai.md#console-api--windowmainifold' },
+        'exportSTL':       { signature: 'exportSTL() -- Download STL file', docs: '/ai.md#console-api--windowmainifold' },
+        'exportOBJ':       { signature: 'exportOBJ() -- Download OBJ file', docs: '/ai.md#console-api--windowmainifold' },
+        'export3MF':       { signature: 'export3MF() -- Download 3MF file', docs: '/ai.md#console-api--windowmainifold' },
+      };
+
+      if (method) {
+        const entry = methods[method];
+        if (entry) {
+          console.log(`${entry.signature}\nDocs: ${entry.docs}`);
+          return { method, ...entry };
+        }
+        return { error: `Unknown method "${method}". Call help() for full list.` };
+      }
+
+      const result = {
+        app: 'mAInifold -- AI-driven parametric CAD in the browser',
+        docs: '/ai.md',
+        constraints: {
+          codeMustReturn: 'Code must end with: return <Manifold object>;',
+          noUIAutomation: 'Do not drive the app with clicks or keystrokes. Use this API.',
+        },
+        quickstart: [
+          'mainifold.help()                        // You are here',
+          'await mainifold.createSession("name")   // Start a named session',
+          'await mainifold.runAndSave(code, "v1", {isManifold: true, maxComponents: 1})',
+        ],
+        methods,
+      };
+
+      // Also log a readable summary to the console
+      const lines = [
+        'mAInifold -- AI-driven parametric CAD. Full docs: /ai.md',
+        '',
+        'Code must end with: return <Manifold object>;',
+        'Do not drive the UI with clicks/keystrokes -- use this API.',
+        '',
+        'Quickstart:',
+        '  await mainifold.createSession("name")',
+        '  await mainifold.runAndSave(code, "v1", {isManifold: true, maxComponents: 1})',
+        '',
+        'Methods:',
+        ...Object.entries(methods).map(([, v]) => `  ${v.signature}`),
+      ];
+      console.log(lines.join('\n'));
+
+      return result;
+    },
   };
 
   (window as unknown as Record<string, unknown>).mainifold = mainifoldAPI;
 
   // Log API availability for AI agents
-  console.log(
-    '%c[mAInifold]%c Console API available at %cwindow.mainifold%c\n' +
-    'Methods: .run(code?), .getGeometryData(), .getCode(), .setCode(code),\n' +
-    '         .sliceAtZ(z), .getBoundingBox(), .validate(code),\n' +
-    '         .toggleClip(on?), .setClipZ(z), .getClipState(),\n' +
-    '         .getModule(), .exportGLB(), .exportSTL(), .exportOBJ(), .export3MF()\n' +
-    'Isolated: .runIsolated(code), .runAndAssert(code, assertions),\n' +
-    '          .runAndExplain(code), .isRunning()\n' +
-    'Intelligence: .analyzeProfile(), .analyzeProfileIsolated(code),\n' +
-    '              .measureAt([x,y]), .measureBetween(p1,p2), .probeRay(origin,dir),\n' +
-    '              .checkContainment()\n' +
-    'View: .getViewState(), .setView(tab), .setUnits(unit), .getUnits()\n' +
-    'Phantom: .setReferenceGeometry(code, opts?), .clearReferenceGeometry(),\n' +
-    '         .hasReferenceGeometry()\n' +
-    'Measure: .measureMode(enabled?), .getMeasurement(), .measurePoints(p1,p2)\n' +
-    'Sessions: .createSession(name?), .saveVersion(label?), .runAndSave(code, label?),\n' +
-    '          .createSessionWithVersions(name, [{code,label},...]),\n' +
-    '          .listSessions(), .openSession(id), .listVersions(), .loadVersion(idx),\n' +
-    '          .renameSession(name, id?), .getGalleryUrl(), .getSessionUrl(),\n' +
-    '          .getSessionState(), .getSessionContext(),\n' +
-    '          .exportSession(id?), .importSession(data), .clearAllSessions()\n' +
-    'Notes: .addSessionNote(text), .listSessionNotes(),\n' +
-    '       .updateSessionNote(noteId, text), .deleteSessionNote(noteId)\n' +
-    'Structured data: document.getElementById("geometry-data").textContent',
-    'color: #4ade80; font-weight: bold',
-    'color: inherit',
-    'color: #60a5fa; font-weight: bold',
-    'color: inherit',
-  );
+  console.info('mAInifold: AI agents should use window.mainifold -- start with mainifold.help(). See /llms.txt');
 
   // === Internal functions ===
 
