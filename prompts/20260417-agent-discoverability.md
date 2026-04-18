@@ -7,26 +7,30 @@ tools: [claude-code]
 
 ## Human
 
-Evaluated feedback from two AI agent sessions about API discoverability issues. First agent proposed 12 changes; assessed which were worthwhile and implemented 5. Second agent (Chrome-based, security-conscious) tested the result and gave further feedback across two rounds.
+An AI agent (via browser extension) had a poor session -- it drove the app with clicks/keystrokes instead of using the `window.mainifold` programmatic API. That agent produced a 12-point improvement spec. The user asked me to evaluate it objectively, then implement the worthwhile changes and create a PR.
+
+A second AI agent (Chrome-based, security-conscious) then tested the result and gave a second round of feedback: the DOM banner triggered prompt-injection caution because it mixed behavioral commands with the signpost, and the docs had encoding, consistency, and content gaps.
+
+A third round of feedback from the same agent addressed final polish: numbering gaps, heading case inconsistency, and adding docs anchors to `help()` output.
 
 ## Changes
 
-### Commit 1: Initial discoverability
-- `index.html`: Add hidden `#ai-agent-readme` div as first child of `<body>`
-- `public/ai.md`: Add "Before you start" TL;DR section and "Common agent mistakes" list
-- `src/main.ts`: Add `mainifold.help(method?)` self-documenting method
-- `src/main.ts`: Seed new sessions with a `[WORKFLOW]` note
-- `public/llms.txt`: New file following llms.txt convention
-- `public/robots.txt`: Add comment directing AI agents to docs
+### Commit 1: Initial discoverability (c096dc4)
+- `index.html`: Add hidden `#ai-agent-readme` div as first child of `<body>` with API instructions
+- `public/ai.md`: Add "Before you start" TL;DR section and "Common agent mistakes" list at top
+- `src/main.ts`: Add `mainifold.help(method?)` self-documenting method returning a string
+- `src/main.ts`: Seed new sessions with a `[WORKFLOW]` note via `createSession()`
+- `public/llms.txt`: New file following llms.txt convention, pointing to `/ai.md`
+- `public/robots.txt`: Add comment directing AI agents to `/ai.md` and `/llms.txt`
 
-### Commit 2: Refinement (security-conscious agent feedback)
-- `index.html`: Shrink banner to pure signpost, add `<meta name="ai-instructions">` tag
-- `public/llms.txt`: Expand with quickstart code block and ## Docs section
-- `public/ai.md`: Restructure top, fix encoding, fix ports, add sandbox docs, add notes to assertions, flag optional tooling, demote #geometry-data, add session-context mistake
-- `src/main.ts`: `help()` returns structured object, console.info one-liner, UI-input warning
-- `vite.config.ts`: Middleware for .md/.txt charset=utf-8
-- `public/_headers`: Content-Type charset rules for production
+### Commit 2: Refinement from security-conscious agent (362a73c)
+- `index.html`: Shrink banner to pure signpost (no API names/commands/code), add `<meta name="ai-instructions">` tag
+- `public/llms.txt`: Expand with quickstart code block and `## Docs` section
+- `public/ai.md`: Restructure top with intro paragraph + table of contents before checklist; replace hardcoded `localhost:5173` with relative paths; replace non-ASCII chars (em-dashes, arrows) with ASCII equivalents; add sandbox environment documentation; add `notes` to assertions spec; flag photo-to-model tooling as optional; demote `#geometry-data` DOM reading below `getGeometryData()`; add "not reading session context" to common mistakes
+- `src/main.ts`: `help()` changed to return structured object (`{app, docs, constraints, quickstart, methods}`); verbose console.log greeter replaced with single `console.info` line; add UI-input warning (toast + console.warn) when `?view=ai` is set and agent clicks/types
+- `vite.config.ts`: Add Vite middleware plugin to serve `.md`/`.txt` with `charset=utf-8`
+- `public/_headers`: Add Content-Type charset rules for `.md` and `.txt` in Cloudflare Pages production
 
-### Commit 3: Final polish (second round of agent feedback)
-- `public/ai.md`: Fix numbering gap (4->6) in Stat-Based Verification, normalize heading case to sentence case throughout, add "Resuming a session" to TOC
-- `src/main.ts`: `help()` method entries now include docs anchors (`{signature, docs}` objects instead of flat strings), per-method lookup returns signature + docs link
+### Commit 3: Final polish (0745003)
+- `public/ai.md`: Fix numbering gap (4 -> 6, now 1-5) in "Stat-based verification" list; normalize all section headings to sentence case; add "Resuming a session" to table of contents
+- `src/main.ts`: `help()` method entries changed from flat strings to `{signature, docs}` objects with anchors to relevant `/ai.md` sections; `help('methodName')` returns `{method, signature, docs}`
