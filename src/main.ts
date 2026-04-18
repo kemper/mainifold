@@ -725,6 +725,26 @@ async function main() {
     }
   });
 
+  // Warn AI agents that try to drive the UI when ?view=ai is set
+  if (new URLSearchParams(window.location.search).get('view') === 'ai') {
+    let agentUIWarningShown = false;
+    const warnAgentUI = () => {
+      if (agentUIWarningShown) return;
+      agentUIWarningShown = true;
+      const msg = 'Detected UI-driven input. This app expects programmatic control from AI agents. Use window.mainifold.runAndSave() -- see /llms.txt';
+      console.warn(msg);
+      // Show a non-blocking toast
+      const toast = document.createElement('div');
+      toast.textContent = msg;
+      toast.style.cssText = 'position:fixed;bottom:16px;left:50%;transform:translateX(-50%);background:#451a03;color:#fbbf24;padding:8px 16px;border-radius:6px;font-size:13px;z-index:9999;max-width:600px;text-align:center;pointer-events:none;';
+      document.body.appendChild(toast);
+      setTimeout(() => toast.remove(), 8000);
+    };
+    // Listen on the editor and viewport containers
+    editorUI.addEventListener('keydown', warnAgentUI, { once: true });
+    editorUI.addEventListener('click', warnAgentUI, { once: true });
+  }
+
   // === Execution state ===
   let _running = false;
 
@@ -1516,105 +1536,100 @@ async function main() {
       return measureDistance(p1, p2);
     },
 
-    /** Self-documenting help — prints method list and returns summary string */
-    help(method?: string): string {
+    /** Self-documenting help -- returns structured object and logs readable summary */
+    help(method?: string): Record<string, unknown> {
       const methods: Record<string, string> = {
         // Core
-        'run': 'run(code?) — Run code, update views, return geometry stats',
-        'getGeometryData': 'getGeometryData() — Current stats (same as #geometry-data)',
-        'validate': 'validate(code) — Check code without rendering → {valid, error?}',
-        'getCode': 'getCode() — Read editor contents',
-        'setCode': 'setCode(code) — Set editor contents (no auto-run)',
+        'run': 'run(code?) -- Run code, update views, return geometry stats',
+        'getGeometryData': 'getGeometryData() -- Current stats as JSON object',
+        'validate': 'validate(code) -- Check code without rendering -> {valid, error?}',
+        'getCode': 'getCode() -- Read editor contents',
+        'setCode': 'setCode(code) -- Set editor contents (no auto-run)',
         // Isolated execution
-        'runIsolated': 'await runIsolated(code) — Test code without side effects → {geometryData, thumbnail}',
-        'runAndAssert': 'await runAndAssert(code, assertions) — Validate geometry → {passed, failures?, stats}',
-        'runAndExplain': 'await runAndExplain(code) — Debug disconnected components → {stats, components[], hints[]}',
-        'modifyAndTest': 'await modifyAndTest(patchFn, assertions?) — Modify + test without committing',
-        'query': 'query({sliceAt?, decompose?, boundingBox?}) — Multi-query current geometry',
+        'runIsolated': 'await runIsolated(code) -- Test code without side effects -> {geometryData, thumbnail}',
+        'runAndAssert': 'await runAndAssert(code, assertions) -- Validate geometry -> {passed, failures?, stats}',
+        'runAndExplain': 'await runAndExplain(code) -- Debug disconnected components -> {stats, components[], hints[]}',
+        'modifyAndTest': 'await modifyAndTest(patchFn, assertions?) -- Modify + test without committing',
+        'query': 'query({sliceAt?, decompose?, boundingBox?}) -- Multi-query current geometry',
         // Sessions
-        'createSession': 'await createSession(name?) — Create session → {id, url, galleryUrl}',
-        'runAndSave': 'await runAndSave(code, label?, assertions?) — Assert + save version in one call',
-        'saveVersion': 'await saveVersion(label?) — Save current state as version',
-        'listVersions': 'await listVersions() — List all versions in session',
-        'loadVersion': 'await loadVersion(index) — Load specific version',
-        'openSession': 'await openSession(id) — Open existing session',
-        'listSessions': 'await listSessions() — List all sessions',
-        'getSessionContext': 'await getSessionContext() — Get full session context (for resuming)',
-        'getGalleryUrl': 'getGalleryUrl() — URL for gallery view (human review)',
+        'createSession': 'await createSession(name?) -- Create session -> {id, url, galleryUrl}',
+        'runAndSave': 'await runAndSave(code, label?, assertions?) -- Assert + save version in one call',
+        'saveVersion': 'await saveVersion(label?) -- Save current state as version',
+        'listVersions': 'await listVersions() -- List all versions in session',
+        'loadVersion': 'await loadVersion(index) -- Load specific version',
+        'openSession': 'await openSession(id) -- Open existing session',
+        'listSessions': 'await listSessions() -- List all sessions',
+        'getSessionContext': 'await getSessionContext() -- Get full session context (for resuming)',
+        'getGalleryUrl': 'getGalleryUrl() -- URL for gallery view (human review)',
         // Notes
-        'addSessionNote': 'await addSessionNote(text) — Add note with [PREFIX] tag',
-        'listSessionNotes': 'await listSessionNotes() — List all session notes',
+        'addSessionNote': 'await addSessionNote(text) -- Add note with [PREFIX] tag',
+        'listSessionNotes': 'await listSessionNotes() -- List all session notes',
         // Inspection
-        'sliceAtZ': 'sliceAtZ(z) — Cross-section at height → {polygons, svg, area}',
-        'getBoundingBox': 'getBoundingBox() — → {min, max}',
-        'renderView': 'renderView({elevation?, azimuth?, ortho?, size?}) — Render from any angle → data URL',
-        'analyzeProfile': 'analyzeProfile(sampleCount?) — Z-profile feature summary',
-        'measureAt': 'measureAt([x,y]) — Ray-cast probe at XY → {hits, thickness, topZ, bottomZ}',
+        'sliceAtZ': 'sliceAtZ(z) -- Cross-section at height -> {polygons, svg, area}',
+        'getBoundingBox': 'getBoundingBox() -- -> {min, max}',
+        'renderView': 'renderView({elevation?, azimuth?, ortho?, size?}) -- Render from any angle -> data URL',
+        'analyzeProfile': 'analyzeProfile(sampleCount?) -- Z-profile feature summary',
+        'measureAt': 'measureAt([x,y]) -- Ray-cast probe at XY -> {hits, thickness, topZ, bottomZ}',
         // View
-        'setView': 'setView(tab) — Switch tab: "interactive", "ai", "elevations", "gallery"',
-        'getViewState': 'getViewState() — Current tab and camera state',
+        'setView': 'setView(tab) -- Switch tab: "interactive", "ai", "elevations", "gallery"',
+        'getViewState': 'getViewState() -- Current tab and camera state',
         // Export
-        'exportGLB': 'await exportGLB() — Download GLB file',
-        'exportSTL': 'exportSTL() — Download STL file',
-        'exportOBJ': 'exportOBJ() — Download OBJ file',
-        'export3MF': 'export3MF() — Download 3MF file',
+        'exportGLB': 'await exportGLB() -- Download GLB file',
+        'exportSTL': 'exportSTL() -- Download STL file',
+        'exportOBJ': 'exportOBJ() -- Download OBJ file',
+        'export3MF': 'export3MF() -- Download 3MF file',
       };
 
       if (method) {
         const entry = methods[method];
         if (entry) {
           console.log(entry);
-          return entry;
+          return { method, description: entry };
         }
-        return `Unknown method "${method}". Call help() for full list.`;
+        const msg = `Unknown method "${method}". Call help() for full list.`;
+        console.log(msg);
+        return { error: msg };
       }
 
+      const result = {
+        app: 'mAInifold -- AI-driven parametric CAD in the browser',
+        docs: '/ai.md',
+        constraints: {
+          codeMustReturn: 'Code must end with: return <Manifold object>;',
+          noUIAutomation: 'Do not drive the app with clicks or keystrokes. Use this API.',
+        },
+        quickstart: [
+          'mainifold.help()                        // You are here',
+          'await mainifold.createSession("name")   // Start a named session',
+          'await mainifold.runAndSave(code, "v1", {isManifold: true, maxComponents: 1})',
+        ],
+        methods,
+      };
+
+      // Also log a readable summary to the console
       const lines = [
-        'mAInifold — AI-driven parametric CAD. Full docs: /ai.md',
+        'mAInifold -- AI-driven parametric CAD. Full docs: /ai.md',
         '',
-        'IMPORTANT: Code must end with "return manifoldObject;"',
-        'Do NOT drive the UI with clicks/keystrokes — use this API.',
+        'Code must end with: return <Manifold object>;',
+        'Do not drive the UI with clicks/keystrokes -- use this API.',
         '',
-        ...Object.values(methods),
+        'Quickstart:',
+        '  await mainifold.createSession("name")',
+        '  await mainifold.runAndSave(code, "v1", {isManifold: true, maxComponents: 1})',
+        '',
+        'Methods:',
+        ...Object.values(methods).map(m => `  ${m}`),
       ];
-      const output = lines.join('\n');
-      console.log(output);
-      return output;
+      console.log(lines.join('\n'));
+
+      return result;
     },
   };
 
   (window as unknown as Record<string, unknown>).mainifold = mainifoldAPI;
 
   // Log API availability for AI agents
-  console.log(
-    '%c[mAInifold]%c Console API available at %cwindow.mainifold%c\n' +
-    'Methods: .run(code?), .getGeometryData(), .getCode(), .setCode(code),\n' +
-    '         .sliceAtZ(z), .getBoundingBox(), .validate(code),\n' +
-    '         .toggleClip(on?), .setClipZ(z), .getClipState(),\n' +
-    '         .getModule(), .exportGLB(), .exportSTL(), .exportOBJ(), .export3MF()\n' +
-    'Isolated: .runIsolated(code), .runAndAssert(code, assertions),\n' +
-    '          .runAndExplain(code), .isRunning()\n' +
-    'Intelligence: .analyzeProfile(), .analyzeProfileIsolated(code),\n' +
-    '              .measureAt([x,y]), .measureBetween(p1,p2), .probeRay(origin,dir),\n' +
-    '              .checkContainment()\n' +
-    'View: .getViewState(), .setView(tab), .setUnits(unit), .getUnits()\n' +
-    'Phantom: .setReferenceGeometry(code, opts?), .clearReferenceGeometry(),\n' +
-    '         .hasReferenceGeometry()\n' +
-    'Measure: .measureMode(enabled?), .getMeasurement(), .measurePoints(p1,p2)\n' +
-    'Sessions: .createSession(name?), .saveVersion(label?), .runAndSave(code, label?),\n' +
-    '          .createSessionWithVersions(name, [{code,label},...]),\n' +
-    '          .listSessions(), .openSession(id), .listVersions(), .loadVersion(idx),\n' +
-    '          .renameSession(name, id?), .getGalleryUrl(), .getSessionUrl(),\n' +
-    '          .getSessionState(), .getSessionContext(),\n' +
-    '          .exportSession(id?), .importSession(data), .clearAllSessions()\n' +
-    'Notes: .addSessionNote(text), .listSessionNotes(),\n' +
-    '       .updateSessionNote(noteId, text), .deleteSessionNote(noteId)\n' +
-    'Structured data: document.getElementById("geometry-data").textContent',
-    'color: #4ade80; font-weight: bold',
-    'color: inherit',
-    'color: #60a5fa; font-weight: bold',
-    'color: inherit',
-  );
+  console.info('mAInifold: AI agents should use window.mainifold -- start with mainifold.help(). See /llms.txt');
 
   // === Internal functions ===
 
