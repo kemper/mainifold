@@ -96,7 +96,8 @@ await mainifold.updateSessionNote(noteId, text) // Edit a note
 await mainifold.deleteSessionNote(noteId)       // Remove a note
 
 // Session context -- get everything in one call (for resuming sessions)
-await mainifold.getSessionContext()     // -> {session, versions[], notes[], currentVersion, versionCount}
+await mainifold.getSessionContext()     // -> {session, versions[], notes[], currentVersion, versionCount, agentHints}
+// agentHints: {apiDocsUrl, recommendedEntrypoint, codeMustReturnManifold, recentErrors[]}
 ```
 
 ## Geometry data
@@ -434,6 +435,8 @@ const ctx = await mainifold.getSessionContext();
 // ctx.notes      -- [{id, text, timestamp}]  (all session notes)
 // ctx.currentVersion -- {index, label}
 // ctx.versionCount
+// ctx.agentHints -- {apiDocsUrl, recommendedEntrypoint, codeMustReturnManifold, recentErrors}
+//   recentErrors: last 5 validation errors from this page session (helps avoid repeating mistakes)
 ```
 
 Read the notes and version history before making changes. The notes tell you:
