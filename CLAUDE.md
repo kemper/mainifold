@@ -144,6 +144,7 @@ const ctx = await mainifold.getSessionContext();
 // ctx.versions   — [{index, label, timestamp, notes?, geometrySummary: {volume, boundingBox, ...}}]
 // ctx.notes      — [{id, text, timestamp}]
 // ctx.currentVersion — {index, label}
+// ctx.agentHints — {apiDocsUrl, recommendedEntrypoint, codeMustReturnManifold, recentErrors}
 ```
 
 Read the notes and version history before making changes. The notes tell you what was required, what was tried, what feedback was given, and what measurements matter. Continue the note-logging pattern as you work.
@@ -784,7 +785,8 @@ const ctx = await mainifold.getSessionContext()
 // → { session: {id, name, created, updated},
 //     versions: [{index, label, timestamp, notes?, geometrySummary: {volume, surfaceArea, boundingBox, ...}}],
 //     notes: [{id, text, timestamp}],
-//     currentVersion: {index, label}, versionCount }
+//     currentVersion: {index, label}, versionCount,
+//     agentHints: {apiDocsUrl, recommendedEntrypoint, codeMustReturnManifold, recentErrors} }
 
 // Version notes — attach design rationale to a specific version
 await mainifold.runAndSave(code, "v2 - thicker walls", {

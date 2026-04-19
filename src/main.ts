@@ -54,6 +54,7 @@ import {
   deleteSessionNote,
   updateSessionNote,
   getSessionContext,
+  recordError,
   onStateChange,
   type ExportedSession,
   type ReferenceImagesData,
@@ -754,6 +755,7 @@ async function main() {
     const elapsed = Math.round(performance.now() - t0);
 
     if (result.error) {
+      recordError(result.error);
       return {
         geometryData: { status: 'error' as const, error: result.error, executionTimeMs: elapsed, codeHash: simpleHash(code) },
         meshData: null as MeshData | null,
@@ -1648,6 +1650,7 @@ async function main() {
     _running = false;
 
     if (result.error) {
+      recordError(result.error);
       setStatus(statusBar, 'error', result.error);
       geometryDataEl.textContent = JSON.stringify({ status: 'error', error: result.error, executionTimeMs: elapsed, codeHash: simpleHash(src) });
       return;
