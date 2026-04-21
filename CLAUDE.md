@@ -520,6 +520,8 @@ When two functions share identical logic (same DOM manipulation, same data trans
 
 ## Console API (window.mainifold)
 
+**Argument validation:** Every method validates its arguments at runtime — no coercion, unknown object keys rejected, empty strings rejected for required params. Value-returning methods return `{ error: "..." }` on validation failure; void setters (`setCode`, `setClipZ`, `setView`, `setUnits`, `setReferenceImages`, `measureAt`, `measureBetween`, `probeRay`, `measurePoints`, `renameSession`) throw `ValidationError`. See `/ai.md#argument-validation` for the full convention and examples.
+
 When using this tool via Playwright MCP or browser automation:
 
 ```javascript
