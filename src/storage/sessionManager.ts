@@ -9,6 +9,7 @@ import {
   listVersions as dbListVersions,
   getLatestVersion,
   getVersionByIndex,
+  getVersionById,
   getVersionCount,
   clearAllData,
   updateSession as dbUpdateSession,
@@ -209,10 +210,28 @@ export async function navigateVersion(direction: 'prev' | 'next'): Promise<Versi
   return version;
 }
 
-export async function loadVersionByIndex(index: number): Promise<Version | null> {
+/** Look up a version by index (number) or id (string) without mutating current state. */
+export async function peekVersion(target: number | string): Promise<Version | null> {
+  if (!currentState.session) return null;
+  if (typeof target === 'number') {
+    return getVersionByIndex(currentState.session.id, target);
+  }
+  const v = await getVersionById(target);
+  return v && v.sessionId === currentState.session.id ? v : null;
+}
+
+/** Load a version by index (number) or id (string). */
+export async function loadVersion(target: number | string): Promise<Version | null> {
   if (!currentState.session) return null;
 
-  const version = await getVersionByIndex(currentState.session.id, index);
+  let version: Version | null = null;
+  if (typeof target === 'number') {
+    version = await getVersionByIndex(currentState.session.id, target);
+  } else {
+    const v = await getVersionById(target);
+    // Reject versions from other sessions to avoid cross-session pollution.
+    if (v && v.sessionId === currentState.session.id) version = v;
+  }
   if (!version) return null;
 
   currentState = { ...currentState, currentVersion: version };

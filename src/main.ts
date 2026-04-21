@@ -38,7 +38,8 @@ import {
   renameSession,
   saveVersion,
   navigateVersion,
-  loadVersionByIndex,
+  loadVersion as loadVersionFromStore,
+  peekVersion,
   listCurrentVersions,
   getState,
   getSessionUrl,
@@ -992,14 +993,30 @@ async function main() {
       }));
     },
 
-    /** Load a specific version by index */
-    async loadVersion(index: number) {
-      const version = await loadVersionByIndex(index);
-      if (version) {
-        setValue(version.code);
-        runCodeSync(version.code);
+    /** Load a version into the editor by index (number, 1-based from listVersions()[].index)
+     *  or id (string, from listVersions()[].id). Returns the loaded version's code and stats,
+     *  or { error } if not found. */
+    async loadVersion(target: number | string) {
+      if (target === undefined || target === null || (typeof target !== 'number' && typeof target !== 'string')) {
+        return { error: 'loadVersion(target): target must be a number (index) or string (id) from listVersions()' };
       }
-      return version ? { id: version.id, index: version.index, label: version.label } : null;
+      if (!getState().session) {
+        return { error: 'No active session. Call openSession(id) or createSession() first.' };
+      }
+      const version = await loadVersionFromStore(target);
+      if (!version) {
+        const kind = typeof target === 'number' ? 'index' : 'id';
+        return { error: `No version found with ${kind} "${target}" in the active session. Use listVersions() to see valid ${kind}s.` };
+      }
+      setValue(version.code);
+      runCodeSync(version.code);
+      return {
+        id: version.id,
+        index: version.index,
+        label: version.label,
+        code: version.code,
+        geometryData: version.geometryData,
+      };
     },
 
     /** Navigate to previous or next version */
@@ -1050,6 +1067,82 @@ async function main() {
 
       return {
         ...(assertions ? { passed: true } : {}),
+        geometry: newGeoData,
+        version: version ? { id: version.id, index: version.index, label: version.label } : null,
+        diff,
+        galleryUrl: getGalleryUrl(),
+      };
+    },
+
+    /** Fork a prior version: load its code, apply transformFn, validate, and save as a new version.
+     *  target: index (number) or id (string) from listVersions().
+     *  transformFn: (code: string) => string — modifies the parent's code. Return the full new code.
+     *  Eliminates the load + getCode + modify + save round-trip chain.
+     *  Returns { error } if the parent isn't found or transformFn throws.
+     *  Returns { passed, failures } without saving if assertions fail.
+     *  On success: { passed?, parent, geometry, version, diff, galleryUrl }. */
+    async forkVersion(
+      target: number | string,
+      transformFn: (code: string) => string,
+      label?: string,
+      assertions?: GeometryAssertions,
+    ) {
+      if (target === undefined || target === null || (typeof target !== 'number' && typeof target !== 'string')) {
+        return { error: 'forkVersion(target, transformFn): target must be a number (index) or string (id) from listVersions()' };
+      }
+      if (typeof transformFn !== 'function') {
+        return { error: 'forkVersion(target, transformFn): transformFn must be a function (code: string) => string' };
+      }
+      if (!getState().session) {
+        return { error: 'No active session. Call openSession(id) or createSession() first.' };
+      }
+
+      const parent = await peekVersion(target);
+      if (!parent) {
+        const kind = typeof target === 'number' ? 'index' : 'id';
+        return { error: `No version found with ${kind} "${target}" in the active session. Use listVersions() to see valid ${kind}s.` };
+      }
+
+      let newCode: string;
+      try {
+        newCode = transformFn(parent.code);
+      } catch (e: unknown) {
+        return { error: `transformFn threw: ${e instanceof Error ? e.message : String(e)}`, parent: { id: parent.id, index: parent.index, label: parent.label } };
+      }
+      if (typeof newCode !== 'string') {
+        return { error: `transformFn must return a string; got ${typeof newCode}`, parent: { id: parent.id, index: parent.index, label: parent.label } };
+      }
+
+      // Validate in isolation before committing anything.
+      const { geometryData: testData, manifold: testManifold } = executeIsolated(newCode);
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      try { (testManifold as any)?.delete?.(); } catch { /* ignore */ }
+      if (testData.status === 'error') {
+        return { passed: false, failures: [testData.error as string], geometry: testData, parent: { id: parent.id, index: parent.index, label: parent.label }, version: null, diff: null, galleryUrl: getGalleryUrl() };
+      }
+      if (assertions) {
+        const failures = checkAssertions(testData, assertions);
+        if (failures.length > 0) {
+          return { passed: false, failures, geometry: testData, parent: { id: parent.id, index: parent.index, label: parent.label }, version: null, diff: null, galleryUrl: getGalleryUrl() };
+        }
+      }
+
+      // Commit: update editor, run, save.
+      const prevGeoData = getState().currentVersion?.geometryData as Record<string, unknown> | null;
+      setValue(newCode);
+      runCodeSync(newCode);
+      const newGeoData = JSON.parse(geometryDataEl.textContent || '{}');
+      const thumbnail = await captureThumbnail();
+      const version = await saveVersion(newCode, getGeometryDataObj(), thumbnail, label, assertions?.notes);
+
+      let diff = null;
+      if (prevGeoData && prevGeoData.status === 'ok' && newGeoData.status === 'ok') {
+        diff = computeStatDiff(prevGeoData, newGeoData);
+      }
+
+      return {
+        ...(assertions ? { passed: true } : {}),
+        parent: { id: parent.id, index: parent.index, label: parent.label },
         geometry: newGeoData,
         version: version ? { id: version.id, index: version.index, label: version.label } : null,
         diff,
@@ -1558,7 +1651,8 @@ async function main() {
         'runAndSave':      { signature: 'await runAndSave(code, label?, assertions?) -- Assert + save version in one call', docs: '/ai.md#assert--save-in-one-call' },
         'saveVersion':     { signature: 'await saveVersion(label?) -- Save current state as version', docs: '/ai.md#console-api--windowmainifold' },
         'listVersions':    { signature: 'await listVersions() -- List all versions in session', docs: '/ai.md#console-api--windowmainifold' },
-        'loadVersion':     { signature: 'await loadVersion(index) -- Load specific version', docs: '/ai.md#console-api--windowmainifold' },
+        'loadVersion':     { signature: 'await loadVersion(indexOrId) -- Load version into editor -> {id, index, label, code, geometryData} or {error}', docs: '/ai.md#console-api--windowmainifold' },
+        'forkVersion':     { signature: 'await forkVersion(indexOrId, transformFn, label?, assertions?) -- Load + modify + validate + save in one call', docs: '/ai.md#forking-a-prior-version' },
         'openSession':     { signature: 'await openSession(id) -- Open existing session', docs: '/ai.md#resuming-a-session' },
         'listSessions':    { signature: 'await listSessions() -- List all sessions', docs: '/ai.md#console-api--windowmainifold' },
         'getSessionContext': { signature: 'await getSessionContext() -- Get full session context (for resuming)', docs: '/ai.md#resuming-a-session' },
