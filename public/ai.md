@@ -34,6 +34,8 @@ mAInifold is a browser-based parametric CAD tool powered by manifold-3d (WASM). 
 - **Skipping visual verification** -- stats alone can't catch visual defects. After structural changes, screenshot the Elevations tab or use `renderView()`.
 - **Flush boolean placement** -- shapes must overlap by at least 0.5 units to union correctly. Merely touching at a face produces disconnected components.
 - **Not reading session context before modifying** -- when opening an existing session, always call `getSessionContext()` first and read the notes/version history before making changes. See [Resuming a session](#resuming-a-session).
+- **Branching off a prior version by hand** -- don't chain `loadVersion` -> `getCode` -> modify -> `runAndSave`. A silent failure (blocked return value, stale buffer) can drop parts of the parent. Use [`forkVersion({index} | {id}, transformFn, label, assertions?)`](#forking-a-prior-version) instead -- it loads the parent's code server-side, applies your transform, validates, and saves atomically.
+- **Passing a bare index or id instead of `{index}` / `{id}`** -- `loadVersion` and `forkVersion` take an object with exactly one of `{index: number}` or `{id: string}`, e.g. `loadVersion({index: 2})` or `loadVersion({id: "Kx3Pq9mA2wEr"})`. Bare `loadVersion(2)` will return `{error: "...target must be { index: number } or { id: string }..."}`.
 
 ## How to use this tool
 
@@ -82,7 +84,8 @@ await mainifold.runAndSave(code, label?, assertions?) // Assert+save in one call
 await mainifold.createSessionWithVersions(name, [{code, label},...]) // Batch create
 await mainifold.saveVersion(label?)     // Save current state as version
 await mainifold.listVersions()          // -> [{id, index, label, timestamp, status}]
-await mainifold.loadVersion(index)      // Load specific version
+await mainifold.loadVersion({index} | {id})  // Load version into editor -> {id, index, label, code, geometryData} or {error}
+await mainifold.forkVersion({index} | {id}, transformFn, label?, assertions?) // Load + modify + validate + save in one call
 mainifold.getGalleryUrl()               // -> URL for gallery view (human review)
 mainifold.getSessionUrl()               // -> URL for this session
 await mainifold.listSessions()          // -> [{id, name, updated}]
@@ -351,6 +354,37 @@ const r = await mainifold.runAndSave(code, "v2 - added towers", {
 // r.diff         = { volume: { from, to, delta }, componentCount: ..., ... }
 // r.galleryUrl   = gallery URL for human review
 ```
+
+### Forking a prior version
+
+When iterating on a design, the common flow is *load a previous version, tweak it, save as a new version*.
+Doing that across separate `loadVersion` -> `getCode` -> modify -> `runAndSave` calls is fragile: if any
+step fails silently (wrong arg type, a client-side content filter on `getCode`, etc.) you can end up saving
+a regression without noticing. `forkVersion` collapses the whole chain into one server-side call:
+
+```js
+const r = await mainifold.forkVersion(
+  { index: 11 },                       // or { id: "Kx3Pq9mA2wEr" } from listVersions()
+  code => code.replace('towerH = 28', 'towerH = 35'),
+  "v11a - taller towers",              // label for the new version
+  { isManifold: true, maxComponents: 1 } // optional assertions (validated before saving)
+);
+// On success:
+//   r.passed       = true (only when assertions provided)
+//   r.parent       = { id, index, label } of the version you forked from
+//   r.geometry     = full geometry stats
+//   r.version      = { id, index, label } of the newly saved version
+//   r.diff         = stat diff vs. the previous current version
+//   r.galleryUrl   = gallery URL for human review
+// On failure:
+//   r.error        = "No version found with index ..." / "transformFn threw: ..." / etc.
+//   r.passed=false + r.failures=[...] if assertions didn't pass (nothing saved)
+```
+
+`target` is an object with exactly one of `{ index }` (numeric, 1-based) or `{ id }` (string from
+`listVersions()[].id`). The two are never mixed, so there's no ambiguity about which field is being
+looked up. This is the recommended way to build parallel branches (v11a, v11b, ...) off a shared
+parent without a load/read/modify/save round-trip chain.
 
 ### Modify and test
 

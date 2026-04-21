@@ -1,6 +1,6 @@
 // Gallery view — grid of version thumbnails for comparing iterations
 
-import { listCurrentVersions, loadVersionByIndex, getReferenceImagesFromSession, type Version, type ReferenceImagesData } from '../storage/sessionManager';
+import { listCurrentVersions, loadVersion, getReferenceImagesFromSession, type Version, type ReferenceImagesData } from '../storage/sessionManager';
 
 let galleryEl: HTMLElement | null = null;
 let onLoadCode: ((code: string) => void) | null = null;
@@ -106,7 +106,7 @@ function createTile(version: Version): HTMLElement {
   const tile = document.createElement('div');
   tile.className = 'bg-zinc-800 rounded-lg overflow-hidden cursor-pointer hover:ring-2 hover:ring-blue-500 transition-all group';
   tile.addEventListener('click', async () => {
-    const v = await loadVersionByIndex(version.index);
+    const v = await loadVersion(version.index);
     if (v && onLoadCode) onLoadCode(v.code);
   });
 

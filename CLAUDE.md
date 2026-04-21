@@ -762,7 +762,11 @@ await mainifold.closeSession()
 
 // Version navigation
 await mainifold.listVersions()        // → [{id, index, label, timestamp, status}]
-await mainifold.loadVersion(2)        // Load version by index
+await mainifold.loadVersion({ index: 2 })   // or { id: "Kx3Pq9mA2wEr" } from listVersions()
+                                             // → {id, index, label, code, geometryData} or {error}
+await mainifold.forkVersion({ index: 2 }, code => code.replace('h = 10', 'h = 20'), "v2a - taller", { isManifold: true })
+                                             // Load parent + apply transform + validate + save in one call
+                                             // → {passed?, parent, geometry, version, diff, galleryUrl} or {error}
 await mainifold.navigateVersion('prev')
 await mainifold.navigateVersion('next')
 await mainifold.saveVersion("label")  // Save current state as version
