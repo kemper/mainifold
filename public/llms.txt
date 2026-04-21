@@ -1,0 +1,19 @@
+# mAInifold
+
+> AI-driven parametric CAD in the browser. All interaction is via the `window.mainifold` JavaScript API.
+
+## Quickstart
+
+```js
+mainifold.help()                        // List all available methods
+await mainifold.createSession("name")   // Start a named session
+await mainifold.runAndSave(code, "v1 - description", {
+  isManifold: true, maxComponents: 1    // Validate before saving
+})
+// Code must end with: return <Manifold object>;
+```
+
+## Docs
+
+- [Full API reference and workflow guide](/ai.md)
+- `mainifold.help()` in the browser console for live method discovery

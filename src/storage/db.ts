@@ -214,6 +214,11 @@ export async function getVersionByIndex(sessionId: string, index: number): Promi
   return reqToPromise(idx.get([sessionId, index])) as Promise<Version | null>;
 }
 
+export async function getVersionById(id: string): Promise<Version | null> {
+  const store = await tx('versions', 'readonly');
+  return reqToPromise(store.get(id)) as Promise<Version | null>;
+}
+
 export async function getVersionCount(sessionId: string): Promise<number> {
   const store = await tx('versions', 'readonly');
   const index = store.index('sessionId');

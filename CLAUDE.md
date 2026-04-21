@@ -144,6 +144,7 @@ const ctx = await mainifold.getSessionContext();
 // ctx.versions   — [{index, label, timestamp, notes?, geometrySummary: {volume, boundingBox, ...}}]
 // ctx.notes      — [{id, text, timestamp}]
 // ctx.currentVersion — {index, label}
+// ctx.agentHints — {apiDocsUrl, recommendedEntrypoint, codeMustReturnManifold, recentErrors}
 ```
 
 Read the notes and version history before making changes. The notes tell you what was required, what was tried, what feedback was given, and what measurements matter. Continue the note-logging pattern as you work.
@@ -761,7 +762,11 @@ await mainifold.closeSession()
 
 // Version navigation
 await mainifold.listVersions()        // → [{id, index, label, timestamp, status}]
-await mainifold.loadVersion(2)        // Load version by index
+await mainifold.loadVersion({ index: 2 })   // or { id: "Kx3Pq9mA2wEr" } from listVersions()
+                                             // → {id, index, label, code, geometryData} or {error}
+await mainifold.forkVersion({ index: 2 }, code => code.replace('h = 10', 'h = 20'), "v2a - taller", { isManifold: true })
+                                             // Load parent + apply transform + validate + save in one call
+                                             // → {passed?, parent, geometry, version, diff, galleryUrl} or {error}
 await mainifold.navigateVersion('prev')
 await mainifold.navigateVersion('next')
 await mainifold.saveVersion("label")  // Save current state as version
@@ -784,7 +789,8 @@ const ctx = await mainifold.getSessionContext()
 // → { session: {id, name, created, updated},
 //     versions: [{index, label, timestamp, notes?, geometrySummary: {volume, surfaceArea, boundingBox, ...}}],
 //     notes: [{id, text, timestamp}],
-//     currentVersion: {index, label}, versionCount }
+//     currentVersion: {index, label}, versionCount,
+//     agentHints: {apiDocsUrl, recommendedEntrypoint, codeMustReturnManifold, recentErrors} }
 
 // Version notes — attach design rationale to a specific version
 await mainifold.runAndSave(code, "v2 - thicker walls", {

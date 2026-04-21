@@ -45,7 +45,7 @@ export function executeCode(jsCode: string): MeshResult {
       return {
         mesh: null,
         manifold: null,
-        error: 'Code must return a Manifold object. Did you forget to `return` the final Manifold?',
+        error: 'Code must return a Manifold object. Did you forget to `return` the final Manifold? See /ai.md#before-you-start',
       };
     }
 

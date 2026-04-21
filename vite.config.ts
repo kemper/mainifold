@@ -1,5 +1,27 @@
-import { defineConfig, type Plugin } from 'vite';
+import { defineConfig, type Plugin, type Connect } from 'vite';
 import tailwindcss from '@tailwindcss/vite';
+
+// Set charset=utf-8 on .md and .txt files served from public/ during dev.
+// Prevents em-dashes and other UTF-8 chars from rendering as mojibake.
+function markdownCharset(): Plugin {
+  return {
+    name: 'markdown-charset',
+    configureServer(server) {
+      server.middlewares.use(((req: Connect.IncomingMessage, res, next) => {
+        if (req.url && /\.(md|txt)(\?|$)/.test(req.url)) {
+          const origSetHeader = res.setHeader.bind(res);
+          res.setHeader = (name: string, value: string | number | readonly string[]) => {
+            if (name.toLowerCase() === 'content-type' && typeof value === 'string' && !value.includes('charset')) {
+              return origSetHeader(name, value + '; charset=utf-8');
+            }
+            return origSetHeader(name, value);
+          };
+        }
+        next();
+      }) as Connect.NextHandleFunction);
+    },
+  };
+}
 
 // Resolve relative paths to absolute URLs at build time.
 // Checks SITE_URL (custom env var) then CF_PAGES_URL (Cloudflare Pages built-in).
@@ -31,7 +53,7 @@ function absoluteUrls(): Plugin {
 
 export default defineConfig({
   base: '/',
-  plugins: [tailwindcss(), absoluteUrls()],
+  plugins: [tailwindcss(), absoluteUrls(), markdownCharset()],
   optimizeDeps: {
     exclude: ['manifold-3d']
   },

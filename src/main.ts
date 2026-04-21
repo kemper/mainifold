@@ -38,7 +38,8 @@ import {
   renameSession,
   saveVersion,
   navigateVersion,
-  loadVersionByIndex,
+  loadVersion as loadVersionFromStore,
+  peekVersion,
   listCurrentVersions,
   getState,
   getSessionUrl,
@@ -54,6 +55,8 @@ import {
   deleteSessionNote,
   updateSessionNote,
   getSessionContext,
+  recordError,
+  onStateChange,
   type ExportedSession,
   type ReferenceImagesData,
 } from './storage/sessionManager';
@@ -67,6 +70,39 @@ let currentManifold: any = null;
 
 // #geometry-data element — always-updated machine-readable state
 let geometryDataEl: HTMLElement;
+
+// === Document title management ===
+// Actively manage document.title to reflect current state.
+// Some browser automation tools (MCP servers, extensions) can inadvertently
+// replace the page title with JS evaluation results; this prevents that.
+const BASE_TITLE = 'mAInifold';
+let _expectedTitle = 'mAInifold — AI-Driven Parametric CAD in Your Browser';
+
+function updateDocumentTitle(context?: { page?: 'landing' | 'editor' | 'help' | '404'; sessionName?: string | null }) {
+  if (context?.page === 'landing' || context?.page === undefined && shouldShowLanding()) {
+    _expectedTitle = `${BASE_TITLE} — AI-Driven Parametric CAD in Your Browser`;
+  } else if (context?.page === 'help') {
+    _expectedTitle = `Help — ${BASE_TITLE}`;
+  } else if (context?.page === '404') {
+    _expectedTitle = `Not Found — ${BASE_TITLE}`;
+  } else {
+    // Editor — include session name if available
+    const name = context?.sessionName ?? getState().session?.name;
+    _expectedTitle = name ? `${name} — ${BASE_TITLE}` : `Editor — ${BASE_TITLE}`;
+  }
+  document.title = _expectedTitle;
+}
+
+// Guard against external title mutations (e.g. browser automation eval results)
+function installTitleGuard() {
+  const titleEl = document.querySelector('title');
+  if (!titleEl) return;
+  new MutationObserver(() => {
+    if (document.title !== _expectedTitle) {
+      document.title = _expectedTitle;
+    }
+  }).observe(titleEl, { childList: true, characterData: true, subtree: true });
+}
 
 function createGeometryDataElement(): HTMLElement {
   const el = document.createElement('pre');
@@ -312,6 +348,37 @@ function getGeometryDataObj(): Record<string, unknown> | null {
   }
 }
 
+/** Validate a { index } | { id } version-target arg. Returns a parsed descriptor
+ *  or { error } with a caller-aware message. Exactly one of index/id must be set. */
+function parseVersionTarget(
+  target: unknown,
+  caller: string,
+): { kind: 'index'; value: number } | { kind: 'id'; value: string } | { error: string } {
+  const usage = `${caller}(target, ...): target must be { index: number } or { id: string } from listVersions()`;
+  if (target === null || typeof target !== 'object') {
+    return { error: usage };
+  }
+  const { index, id } = target as { index?: unknown; id?: unknown };
+  const hasIndex = index !== undefined;
+  const hasId = id !== undefined;
+  if (hasIndex && hasId) {
+    return { error: `${caller}: pass either { index } or { id }, not both.` };
+  }
+  if (!hasIndex && !hasId) {
+    return { error: usage };
+  }
+  if (hasIndex) {
+    if (typeof index !== 'number' || !Number.isFinite(index)) {
+      return { error: `${caller}: target.index must be a finite number (got ${typeof index}).` };
+    }
+    return { kind: 'index', value: index };
+  }
+  if (typeof id !== 'string' || id.length === 0) {
+    return { error: `${caller}: target.id must be a non-empty string (got ${typeof id}).` };
+  }
+  return { kind: 'id', value: id };
+}
+
 // Determine which page to show based on URL path and query params
 function shouldShowLanding(): boolean {
   const path = window.location.pathname;
@@ -344,6 +411,7 @@ async function main() {
 
   const app = document.getElementById('app')!;
   geometryDataEl = createGeometryDataElement();
+  installTitleGuard();
 
   // Overlay container for landing/help pages (sits above the editor UI)
   const overlayContainer = document.createElement('div');
@@ -481,6 +549,7 @@ async function main() {
             helpEl?.classList.add('hidden');
             landingEl.classList.remove('hidden');
             window.history.replaceState(null, '', '/');
+            updateDocumentTitle({ page: 'landing' });
           } else {
             // Go back to editor — preserve session URL params
             transitionToEditor();
@@ -493,6 +562,7 @@ async function main() {
             } else {
               window.history.replaceState(null, '', '/editor');
             }
+            updateDocumentTitle({ page: 'editor' });
           }
         },
         onStartTour: async () => {
@@ -514,6 +584,7 @@ async function main() {
     if (landingEl) landingEl.classList.add('hidden');
     helpEl.classList.remove('hidden');
     window.history.replaceState(null, '', '/help');
+    updateDocumentTitle({ page: 'help' });
   }
 
   // Expose showHelp for toolbar
@@ -528,11 +599,13 @@ async function main() {
     // Show landing page immediately — hide editor UI
     editorUI.classList.add('hidden');
     overlayContainer.classList.remove('hidden');
+    updateDocumentTitle({ page: 'landing' });
     landingEl = await createLandingPage(overlayContainer, {
       onOpenEditor: async () => {
         transitionToEditor();
         await ensureEditorReady();
         await createSession();
+        updateDocumentTitle({ page: 'editor' });
         setStatus(statusBar, 'ready', 'Ready');
         runCode(defaultCode);
       },
@@ -547,6 +620,7 @@ async function main() {
           const refImages = await getReferenceImagesFromSession();
           if (refImages) _setRefImages(refImages as ReferenceImages);
         }
+        updateDocumentTitle({ page: 'editor' });
         window.history.replaceState(null, '', `/editor?session=${sid}`);
       },
     });
@@ -554,6 +628,7 @@ async function main() {
     // Show help page immediately
     editorUI.classList.add('hidden');
     overlayContainer.classList.remove('hidden');
+    updateDocumentTitle({ page: 'help' });
     helpEl = createHelpPage(overlayContainer, {
       onBack: async () => {
         helpEl?.classList.add('hidden');
@@ -563,6 +638,7 @@ async function main() {
           await createSession();
           runCode(defaultCode);
         }
+        updateDocumentTitle({ page: 'editor' });
       },
       onStartTour: async () => {
         helpEl?.classList.add('hidden');
@@ -581,6 +657,7 @@ async function main() {
     // Show 404 page — hide editor UI entirely
     editorUI.classList.add('hidden');
     overlayContainer.classList.remove('hidden');
+    updateDocumentTitle({ page: '404' });
     createNotFoundPage(overlayContainer, {
       onGoHome: () => {
         window.location.href = '/';
@@ -663,6 +740,16 @@ async function main() {
     }
   }
 
+  // Update document title when session state changes (create, open, close, rename)
+  onStateChange((state) => {
+    updateDocumentTitle({ page: 'editor', sessionName: state.session?.name ?? null });
+  });
+
+  // Set initial editor title if we're on the editor page
+  if (!showLanding && !showHelpPage && !show404) {
+    updateDocumentTitle({ page: 'editor' });
+  }
+
   // Clean up empty auto-created sessions when leaving the page
   window.addEventListener('beforeunload', () => {
     const state = getState();
@@ -670,6 +757,26 @@ async function main() {
       deleteIfEmpty(state.session.id);
     }
   });
+
+  // Warn AI agents that try to drive the UI when ?view=ai is set
+  if (new URLSearchParams(window.location.search).get('view') === 'ai') {
+    let agentUIWarningShown = false;
+    const warnAgentUI = () => {
+      if (agentUIWarningShown) return;
+      agentUIWarningShown = true;
+      const msg = 'Detected UI-driven input. This app expects programmatic control from AI agents. Use window.mainifold.runAndSave() -- see /llms.txt';
+      console.warn(msg);
+      // Show a non-blocking toast
+      const toast = document.createElement('div');
+      toast.textContent = msg;
+      toast.style.cssText = 'position:fixed;bottom:16px;left:50%;transform:translateX(-50%);background:#451a03;color:#fbbf24;padding:8px 16px;border-radius:6px;font-size:13px;z-index:9999;max-width:600px;text-align:center;pointer-events:none;';
+      document.body.appendChild(toast);
+      setTimeout(() => toast.remove(), 8000);
+    };
+    // Listen on the editor and viewport containers
+    editorUI.addEventListener('keydown', warnAgentUI, { once: true });
+    editorUI.addEventListener('click', warnAgentUI, { once: true });
+  }
 
   // === Execution state ===
   let _running = false;
@@ -680,6 +787,7 @@ async function main() {
     const elapsed = Math.round(performance.now() - t0);
 
     if (result.error) {
+      recordError(result.error);
       return {
         geometryData: { status: 'error' as const, error: result.error, executionTimeMs: elapsed, codeHash: simpleHash(code) },
         meshData: null as MeshData | null,
@@ -849,6 +957,12 @@ async function main() {
     /** Create a new session and make it active */
     async createSession(name?: string) {
       const session = await createSession(name);
+      await addSessionNote(
+        '[WORKFLOW] Drive this app via window.mainifold (see /ai.md). ' +
+        'Use runAndSave(code, label, assertions) for iterations; ' +
+        'addSessionNote with [REQUIREMENT]/[DECISION]/[MEASUREMENT]/[FEEDBACK]/[ATTEMPT]/[TODO] prefixes; ' +
+        'getSessionContext() when resuming.',
+      );
       return { id: session.id, url: getSessionUrl(), galleryUrl: getGalleryUrl() };
     },
 
@@ -910,14 +1024,28 @@ async function main() {
       }));
     },
 
-    /** Load a specific version by index */
-    async loadVersion(index: number) {
-      const version = await loadVersionByIndex(index);
-      if (version) {
-        setValue(version.code);
-        runCodeSync(version.code);
+    /** Load a version into the editor. Pass { index } or { id } from listVersions().
+     *  Returns the loaded version's code and stats, or { error } if not found. */
+    async loadVersion(target: { index?: number; id?: string }) {
+      const parsed = parseVersionTarget(target, 'loadVersion');
+      if ('error' in parsed) return parsed;
+      if (!getState().session) {
+        return { error: 'No active session. Call openSession(id) or createSession() first.' };
       }
-      return version ? { id: version.id, index: version.index, label: version.label } : null;
+      const version = await loadVersionFromStore(parsed.value);
+      if (!version) {
+        const kind = parsed.kind;
+        return { error: `No version found with ${kind} "${parsed.value}" in the active session. Use listVersions() to see valid ${kind}s.` };
+      }
+      setValue(version.code);
+      runCodeSync(version.code);
+      return {
+        id: version.id,
+        index: version.index,
+        label: version.label,
+        code: version.code,
+        geometryData: version.geometryData,
+      };
     },
 
     /** Navigate to previous or next version */
@@ -968,6 +1096,81 @@ async function main() {
 
       return {
         ...(assertions ? { passed: true } : {}),
+        geometry: newGeoData,
+        version: version ? { id: version.id, index: version.index, label: version.label } : null,
+        diff,
+        galleryUrl: getGalleryUrl(),
+      };
+    },
+
+    /** Fork a prior version: load its code, apply transformFn, validate, and save as a new version.
+     *  target: { index } or { id } from listVersions().
+     *  transformFn: (code: string) => string — modifies the parent's code. Return the full new code.
+     *  Eliminates the load + getCode + modify + save round-trip chain.
+     *  Returns { error } if the parent isn't found or transformFn throws.
+     *  Returns { passed, failures } without saving if assertions fail.
+     *  On success: { passed?, parent, geometry, version, diff, galleryUrl }. */
+    async forkVersion(
+      target: { index?: number; id?: string },
+      transformFn: (code: string) => string,
+      label?: string,
+      assertions?: GeometryAssertions,
+    ) {
+      const parsed = parseVersionTarget(target, 'forkVersion');
+      if ('error' in parsed) return parsed;
+      if (typeof transformFn !== 'function') {
+        return { error: 'forkVersion(target, transformFn): transformFn must be a function (code: string) => string' };
+      }
+      if (!getState().session) {
+        return { error: 'No active session. Call openSession(id) or createSession() first.' };
+      }
+
+      const parent = await peekVersion(parsed.value);
+      if (!parent) {
+        const kind = typeof target === 'number' ? 'index' : 'id';
+        return { error: `No version found with ${kind} "${target}" in the active session. Use listVersions() to see valid ${kind}s.` };
+      }
+
+      let newCode: string;
+      try {
+        newCode = transformFn(parent.code);
+      } catch (e: unknown) {
+        return { error: `transformFn threw: ${e instanceof Error ? e.message : String(e)}`, parent: { id: parent.id, index: parent.index, label: parent.label } };
+      }
+      if (typeof newCode !== 'string') {
+        return { error: `transformFn must return a string; got ${typeof newCode}`, parent: { id: parent.id, index: parent.index, label: parent.label } };
+      }
+
+      // Validate in isolation before committing anything.
+      const { geometryData: testData, manifold: testManifold } = executeIsolated(newCode);
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      try { (testManifold as any)?.delete?.(); } catch { /* ignore */ }
+      if (testData.status === 'error') {
+        return { passed: false, failures: [testData.error as string], geometry: testData, parent: { id: parent.id, index: parent.index, label: parent.label }, version: null, diff: null, galleryUrl: getGalleryUrl() };
+      }
+      if (assertions) {
+        const failures = checkAssertions(testData, assertions);
+        if (failures.length > 0) {
+          return { passed: false, failures, geometry: testData, parent: { id: parent.id, index: parent.index, label: parent.label }, version: null, diff: null, galleryUrl: getGalleryUrl() };
+        }
+      }
+
+      // Commit: update editor, run, save.
+      const prevGeoData = getState().currentVersion?.geometryData as Record<string, unknown> | null;
+      setValue(newCode);
+      runCodeSync(newCode);
+      const newGeoData = JSON.parse(geometryDataEl.textContent || '{}');
+      const thumbnail = await captureThumbnail();
+      const version = await saveVersion(newCode, getGeometryDataObj(), thumbnail, label, assertions?.notes);
+
+      let diff = null;
+      if (prevGeoData && prevGeoData.status === 'ok' && newGeoData.status === 'ok') {
+        diff = computeStatDiff(prevGeoData, newGeoData);
+      }
+
+      return {
+        ...(assertions ? { passed: true } : {}),
+        parent: { id: parent.id, index: parent.index, label: parent.label },
         geometry: newGeoData,
         version: version ? { id: version.id, index: version.index, label: version.label } : null,
         diff,
@@ -1455,40 +1658,100 @@ async function main() {
     measurePoints(p1: [number, number, number], p2: [number, number, number]): number {
       return measureDistance(p1, p2);
     },
+
+    /** Self-documenting help -- returns structured object and logs readable summary */
+    help(method?: string): Record<string, unknown> {
+      const methods: Record<string, { signature: string; docs: string }> = {
+        // Core
+        'run':             { signature: 'run(code?) -- Run code, update views, return geometry stats', docs: '/ai.md#console-api--windowmainifold' },
+        'getGeometryData': { signature: 'getGeometryData() -- Current stats as JSON object', docs: '/ai.md#geometry-data' },
+        'validate':        { signature: 'validate(code) -- Check code without rendering -> {valid, error?}', docs: '/ai.md#console-api--windowmainifold' },
+        'getCode':         { signature: 'getCode() -- Read editor contents', docs: '/ai.md#console-api--windowmainifold' },
+        'setCode':         { signature: 'setCode(code) -- Set editor contents (no auto-run)', docs: '/ai.md#console-api--windowmainifold' },
+        // Isolated execution
+        'runIsolated':     { signature: 'await runIsolated(code) -- Test without side effects -> {geometryData, thumbnail}', docs: '/ai.md#testing-without-side-effects' },
+        'runAndAssert':    { signature: 'await runAndAssert(code, assertions) -- Validate geometry -> {passed, failures?, stats}', docs: '/ai.md#assertions----structured-validation' },
+        'runAndExplain':   { signature: 'await runAndExplain(code) -- Debug disconnected components -> {stats, components[], hints[]}', docs: '/ai.md#debugging-disconnected-components' },
+        'modifyAndTest':   { signature: 'await modifyAndTest(patchFn, assertions?) -- Modify + test without committing', docs: '/ai.md#modify-and-test' },
+        'query':           { signature: 'query({sliceAt?, decompose?, boundingBox?}) -- Multi-query current geometry', docs: '/ai.md#multi-query-current-geometry' },
+        // Sessions
+        'createSession':   { signature: 'await createSession(name?) -- Create session -> {id, url, galleryUrl}', docs: '/ai.md#console-api--windowmainifold' },
+        'runAndSave':      { signature: 'await runAndSave(code, label?, assertions?) -- Assert + save version in one call', docs: '/ai.md#assert--save-in-one-call' },
+        'saveVersion':     { signature: 'await saveVersion(label?) -- Save current state as version', docs: '/ai.md#console-api--windowmainifold' },
+        'listVersions':    { signature: 'await listVersions() -- List all versions in session', docs: '/ai.md#console-api--windowmainifold' },
+        'loadVersion':     { signature: 'await loadVersion({index} | {id}) -- Load version into editor -> {id, index, label, code, geometryData} or {error}', docs: '/ai.md#console-api--windowmainifold' },
+        'forkVersion':     { signature: 'await forkVersion({index} | {id}, transformFn, label?, assertions?) -- Load + modify + validate + save in one call', docs: '/ai.md#forking-a-prior-version' },
+        'openSession':     { signature: 'await openSession(id) -- Open existing session', docs: '/ai.md#resuming-a-session' },
+        'listSessions':    { signature: 'await listSessions() -- List all sessions', docs: '/ai.md#console-api--windowmainifold' },
+        'getSessionContext': { signature: 'await getSessionContext() -- Get full session context (for resuming)', docs: '/ai.md#resuming-a-session' },
+        'getGalleryUrl':   { signature: 'getGalleryUrl() -- URL for gallery view (human review)', docs: '/ai.md#console-api--windowmainifold' },
+        // Notes
+        'addSessionNote':  { signature: 'await addSessionNote(text) -- Add note with [PREFIX] tag', docs: '/ai.md#session-notes----tracking-design-context' },
+        'listSessionNotes': { signature: 'await listSessionNotes() -- List all session notes', docs: '/ai.md#session-notes----tracking-design-context' },
+        // Inspection
+        'sliceAtZ':        { signature: 'sliceAtZ(z) -- Cross-section at height -> {polygons, svg, area}', docs: '/ai.md#console-api--windowmainifold' },
+        'getBoundingBox':  { signature: 'getBoundingBox() -- -> {min, max}', docs: '/ai.md#console-api--windowmainifold' },
+        'renderView':      { signature: 'renderView({elevation?, azimuth?, ortho?, size?}) -- Render from any angle -> data URL', docs: '/ai.md#visual-verification' },
+        'analyzeProfile':  { signature: 'analyzeProfile(sampleCount?) -- Z-profile feature summary', docs: '/ai.md#console-api--windowmainifold' },
+        'measureAt':       { signature: 'measureAt([x,y]) -- Ray-cast probe at XY -> {hits, thickness, topZ, bottomZ}', docs: '/ai.md#console-api--windowmainifold' },
+        // View
+        'setView':         { signature: 'setView(tab) -- Switch tab: "interactive", "ai", "elevations", "gallery"', docs: '/ai.md#view-tabs' },
+        'getViewState':    { signature: 'getViewState() -- Current tab and camera state', docs: '/ai.md#view-tabs' },
+        // Export
+        'exportGLB':       { signature: 'await exportGLB() -- Download GLB file', docs: '/ai.md#console-api--windowmainifold' },
+        'exportSTL':       { signature: 'exportSTL() -- Download STL file', docs: '/ai.md#console-api--windowmainifold' },
+        'exportOBJ':       { signature: 'exportOBJ() -- Download OBJ file', docs: '/ai.md#console-api--windowmainifold' },
+        'export3MF':       { signature: 'export3MF() -- Download 3MF file', docs: '/ai.md#console-api--windowmainifold' },
+      };
+
+      if (method) {
+        const entry = methods[method];
+        if (entry) {
+          console.log(`${entry.signature}\nDocs: ${entry.docs}`);
+          return { method, ...entry };
+        }
+        return { error: `Unknown method "${method}". Call help() for full list.` };
+      }
+
+      const result = {
+        app: 'mAInifold -- AI-driven parametric CAD in the browser',
+        docs: '/ai.md',
+        constraints: {
+          codeMustReturn: 'Code must end with: return <Manifold object>;',
+          noUIAutomation: 'Do not drive the app with clicks or keystrokes. Use this API.',
+        },
+        quickstart: [
+          'mainifold.help()                        // You are here',
+          'await mainifold.createSession("name")   // Start a named session',
+          'await mainifold.runAndSave(code, "v1", {isManifold: true, maxComponents: 1})',
+        ],
+        methods,
+      };
+
+      // Also log a readable summary to the console
+      const lines = [
+        'mAInifold -- AI-driven parametric CAD. Full docs: /ai.md',
+        '',
+        'Code must end with: return <Manifold object>;',
+        'Do not drive the UI with clicks/keystrokes -- use this API.',
+        '',
+        'Quickstart:',
+        '  await mainifold.createSession("name")',
+        '  await mainifold.runAndSave(code, "v1", {isManifold: true, maxComponents: 1})',
+        '',
+        'Methods:',
+        ...Object.entries(methods).map(([, v]) => `  ${v.signature}`),
+      ];
+      console.log(lines.join('\n'));
+
+      return result;
+    },
   };
 
   (window as unknown as Record<string, unknown>).mainifold = mainifoldAPI;
 
   // Log API availability for AI agents
-  console.log(
-    '%c[mAInifold]%c Console API available at %cwindow.mainifold%c\n' +
-    'Methods: .run(code?), .getGeometryData(), .getCode(), .setCode(code),\n' +
-    '         .sliceAtZ(z), .getBoundingBox(), .validate(code),\n' +
-    '         .toggleClip(on?), .setClipZ(z), .getClipState(),\n' +
-    '         .getModule(), .exportGLB(), .exportSTL(), .exportOBJ(), .export3MF()\n' +
-    'Isolated: .runIsolated(code), .runAndAssert(code, assertions),\n' +
-    '          .runAndExplain(code), .isRunning()\n' +
-    'Intelligence: .analyzeProfile(), .analyzeProfileIsolated(code),\n' +
-    '              .measureAt([x,y]), .measureBetween(p1,p2), .probeRay(origin,dir),\n' +
-    '              .checkContainment()\n' +
-    'View: .getViewState(), .setView(tab), .setUnits(unit), .getUnits()\n' +
-    'Phantom: .setReferenceGeometry(code, opts?), .clearReferenceGeometry(),\n' +
-    '         .hasReferenceGeometry()\n' +
-    'Measure: .measureMode(enabled?), .getMeasurement(), .measurePoints(p1,p2)\n' +
-    'Sessions: .createSession(name?), .saveVersion(label?), .runAndSave(code, label?),\n' +
-    '          .createSessionWithVersions(name, [{code,label},...]),\n' +
-    '          .listSessions(), .openSession(id), .listVersions(), .loadVersion(idx),\n' +
-    '          .renameSession(name, id?), .getGalleryUrl(), .getSessionUrl(),\n' +
-    '          .getSessionState(), .getSessionContext(),\n' +
-    '          .exportSession(id?), .importSession(data), .clearAllSessions()\n' +
-    'Notes: .addSessionNote(text), .listSessionNotes(),\n' +
-    '       .updateSessionNote(noteId, text), .deleteSessionNote(noteId)\n' +
-    'Structured data: document.getElementById("geometry-data").textContent',
-    'color: #4ade80; font-weight: bold',
-    'color: inherit',
-    'color: #60a5fa; font-weight: bold',
-    'color: inherit',
-  );
+  console.info('mAInifold: AI agents should use window.mainifold -- start with mainifold.help(). See /llms.txt');
 
   // === Internal functions ===
 
@@ -1509,6 +1772,7 @@ async function main() {
     _running = false;
 
     if (result.error) {
+      recordError(result.error);
       setStatus(statusBar, 'error', result.error);
       geometryDataEl.textContent = JSON.stringify({ status: 'error', error: result.error, executionTimeMs: elapsed, codeHash: simpleHash(src) });
       return;

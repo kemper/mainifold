@@ -9,6 +9,7 @@ import {
   listVersions as dbListVersions,
   getLatestVersion,
   getVersionByIndex,
+  getVersionById,
   getVersionCount,
   clearAllData,
   updateSession as dbUpdateSession,
@@ -209,10 +210,28 @@ export async function navigateVersion(direction: 'prev' | 'next'): Promise<Versi
   return version;
 }
 
-export async function loadVersionByIndex(index: number): Promise<Version | null> {
+/** Look up a version by index (number) or id (string) without mutating current state. */
+export async function peekVersion(target: number | string): Promise<Version | null> {
+  if (!currentState.session) return null;
+  if (typeof target === 'number') {
+    return getVersionByIndex(currentState.session.id, target);
+  }
+  const v = await getVersionById(target);
+  return v && v.sessionId === currentState.session.id ? v : null;
+}
+
+/** Load a version by index (number) or id (string). */
+export async function loadVersion(target: number | string): Promise<Version | null> {
   if (!currentState.session) return null;
 
-  const version = await getVersionByIndex(currentState.session.id, index);
+  let version: Version | null = null;
+  if (typeof target === 'number') {
+    version = await getVersionByIndex(currentState.session.id, target);
+  } else {
+    const v = await getVersionById(target);
+    // Reject versions from other sessions to avoid cross-session pollution.
+    if (v && v.sessionId === currentState.session.id) version = v;
+  }
   if (!version) return null;
 
   currentState = { ...currentState, currentVersion: version };
@@ -283,6 +302,20 @@ export async function updateSessionNote(noteId: string, text: string): Promise<v
   await dbUpdateNote(noteId, text);
 }
 
+// === Recent error tracking (for agentHints) ===
+
+const recentErrors: { error: string; timestamp: number }[] = [];
+const MAX_RECENT_ERRORS = 5;
+
+export function recordError(error: string): void {
+  recentErrors.push({ error, timestamp: Date.now() });
+  if (recentErrors.length > MAX_RECENT_ERRORS) recentErrors.shift();
+}
+
+export function getRecentErrors(): { error: string; timestamp: number }[] {
+  return [...recentErrors];
+}
+
 // === Session context (single call for AI agents) ===
 
 export interface SessionContext {
@@ -304,6 +337,12 @@ export interface SessionContext {
   notes: { id: string; text: string; timestamp: number }[];
   currentVersion: { index: number; label: string } | null;
   versionCount: number;
+  agentHints: {
+    apiDocsUrl: string;
+    recommendedEntrypoint: string;
+    codeMustReturnManifold: boolean;
+    recentErrors: { error: string; timestamp: number }[];
+  };
 }
 
 export async function getSessionContext(): Promise<SessionContext | null> {
@@ -343,6 +382,12 @@ export async function getSessionContext(): Promise<SessionContext | null> {
       ? { index: currentState.currentVersion.index, label: currentState.currentVersion.label }
       : null,
     versionCount: currentState.versionCount,
+    agentHints: {
+      apiDocsUrl: '/ai.md',
+      recommendedEntrypoint: 'runAndSave',
+      codeMustReturnManifold: true,
+      recentErrors: getRecentErrors(),
+    },
   };
 }
 
