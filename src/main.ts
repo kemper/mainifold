@@ -348,6 +348,37 @@ function getGeometryDataObj(): Record<string, unknown> | null {
   }
 }
 
+/** Validate a { index } | { id } version-target arg. Returns a parsed descriptor
+ *  or { error } with a caller-aware message. Exactly one of index/id must be set. */
+function parseVersionTarget(
+  target: unknown,
+  caller: string,
+): { kind: 'index'; value: number } | { kind: 'id'; value: string } | { error: string } {
+  const usage = `${caller}(target, ...): target must be { index: number } or { id: string } from listVersions()`;
+  if (target === null || typeof target !== 'object') {
+    return { error: usage };
+  }
+  const { index, id } = target as { index?: unknown; id?: unknown };
+  const hasIndex = index !== undefined;
+  const hasId = id !== undefined;
+  if (hasIndex && hasId) {
+    return { error: `${caller}: pass either { index } or { id }, not both.` };
+  }
+  if (!hasIndex && !hasId) {
+    return { error: usage };
+  }
+  if (hasIndex) {
+    if (typeof index !== 'number' || !Number.isFinite(index)) {
+      return { error: `${caller}: target.index must be a finite number (got ${typeof index}).` };
+    }
+    return { kind: 'index', value: index };
+  }
+  if (typeof id !== 'string' || id.length === 0) {
+    return { error: `${caller}: target.id must be a non-empty string (got ${typeof id}).` };
+  }
+  return { kind: 'id', value: id };
+}
+
 // Determine which page to show based on URL path and query params
 function shouldShowLanding(): boolean {
   const path = window.location.pathname;
@@ -993,20 +1024,18 @@ async function main() {
       }));
     },
 
-    /** Load a version into the editor by index (number, 1-based from listVersions()[].index)
-     *  or id (string, from listVersions()[].id). Returns the loaded version's code and stats,
-     *  or { error } if not found. */
-    async loadVersion(target: number | string) {
-      if (target === undefined || target === null || (typeof target !== 'number' && typeof target !== 'string')) {
-        return { error: 'loadVersion(target): target must be a number (index) or string (id) from listVersions()' };
-      }
+    /** Load a version into the editor. Pass { index } or { id } from listVersions().
+     *  Returns the loaded version's code and stats, or { error } if not found. */
+    async loadVersion(target: { index?: number; id?: string }) {
+      const parsed = parseVersionTarget(target, 'loadVersion');
+      if ('error' in parsed) return parsed;
       if (!getState().session) {
         return { error: 'No active session. Call openSession(id) or createSession() first.' };
       }
-      const version = await loadVersionFromStore(target);
+      const version = await loadVersionFromStore(parsed.value);
       if (!version) {
-        const kind = typeof target === 'number' ? 'index' : 'id';
-        return { error: `No version found with ${kind} "${target}" in the active session. Use listVersions() to see valid ${kind}s.` };
+        const kind = parsed.kind;
+        return { error: `No version found with ${kind} "${parsed.value}" in the active session. Use listVersions() to see valid ${kind}s.` };
       }
       setValue(version.code);
       runCodeSync(version.code);
@@ -1075,21 +1104,20 @@ async function main() {
     },
 
     /** Fork a prior version: load its code, apply transformFn, validate, and save as a new version.
-     *  target: index (number) or id (string) from listVersions().
+     *  target: { index } or { id } from listVersions().
      *  transformFn: (code: string) => string — modifies the parent's code. Return the full new code.
      *  Eliminates the load + getCode + modify + save round-trip chain.
      *  Returns { error } if the parent isn't found or transformFn throws.
      *  Returns { passed, failures } without saving if assertions fail.
      *  On success: { passed?, parent, geometry, version, diff, galleryUrl }. */
     async forkVersion(
-      target: number | string,
+      target: { index?: number; id?: string },
       transformFn: (code: string) => string,
       label?: string,
       assertions?: GeometryAssertions,
     ) {
-      if (target === undefined || target === null || (typeof target !== 'number' && typeof target !== 'string')) {
-        return { error: 'forkVersion(target, transformFn): target must be a number (index) or string (id) from listVersions()' };
-      }
+      const parsed = parseVersionTarget(target, 'forkVersion');
+      if ('error' in parsed) return parsed;
       if (typeof transformFn !== 'function') {
         return { error: 'forkVersion(target, transformFn): transformFn must be a function (code: string) => string' };
       }
@@ -1097,7 +1125,7 @@ async function main() {
         return { error: 'No active session. Call openSession(id) or createSession() first.' };
       }
 
-      const parent = await peekVersion(target);
+      const parent = await peekVersion(parsed.value);
       if (!parent) {
         const kind = typeof target === 'number' ? 'index' : 'id';
         return { error: `No version found with ${kind} "${target}" in the active session. Use listVersions() to see valid ${kind}s.` };
@@ -1651,8 +1679,8 @@ async function main() {
         'runAndSave':      { signature: 'await runAndSave(code, label?, assertions?) -- Assert + save version in one call', docs: '/ai.md#assert--save-in-one-call' },
         'saveVersion':     { signature: 'await saveVersion(label?) -- Save current state as version', docs: '/ai.md#console-api--windowmainifold' },
         'listVersions':    { signature: 'await listVersions() -- List all versions in session', docs: '/ai.md#console-api--windowmainifold' },
-        'loadVersion':     { signature: 'await loadVersion(indexOrId) -- Load version into editor -> {id, index, label, code, geometryData} or {error}', docs: '/ai.md#console-api--windowmainifold' },
-        'forkVersion':     { signature: 'await forkVersion(indexOrId, transformFn, label?, assertions?) -- Load + modify + validate + save in one call', docs: '/ai.md#forking-a-prior-version' },
+        'loadVersion':     { signature: 'await loadVersion({index} | {id}) -- Load version into editor -> {id, index, label, code, geometryData} or {error}', docs: '/ai.md#console-api--windowmainifold' },
+        'forkVersion':     { signature: 'await forkVersion({index} | {id}, transformFn, label?, assertions?) -- Load + modify + validate + save in one call', docs: '/ai.md#forking-a-prior-version' },
         'openSession':     { signature: 'await openSession(id) -- Open existing session', docs: '/ai.md#resuming-a-session' },
         'listSessions':    { signature: 'await listSessions() -- List all sessions', docs: '/ai.md#console-api--windowmainifold' },
         'getSessionContext': { signature: 'await getSessionContext() -- Get full session context (for resuming)', docs: '/ai.md#resuming-a-session' },

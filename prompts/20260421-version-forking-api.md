@@ -39,10 +39,17 @@ That's the root cause, but the design issues behind it are real:
   convention used by `sliceAtZ`, `modifyAndTest`, `getSessionContext`,
   `help()`. Keep `id` out of the error branch so truthy checks on
   `result.id` still work as success tests.
-- Accept either `number` (index) or `string` (id) via runtime type
-  dispatch in `loadVersion` and `forkVersion`, rather than introducing
-  separate `loadVersionById` methods. Error messages call out which
-  kind of arg was received.
+- Public `loadVersion` and `forkVersion` take an object arg with
+  exactly one of `{ index: number }` or `{ id: string }`. Initial
+  proposal used runtime `typeof` dispatch on a bare `number | string`
+  param; switched to object args after the user flagged that dual-type
+  params read as a code smell even when `typeof` mechanically separates
+  them. Object args are self-documenting (`{index: 2}` vs
+  `{id: "..."}`), reject both-set / neither-set at the boundary, and
+  keep forkVersion's call site readable. Internal sessionManager
+  helpers (`loadVersion`, `peekVersion`) still accept the looser
+  `number | string` — the object-arg unwrapping happens at the public
+  boundary only.
 - `forkVersion` re-uses the existing `runAndSave` pattern (validate in
   isolation, commit atomically, return diff + galleryUrl), adding a
   `parent` field so the agent sees which version was forked even on
