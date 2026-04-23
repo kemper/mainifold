@@ -12,6 +12,7 @@ mAInifold is a browser-based parametric CAD tool powered by manifold-3d (WASM). 
 - [Geometry data](#geometry-data)
 - [Writing model code](#writing-model-code)
 - [Common pitfalls for boolean operations](#common-pitfalls-for-boolean-operations)
+- [Print-safe geometry](#print-safe-geometry)
 - [Reference images](#reference-images)
 - [Photo-to-model workflow](#photo-to-model-workflow) (optional tooling)
 - [Iteration workflow](#iteration-workflow)
@@ -33,6 +34,7 @@ mAInifold is a browser-based parametric CAD tool powered by manifold-3d (WASM). 
 - **Skipping sessions** -- always create a session (`createSession`) and save versions (`runAndSave`) so the user can review your work in the gallery.
 - **Skipping visual verification** -- stats alone can't catch visual defects. After structural changes, screenshot the Elevations tab or use `renderView()`.
 - **Flush boolean placement** -- shapes must overlap by at least 0.5 units to union correctly. Merely touching at a face produces disconnected components.
+- **Tapering to a near-point on printed geometry** -- `scaleTop=[0.01, 0.01]` or chamfers that collapse the top to sub-millimeter area look fine in `geometry-data` but FDM slicers silently drop sub-extrusion-width layers, so the cap disappears on the print. See [Print-safe geometry](#print-safe-geometry).
 - **Not reading session context before modifying** -- when opening an existing session, always call `getSessionContext()` first and read the notes/version history before making changes. See [Resuming a session](#resuming-a-session).
 - **Branching off a prior version by hand** -- don't chain `loadVersion` -> `getCode` -> modify -> `runAndSave`. A silent failure (blocked return value, stale buffer) can drop parts of the parent. Use [`forkVersion({index} | {id}, transformFn, label, assertions?)`](#forking-a-prior-version) instead -- it loads the parent's code server-side, applies your transform, validates, and saves atomically.
 - **Passing a bare index or id instead of `{index}` / `{id}`** -- `loadVersion` and `forkVersion` take an object with exactly one of `{index: number}` or `{id: string}`, e.g. `loadVersion({index: 2})` or `loadVersion({id: "Kx3Pq9mA2wEr"})`. Bare `loadVersion(2)` will return `{error: "...target must be { index: number } or { id: string }..."}`.
@@ -232,6 +234,57 @@ const r = await mainifold.runAndExplain(code);
 //   "Components 0 and 1 share a face or near-touch (gap: 0.00) -- need volumetric overlap"
 // ]
 ```
+
+## Print-safe geometry
+
+If the output will be 3D-printed (FDM/FFF), geometry thinner than the nozzle's extrusion width is silently dropped by slicers. This is a real class of bug that passes every `geometry-data` check (volume, `componentCount`, `genus`, `isManifold` all correct) but renders the top of the model as "missing" on the physical print.
+
+### The classic trap: `scaleTop` near zero
+
+An extrusion with `scaleTop=[0.01, 0.01]` (or any small fraction) tapers linearly to a near-point. The last slices have areas well under 1 mm², which most slicers drop at typical nozzle widths. Example failure mode observed in the wild: a hook band extruded with `scaleTop=[0.01, 0.01]` had layer areas of 118 mm² at z=5.8 collapsing to 0.07 mm² at z=6.55 -- the slicer dropped every layer under ~0.4 mm² and the cap disappeared.
+
+```js
+// BAD -- lead-in chamfer via scaleTop=0, tapers to sub-extrusion-width
+ring.extrude(6, 4, 0, [0.01, 0.01])
+
+// GOOD -- explicit 45deg chamfer that stops at a flat-top ring of finite width.
+// Stack a full-width body + a chamfer frustum whose smaller radius is still >= wall thickness.
+const body    = ringCS.extrude(bodyH);
+const chamfer = ringCS.extrude(chamferH, 1, 0, outerFrac)  // outerFrac chosen so top width >= wallT
+                    .translate([0, 0, bodyH]);
+const result  = body.add(chamfer);
+```
+
+### Rules of thumb (assume ~0.4 mm nozzle, ~0.2 mm layer height)
+
+- **Minimum wall / feature thickness:** `>= 0.4 mm` (one nozzle width). Prefer `>= 0.8 mm` for anything load-bearing.
+- **Minimum cross-sectional area on any printed layer:** `>= ~0.4 mm²` (roughly nozzle width x 1 mm of extruded line).
+- **Never taper to a true point on a printed face.** Chamfers, drafts, and lead-ins must land on a flat plateau wider than the nozzle.
+- **Decorative points** (spires, finials) either need to be printed as a separate top piece, or accept that the tip will be missing up to the slicer's minimum width.
+
+### Catch this before the user does
+
+After any change that uses `scaleTop` < 1, tapers via `hull`, or brings two surfaces toward a vanishing edge, dense-sample near `zMax` and flag sub-extrusion-width layers:
+
+```js
+const bb = mainifold.getBoundingBox();
+const zMax = bb.max[2];
+const layerH = 0.2;
+const minArea = 0.4;  // mm^2, assuming ~0.4mm nozzle
+
+const problems = [];
+for (let z = zMax - 2; z <= zMax - layerH; z += layerH) {
+  const s = mainifold.sliceAtZ(z);
+  if (s && s.area > 0 && s.area < minArea) {
+    problems.push({ z: +z.toFixed(2), area: +s.area.toFixed(3) });
+  }
+}
+if (problems.length) {
+  console.warn("Sub-extrusion-width layers detected:", problems);
+}
+```
+
+Or batch it with `query({ sliceAt: [zMax - 2, zMax - 1.8, ..., zMax - 0.2] })` and check each slice's `area`. If any layer below the actual geometry end falls under threshold, redesign the top to terminate with a flat plateau instead of a near-point taper.
 
 ## Reference images
 
