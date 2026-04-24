@@ -999,20 +999,33 @@ async function main() {
 
   // Set up unlock handlers
   setUnlockHandlers(
-    // Fork: save the colored version first, then create a new uncolored version
+    // Fork: save the colored version, then create a new uncolored version
     async (colorData) => {
-      // Save current version with color data if in a session
       if (getState().session && currentMeshData) {
         const code = getValue();
-        const geometryData = getGeometryDataObj() ?? {};
-        geometryData.colorRegions = colorData;
-        await saveVersion(code, geometryData, null, 'colored', undefined);
-      }
-      // Editor is now unlocked (clearRegions already called), re-render without colors
-      if (currentMeshData) {
+        const thumbnail = await captureThumbnail();
+
+        // 1. Save the colored version (force to bypass duplicate-code check)
+        const coloredGeoData = getGeometryDataObj() ?? {};
+        coloredGeoData.colorRegions = colorData;
+        await saveVersion(code, coloredGeoData, thumbnail, 'colored', undefined, { force: true });
+
+        // 2. Re-render without colors, then save an uncolored sibling
         updateMesh(currentMeshData, { skipAutoFrame: true });
         updateMultiView(currentMeshData);
         renderElevationsToContainer(elevationsContainer, currentMeshData);
+
+        const cleanGeoData = getGeometryDataObj() ?? {};
+        delete cleanGeoData.colorRegions;
+        const cleanThumb = await captureThumbnail();
+        await saveVersion(code, cleanGeoData, cleanThumb, undefined, undefined, { force: true });
+      } else {
+        // No session — just re-render without colors
+        if (currentMeshData) {
+          updateMesh(currentMeshData, { skipAutoFrame: true });
+          updateMultiView(currentMeshData);
+          renderElevationsToContainer(elevationsContainer, currentMeshData);
+        }
       }
     },
     // Clear: just re-render without colors (clearRegions already called)
