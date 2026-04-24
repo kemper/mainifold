@@ -18,6 +18,9 @@ let animationId: number;
 let measureLock = false;
 let userLock = false;
 
+// Grid plane
+let grid: THREE.GridHelper;
+
 // Clipping plane state
 const clipPlane = new THREE.Plane(new THREE.Vector3(0, 0, -1), 0); // clips above Z
 let clippingEnabled = false;
@@ -73,9 +76,10 @@ export function initViewport(container: HTMLElement): {
   dir2.position.set(-10, 10, -5);
   scene.add(dir2);
 
-  // Grid on XY plane
-  const grid = new THREE.GridHelper(40, 40, 0x444444, 0x333333);
+  // Grid on XY plane (hidden by default)
+  grid = new THREE.GridHelper(40, 40, 0x444444, 0x333333);
   grid.rotation.x = Math.PI / 2;
+  grid.visible = false;
   scene.add(grid);
 
   meshGroup = new THREE.Group();
@@ -168,6 +172,9 @@ export function updateMesh(meshData: MeshData, options?: { skipAutoFrame?: boole
 
     // Update model bounds for clip slider
     modelBounds = { min: box.min.z, max: box.max.z };
+
+    // Position grid at the bottom of the model
+    grid.position.z = box.min.z;
 
     // Update bounding box dimension annotations
     updateDimensionLines(box);
@@ -396,6 +403,16 @@ export function isUserOrbitLocked(): boolean {
 }
 
 export { setDimensionsVisible, isDimensionsVisible } from './dimensionLines';
+
+// === Grid visibility API ===
+
+export function setGridVisible(visible: boolean): void {
+  grid.visible = visible;
+}
+
+export function isGridVisible(): boolean {
+  return grid.visible;
+}
 
 export function dispose(): void {
   cancelAnimationFrame(animationId);

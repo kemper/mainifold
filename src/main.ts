@@ -1,7 +1,7 @@
 import './style.css';
 import { initEngine, executeCode, executeCodeAsync, validateCodeAsync, ensureEngineReady, getModule, getActiveLanguage, setActiveLanguage, type Language } from './geometry/engine';
 import { sliceAtZ, getBoundingBox } from './geometry/crossSection';
-import { initViewport, updateMesh, setClipping, setClipZ, getClipState, getCameraState, getCanvas, getMeshGroup, getCamera, setMeasureLock, setUserOrbitLock, isUserOrbitLocked, setDimensionsVisible, isDimensionsVisible } from './renderer/viewport';
+import { initViewport, updateMesh, setClipping, setClipZ, getClipState, getCameraState, getCanvas, getMeshGroup, getCamera, setMeasureLock, setUserOrbitLock, isUserOrbitLocked, setDimensionsVisible, isDimensionsVisible, setGridVisible, isGridVisible } from './renderer/viewport';
 import { renderCompositeCanvas, renderElevationsToContainer, renderSingleView, renderSliceSVG, setReferenceImages as _setRefImages, clearReferenceImages as _clearRefImages, getReferenceImages as _getRefImages, type ReferenceImages } from './renderer/multiview';
 import { setPhantom, clearPhantom, hasPhantom, type PhantomOptions } from './renderer/phantomGeometry';
 import { initEditor, setValue, getValue, setLanguage as setEditorLanguage, setEditorDiagnostics, clearEditorDiagnostics, revealFirstDiagnostic } from './editor/codeEditor';
@@ -1049,6 +1049,7 @@ async function main() {
   initClipControls(clipControls);
 
   // Wire up viewport overlay buttons
+  initGridToggle(clipControls);
   initDimensionsToggle(clipControls);
   initPaintUI(clipControls);
   initMeasureToggle(clipControls);
@@ -2611,6 +2612,21 @@ async function main() {
         setMeasureLock(true);
         measureBtn.className = activeClass;
       }
+    });
+  }
+
+  function initGridToggle(container: HTMLElement) {
+    const gridBtn = container.querySelector('#grid-toggle') as HTMLButtonElement;
+    if (!gridBtn) return;
+
+    const inactiveClass = 'px-2 py-1 rounded text-xs bg-zinc-800/80 backdrop-blur text-zinc-400 hover:text-zinc-200 hover:bg-zinc-700/80 transition-colors border border-zinc-600/50';
+    const activeClass = 'px-2 py-1 rounded text-xs bg-blue-500/20 backdrop-blur text-blue-400 hover:bg-blue-500/30 transition-colors border border-blue-500/30';
+
+    gridBtn.addEventListener('click', () => {
+      const nowVisible = !isGridVisible();
+      setGridVisible(nowVisible);
+      gridBtn.className = nowVisible ? activeClass : inactiveClass;
+      gridBtn.title = nowVisible ? 'Hide grid plane' : 'Show grid plane';
     });
   }
 
