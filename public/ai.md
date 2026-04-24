@@ -1,17 +1,20 @@
 # mAInifold -- AI Agent Instructions
 
-mAInifold is a browser-based parametric CAD tool powered by manifold-3d (WASM). You write JavaScript that constructs 3D geometry and returns a `Manifold` object, which renders live. All interaction is via the `window.mainifold` programmatic API -- do not drive the app through clicks or keystrokes.
+mAInifold is a browser-based parametric CAD tool with two modeling engines: **manifold-js** (default, JavaScript DSL with manifold-3d API) and **OpenSCAD** (SCAD language via WASM). You write code that constructs 3D geometry, which renders live. All interaction is via the `window.mainifold` programmatic API -- do not drive the app through clicks or keystrokes.
 
 **Coordinate system:** Right-handed, Z-up. XY plane is the ground. Units are arbitrary.
 
 ## Contents
 
 - [Before you start](#before-you-start)
+- [Choosing an engine](#choosing-an-engine)
 - [Common agent mistakes](#common-agent-mistakes)
 - [Console API -- window.mainifold](#console-api--windowmainifold)
 - [Geometry data](#geometry-data)
 - [Writing model code](#writing-model-code)
+- [Writing OpenSCAD code](#writing-openscad-code)
 - [Common pitfalls for boolean operations](#common-pitfalls-for-boolean-operations)
+- [Print-safe geometry](#print-safe-geometry)
 - [Reference images](#reference-images)
 - [Photo-to-model workflow](#photo-to-model-workflow) (optional tooling)
 - [Iteration workflow](#iteration-workflow)
@@ -22,9 +25,39 @@ mAInifold is a browser-based parametric CAD tool powered by manifold-3d (WASM). 
 ## Before you start
 
 1. **Use `window.mainifold`** -- that's the programmatic API. Do NOT drive the app with clicks, keystrokes, or DOM manipulation.
-2. **Code must end with `return manifoldObject;`** -- a bare trailing expression won't work.
-3. **Use `runAndSave(code, label, {isManifold: true, maxComponents: 1})`** to validate and commit a version.
-4. **Log decisions with `addSessionNote("[PREFIX] ...")`** -- prefixes: `[REQUIREMENT]`, `[DECISION]`, `[FEEDBACK]`, `[MEASUREMENT]`, `[ATTEMPT]`, `[TODO]`.
+2. **Pick your engine:** manifold-js (default) or OpenSCAD. See [Choosing an engine](#choosing-an-engine).
+3. **manifold-js code must end with `return manifoldObject;`** -- a bare trailing expression won't work. OpenSCAD code uses standard SCAD syntax (no `return`).
+4. **Use `runAndSave(code, label, {isManifold: true, maxComponents: 1})`** to validate and commit a version.
+5. **Log decisions with `addSessionNote("[PREFIX] ...")`** -- prefixes: `[REQUIREMENT]`, `[DECISION]`, `[FEEDBACK]`, `[MEASUREMENT]`, `[ATTEMPT]`, `[TODO]`.
+
+## Choosing an engine
+
+mAInifold supports two modeling engines. Pick whichever is best for the task:
+
+| | **manifold-js** (default) | **OpenSCAD** (SCAD) |
+|---|---|---|
+| Language | JavaScript | OpenSCAD `.scad` |
+| Best for | Algorithmic/parametric geometry, complex math, programmatic iteration | Standard OpenSCAD idioms, porting existing `.scad` files, users who think in CSG |
+| Code style | `return Manifold.cube([10,10,10], true);` | `cube([10,10,10], center=true);` |
+| Strengths | Fast execution, rich JS ecosystem, direct Manifold API access | Familiar to OpenSCAD users, large body of existing `.scad` code online |
+| Limitations | Must learn the manifold-3d API | No `text()` (fonts not loaded), no `use<>`/`include<>` with external libraries, slower (fresh WASM instance per run) |
+
+### Switching engines
+
+```js
+// Check current engine
+mainifold.getActiveLanguage()        // -> 'manifold-js' or 'scad'
+
+// Switch engine (also updates the code editor's syntax highlighting)
+await mainifold.setActiveLanguage('scad')
+await mainifold.setActiveLanguage('manifold-js')
+
+// Run code with a specific engine (one-shot, doesn't change active engine)
+await mainifold.run(scadCode)        // uses active engine
+// To force a specific engine, switch first then run
+```
+
+Selecting a SCAD example from the toolbar dropdown auto-switches to OpenSCAD mode. Session versions remember which engine was used and restore it when loaded.
 
 ## Common agent mistakes
 
@@ -33,6 +66,7 @@ mAInifold is a browser-based parametric CAD tool powered by manifold-3d (WASM). 
 - **Skipping sessions** -- always create a session (`createSession`) and save versions (`runAndSave`) so the user can review your work in the gallery.
 - **Skipping visual verification** -- stats alone can't catch visual defects. After structural changes, screenshot the Elevations tab or use `renderView()`.
 - **Flush boolean placement** -- shapes must overlap by at least 0.5 units to union correctly. Merely touching at a face produces disconnected components.
+- **Tapering to a near-point on printed geometry** -- `scaleTop=[0.01, 0.01]` or chamfers that collapse the top to sub-millimeter area look fine in `geometry-data` but FDM slicers silently drop sub-extrusion-width layers, so the cap disappears on the print. See [Print-safe geometry](#print-safe-geometry).
 - **Not reading session context before modifying** -- when opening an existing session, always call `getSessionContext()` first and read the notes/version history before making changes. See [Resuming a session](#resuming-a-session).
 - **Branching off a prior version by hand** -- don't chain `loadVersion` -> `getCode` -> modify -> `runAndSave`. A silent failure (blocked return value, stale buffer) can drop parts of the parent. Use [`forkVersion({index} | {id}, transformFn, label, assertions?)`](#forking-a-prior-version) instead -- it loads the parent's code server-side, applies your transform, validates, and saves atomically.
 - **Passing a bare index or id instead of `{index}` / `{id}`** -- `loadVersion` and `forkVersion` take an object with exactly one of `{index: number}` or `{id: string}`, e.g. `loadVersion({index: 2})` or `loadVersion({id: "Kx3Pq9mA2wEr"})`. Bare `loadVersion(2)` will return `{error: "...target must be { index: number } or { id: string }..."}`.
@@ -55,6 +89,8 @@ mainifold.setCode(code)       // Set editor contents (no auto-run)
 mainifold.sliceAtZ(z)         // Cross-section -> {polygons, svg, boundingBox, area}
 mainifold.getBoundingBox()    // -> {min:[x,y,z], max:[x,y,z]}
 mainifold.getModule()         // Raw manifold-3d WASM module
+mainifold.getActiveLanguage() // -> 'manifold-js' or 'scad'
+await mainifold.setActiveLanguage(lang) // Switch engine + editor mode ('manifold-js' | 'scad')
 mainifold.toggleClip(on?)     // Toggle 3D clipping plane -> {enabled, z, min, max}
 mainifold.setClipZ(z)         // Set clip height -> {enabled, z, min, max}
 mainifold.getClipState()      // -> {enabled, z, min, max}
@@ -196,6 +232,34 @@ Queries:    .area()  .isEmpty()  .numVert()  .numContour()  .bounds()
 Output:     .toPolygons()  .decompose()  .delete()
 ```
 
+## Writing OpenSCAD code
+
+When the engine is set to `scad`, code is compiled by OpenSCAD (WASM) instead of running as JavaScript.
+
+**Key differences from manifold-js:**
+- **No `return` statement** -- SCAD uses implicit top-level geometry. Just write `cube(10);`, not `return Manifold.cube(...)`.
+- **SCAD syntax** -- standard OpenSCAD: `module`, `function`, `for`, `let`, `if/else`, `use`, `include`.
+- **Built-in primitives** -- `cube`, `sphere`, `cylinder`, `polyhedron`, `polygon`, `circle`, `square`, `text` (text not available -- fonts not loaded).
+- **Transforms** -- `translate`, `rotate`, `scale`, `mirror`, `multmatrix`, `color`, `resize`.
+- **Booleans** -- `union()`, `difference()`, `intersection()`, `hull()`, `minkowski()`.
+- **Extrusion** -- `linear_extrude(height, twist, slices, scale)`, `rotate_extrude(angle)`.
+- **The `--enable=manifold` flag is set automatically** -- OpenSCAD uses the same manifold-3d boolean backend, so CSG results match the JS engine.
+
+**Known limitations (v1):**
+- `text()` is not available (font data not loaded to save ~8MB).
+- `use <...>` / `include <...>` with external `.scad` libraries does not work (no external file system). Inline all modules.
+- BOSL2 and MCAD libraries are not available.
+- Each SCAD run creates a fresh WASM instance (~100-300ms overhead). For fast iteration, manifold-js is snappier.
+
+**Example SCAD code:**
+```scad
+// Cube with cylindrical hole
+difference() {
+  cube([10, 10, 10], center=true);
+  cylinder(h=12, r=4, center=true, $fn=32);
+}
+```
+
 ## Common pitfalls for boolean operations
 
 ### Always use volumetric overlap, never flush placement
@@ -232,6 +296,57 @@ const r = await mainifold.runAndExplain(code);
 //   "Components 0 and 1 share a face or near-touch (gap: 0.00) -- need volumetric overlap"
 // ]
 ```
+
+## Print-safe geometry
+
+If the output will be 3D-printed (FDM/FFF), geometry thinner than the nozzle's extrusion width is silently dropped by slicers. This is a real class of bug that passes every `geometry-data` check (volume, `componentCount`, `genus`, `isManifold` all correct) but renders the top of the model as "missing" on the physical print.
+
+### The classic trap: `scaleTop` near zero
+
+An extrusion with `scaleTop=[0.01, 0.01]` (or any small fraction) tapers linearly to a near-point. The last slices have areas well under 1 mm², which most slicers drop at typical nozzle widths. Example failure mode observed in the wild: a hook band extruded with `scaleTop=[0.01, 0.01]` had layer areas of 118 mm² at z=5.8 collapsing to 0.07 mm² at z=6.55 -- the slicer dropped every layer under ~0.4 mm² and the cap disappeared.
+
+```js
+// BAD -- lead-in chamfer via scaleTop=0, tapers to sub-extrusion-width
+ring.extrude(6, 4, 0, [0.01, 0.01])
+
+// GOOD -- explicit 45deg chamfer that stops at a flat-top ring of finite width.
+// Stack a full-width body + a chamfer frustum whose smaller radius is still >= wall thickness.
+const body    = ringCS.extrude(bodyH);
+const chamfer = ringCS.extrude(chamferH, 1, 0, outerFrac)  // outerFrac chosen so top width >= wallT
+                    .translate([0, 0, bodyH]);
+const result  = body.add(chamfer);
+```
+
+### Rules of thumb (assume ~0.4 mm nozzle, ~0.2 mm layer height)
+
+- **Minimum wall / feature thickness:** `>= 0.4 mm` (one nozzle width). Prefer `>= 0.8 mm` for anything load-bearing.
+- **Minimum cross-sectional area on any printed layer:** `>= ~0.4 mm²` (roughly nozzle width x 1 mm of extruded line).
+- **Never taper to a true point on a printed face.** Chamfers, drafts, and lead-ins must land on a flat plateau wider than the nozzle.
+- **Decorative points** (spires, finials) either need to be printed as a separate top piece, or accept that the tip will be missing up to the slicer's minimum width.
+
+### Catch this before the user does
+
+After any change that uses `scaleTop` < 1, tapers via `hull`, or brings two surfaces toward a vanishing edge, dense-sample near `zMax` and flag sub-extrusion-width layers:
+
+```js
+const bb = mainifold.getBoundingBox();
+const zMax = bb.max[2];
+const layerH = 0.2;
+const minArea = 0.4;  // mm^2, assuming ~0.4mm nozzle
+
+const problems = [];
+for (let z = zMax - 2; z <= zMax - layerH; z += layerH) {
+  const s = mainifold.sliceAtZ(z);
+  if (s && s.area > 0 && s.area < minArea) {
+    problems.push({ z: +z.toFixed(2), area: +s.area.toFixed(3) });
+  }
+}
+if (problems.length) {
+  console.warn("Sub-extrusion-width layers detected:", problems);
+}
+```
+
+Or batch it with `query({ sliceAt: [zMax - 2, zMax - 1.8, ..., zMax - 0.2] })` and check each slice's `area`. If any layer below the actual geometry end falls under threshold, redesign the top to terminate with a flat plateau instead of a near-point taper.
 
 ## Reference images
 

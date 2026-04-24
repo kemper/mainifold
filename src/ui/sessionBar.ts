@@ -89,6 +89,12 @@ function render(state: SessionState) {
   });
   barEl.appendChild(nameEl);
 
+  // Language badge
+  const langLabel = state.session.language === 'scad' ? 'SCAD' : 'JS';
+  const langColor = state.session.language === 'scad' ? 'text-amber-400 border-amber-400/30' : 'text-blue-400 border-blue-400/30';
+  const langBadge = el('span', `text-[10px] font-semibold border rounded px-1 ${langColor}`, langLabel);
+  barEl.appendChild(langBadge);
+
   // Separator
   barEl.appendChild(el('span', 'text-zinc-600', '|'));
 

@@ -6,6 +6,8 @@ export interface Session {
   created: number;
   updated: number;
   referenceImages?: ReferenceImagesData | null;
+  /** Modeling language for this session. Missing = 'manifold-js'. */
+  language?: 'manifold-js' | 'scad';
 }
 
 export interface ReferenceImagesData {
@@ -88,12 +90,13 @@ function reqToPromise<T>(req: IDBRequest<T>): Promise<T> {
 
 // === Sessions ===
 
-export async function createSession(name?: string): Promise<Session> {
+export async function createSession(name?: string, language?: 'manifold-js' | 'scad'): Promise<Session> {
   const session: Session = {
     id: generateId(),
     name: name || `Session ${new Date().toLocaleDateString()}`,
     created: Date.now(),
     updated: Date.now(),
+    ...(language && language !== 'manifold-js' ? { language } : {}),
   };
   const store = await tx('sessions', 'readwrite');
   await reqToPromise(store.put(session));
@@ -111,7 +114,7 @@ export async function listSessions(): Promise<Session[]> {
   return sessions.sort((a, b) => b.updated - a.updated);
 }
 
-export async function updateSession(id: string, updates: Partial<Pick<Session, 'name' | 'updated' | 'referenceImages'>>): Promise<void> {
+export async function updateSession(id: string, updates: Partial<Pick<Session, 'name' | 'updated' | 'referenceImages' | 'language'>>): Promise<void> {
   const store = await tx('sessions', 'readwrite');
   const session = await reqToPromise(store.get(id)) as Session | null;
   if (!session) return;

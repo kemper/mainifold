@@ -7,6 +7,15 @@
   height: 100%;
 }
 
+/* Confirm modal entrance */
+@keyframes modal-in {
+  from { transform: scale(0.95); opacity: 0; }
+  to { transform: scale(1); opacity: 1; }
+}
+.animate-modal-in {
+  animation: modal-in 0.15s ease-out;
+}
+
 /* Guided tour overlay */
 .tour-backdrop {
   position: fixed;

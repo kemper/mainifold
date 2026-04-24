@@ -158,12 +158,19 @@ function createSessionTile(
   const meta = document.createElement('div');
   meta.className = 'text-xs text-zinc-500 mt-1 flex justify-between';
 
+  const langLabel = session.language === 'scad' ? 'SCAD' : 'JS';
+  const langColor = session.language === 'scad' ? 'text-amber-400 border-amber-400/30' : 'text-blue-400 border-blue-400/30';
+  const langBadge = document.createElement('span');
+  langBadge.className = `text-[10px] font-semibold border rounded px-1 ${langColor}`;
+  langBadge.textContent = langLabel;
+
   const versions = document.createElement('span');
   versions.textContent = `${versionCount} version${versionCount !== 1 ? 's' : ''}`;
 
   const date = document.createElement('span');
   date.textContent = formatRelativeDate(session.updated);
 
+  meta.appendChild(langBadge);
   meta.appendChild(versions);
   meta.appendChild(date);
 
