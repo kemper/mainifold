@@ -3,6 +3,7 @@ export type TabName = 'interactive' | 'ai' | 'elevations' | 'gallery' | 'diff' |
 export interface LayoutElements {
   editorPane: HTMLElement;
   editorContainer: HTMLElement;
+  editorErrorPanel: HTMLElement;
   viewportPane: HTMLElement;
   viewsContainer: HTMLElement;
   elevationsContainer: HTMLElement;
@@ -39,6 +40,11 @@ export function createLayout(appContainer: HTMLElement): LayoutElements {
   editorHeader.appendChild(statusBar);
 
   editorPane.appendChild(editorHeader);
+
+  const editorErrorPanel = document.createElement('div');
+  editorErrorPanel.id = 'editor-error-panel';
+  editorErrorPanel.className = 'hidden border-b border-red-500/30 bg-red-950/40 px-3 py-2 text-xs text-red-100';
+  editorPane.appendChild(editorErrorPanel);
 
   const editorContainer = document.createElement('div');
   editorContainer.id = 'editor-container';
@@ -226,7 +232,7 @@ export function createLayout(appContainer: HTMLElement): LayoutElements {
 
   appContainer.appendChild(main);
 
-  return { editorPane, editorContainer, viewportPane, viewsContainer, elevationsContainer, galleryContainer, diffContainer, notesContainer, statusBar, clipControls, switchTab };
+  return { editorPane, editorContainer, editorErrorPanel, viewportPane, viewsContainer, elevationsContainer, galleryContainer, diffContainer, notesContainer, statusBar, clipControls, switchTab };
 }
 
 function createTab(label: string, active: boolean): HTMLButtonElement {

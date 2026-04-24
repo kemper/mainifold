@@ -1,6 +1,7 @@
 import type { Engine, MeshResult, ValidateResult } from './types';
 import { parseBinarySTLToMeshGL } from './scadToManifold';
 import { getManifoldModule, manifoldJsEngine } from './manifoldJs';
+import { scadDiagnostics } from '../sourceDiagnostics';
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type CreateOpenSCAD = (opts: any) => Promise<any>;
@@ -105,7 +106,8 @@ export const openscadEngine: Engine = {
  *  and round-trips through Manifold.ofMesh(). */
 export async function runScadAsync(source: string): Promise<MeshResult> {
   if (!createFn) {
-    return { mesh: null, manifold: null, error: 'OpenSCAD engine not initialized.' };
+    const error = 'OpenSCAD engine not initialized.';
+    return { mesh: null, manifold: null, error, diagnostics: scadDiagnostics(source, error) };
   }
 
   let instance: any;
@@ -113,7 +115,8 @@ export async function runScadAsync(source: string): Promise<MeshResult> {
   try {
     ({ instance, stderr } = await createInstance());
   } catch (e) {
-    return { mesh: null, manifold: null, error: `Failed to create OpenSCAD instance: ${e instanceof Error ? e.message : String(e)}` };
+    const error = `Failed to create OpenSCAD instance: ${e instanceof Error ? e.message : String(e)}`;
+    return { mesh: null, manifold: null, error, diagnostics: scadDiagnostics(source, error) };
   }
 
   try {
@@ -127,10 +130,12 @@ export async function runScadAsync(source: string): Promise<MeshResult> {
     ]);
 
     if (exitCode !== 0) {
+      const error = `OpenSCAD exited with code ${exitCode}\n${formatStderr(stderr)}`;
       return {
         mesh: null,
         manifold: null,
-        error: `OpenSCAD exited with code ${exitCode}\n${formatStderr(stderr)}`,
+        error,
+        diagnostics: scadDiagnostics(source, error),
       };
     }
 
@@ -139,19 +144,23 @@ export async function runScadAsync(source: string): Promise<MeshResult> {
       const raw = instance.FS.readFile('/out.stl');
       stlBytes = raw instanceof Uint8Array ? raw : new Uint8Array(raw);
     } catch (e) {
+      const error = `OpenSCAD did not produce output: ${e instanceof Error ? e.message : String(e)}\n${formatStderr(stderr)}`;
       return {
         mesh: null,
         manifold: null,
-        error: `OpenSCAD did not produce output: ${e instanceof Error ? e.message : String(e)}\n${formatStderr(stderr)}`,
+        error,
+        diagnostics: scadDiagnostics(source, error),
       };
     }
 
     const mesh = parseBinarySTLToMeshGL(stlBytes);
     if (!mesh || mesh.numTri === 0) {
+      const error = `OpenSCAD produced empty or invalid STL output.\n${formatStderr(stderr)}`;
       return {
         mesh: null,
         manifold: null,
-        error: `OpenSCAD produced empty or invalid STL output.\n${formatStderr(stderr)}`,
+        error,
+        diagnostics: scadDiagnostics(source, error),
       };
     }
 
@@ -176,24 +185,30 @@ export async function runScadAsync(source: string): Promise<MeshResult> {
     } else {
       msg = e instanceof Error ? e.message : String(e);
     }
+    const error = `OpenSCAD: ${msg}\n${formatStderr(stderr)}`;
     return {
       mesh: null,
       manifold: null,
-      error: `OpenSCAD: ${msg}\n${formatStderr(stderr)}`,
+      error,
+      diagnostics: scadDiagnostics(source, error),
     };
   }
 }
 
 /** Async validate — creates a fresh instance, compiles to AST (fast path). */
 export async function validateScadAsync(source: string): Promise<ValidateResult> {
-  if (!createFn) return { valid: false, error: 'OpenSCAD not initialized' };
+  if (!createFn) {
+    const error = 'OpenSCAD not initialized';
+    return { valid: false, error, diagnostics: scadDiagnostics(source, error) };
+  }
 
   let instance: any;
   let stderr: string[];
   try {
     ({ instance, stderr } = await createInstance());
   } catch (e) {
-    return { valid: false, error: `Failed to create OpenSCAD instance: ${e instanceof Error ? e.message : String(e)}` };
+    const error = `Failed to create OpenSCAD instance: ${e instanceof Error ? e.message : String(e)}`;
+    return { valid: false, error, diagnostics: scadDiagnostics(source, error) };
   }
 
   try {
@@ -204,8 +219,10 @@ export async function validateScadAsync(source: string): Promise<ValidateResult>
       '/v.scad',
     ]);
     if (code === 0) return { valid: true };
-    return { valid: false, error: formatStderr(stderr) };
+    const error = formatStderr(stderr);
+    return { valid: false, error, diagnostics: scadDiagnostics(source, error) };
   } catch (e) {
-    return { valid: false, error: e instanceof Error ? e.message : String(e) };
+    const error = e instanceof Error ? e.message : String(e);
+    return { valid: false, error, diagnostics: scadDiagnostics(source, error) };
   }
 }
