@@ -4,6 +4,7 @@ export interface MeshData {
   numVert: number;
   numTri: number;
   numProp: number;
+  triColors?: Uint8Array; // numTri * 3 (RGB per triangle), optional
 }
 
 export type DiagnosticSeverity = 'error' | 'warning' | 'info' | 'hint';

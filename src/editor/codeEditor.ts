@@ -13,6 +13,7 @@ let editorView: EditorView | null = null;
 let debounceTimer: number | null = null;
 let activeDiagnostics: Diagnostic[] = [];
 const languageCompartment = new Compartment();
+const readOnlyCompartment = new Compartment();
 
 // Minimal OpenSCAD StreamLanguage — keyword/builtin/comment/string/number coloring.
 const SCAD_KEYWORDS = new Set([
@@ -121,6 +122,7 @@ export function initEditor(
       basicSetup,
       languageCompartment.of(languageExt(initialLanguage)),
       lintGutter(),
+      readOnlyCompartment.of(EditorState.readOnly.of(false)),
       oneDark,
       EditorView.updateListener.of((update) => {
         if (update.docChanged) {
@@ -191,4 +193,11 @@ export function revealFirstDiagnostic(): void {
     effects: EditorView.scrollIntoView(first.from, { y: 'center' }),
   });
   editorView.focus();
+}
+
+export function setReadOnly(readOnly: boolean): void {
+  if (!editorView) return;
+  editorView.dispatch({
+    effects: readOnlyCompartment.reconfigure(EditorState.readOnly.of(readOnly)),
+  });
 }
