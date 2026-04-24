@@ -9,6 +9,7 @@ mAInifold is a browser-based parametric CAD tool with two modeling engines: **ma
 - [Before you start](#before-you-start)
 - [Choosing an engine](#choosing-an-engine)
 - [Common agent mistakes](#common-agent-mistakes)
+- [Argument validation](#argument-validation)
 - [Console API -- window.mainifold](#console-api--windowmainifold)
 - [Geometry data](#geometry-data)
 - [Writing model code](#writing-model-code)
@@ -70,6 +71,35 @@ Selecting a SCAD example from the toolbar dropdown auto-switches to OpenSCAD mod
 - **Not reading session context before modifying** -- when opening an existing session, always call `getSessionContext()` first and read the notes/version history before making changes. See [Resuming a session](#resuming-a-session).
 - **Branching off a prior version by hand** -- don't chain `loadVersion` -> `getCode` -> modify -> `runAndSave`. A silent failure (blocked return value, stale buffer) can drop parts of the parent. Use [`forkVersion({index} | {id}, transformFn, label, assertions?)`](#forking-a-prior-version) instead -- it loads the parent's code server-side, applies your transform, validates, and saves atomically.
 - **Passing a bare index or id instead of `{index}` / `{id}`** -- `loadVersion` and `forkVersion` take an object with exactly one of `{index: number}` or `{id: string}`, e.g. `loadVersion({index: 2})` or `loadVersion({id: "Kx3Pq9mA2wEr"})`. Bare `loadVersion(2)` will return `{error: "...target must be { index: number } or { id: string }..."}`.
+- **Passing the wrong object shape to `setReferenceImages`, `setReferenceGeometry`, `query`, `runAndAssert`, etc.** -- the API rejects unknown keys and wrong-type values. See [Argument validation](#argument-validation).
+
+## Argument validation
+
+Every `window.mainifold` method validates its arguments at runtime. If you pass the wrong type or an object with unexpected keys, the call fails fast with a descriptive error rather than silently accepting bad input.
+
+**Conventions:**
+
+- **Methods that return a value** (e.g. `runAndSave`, `loadVersion`, `query`, `importSession`, `setReferenceGeometry`, notes/session CRUD) return `{ error: "..." }` on a validation failure. The error string names the exact parameter and expected type, e.g. `"setReferenceImages(images).front must be a string, got null. See /ai.md#argument-validation"`.
+- **Void setters** (`setCode`, `setClipZ`, `setReferenceImages`, `setView`, `setUnits`, `measureAt`, `measureBetween`, `probeRay`, `measurePoints`, `renameSession`) **throw** a `ValidationError`. Wrap calls in a try/catch if you want to handle failure rather than crash the console.
+- **No coercion.** `setClipZ("5")` throws -- strings are not auto-converted to numbers. Pass the right type.
+- **Unknown object keys are rejected.** `runAndAssert(code, { widthToDeep: [1,2] })` errors on the typo; it does not silently ignore it. Allowed keys are listed on each assertion/options interface.
+- **Empty strings are rejected** by default for required string params (names, IDs, note text, code). Optional strings can be omitted but, if provided, must still be non-empty unless noted otherwise.
+
+**Examples of what gets rejected:**
+
+```js
+mainifold.navigateVersion('backward')            // ValidationError: direction must be one of: "prev" | "next"
+mainifold.setView('sketch')                      // ValidationError: tab must be one of: ...
+mainifold.measureAt([5])                         // ValidationError: measureAt(xy) must have exactly 2 elements
+mainifold.probeRay([0,0,0], [0, '1', 0])         // ValidationError: probeRay(direction)[1] must be a finite number
+mainifold.setReferenceImages({ fron: '...' })    // ValidationError: setReferenceImages(images).fron is not a recognized field
+mainifold.setReferenceGeometry(code, { opacity: 2 })  // returns { success: false, error: "... .opacity must be <= 1 ..." }
+await mainifold.runAndAssert(code, { minVolume: '1000' })  // returns { passed: false, failures: ["... .minVolume must be a finite number ..."] }
+await mainifold.runAndSave(code, 'v1', { boundsRatio: { widthToDeep: [1,2] } })  // typo caught: not a recognized field
+await mainifold.query({ sliceAt: 5 })            // returns { error: "... .sliceAt must be an array ..." }
+```
+
+When you see a validation error, fix the call -- don't pattern-match around it.
 
 ## How to use this tool
 

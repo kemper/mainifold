@@ -56,6 +56,7 @@ Key rules:
 - Use `runAndSave(code, label, {isManifold: true, maxComponents: 1})` to validate+commit
 - Use `getSessionContext()` when resuming a session to read notes and version history first
 - Log design decisions with `addSessionNote("[PREFIX] ...")` — prefixes: `[REQUIREMENT]`, `[DECISION]`, `[FEEDBACK]`, `[MEASUREMENT]`, `[ATTEMPT]`, `[TODO]`
+- API methods validate their arguments — no type coercion, unknown keys rejected. Value-returning methods return `{ error }` on bad input; void setters throw. See `public/ai.md#argument-validation`
 
 ## Architecture
 
