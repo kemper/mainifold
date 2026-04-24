@@ -5,7 +5,7 @@ import { initViewport, updateMesh, setClipping, setClipZ, getClipState, getCamer
 import { renderCompositeCanvas, renderElevationsToContainer, renderSingleView, renderSliceSVG, setReferenceImages as _setRefImages, clearReferenceImages as _clearRefImages, getReferenceImages as _getRefImages, type ReferenceImages } from './renderer/multiview';
 import { setPhantom, clearPhantom, hasPhantom, type PhantomOptions } from './renderer/phantomGeometry';
 import { initEditor, setValue, getValue, setLanguage as setEditorLanguage } from './editor/codeEditor';
-import { createLayout } from './ui/layout';
+import { createLayout, type TabName } from './ui/layout';
 import { createToolbar, isAutoRun, setToolbarLanguage } from './ui/toolbar';
 import { createLandingPage } from './ui/landing';
 import { createHelpPage } from './ui/help';
@@ -29,7 +29,6 @@ import { maybeStartTour, resetTour, startTour } from './ui/tour';
 import {
   getSessionIdFromURL,
   getVersionFromURL,
-  isGalleryMode,
   openSession,
   createSession,
   closeSession,
@@ -584,6 +583,28 @@ function shouldShow404(): boolean {
   return path !== '/' && path !== '' && path !== '/help' && path !== '/editor';
 }
 
+function getTabFromURL(): TabName {
+  const params = new URLSearchParams(window.location.search);
+  if (params.has('notes')) return 'notes';
+  if (params.has('gallery')) return 'gallery';
+  if (params.get('view') === 'elevations') return 'elevations';
+  if (params.get('view') === 'ai') return 'ai';
+  return 'interactive';
+}
+
+function currentURLPathAndSearch(): string {
+  return `${window.location.pathname}${window.location.search}`;
+}
+
+function updateAppHistory(url: string, mode: 'push' | 'replace'): void {
+  if (url === currentURLPathAndSearch()) return;
+  if (mode === 'push') {
+    window.history.pushState(null, '', url);
+  } else {
+    window.history.replaceState(null, '', url);
+  }
+}
+
 
 // Hide landing/help and show the editor UI
 function showEditorUI(landingEl: HTMLElement | null, helpEl: HTMLElement | null, editorUI: HTMLElement) {
@@ -747,52 +768,126 @@ async function main() {
   app.appendChild(editorUI);
   app.appendChild(overlayContainer);
 
+  let editorReady = false;
+  let editorReadyResolve: (() => void) = () => {};
+  const editorReadyPromise = new Promise<void>(resolve => { editorReadyResolve = resolve; });
+  let engineOk = false;
+  let helpHasAppBackTarget = false;
+  let notFoundEl: HTMLElement | null = null;
+
+  async function ensureEditorReady() {
+    if (!editorReady) await editorReadyPromise;
+  }
+
   // Helper to transition from landing/help to editor
   function transitionToEditor() {
     showEditorUI(landingEl, helpEl, editorUI);
+    if (notFoundEl) notFoundEl.classList.add('hidden');
     overlayContainer.classList.add('hidden');
     window.dispatchEvent(new Event('resize'));
   }
 
-  // Track whether user came from landing (for help back navigation)
-  let cameFromLanding = false;
+  async function loadVersionIntoEditor(version: { code: string }) {
+    const sessionLang = getState().session?.language ?? 'manifold-js';
+    if (sessionLang !== getActiveLanguage()) {
+      await switchLanguage(sessionLang);
+    }
+    setValue(version.code);
+    runCode(version.code);
+    const refImages = await getReferenceImagesFromSession();
+    if (refImages) {
+      _setRefImages(refImages as ReferenceImages);
+    } else {
+      _clearRefImages();
+    }
+  }
+
+  async function openEditorFromLanding() {
+    updateAppHistory('/editor', 'push');
+    transitionToEditor();
+    await ensureEditorReady();
+    if (window.location.pathname !== '/editor') return;
+    await createSession();
+    updateDocumentTitle({ page: 'editor' });
+    setStatus(statusBar, 'ready', 'Ready');
+    runCode(defaultCode);
+  }
+
+  async function openSessionFromLanding(sid: string) {
+    updateAppHistory(`/editor?session=${sid}`, 'push');
+    transitionToEditor();
+    await ensureEditorReady();
+    if (getSessionIdFromURL() !== sid) return;
+    const version = await openSession(sid);
+    if (version) {
+      await loadVersionIntoEditor(version);
+    }
+    updateDocumentTitle({ page: 'editor' });
+  }
+
+  async function ensureLandingPage() {
+    if (!landingEl) {
+      landingEl = await createLandingPage(overlayContainer, {
+        onOpenEditor: openEditorFromLanding,
+        onOpenHelp: () => showHelp(),
+        onOpenSession: openSessionFromLanding,
+      });
+    }
+    return landingEl;
+  }
+
+  async function showLandingPage() {
+    const page = await ensureLandingPage();
+    overlayContainer.classList.remove('hidden');
+    editorUI.classList.add('hidden');
+    helpEl?.classList.add('hidden');
+    notFoundEl?.classList.add('hidden');
+    page.classList.remove('hidden');
+    updateDocumentTitle({ page: 'landing' });
+  }
+
+  function showNotFoundPage() {
+    if (!notFoundEl) {
+      notFoundEl = createNotFoundPage(overlayContainer, {
+        onGoHome: () => {
+          updateAppHistory('/', 'push');
+          void syncRouteFromURL();
+        },
+      });
+    }
+    overlayContainer.classList.remove('hidden');
+    editorUI.classList.add('hidden');
+    landingEl?.classList.add('hidden');
+    helpEl?.classList.add('hidden');
+    notFoundEl.classList.remove('hidden');
+    updateDocumentTitle({ page: '404' });
+  }
 
   // Helper to show help page
-  function showHelp() {
-    cameFromLanding = landingEl != null && !landingEl.classList.contains('hidden');
+  function showHelp(options: { history?: 'push' | 'replace' | 'none' } = {}) {
+    const historyMode = options.history ?? 'push';
+    if (historyMode !== 'none') {
+      helpHasAppBackTarget = currentURLPathAndSearch() !== '/help';
+      updateAppHistory('/help', historyMode);
+    }
     if (!helpEl) {
       helpEl = createHelpPage(overlayContainer, {
         onBack: () => {
-          if (cameFromLanding && landingEl) {
-            // Go back to landing
-            helpEl?.classList.add('hidden');
-            landingEl.classList.remove('hidden');
-            window.history.replaceState(null, '', '/');
-            updateDocumentTitle({ page: 'landing' });
+          if (helpHasAppBackTarget) {
+            window.history.back();
           } else {
-            // Go back to editor — preserve session URL params
-            transitionToEditor();
-            const state = getState();
-            if (state.session) {
-              const params = new URLSearchParams();
-              params.set('session', state.session.id);
-              if (state.currentVersion) params.set('v', String(state.currentVersion.index));
-              window.history.replaceState(null, '', `/editor?${params}`);
-            } else {
-              window.history.replaceState(null, '', '/editor');
-            }
-            updateDocumentTitle({ page: 'editor' });
+            updateAppHistory('/editor', 'replace');
+            void syncEditorFromURL();
           }
         },
         onStartTour: async () => {
-          // Always go to editor (not landing), wait for it to be ready, then start tour
+          updateAppHistory('/editor', 'push');
           transitionToEditor();
           await ensureEditorReady();
           if (!getState().session) {
             await createSession();
             runCode(defaultCode);
           }
-          window.history.replaceState(null, '', '/editor');
           resetTour();
           startTour();
         },
@@ -801,10 +896,52 @@ async function main() {
     overlayContainer.classList.remove('hidden');
     editorUI.classList.add('hidden');
     if (landingEl) landingEl.classList.add('hidden');
+    if (notFoundEl) notFoundEl.classList.add('hidden');
     helpEl.classList.remove('hidden');
-    window.history.replaceState(null, '', '/help');
     updateDocumentTitle({ page: 'help' });
   }
+
+  async function syncEditorFromURL() {
+    transitionToEditor();
+    switchTab(getTabFromURL(), { history: 'none' });
+    updateDocumentTitle({ page: 'editor' });
+    await ensureEditorReady();
+    if (!engineOk) return;
+
+    const sessionId = getSessionIdFromURL();
+    if (sessionId) {
+      const versionIndex = getVersionFromURL();
+      const state = getState();
+      const needsSessionLoad = state.session?.id !== sessionId;
+      const needsVersionLoad = versionIndex !== null && state.currentVersion?.index !== versionIndex;
+      if (needsSessionLoad || needsVersionLoad) {
+        const version = await openSession(sessionId, versionIndex ?? undefined);
+        if (version) {
+          await loadVersionIntoEditor(version);
+        }
+      }
+    } else if (!getState().session) {
+      await createSession();
+      setStatus(statusBar, 'ready', 'Ready');
+      runCode(defaultCode);
+    }
+  }
+
+  async function syncRouteFromURL() {
+    if (shouldShowLanding()) {
+      await showLandingPage();
+    } else if (shouldShowHelp()) {
+      showHelp({ history: 'none' });
+    } else if (shouldShow404()) {
+      showNotFoundPage();
+    } else {
+      await syncEditorFromURL();
+    }
+  }
+
+  window.addEventListener('popstate', () => {
+    void syncRouteFromURL();
+  });
 
   // Expose showHelp for toolbar
   const windowRecord = window as unknown as Record<string, unknown>;
@@ -817,92 +954,14 @@ async function main() {
   const show404 = shouldShow404();
 
   if (showLanding) {
-    // Show landing page immediately — hide editor UI
-    editorUI.classList.add('hidden');
-    overlayContainer.classList.remove('hidden');
-    updateDocumentTitle({ page: 'landing' });
-    landingEl = await createLandingPage(overlayContainer, {
-      onOpenEditor: async () => {
-        transitionToEditor();
-        await ensureEditorReady();
-        await createSession();
-        updateDocumentTitle({ page: 'editor' });
-        setStatus(statusBar, 'ready', 'Ready');
-        runCode(defaultCode);
-      },
-      onOpenHelp: showHelp,
-      onOpenSession: async (sid) => {
-        transitionToEditor();
-        await ensureEditorReady();
-        const version = await openSession(sid);
-        if (version) {
-          // Restore session language
-          const sessionLang = getState().session?.language ?? 'manifold-js';
-          if (sessionLang !== getActiveLanguage()) {
-            await switchLanguage(sessionLang);
-          }
-          setValue(version.code);
-          runCode(version.code);
-          const refImages = await getReferenceImagesFromSession();
-          if (refImages) _setRefImages(refImages as ReferenceImages);
-        }
-        updateDocumentTitle({ page: 'editor' });
-        window.history.replaceState(null, '', `/editor?session=${sid}`);
-      },
-    });
+    await showLandingPage();
   } else if (showHelpPage) {
-    // Show help page immediately
-    editorUI.classList.add('hidden');
-    overlayContainer.classList.remove('hidden');
-    updateDocumentTitle({ page: 'help' });
-    helpEl = createHelpPage(overlayContainer, {
-      onBack: async () => {
-        helpEl?.classList.add('hidden');
-        transitionToEditor();
-        await ensureEditorReady();
-        if (!getState().session) {
-          await createSession();
-          runCode(defaultCode);
-        }
-        updateDocumentTitle({ page: 'editor' });
-      },
-      onStartTour: async () => {
-        helpEl?.classList.add('hidden');
-        transitionToEditor();
-        await ensureEditorReady();
-        if (!getState().session) {
-          await createSession();
-          runCode(defaultCode);
-        }
-        window.history.replaceState(null, '', '/editor');
-        resetTour();
-        startTour();
-      },
-    });
+    showHelp({ history: 'none' });
   } else if (show404) {
-    // Show 404 page — hide editor UI entirely
-    editorUI.classList.add('hidden');
-    overlayContainer.classList.remove('hidden');
-    updateDocumentTitle({ page: '404' });
-    createNotFoundPage(overlayContainer, {
-      onGoHome: () => {
-        window.location.href = '/';
-      },
-    });
-  }
-
-  // Init engine, viewport, editor (in background if landing/help is showing)
-  let editorReady = false;
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  let editorReadyResolve: (() => void) = () => {};
-  const editorReadyPromise = new Promise<void>(resolve => { editorReadyResolve = resolve; });
-
-  async function ensureEditorReady() {
-    if (!editorReady) await editorReadyPromise;
+    showNotFoundPage();
   }
 
   // Init geometry engine — wrapped in try/catch so editor/viewport still init on failure
-  let engineOk = false;
   setStatus(statusBar, 'loading', 'Loading WASM...');
   try {
     await initEngine();
@@ -941,38 +1000,7 @@ async function main() {
 
   // If not on landing/help/404, load session or default code now
   if (!showLanding && !showHelpPage && !show404 && engineOk) {
-    const sessionId = getSessionIdFromURL();
-    if (sessionId) {
-      const versionIndex = getVersionFromURL();
-      const version = await openSession(sessionId, versionIndex ?? undefined);
-      if (version) {
-        // Restore session language
-        const sessionLang = getState().session?.language ?? 'manifold-js';
-        if (sessionLang !== getActiveLanguage()) {
-          setActiveLanguage(sessionLang);
-          setEditorLanguage(sessionLang);
-          await ensureEngineReady(sessionLang);
-        }
-        setValue(version.code);
-        runCode(version.code);
-        const refImages = await getReferenceImagesFromSession();
-        if (refImages) {
-          _setRefImages(refImages as ReferenceImages);
-        }
-        if (isGalleryMode()) {
-          switchTab('gallery');
-          refreshGallery();
-        }
-      } else {
-        await createSession();
-        setStatus(statusBar, 'ready', 'Ready');
-        runCode(defaultCode);
-      }
-    } else {
-      await createSession();
-      setStatus(statusBar, 'ready', 'Ready');
-      runCode(defaultCode);
-    }
+    await syncEditorFromURL();
   }
 
   // Update document title when session state changes (create, open, close, rename)
@@ -1991,13 +2019,7 @@ async function main() {
 
     /** Get current view state — active tab, camera angle, zoom */
     getViewState(): { tab: string; camera: { azimuth: number; elevation: number; distance: number; target: [number, number, number] } } {
-      const params = new URLSearchParams(window.location.search);
-      let tab = 'interactive';
-      if (params.has('gallery')) tab = 'gallery';
-      else if (params.has('notes')) tab = 'notes';
-      else if (params.get('view') === 'ai') tab = 'ai';
-      else if (params.get('view') === 'elevations') tab = 'elevations';
-      return { tab, camera: getCameraState() };
+      return { tab: getTabFromURL(), camera: getCameraState() };
     },
 
     /** Programmatic tab switching */

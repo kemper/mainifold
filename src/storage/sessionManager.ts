@@ -84,7 +84,6 @@ function updateURL() {
   } else {
     params.delete('session');
     params.delete('v');
-    params.delete('gallery');
   }
   const qs = params.toString().replace(/=(?=&|$)/g, '');
   const newUrl = qs
@@ -100,10 +99,6 @@ export function getSessionIdFromURL(): string | null {
 export function getVersionFromURL(): number | null {
   const v = new URLSearchParams(window.location.search).get('v');
   return v ? parseInt(v, 10) : null;
-}
-
-export function isGalleryMode(): boolean {
-  return new URLSearchParams(window.location.search).has('gallery');
 }
 
 // === Session operations ===
