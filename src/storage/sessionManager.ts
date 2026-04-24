@@ -85,6 +85,7 @@ function updateURL() {
     params.delete('session');
     params.delete('v');
     params.delete('gallery');
+    params.delete('diff');
   }
   const qs = params.toString().replace(/=(?=&|$)/g, '');
   const newUrl = qs
@@ -182,11 +183,12 @@ export async function saveVersion(
   thumbnail: Blob | null,
   label?: string,
   notes?: string,
+  options?: { force?: boolean },
 ): Promise<Version | null> {
   if (!currentState.session) return null;
 
-  // Skip if code is identical to the current version
-  if (currentState.currentVersion && currentState.currentVersion.code === code) {
+  // Skip if code is identical to the current version (unless forced)
+  if (!options?.force && currentState.currentVersion && currentState.currentVersion.code === code) {
     return null;
   }
 
