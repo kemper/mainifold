@@ -4,6 +4,8 @@ import type { MeshData } from '../geometry/types';
 import { createDefaultMaterial, createWireframeMaterial } from './materials';
 import { initPhantomGroup } from './phantomGeometry';
 import { initMeasureOverlay } from './measureOverlay';
+import { initOrientationGizmo, renderGizmo, updateGizmo, disposeGizmo, isGizmoAnimating } from './orientationGizmo';
+import { initDimensionLines, updateDimensionLines, disposeDimensionLines } from './dimensionLines';
 
 let renderer: THREE.WebGLRenderer;
 let camera: THREE.PerspectiveCamera;
@@ -11,6 +13,10 @@ let scene: THREE.Scene;
 let controls: OrbitControls;
 let meshGroup: THREE.Group;
 let animationId: number;
+
+// Orbit lock state — orbit is disabled when any lock source is active
+let measureLock = false;
+let userLock = false;
 
 // Clipping plane state
 const clipPlane = new THREE.Plane(new THREE.Vector3(0, 0, -1), 0); // clips above Z
@@ -81,6 +87,12 @@ export function initViewport(container: HTMLElement): {
   // Measure overlay group
   initMeasureOverlay(scene, camera, renderer);
 
+  // Orientation gizmo (XYZ axes indicator)
+  initOrientationGizmo(camera, canvas, controls);
+
+  // Bounding box dimension annotations
+  initDimensionLines(scene);
+
   // ResizeObserver
   const observer = new ResizeObserver(entries => {
     const { width, height } = entries[0].contentRect;
@@ -92,10 +104,15 @@ export function initViewport(container: HTMLElement): {
   observer.observe(container);
 
   // Animate
+  const clock = new THREE.Clock();
   function animate() {
     animationId = requestAnimationFrame(animate);
+    const delta = clock.getDelta();
+    updateGizmo(delta);
+    controls.enabled = !measureLock && !userLock && !isGizmoAnimating();
     controls.update();
     renderer.render(scene, camera);
+    renderGizmo(renderer);
   }
   animate();
 
@@ -148,6 +165,9 @@ export function updateMesh(meshData: MeshData): void {
 
   // Update model bounds for clip slider
   modelBounds = { min: box.min.z, max: box.max.z };
+
+  // Update bounding box dimension annotations
+  updateDimensionLines(box);
 
   controls.target.copy(center);
   camera.position.set(
@@ -304,8 +324,32 @@ export function getMeshGroup(): THREE.Group {
   return meshGroup;
 }
 
+// === Orbit lock API ===
+
+function syncOrbitEnabled(): void {
+  controls.enabled = !measureLock && !userLock && !isGizmoAnimating();
+}
+
+export function setMeasureLock(locked: boolean): void {
+  measureLock = locked;
+  syncOrbitEnabled();
+}
+
+export function setUserOrbitLock(locked: boolean): void {
+  userLock = locked;
+  syncOrbitEnabled();
+}
+
+export function isUserOrbitLocked(): boolean {
+  return userLock;
+}
+
+export { setDimensionsVisible, isDimensionsVisible } from './dimensionLines';
+
 export function dispose(): void {
   cancelAnimationFrame(animationId);
+  disposeGizmo();
+  disposeDimensionLines();
   controls.dispose();
   renderer.dispose();
 }
