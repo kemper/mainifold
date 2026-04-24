@@ -1,12 +1,18 @@
 import { resetTour, startTour } from './tour';
 
+export interface ExampleEntry {
+  code: string;
+  language: 'manifold-js' | 'scad';
+}
+
 export interface ToolbarCallbacks {
   onRun: () => void;
   onExportGLB: () => void;
   onExportSTL: () => void;
   onExportOBJ: () => void;
   onExport3MF: () => void;
-  onExampleSelect: (code: string) => void;
+  onExampleSelect: (entry: ExampleEntry) => void;
+  onLanguageSwitch: (lang: 'manifold-js' | 'scad') => void;
 }
 
 let _autoRun = true;
@@ -18,9 +24,29 @@ export function isAutoRun(): boolean { return _autoRun; }
 /** Register a callback for when auto-run state changes */
 export function onAutoRunChange(cb: (on: boolean) => void): void { _onAutoRunChange = cb; }
 
+// Language toggle state — managed externally via setToolbarLanguage()
+let _langBtnJs: HTMLButtonElement | null = null;
+let _langBtnScad: HTMLButtonElement | null = null;
+let _currentLang: 'manifold-js' | 'scad' = 'manifold-js';
+
+const LANG_ACTIVE = 'px-2 py-0.5 rounded text-xs font-medium transition-colors bg-zinc-700 text-zinc-100';
+const LANG_INACTIVE = 'px-2 py-0.5 rounded text-xs font-medium transition-colors text-zinc-500 hover:text-zinc-300';
+
+function syncLangToggle() {
+  if (!_langBtnJs || !_langBtnScad) return;
+  _langBtnJs.className = _currentLang === 'manifold-js' ? LANG_ACTIVE : LANG_INACTIVE;
+  _langBtnScad.className = _currentLang === 'scad' ? LANG_ACTIVE : LANG_INACTIVE;
+}
+
+/** Update the toolbar language toggle from outside (e.g. when opening a session). */
+export function setToolbarLanguage(lang: 'manifold-js' | 'scad'): void {
+  _currentLang = lang;
+  syncLangToggle();
+}
+
 export function createToolbar(
   container: HTMLElement,
-  examples: Record<string, string>,
+  examples: Record<string, ExampleEntry>,
   callbacks: ToolbarCallbacks,
 ): HTMLElement {
   const toolbar = document.createElement('div');
@@ -78,6 +104,33 @@ export function createToolbar(
   runGroup.appendChild(btnRun);
   toolbar.appendChild(runGroup);
 
+  // Language toggle — segmented JS / SCAD control
+  const langGroup = document.createElement('div');
+  langGroup.id = 'lang-toggle';
+  langGroup.className = 'flex items-center bg-zinc-800 border border-zinc-600 rounded ml-2';
+  langGroup.title = 'Modeling language';
+
+  _langBtnJs = document.createElement('button');
+  _langBtnJs.textContent = 'JS';
+  _langBtnJs.addEventListener('click', () => {
+    if (_currentLang !== 'manifold-js') {
+      callbacks.onLanguageSwitch('manifold-js');
+    }
+  });
+
+  _langBtnScad = document.createElement('button');
+  _langBtnScad.textContent = 'SCAD';
+  _langBtnScad.addEventListener('click', () => {
+    if (_currentLang !== 'scad') {
+      callbacks.onLanguageSwitch('scad');
+    }
+  });
+
+  syncLangToggle();
+  langGroup.appendChild(_langBtnJs);
+  langGroup.appendChild(_langBtnScad);
+  toolbar.appendChild(langGroup);
+
   // Spacer
   const spacer = document.createElement('div');
   spacer.className = 'flex-1';
@@ -93,13 +146,14 @@ export function createToolbar(
   defaultOpt.value = '';
   select.appendChild(defaultOpt);
 
-  for (const [name] of Object.entries(examples)) {
+  for (const [name, entry] of Object.entries(examples)) {
     const opt = document.createElement('option');
     const displayName = name
       .replace(/^.*\//, '')
-      .replace(/\.js$/, '')
+      .replace(/\.(js|scad)$/, '')
       .replace(/_/g, ' ');
-    opt.textContent = displayName;
+    const tag = entry.language === 'scad' ? ' [SCAD]' : '';
+    opt.textContent = displayName + tag;
     opt.value = name;
     select.appendChild(opt);
   }

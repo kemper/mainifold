@@ -1,12 +1,12 @@
 import './style.css';
-import { initEngine, executeCode, getModule } from './geometry/engine';
+import { initEngine, executeCode, executeCodeAsync, validateCodeAsync, ensureEngineReady, getModule, getActiveLanguage, setActiveLanguage, type Language } from './geometry/engine';
 import { sliceAtZ, getBoundingBox } from './geometry/crossSection';
 import { initViewport, updateMesh, setClipping, setClipZ, getClipState, getCameraState, getCanvas, getMeshGroup, getCamera } from './renderer/viewport';
 import { renderCompositeCanvas, renderElevationsToContainer, renderSingleView, renderSliceSVG, setReferenceImages as _setRefImages, clearReferenceImages as _clearRefImages, getReferenceImages as _getRefImages, type ReferenceImages } from './renderer/multiview';
 import { setPhantom, clearPhantom, hasPhantom, type PhantomOptions } from './renderer/phantomGeometry';
-import { initEditor, setValue, getValue } from './editor/codeEditor';
+import { initEditor, setValue, getValue, setLanguage as setEditorLanguage } from './editor/codeEditor';
 import { createLayout } from './ui/layout';
-import { createToolbar, isAutoRun } from './ui/toolbar';
+import { createToolbar, isAutoRun, setToolbarLanguage } from './ui/toolbar';
 import { createLandingPage } from './ui/landing';
 import { createHelpPage } from './ui/help';
 import { createNotFoundPage } from './ui/notFound';
@@ -61,8 +61,14 @@ import {
   type ReferenceImagesData,
 } from './storage/sessionManager';
 
-// Load examples as raw text
-const exampleModules = import.meta.glob('../examples/*.js', { query: '?raw', import: 'default' });
+// Load examples as raw text — JS and SCAD
+const jsExampleModules = import.meta.glob('../examples/*.js', { query: '?raw', import: 'default' });
+const scadExampleModules = import.meta.glob('../examples/*.scad', { query: '?raw', import: 'default' });
+
+export interface ExampleEntry {
+  code: string;
+  language: Language;
+}
 
 let currentMeshData: MeshData | null = null;
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -607,14 +613,17 @@ async function main() {
   let landingEl: HTMLElement | null = null;
   let helpEl: HTMLElement | null = null;
 
-  // Load examples
-  const examples: Record<string, string> = {};
-  for (const [path, loader] of Object.entries(exampleModules)) {
-    examples[path] = await loader() as string;
+  // Load examples (JS + SCAD) with language metadata
+  const examples: Record<string, ExampleEntry> = {};
+  for (const [path, loader] of Object.entries(jsExampleModules)) {
+    examples[path] = { code: await loader() as string, language: 'manifold-js' };
+  }
+  for (const [path, loader] of Object.entries(scadExampleModules)) {
+    examples[path] = { code: await loader() as string, language: 'scad' };
   }
 
   const defaultExampleKey = Object.keys(examples).find(k => k.includes('basic_shapes')) ?? Object.keys(examples)[0];
-  const defaultCode = examples[defaultExampleKey] ?? '// Write your manifold code here\nconst { Manifold } = api;\nreturn Manifold.cube([5,5,5], true);';
+  const defaultCode = examples[defaultExampleKey]?.code ?? '// Write your manifold code here\nconst { Manifold } = api;\nreturn Manifold.cube([5,5,5], true);';
 
   // Create toolbar
   createToolbar(editorUI, examples, {
@@ -631,7 +640,31 @@ async function main() {
     onExport3MF: () => {
       if (currentMeshData) export3MF(currentMeshData);
     },
-    onExampleSelect: (code: string) => {
+    onExampleSelect: async (entry: ExampleEntry) => {
+      // Auto-switch engine + editor mode if the example uses a different language.
+      if (entry.language !== getActiveLanguage()) {
+        await switchLanguage(entry.language);
+      }
+      setValue(entry.code);
+      runCode(entry.code);
+    },
+    onLanguageSwitch: async (lang: 'manifold-js' | 'scad') => {
+      if (lang === getActiveLanguage()) return;
+      // If current session has work, ask before switching
+      const curState = getState();
+      if (curState.session && curState.versionCount > 0) {
+        const msg = lang === 'scad'
+          ? 'Your current JS session will be kept. Start new OpenSCAD session?'
+          : 'Your current SCAD session will be kept. Start new JavaScript session?';
+        const ok = await showInlineConfirm(editorUI, msg);
+        if (!ok) return;
+      }
+      await switchLanguage(lang);
+      // Create a fresh session in the new language (empty previous session auto-deleted)
+      await createSession(undefined, lang);
+      const defaultScad = '// OpenSCAD\ncube([10, 10, 10], center=true);';
+      const defaultJs = 'const { Manifold } = api;\nreturn Manifold.cube([10, 10, 10], true);';
+      const code = lang === 'scad' ? defaultScad : defaultJs;
       setValue(code);
       runCode(code);
     },
@@ -695,12 +728,17 @@ async function main() {
 
   // Init session list
   initSessionList(
-    (code: string) => {
+    async (code: string) => {
+      // Restore language from the newly opened session
+      const sessionLang = getState().session?.language ?? 'manifold-js';
+      if (sessionLang !== getActiveLanguage()) {
+        await switchLanguage(sessionLang);
+      }
       setValue(code);
       runCode(code);
     },
     async (code: string) => {
-      runCodeSync(code);
+      await runCodeSync(code);
       return captureThumbnail();
     },
   );
@@ -796,6 +834,11 @@ async function main() {
         await ensureEditorReady();
         const version = await openSession(sid);
         if (version) {
+          // Restore session language
+          const sessionLang = getState().session?.language ?? 'manifold-js';
+          if (sessionLang !== getActiveLanguage()) {
+            await switchLanguage(sessionLang);
+          }
           setValue(version.code);
           runCode(version.code);
           const refImages = await getReferenceImagesFromSession();
@@ -899,6 +942,13 @@ async function main() {
       const versionIndex = getVersionFromURL();
       const version = await openSession(sessionId, versionIndex ?? undefined);
       if (version) {
+        // Restore session language
+        const sessionLang = getState().session?.language ?? 'manifold-js';
+        if (sessionLang !== getActiveLanguage()) {
+          setActiveLanguage(sessionLang);
+          setEditorLanguage(sessionLang);
+          await ensureEngineReady(sessionLang);
+        }
         setValue(version.code);
         runCode(version.code);
         const refImages = await getReferenceImagesFromSession();
@@ -959,12 +1009,30 @@ async function main() {
     editorUI.addEventListener('click', warnAgentUI, { once: true });
   }
 
+  // === Language switching helper ===
+  async function switchLanguage(lang: Language) {
+    setActiveLanguage(lang);
+    setEditorLanguage(lang);
+    setToolbarLanguage(lang);
+    // Update editor filename indicator
+    const titleEl = document.getElementById('editor-title');
+    if (titleEl) titleEl.textContent = lang === 'scad' ? 'editor.scad' : 'editor.js';
+    setStatus(statusBar, 'running', lang === 'scad' ? 'Loading OpenSCAD...' : 'Switching...');
+    try {
+      await ensureEngineReady(lang);
+    } catch (e) {
+      setStatus(statusBar, 'error', `Failed to load ${lang}: ${e instanceof Error ? e.message : String(e)}`);
+      throw e;
+    }
+    setStatus(statusBar, 'ready', 'Ready');
+  }
+
   // === Execution state ===
   let _running = false;
 
-  function executeIsolated(code: string) {
+  async function executeIsolated(code: string, lang?: Language) {
     const t0 = performance.now();
-    const result = executeCode(code);
+    const result = await executeCodeAsync(code, lang);
     const elapsed = Math.round(performance.now() - t0);
 
     if (result.error) {
@@ -987,11 +1055,11 @@ async function main() {
   // === Expose window.mainifold console API ===
   const mainifoldAPI = {
     /** Run code string and update all views. Returns geometry data object. */
-    run(code?: string): Record<string, unknown> {
+    async run(code?: string): Promise<Record<string, unknown>> {
       assertString(code, 'run(code)', { optional: true, allowEmpty: false });
       const src = code ?? getValue();
       if (code !== undefined) setValue(code);
-      runCodeSync(src);
+      await runCodeSync(src);
       return JSON.parse(geometryDataEl.textContent || '{}');
     },
 
@@ -1055,14 +1123,30 @@ async function main() {
     },
 
     /** Validate code without rendering. Returns { valid, error? } */
-    validate(code: string): { valid: boolean; error?: string } {
-      const check = guard(() => assertString(code, 'validate(code)', { allowEmpty: false }));
+    async validate(code: string, opts?: { language?: Language }): Promise<{ valid: boolean; error?: string }> {
+      const check = guard(() => {
+        assertString(code, 'validate(code)', { allowEmpty: false });
+        if (opts !== undefined) {
+          const o = assertObject(opts, 'validate(code, opts)')!;
+          assertNoUnknownKeys(o, ['language'], 'validate(opts)');
+          if (o.language !== undefined) assertEnum(o.language, ['manifold-js', 'scad'], 'validate(opts).language');
+        }
+        return true;
+      });
       if (typeof check === 'object' && check !== null && 'error' in check) return { valid: false, error: check.error };
-      const result = executeCode(code);
-      if (result.error) return { valid: false, error: result.error };
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      try { (result.manifold as any)?.delete?.(); } catch { /* ignore */ }
-      return { valid: true };
+      const r = await validateCodeAsync(code, opts?.language);
+      return r.valid ? { valid: true } : { valid: false, error: r.error };
+    },
+
+    /** Get active engine language */
+    getActiveLanguage(): Language {
+      return getActiveLanguage();
+    },
+
+    /** Switch active engine language. Lazy-inits SCAD on first switch. */
+    async setActiveLanguage(lang: Language): Promise<void> {
+      assertEnum(lang, ['manifold-js', 'scad'], 'setActiveLanguage(lang)');
+      await switchLanguage(lang);
     },
 
     // === Clipping API ===
@@ -1165,7 +1249,7 @@ async function main() {
     /** Create a new session and make it active */
     async createSession(name?: string) {
       assertString(name, 'createSession(name)', { optional: true });
-      const session = await createSession(name);
+      const session = await createSession(name, getActiveLanguage());
       await addSessionNote(
         '[WORKFLOW] Drive this app via window.mainifold (see /ai.md). ' +
         'Use runAndSave(code, label, assertions) for iterations; ' +
@@ -1181,14 +1265,19 @@ async function main() {
       return sessions.map(s => ({ id: s.id, name: s.name, updated: s.updated }));
     },
 
-    /** Open an existing session (loads latest version, restores reference images) */
+    /** Open an existing session (loads latest version, restores reference images, restores language) */
     async openSession(id: string) {
       const check = guard(() => assertString(id, 'openSession(id)', { allowEmpty: false }));
       if (typeof check === 'object' && check !== null && 'error' in check) return check;
       const version = await openSession(id);
       if (version) {
+        // Restore language from session
+        const lang = getState().session?.language ?? 'manifold-js';
+        if (lang !== getActiveLanguage()) {
+          await switchLanguage(lang);
+        }
         setValue(version.code);
-        runCodeSync(version.code);
+        await runCodeSync(version.code);
       }
       // Restore reference images from session
       const refImages = await getReferenceImagesFromSession();
@@ -1251,7 +1340,7 @@ async function main() {
         return { error: `No version found with ${kind} "${parsed.value}" in the active session. Use listVersions() to see valid ${kind}s.` };
       }
       setValue(version.code);
-      runCodeSync(version.code);
+      await runCodeSync(version.code);
       return {
         id: version.id,
         index: version.index,
@@ -1268,7 +1357,7 @@ async function main() {
       const version = await navigateVersion(direction);
       if (version) {
         setValue(version.code);
-        runCodeSync(version.code);
+        await runCodeSync(version.code);
       }
       return version ? { id: version.id, index: version.index, label: version.label } : null;
     },
@@ -1285,7 +1374,7 @@ async function main() {
       if (typeof check === 'object' && check !== null && 'error' in check) return check;
       // If assertions provided, validate in isolation first (no side effects if it fails)
       if (assertions) {
-        const { geometryData: testData, manifold: testManifold } = executeIsolated(code);
+        const { geometryData: testData, manifold: testManifold } = await executeIsolated(code);
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         try { (testManifold as any)?.delete?.(); } catch { /* ignore */ }
         if (testData.status === 'error') {
@@ -1300,13 +1389,13 @@ async function main() {
       // Auto-create session if none exists (e.g. AI agent calling runAndSave without createSession)
       if (!getState().session) {
         const sessionName = label || `AI Session ${new Date().toLocaleDateString()}`;
-        await createSession(sessionName);
+        await createSession(sessionName, getActiveLanguage());
       }
 
       const prevGeoData = getState().currentVersion?.geometryData as Record<string, unknown> | null;
 
       setValue(code);
-      runCodeSync(code);
+      await runCodeSync(code);
       const newGeoData = JSON.parse(geometryDataEl.textContent || '{}');
       const thumbnail = await captureThumbnail();
       const version = await saveVersion(code, getGeometryDataObj(), thumbnail, label, assertions?.notes);
@@ -1370,7 +1459,7 @@ async function main() {
       }
 
       // Validate in isolation before committing anything.
-      const { geometryData: testData, manifold: testManifold } = executeIsolated(newCode);
+      const { geometryData: testData, manifold: testManifold } = await executeIsolated(newCode);
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       try { (testManifold as any)?.delete?.(); } catch { /* ignore */ }
       if (testData.status === 'error') {
@@ -1386,7 +1475,7 @@ async function main() {
       // Commit: update editor, run, save.
       const prevGeoData = getState().currentVersion?.geometryData as Record<string, unknown> | null;
       setValue(newCode);
-      runCodeSync(newCode);
+      await runCodeSync(newCode);
       const newGeoData = JSON.parse(geometryDataEl.textContent || '{}');
       const thumbnail = await captureThumbnail();
       const version = await saveVersion(newCode, getGeometryDataObj(), thumbnail, label, assertions?.notes);
@@ -1508,13 +1597,13 @@ async function main() {
       });
       if (typeof check === 'object' && check !== null && 'error' in check) return check;
       const session = await importSession(data, async (code: string) => {
-        runCodeSync(code);
+        await runCodeSync(code);
         return captureThumbnail();
       });
       const version = await openSession(session.id);
       if (version) {
         setValue(version.code);
-        runCodeSync(version.code);
+        await runCodeSync(version.code);
       }
       // Restore reference images from imported session
       const refImages = await getReferenceImagesFromSession();
@@ -1548,7 +1637,7 @@ async function main() {
       if (typeof check === 'object' && check !== null && 'error' in check) {
         return { geometryData: { status: 'error', error: check.error }, thumbnail: null };
       }
-      const { geometryData, meshData, manifold } = executeIsolated(code);
+      const { geometryData, meshData, manifold } = await executeIsolated(code);
 
       let thumbnail: string | null = null;
       if (meshData) {
@@ -1575,7 +1664,7 @@ async function main() {
       if (typeof check === 'object' && check !== null && 'error' in check) {
         return { passed: false, failures: [check.error], stats: null };
       }
-      const { geometryData, manifold } = executeIsolated(code);
+      const { geometryData, manifold } = await executeIsolated(code);
 
       // Clean up manifold
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -1599,7 +1688,7 @@ async function main() {
       if (typeof check === 'object' && check !== null && 'error' in check) {
         return { stats: { status: 'error', error: check.error }, components: null };
       }
-      const { geometryData, manifold } = executeIsolated(code);
+      const { geometryData, manifold } = await executeIsolated(code);
 
       if (geometryData.status === 'error' || !manifold) {
         return { stats: geometryData, components: null };
@@ -1725,7 +1814,7 @@ async function main() {
         return { error: `Patch function failed: ${e instanceof Error ? e.message : String(e)}`, modifiedCode: null, stats: null };
       }
 
-      const { geometryData, manifold } = executeIsolated(modifiedCode);
+      const { geometryData, manifold } = await executeIsolated(modifiedCode);
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       try { (manifold as any)?.delete?.(); } catch { /* ignore */ }
 
@@ -1816,12 +1905,12 @@ async function main() {
         return true;
       });
       if (typeof check === 'object' && check !== null && 'error' in check) return check;
-      const session = await createSession(name);
+      const session = await createSession(name, getActiveLanguage());
       const results = [];
 
       for (const v of versions) {
         setValue(v.code);
-        runCodeSync(v.code);
+        await runCodeSync(v.code);
         const thumbnail = await captureThumbnail();
         const geoData = getGeometryDataObj();
         const version = await saveVersion(v.code, geoData, thumbnail, v.label);
@@ -1850,10 +1939,10 @@ async function main() {
     },
 
     /** Analyze Z-profile of code in isolation — no side effects */
-    analyzeProfileIsolated(code: string, sampleCount?: number): { profile: ZProfile | null; stats: Record<string, unknown> } {
+    async analyzeProfileIsolated(code: string, sampleCount?: number): Promise<{ profile: ZProfile | null; stats: Record<string, unknown> }> {
       assertString(code, 'analyzeProfileIsolated(code)', { allowEmpty: false });
       assertNumber(sampleCount, 'analyzeProfileIsolated(sampleCount)', { optional: true, min: 1, integer: true });
-      const { geometryData, manifold } = executeIsolated(code);
+      const { geometryData, manifold } = await executeIsolated(code);
       if (geometryData.status === 'error' || !manifold) {
         return { profile: null, stats: geometryData };
       }
@@ -1923,7 +2012,7 @@ async function main() {
 
     // === Phase 3: Reference/Phantom Geometry ===
 
-    /** Set translucent reference geometry for fitment checking. Code is executed in isolation. */
+    /** Set translucent reference geometry for fitment checking. Code is executed in isolation (always manifold-js). */
     setReferenceGeometry(code: string, options?: PhantomOptions): { success: boolean; error?: string; boundingBox?: unknown; volume?: number } {
       const check = guard(() => {
         assertString(code, 'setReferenceGeometry(code)', { allowEmpty: false });
@@ -1939,7 +2028,7 @@ async function main() {
       if (typeof check === 'object' && check !== null && 'error' in check) {
         return { success: false, error: check.error };
       }
-      const result = executeCode(code);
+      const result = executeCode(code, 'manifold-js');
       if (result.error) {
         return { success: false, error: result.error };
       }
@@ -2113,15 +2202,15 @@ async function main() {
     const src = code ?? getValue();
     setStatus(statusBar, 'running', 'Running...');
 
-    requestAnimationFrame(() => {
-      runCodeSync(src);
+    requestAnimationFrame(async () => {
+      await runCodeSync(src);
     });
   }
 
-  function runCodeSync(src: string) {
+  async function runCodeSync(src: string) {
     _running = true;
     const t0 = performance.now();
-    const result = executeCode(src);
+    const result = await executeCodeAsync(src);
     const elapsed = Math.round(performance.now() - t0);
     _running = false;
 
@@ -2242,6 +2331,69 @@ function setStatus(el: HTMLElement, state: 'ready' | 'running' | 'error' | 'load
       el.className += 'text-red-400';
       break;
   }
+}
+
+/** Modal confirmation dialog with semi-transparent backdrop overlay.
+ *  Returns a Promise that resolves true (Continue) or false (Cancel / Escape / click overlay). */
+function showInlineConfirm(_container: HTMLElement, message: string): Promise<boolean> {
+  return new Promise((resolve) => {
+    // Remove any existing modal
+    document.querySelector('.confirm-modal-overlay')?.remove();
+
+    // Backdrop overlay
+    const overlay = document.createElement('div');
+    overlay.className = 'confirm-modal-overlay fixed inset-0 bg-black/50 backdrop-blur-sm z-50 flex items-center justify-center';
+
+    // Modal box
+    const modal = document.createElement('div');
+    modal.className = 'bg-zinc-800 border border-zinc-600 rounded-xl shadow-2xl p-5 max-w-sm mx-4 animate-modal-in';
+
+    const msg = document.createElement('p');
+    msg.className = 'text-zinc-200 text-sm leading-relaxed mb-5';
+    msg.textContent = message;
+
+    const btnGroup = document.createElement('div');
+    btnGroup.className = 'flex items-center justify-end gap-2';
+
+    const cancelBtn = document.createElement('button');
+    cancelBtn.className = 'px-4 py-1.5 rounded-lg text-sm text-zinc-400 hover:text-zinc-200 hover:bg-zinc-700 transition-colors';
+    cancelBtn.textContent = 'Cancel';
+
+    const continueBtn = document.createElement('button');
+    continueBtn.className = 'px-4 py-1.5 rounded-lg text-sm font-medium bg-blue-600 text-white hover:bg-blue-500 transition-colors';
+    continueBtn.textContent = 'Continue';
+
+    btnGroup.appendChild(cancelBtn);
+    btnGroup.appendChild(continueBtn);
+    modal.appendChild(msg);
+    modal.appendChild(btnGroup);
+    overlay.appendChild(modal);
+
+    let resolved = false;
+    function finish(result: boolean) {
+      if (resolved) return;
+      resolved = true;
+      overlay.remove();
+      document.removeEventListener('keydown', onKey);
+      resolve(result);
+    }
+
+    continueBtn.addEventListener('click', () => finish(true));
+    cancelBtn.addEventListener('click', () => finish(false));
+
+    // Click on overlay (outside modal) dismisses
+    overlay.addEventListener('mousedown', (e) => {
+      if (e.target === overlay) finish(false);
+    });
+
+    function onKey(e: KeyboardEvent) {
+      if (e.key === 'Escape') finish(false);
+    }
+    document.addEventListener('keydown', onKey);
+
+    document.body.appendChild(overlay);
+    continueBtn.focus();
+  });
 }
 
 main().catch(console.error);

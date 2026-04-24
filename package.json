@@ -23,6 +23,7 @@
     "@tailwindcss/vite": "^4.2.1",
     "codemirror": "^6.0.2",
     "manifold-3d": "^3.3.2",
+    "openscad-wasm-prebuilt": "^1.2.0",
     "tailwindcss": "^4.2.1",
     "three": "^0.183.2"
   }
