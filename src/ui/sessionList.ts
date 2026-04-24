@@ -65,7 +65,7 @@ export async function showSessionList(): Promise<void> {
       try {
         const text = await file.text();
         const data = JSON.parse(text) as ExportedSession;
-        if (!data.mainifold || !data.session || !Array.isArray(data.versions)) {
+        if ((!data.partwright && !data.mainifold) || !data.session || !Array.isArray(data.versions)) {
           alert('Invalid session file.');
           return;
         }
@@ -187,7 +187,7 @@ async function createSessionRow(session: Session): Promise<HTMLElement> {
     const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
     const link = document.createElement('a');
     link.href = URL.createObjectURL(blob);
-    link.download = `${session.name.replace(/[^a-zA-Z0-9_-]/g, '_')}.mainifold.json`;
+    link.download = `${session.name.replace(/[^a-zA-Z0-9_-]/g, '_')}.partwright.json`;
     link.click();
     URL.revokeObjectURL(link.href);
   });

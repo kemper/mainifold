@@ -1,6 +1,6 @@
-# mAInifold -- AI Agent Instructions
+# Partwright -- AI Agent Instructions
 
-mAInifold is a browser-based parametric CAD tool with two modeling engines: **manifold-js** (default, JavaScript DSL with manifold-3d API) and **OpenSCAD** (SCAD language via WASM). You write code that constructs 3D geometry, which renders live. All interaction is via the `window.mainifold` programmatic API -- do not drive the app through clicks or keystrokes.
+Partwright is a browser-based parametric CAD tool with two modeling engines: **manifold-js** (default, JavaScript DSL with manifold-3d API) and **OpenSCAD** (SCAD language via WASM). You write code that constructs 3D geometry, which renders live. All interaction is via the `window.partwright` programmatic API -- do not drive the app through clicks or keystrokes. `window.mainifold` remains available as a legacy alias for older prompts.
 
 **Coordinate system:** Right-handed, Z-up. XY plane is the ground. Units are arbitrary.
 
@@ -9,7 +9,8 @@ mAInifold is a browser-based parametric CAD tool with two modeling engines: **ma
 - [Before you start](#before-you-start)
 - [Choosing an engine](#choosing-an-engine)
 - [Common agent mistakes](#common-agent-mistakes)
-- [Console API -- window.mainifold](#console-api--windowmainifold)
+- [Argument validation](#argument-validation)
+- [Console API -- window.partwright](#console-api--windowpartwright)
 - [Geometry data](#geometry-data)
 - [Writing model code](#writing-model-code)
 - [Writing OpenSCAD code](#writing-openscad-code)
@@ -24,7 +25,7 @@ mAInifold is a browser-based parametric CAD tool with two modeling engines: **ma
 
 ## Before you start
 
-1. **Use `window.mainifold`** -- that's the programmatic API. Do NOT drive the app with clicks, keystrokes, or DOM manipulation.
+1. **Use `window.partwright`** -- that's the programmatic API. Do NOT drive the app with clicks, keystrokes, or DOM manipulation.
 2. **Pick your engine:** manifold-js (default) or OpenSCAD. See [Choosing an engine](#choosing-an-engine).
 3. **manifold-js code must end with `return manifoldObject;`** -- a bare trailing expression won't work. OpenSCAD code uses standard SCAD syntax (no `return`).
 4. **Use `runAndSave(code, label, {isManifold: true, maxComponents: 1})`** to validate and commit a version.
@@ -32,7 +33,7 @@ mAInifold is a browser-based parametric CAD tool with two modeling engines: **ma
 
 ## Choosing an engine
 
-mAInifold supports two modeling engines. Pick whichever is best for the task:
+Partwright supports two modeling engines. Pick whichever is best for the task:
 
 | | **manifold-js** (default) | **OpenSCAD** (SCAD) |
 |---|---|---|
@@ -46,14 +47,14 @@ mAInifold supports two modeling engines. Pick whichever is best for the task:
 
 ```js
 // Check current engine
-mainifold.getActiveLanguage()        // -> 'manifold-js' or 'scad'
+partwright.getActiveLanguage()        // -> 'manifold-js' or 'scad'
 
 // Switch engine (also updates the code editor's syntax highlighting)
-await mainifold.setActiveLanguage('scad')
-await mainifold.setActiveLanguage('manifold-js')
+await partwright.setActiveLanguage('scad')
+await partwright.setActiveLanguage('manifold-js')
 
 // Run code with a specific engine (one-shot, doesn't change active engine)
-await mainifold.run(scadCode)        // uses active engine
+await partwright.run(scadCode)        // uses active engine
 // To force a specific engine, switch first then run
 ```
 
@@ -61,7 +62,7 @@ Selecting a SCAD example from the toolbar dropdown auto-switches to OpenSCAD mod
 
 ## Common agent mistakes
 
-- **Driving the UI with clicks/keystrokes** -- CodeMirror's auto-close-brackets will corrupt your code. Use `mainifold.setCode()` and `mainifold.run()` instead.
+- **Driving the UI with clicks/keystrokes** -- CodeMirror's auto-close-brackets will corrupt your code. Use `partwright.setCode()` and `partwright.run()` instead.
 - **Forgetting `return`** -- code runs in `new Function()`, so a trailing expression is NOT automatically returned. You must write `return Manifold.cube(...)`.
 - **Skipping sessions** -- always create a session (`createSession`) and save versions (`runAndSave`) so the user can review your work in the gallery.
 - **Skipping visual verification** -- stats alone can't catch visual defects. After structural changes, screenshot the Elevations tab or use `renderView()`.
@@ -70,80 +71,111 @@ Selecting a SCAD example from the toolbar dropdown auto-switches to OpenSCAD mod
 - **Not reading session context before modifying** -- when opening an existing session, always call `getSessionContext()` first and read the notes/version history before making changes. See [Resuming a session](#resuming-a-session).
 - **Branching off a prior version by hand** -- don't chain `loadVersion` -> `getCode` -> modify -> `runAndSave`. A silent failure (blocked return value, stale buffer) can drop parts of the parent. Use [`forkVersion({index} | {id}, transformFn, label, assertions?)`](#forking-a-prior-version) instead -- it loads the parent's code server-side, applies your transform, validates, and saves atomically.
 - **Passing a bare index or id instead of `{index}` / `{id}`** -- `loadVersion` and `forkVersion` take an object with exactly one of `{index: number}` or `{id: string}`, e.g. `loadVersion({index: 2})` or `loadVersion({id: "Kx3Pq9mA2wEr"})`. Bare `loadVersion(2)` will return `{error: "...target must be { index: number } or { id: string }..."}`.
+- **Passing the wrong object shape to `setReferenceImages`, `setReferenceGeometry`, `query`, `runAndAssert`, etc.** -- the API rejects unknown keys and wrong-type values. See [Argument validation](#argument-validation).
+
+## Argument validation
+
+Every `window.partwright` method validates its arguments at runtime. If you pass the wrong type or an object with unexpected keys, the call fails fast with a descriptive error rather than silently accepting bad input.
+
+**Conventions:**
+
+- **Methods that return a value** (e.g. `runAndSave`, `loadVersion`, `query`, `importSession`, `setReferenceGeometry`, notes/session CRUD) return `{ error: "..." }` on a validation failure. The error string names the exact parameter and expected type, e.g. `"setReferenceImages(images).front must be a string, got null. See /ai.md#argument-validation"`.
+- **Void setters** (`setCode`, `setClipZ`, `setReferenceImages`, `setView`, `setUnits`, `measureAt`, `measureBetween`, `probeRay`, `measurePoints`, `renameSession`) **throw** a `ValidationError`. Wrap calls in a try/catch if you want to handle failure rather than crash the console.
+- **No coercion.** `setClipZ("5")` throws -- strings are not auto-converted to numbers. Pass the right type.
+- **Unknown object keys are rejected.** `runAndAssert(code, { widthToDeep: [1,2] })` errors on the typo; it does not silently ignore it. Allowed keys are listed on each assertion/options interface.
+- **Empty strings are rejected** by default for required string params (names, IDs, note text, code). Optional strings can be omitted but, if provided, must still be non-empty unless noted otherwise.
+
+**Examples of what gets rejected:**
+
+```js
+partwright.navigateVersion('backward')            // ValidationError: direction must be one of: "prev" | "next"
+partwright.setView('sketch')                      // ValidationError: tab must be one of: ...
+partwright.measureAt([5])                         // ValidationError: measureAt(xy) must have exactly 2 elements
+partwright.probeRay([0,0,0], [0, '1', 0])         // ValidationError: probeRay(direction)[1] must be a finite number
+partwright.setReferenceImages({ fron: '...' })    // ValidationError: setReferenceImages(images).fron is not a recognized field
+partwright.setReferenceGeometry(code, { opacity: 2 })  // returns { success: false, error: "... .opacity must be <= 1 ..." }
+await partwright.runAndAssert(code, { minVolume: '1000' })  // returns { passed: false, failures: ["... .minVolume must be a finite number ..."] }
+await partwright.runAndSave(code, 'v1', { boundsRatio: { widthToDeep: [1,2] } })  // typo caught: not a recognized field
+await partwright.query({ sliceAt: 5 })            // returns { error: "... .sliceAt must be an array ..." }
+```
+
+When you see a validation error, fix the call -- don't pattern-match around it.
 
 ## How to use this tool
 
 1. Navigate with `?view=ai` to see 4 isometric views (e.g. `/editor?view=ai`)
-2. Use `window.mainifold` in the browser console to interact programmatically
-3. Call `mainifold.help()` for a full method list, or `mainifold.help('methodName')` for a specific method
-4. Use `mainifold.getGeometryData()` to read current geometry stats programmatically
+2. Use `window.partwright` in the browser console to interact programmatically
+3. Call `partwright.help()` for a full method list, or `partwright.help('methodName')` for a specific method
+4. Use `partwright.getGeometryData()` to read current geometry stats programmatically
 
-## Console API -- window.mainifold
+## Console API -- window.partwright
+
+<a id="console-api--windowmainifold"></a>
 
 ```js
-mainifold.run(code?)          // Run code, update views, return geometry stats
-mainifold.getGeometryData()   // Current stats (same as #geometry-data)
-mainifold.validate(code)      // Check code without rendering -> {valid, error?}
-mainifold.getCode()           // Read editor contents
-mainifold.setCode(code)       // Set editor contents (no auto-run)
-mainifold.sliceAtZ(z)         // Cross-section -> {polygons, svg, boundingBox, area}
-mainifold.getBoundingBox()    // -> {min:[x,y,z], max:[x,y,z]}
-mainifold.getModule()         // Raw manifold-3d WASM module
-mainifold.getActiveLanguage() // -> 'manifold-js' or 'scad'
-await mainifold.setActiveLanguage(lang) // Switch engine + editor mode ('manifold-js' | 'scad')
-mainifold.toggleClip(on?)     // Toggle 3D clipping plane -> {enabled, z, min, max}
-mainifold.setClipZ(z)         // Set clip height -> {enabled, z, min, max}
-mainifold.getClipState()      // -> {enabled, z, min, max}
-await mainifold.exportGLB()   // Download GLB
-mainifold.exportSTL()         // Download STL
-mainifold.exportOBJ()         // Download OBJ
-mainifold.export3MF()         // Download 3MF
+partwright.run(code?)          // Run code, update views, return geometry stats
+partwright.getGeometryData()   // Current stats (same as #geometry-data)
+partwright.validate(code)      // Check code without rendering -> {valid, error?}
+partwright.getCode()           // Read editor contents
+partwright.setCode(code)       // Set editor contents (no auto-run)
+partwright.sliceAtZ(z)         // Cross-section -> {polygons, svg, boundingBox, area}
+partwright.getBoundingBox()    // -> {min:[x,y,z], max:[x,y,z]}
+partwright.getModule()         // Raw manifold-3d WASM module
+partwright.getActiveLanguage() // -> 'manifold-js' or 'scad'
+await partwright.setActiveLanguage(lang) // Switch engine + editor mode ('manifold-js' | 'scad')
+partwright.toggleClip(on?)     // Toggle 3D clipping plane -> {enabled, z, min, max}
+partwright.setClipZ(z)         // Set clip height -> {enabled, z, min, max}
+partwright.getClipState()      // -> {enabled, z, min, max}
+await partwright.exportGLB()   // Download GLB
+partwright.exportSTL()         // Download STL
+partwright.exportOBJ()         // Download OBJ
+partwright.export3MF()         // Download 3MF
 
 // Isolated execution -- test code without changing editor/viewport state
-await mainifold.runIsolated(code)       // -> {geometryData, thumbnail}
-await mainifold.runAndAssert(code, assertions) // -> {passed, failures?, stats}
-await mainifold.runAndExplain(code)     // -> {stats, components[], hints[]} (debug disconnects)
-await mainifold.modifyAndTest(patchFn, assertions?) // Modify current code + test in isolation
-mainifold.query({sliceAt?, decompose?, boundingBox?}) // Multi-query current geometry in one call
-mainifold.renderView({elevation?, azimuth?, ortho?, size?}) // Render from any angle -> data URL
-mainifold.sliceAtZVisual(z)            // Cross-section SVG at height z -> {svg, area, contours}
-mainifold.isRunning()                   // -> boolean (is code executing?)
+await partwright.runIsolated(code)       // -> {geometryData, thumbnail}
+await partwright.runAndAssert(code, assertions) // -> {passed, failures?, stats}
+await partwright.runAndExplain(code)     // -> {stats, components[], hints[]} (debug disconnects)
+await partwright.modifyAndTest(patchFn, assertions?) // Modify current code + test in isolation
+partwright.query({sliceAt?, decompose?, boundingBox?}) // Multi-query current geometry in one call
+partwright.renderView({elevation?, azimuth?, ortho?, size?}) // Render from any angle -> data URL
+partwright.sliceAtZVisual(z)            // Cross-section SVG at height z -> {svg, area, contours}
+partwright.isRunning()                   // -> boolean (is code executing?)
 
 // Reference images -- compare model against photos
-mainifold.setReferenceImages({front?, right?, back?, left?, top?, perspective?})
-mainifold.clearReferenceImages()
-mainifold.getReferenceImages()
+partwright.setReferenceImages({front?, right?, back?, left?, top?, perspective?})
+partwright.clearReferenceImages()
+partwright.getReferenceImages()
 
 // Sessions -- save/compare design iterations
-await mainifold.createSession(name?)    // -> {id, url, galleryUrl}
-await mainifold.runAndSave(code, label?, assertions?) // Assert+save in one call -> {passed?, geometry, version, diff, galleryUrl}
-await mainifold.createSessionWithVersions(name, [{code, label},...]) // Batch create
-await mainifold.saveVersion(label?)     // Save current state as version
-await mainifold.listVersions()          // -> [{id, index, label, timestamp, status}]
-await mainifold.loadVersion({index} | {id})  // Load version into editor -> {id, index, label, code, geometryData} or {error}
-await mainifold.forkVersion({index} | {id}, transformFn, label?, assertions?) // Load + modify + validate + save in one call
-mainifold.getGalleryUrl()               // -> URL for gallery view (human review)
-mainifold.getSessionUrl()               // -> URL for this session
-await mainifold.listSessions()          // -> [{id, name, updated}]
-await mainifold.openSession(id)         // Open existing session
-await mainifold.clearAllSessions()      // Delete all sessions & versions
+await partwright.createSession(name?)    // -> {id, url, galleryUrl}
+await partwright.runAndSave(code, label?, assertions?) // Assert+save in one call -> {passed?, geometry, version, diff, galleryUrl}
+await partwright.createSessionWithVersions(name, [{code, label},...]) // Batch create
+await partwright.saveVersion(label?)     // Save current state as version
+await partwright.listVersions()          // -> [{id, index, label, timestamp, status}]
+await partwright.loadVersion({index} | {id})  // Load version into editor -> {id, index, label, code, geometryData} or {error}
+await partwright.forkVersion({index} | {id}, transformFn, label?, assertions?) // Load + modify + validate + save in one call
+partwright.getGalleryUrl()               // -> URL for gallery view (human review)
+partwright.getSessionUrl()               // -> URL for this session
+await partwright.listSessions()          // -> [{id, name, updated}]
+await partwright.openSession(id)         // Open existing session
+await partwright.clearAllSessions()      // Delete all sessions & versions
 
 // Notes -- track design context, decisions, and measurements
-await mainifold.addSessionNote(text)    // -> {id, text, timestamp}
-await mainifold.listSessionNotes()      // -> [{id, text, timestamp}, ...]
-await mainifold.updateSessionNote(noteId, text) // Edit a note
-await mainifold.deleteSessionNote(noteId)       // Remove a note
+await partwright.addSessionNote(text)    // -> {id, text, timestamp}
+await partwright.listSessionNotes()      // -> [{id, text, timestamp}, ...]
+await partwright.updateSessionNote(noteId, text) // Edit a note
+await partwright.deleteSessionNote(noteId)       // Remove a note
 
 // Session context -- get everything in one call (for resuming sessions)
-await mainifold.getSessionContext()     // -> {session, versions[], notes[], currentVersion, versionCount, agentHints}
+await partwright.getSessionContext()     // -> {session, versions[], notes[], currentVersion, versionCount, agentHints}
 // agentHints: {apiDocsUrl, recommendedEntrypoint, codeMustReturnManifold, recentErrors[]}
 ```
 
 ## Geometry data
 
-**Preferred:** Use `mainifold.getGeometryData()` to read current geometry stats programmatically.
+**Preferred:** Use `partwright.getGeometryData()` to read current geometry stats programmatically.
 
-**Fallback** (if `window.mainifold` is not yet initialized): read `document.getElementById("geometry-data").textContent` -- it contains the same JSON.
+**Fallback** (if `window.partwright` is not yet initialized): read `document.getElementById("geometry-data").textContent` -- it contains the same JSON.
 
 ```json
 {
@@ -286,7 +318,7 @@ A cylinder placed at the exact tip of a cone (where radius = 0) has nothing to u
 ### Debugging disconnected components
 When `componentCount > 1`, use `runAndExplain(code)` to identify which pieces are floating:
 ```js
-const r = await mainifold.runAndExplain(code);
+const r = await partwright.runAndExplain(code);
 // r.components = [
 //   { index: 0, volume: 14800, centroid: [0, 0, 9], boundingBox: {...} },
 //   { index: 1, volume: 12,    centroid: [29, 29, 26], boundingBox: {...} },
@@ -329,14 +361,14 @@ const result  = body.add(chamfer);
 After any change that uses `scaleTop` < 1, tapers via `hull`, or brings two surfaces toward a vanishing edge, dense-sample near `zMax` and flag sub-extrusion-width layers:
 
 ```js
-const bb = mainifold.getBoundingBox();
+const bb = partwright.getBoundingBox();
 const zMax = bb.max[2];
 const layerH = 0.2;
 const minArea = 0.4;  // mm^2, assuming ~0.4mm nozzle
 
 const problems = [];
 for (let z = zMax - 2; z <= zMax - layerH; z += layerH) {
-  const s = mainifold.sliceAtZ(z);
+  const s = partwright.sliceAtZ(z);
   if (s && s.area > 0 && s.area < minArea) {
     problems.push({ z: +z.toFixed(2), area: +s.area.toFixed(3) });
   }
@@ -353,7 +385,7 @@ Or batch it with `query({ sliceAt: [zMax - 2, zMax - 1.8, ..., zMax - 0.2] })` a
 Load reference photos to compare against your model's elevations:
 ```js
 // Load reference images for side-by-side comparison in Elevations tab
-mainifold.setReferenceImages({
+partwright.setReferenceImages({
   front: 'data:image/jpeg;base64,...',   // or a URL
   right: 'data:image/jpeg;base64,...',
   back: 'data:image/jpeg;base64,...',
@@ -363,10 +395,10 @@ mainifold.setReferenceImages({
 })
 
 // Clear reference images
-mainifold.clearReferenceImages()
+partwright.clearReferenceImages()
 
 // Get current reference image state
-mainifold.getReferenceImages()  // -> {front?, right?, ...} or null
+partwright.getReferenceImages()  // -> {front?, right?, ...} or null
 ```
 
 When reference images are loaded, the Elevations tab shows each model view side-by-side with the corresponding reference image. This enables direct visual comparison for accuracy.
@@ -392,7 +424,7 @@ This calls Gemini to analyze the photo and produces a JSON file with:
 ### 2. Load reference images
 If you have multiple angle photos (or Gemini-generated views), load them:
 ```js
-mainifold.setReferenceImages({ front: frontDataUrl, right: rightDataUrl, ... })
+partwright.setReferenceImages({ front: frontDataUrl, right: rightDataUrl, ... })
 ```
 
 ### 3. Build major masses first
@@ -400,7 +432,7 @@ Start with the largest geometric volumes and get proportions right before adding
 ```js
 // Decompose into: main body -> wings -> roof -> porch -> details
 // Build each mass, validate proportions against reference
-const r = await mainifold.runAndAssert(code, {
+const r = await partwright.runAndAssert(code, {
   isManifold: true, maxComponents: 1,
   // Use proportion assertions to match reference
   boundsRatio: { widthToDepth: [1.2, 1.8], widthToHeight: [1.5, 2.5] }
@@ -424,7 +456,7 @@ After each addition, verify the relevant elevation matches the reference.
 
 Use `runIsolated` to test code variations without changing the editor or viewport:
 ```js
-const r = await mainifold.runIsolated(code);
+const r = await partwright.runIsolated(code);
 // r.geometryData = full stats (same schema as #geometry-data)
 // r.thumbnail = data:image/png base64 string (4 isometric views)
 ```
@@ -433,7 +465,7 @@ const r = await mainifold.runIsolated(code);
 
 Check geometry against expectations in one call:
 ```js
-const r = await mainifold.runAndAssert(code, {
+const r = await partwright.runAndAssert(code, {
   minVolume: 1000,      // volume bounds
   maxVolume: 50000,
   isManifold: true,     // must be valid manifold
@@ -458,7 +490,7 @@ const r = await mainifold.runAndAssert(code, {
 `runAndSave` accepts optional assertions. If provided, validates in isolation first -- fails fast
 without saving if assertions don't pass. On success, saves the version and returns stat diff:
 ```js
-const r = await mainifold.runAndSave(code, "v2 - added towers", {
+const r = await partwright.runAndSave(code, "v2 - added towers", {
   isManifold: true, maxComponents: 1
 });
 // If assertions fail: r.passed = false, r.failures = [...], version NOT saved
@@ -478,7 +510,7 @@ step fails silently (wrong arg type, a client-side content filter on `getCode`, 
 a regression without noticing. `forkVersion` collapses the whole chain into one server-side call:
 
 ```js
-const r = await mainifold.forkVersion(
+const r = await partwright.forkVersion(
   { index: 11 },                       // or { id: "Kx3Pq9mA2wEr" } from listVersions()
   code => code.replace('towerH = 28', 'towerH = 35'),
   "v11a - taller towers",              // label for the new version
@@ -505,7 +537,7 @@ parent without a load/read/modify/save round-trip chain.
 
 Modify current editor code with a transform function and test the result without committing:
 ```js
-const r = await mainifold.modifyAndTest(
+const r = await partwright.modifyAndTest(
   code => code.replace('towerH = 28', 'towerH = 35'),
   { isManifold: true, maxComponents: 1 }
 );
@@ -519,7 +551,7 @@ const r = await mainifold.modifyAndTest(
 
 Query multiple properties of the already-computed geometry in a single call:
 ```js
-const r = mainifold.query({
+const r = partwright.query({
   sliceAt: [5, 10, 15, 20],  // cross-sections at these Z heights
   decompose: true,             // component breakdown
   boundingBox: true,           // bounding box
@@ -534,7 +566,7 @@ const r = mainifold.query({
 
 Create a complete session with multiple versions in one call:
 ```js
-const r = await mainifold.createSessionWithVersions("Castle", [
+const r = await partwright.createSessionWithVersions("Castle", [
   { code: v1Code, label: "v1 - walls" },
   { code: v2Code, label: "v2 - towers" },
   { code: v3Code, label: "v3 - gate" },
@@ -557,17 +589,17 @@ Use session notes to build a persistent record of the design story. This enables
 
 **Prefix conventions** (so notes are scannable):
 ```js
-await mainifold.addSessionNote("[REQUIREMENT] 5.5x5.5x36in boards, snap-on C-channel, screw holes");
-await mainifold.addSessionNote("[FEEDBACK] User: groove looks too shallow, wants full tongue insertion");
-await mainifold.addSessionNote("[DECISION] Omitted right wall on end pieces for clearance");
-await mainifold.addSessionNote("[MEASUREMENT] Tongue width = outerW - 2*wallT = 133.7mm");
-await mainifold.addSessionNote("[ATTEMPT] v2 tried 3mm walls but too flimsy. Increased to 5mm in v3");
-await mainifold.addSessionNote("[TODO] Add chamfer to bottom edge for easier print removal");
+await partwright.addSessionNote("[REQUIREMENT] 5.5x5.5x36in boards, snap-on C-channel, screw holes");
+await partwright.addSessionNote("[FEEDBACK] User: groove looks too shallow, wants full tongue insertion");
+await partwright.addSessionNote("[DECISION] Omitted right wall on end pieces for clearance");
+await partwright.addSessionNote("[MEASUREMENT] Tongue width = outerW - 2*wallT = 133.7mm");
+await partwright.addSessionNote("[ATTEMPT] v2 tried 3mm walls but too flimsy. Increased to 5mm in v3");
+await partwright.addSessionNote("[TODO] Add chamfer to bottom edge for easier print removal");
 ```
 
 Version-level notes go in the `runAndSave` assertions object:
 ```js
-await mainifold.runAndSave(code, "v2 - widened tongue per feedback", {
+await partwright.runAndSave(code, "v2 - widened tongue per feedback", {
   isManifold: true,
   notes: "Changed tabW from 20mm to outerW - 2*wallT per user request"
 });
@@ -577,8 +609,8 @@ await mainifold.runAndSave(code, "v2 - widened tongue per feedback", {
 
 When opening a session you haven't worked on (or returning after time away), **always call `getSessionContext()` first**:
 ```js
-await mainifold.openSession(sessionId);
-const ctx = await mainifold.getSessionContext();
+await partwright.openSession(sessionId);
+const ctx = await partwright.getSessionContext();
 // ctx.session    -- {id, name, created, updated}
 // ctx.versions   -- [{index, label, timestamp, notes?, geometrySummary: {volume, boundingBox, ...}}]
 // ctx.notes      -- [{id, text, timestamp}]  (all session notes)
@@ -615,14 +647,14 @@ structural change:
    isometric views can hide.
 2. **Use `renderView()` for specific angles:**
 ```js
-mainifold.renderView({ elevation: 0, azimuth: 0, ortho: true })   // front elevation
-mainifold.renderView({ elevation: 0, azimuth: 90, ortho: true })  // right side elevation
-mainifold.renderView({ elevation: 90, ortho: true })               // top-down plan view
-mainifold.renderView({ elevation: 30, azimuth: 315 })              // isometric (default)
+partwright.renderView({ elevation: 0, azimuth: 0, ortho: true })   // front elevation
+partwright.renderView({ elevation: 0, azimuth: 90, ortho: true })  // right side elevation
+partwright.renderView({ elevation: 90, ortho: true })               // top-down plan view
+partwright.renderView({ elevation: 30, azimuth: 315 })              // isometric (default)
 ```
 3. **Use `sliceAtZVisual(z)` for cross-section thumbnails:**
 ```js
-const s = mainifold.sliceAtZVisual(10);  // returns {svg, area, contours}
+const s = partwright.sliceAtZVisual(10);  // returns {svg, area, contours}
 // svg = visual rendering of the cross-section profile at z=10
 ```
 4. **Feature-specific checks:**
@@ -641,6 +673,6 @@ const s = mainifold.sliceAtZVisual(10);  // returns {svg, area, contours}
 
 1. Read `#geometry-data` -- check `status:"ok"`, volume, dimensions, componentCount, isManifold
 2. Check `crossSections` quartiles (z25/z50/z75) for expected profile
-3. Use `mainifold.sliceAtZ(z)` for specific heights
-4. Use `mainifold.validate(code)` for quick syntax checks
-5. Use `mainifold.runAndAssert(code, assertions)` for structured validation
+3. Use `partwright.sliceAtZ(z)` for specific heights
+4. Use `partwright.validate(code)` for quick syntax checks
+5. Use `partwright.runAndAssert(code, assertions)` for structured validation

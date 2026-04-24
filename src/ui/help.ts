@@ -1,4 +1,4 @@
-// Help page — explains what mAInifold is and how to use it
+// Help page — explains what Partwright is and how to use it
 
 export interface HelpCallbacks {
   onBack: () => void;
@@ -26,14 +26,14 @@ export function createHelpPage(
   // Title
   const title = document.createElement('h1');
   title.className = 'text-2xl font-bold mb-6';
-  title.innerHTML = 'How m<span class="text-blue-400">AI</span>nifold works';
+  title.textContent = 'How Partwright works';
   content.appendChild(title);
 
   // Sections
   const sections: { heading: string; body: string }[] = [
     {
-      heading: 'What is mAInifold?',
-      body: 'mAInifold is a browser-based parametric CAD tool powered by <a href="https://github.com/elalish/manifold" class="text-blue-400 hover:underline">manifold-3d</a> (compiled to WebAssembly). It supports two modeling languages: <strong class="text-zinc-300">JavaScript</strong> (default, using the manifold-3d API) and <strong class="text-zinc-300">OpenSCAD</strong> (standard .scad syntax via WASM). You write code that constructs 3D geometry, and the result renders live in the viewport.',
+      heading: 'What is Partwright?',
+      body: 'Partwright is a browser-based parametric CAD tool powered by <a href="https://github.com/elalish/manifold" class="text-blue-400 hover:underline">manifold-3d</a> (compiled to WebAssembly). It supports two modeling languages: <strong class="text-zinc-300">JavaScript</strong> (default, using the manifold-3d API) and <strong class="text-zinc-300">OpenSCAD</strong> (standard .scad syntax via WASM). You write code that constructs 3D geometry, and the result renders live in the viewport.',
     },
     {
       heading: 'Choosing a language',
@@ -57,7 +57,7 @@ export function createHelpPage(
     },
     {
       heading: 'AI agent workflow',
-      body: 'mAInifold is designed to be driven by AI agents. An agent navigates to the app, writes geometry code, and uses the <code class="text-emerald-400 bg-zinc-800 px-1 rounded">window.mainifold</code> console API to create sessions, run code, validate results, and save versions — all programmatically. The agent can produce a gallery URL for human review. <a href="/ai.md" class="text-blue-400 hover:underline">Full agent instructions \u2192</a>',
+      body: 'Partwright is designed to be driven by AI agents. An agent navigates to the app, writes geometry code, and uses the <code class="text-emerald-400 bg-zinc-800 px-1 rounded">window.partwright</code> console API to create sessions, run code, validate results, and save versions — all programmatically. The legacy <code class="text-emerald-400 bg-zinc-800 px-1 rounded">window.mainifold</code> alias still works during migration. <a href="/ai.md" class="text-blue-400 hover:underline">Full agent instructions \u2192</a>',
     },
     {
       heading: 'Connecting an AI agent',
@@ -73,7 +73,7 @@ export function createHelpPage(
         return 'Copy and paste this prompt into Claude Code, ChatGPT, or any AI agent with browser access to verify everything works end-to-end:' +
           '<pre class="bg-zinc-800 rounded-lg p-4 text-xs leading-relaxed overflow-x-auto mt-3 mb-3 whitespace-pre-wrap"><code class="text-zinc-300">' +
           `Read the AI agent instructions at ${origin}/ai.md to understand how to use this tool.\n\n` +
-          `Then navigate to ${origin}/editor?view=ai and use the window.mainifold console API to:\n\n` +
+          `Then navigate to ${origin}/editor?view=ai and use the window.partwright console API to:\n\n` +
           '1. Create a session called "Standard Lego Brick"\n' +
           '2. Build a standard 2x4 Lego brick (approximately 31.8mm x 15.8mm x 11.4mm with studs on top and hollow underside with tubes)\n' +
           '3. Save each major step as a version (e.g. v1 - base block, v2 - add studs, v3 - hollow underside with tubes)\n' +

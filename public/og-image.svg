@@ -5,25 +5,23 @@
       <stop offset="50%" stop-color="#0f172a"/>
       <stop offset="100%" stop-color="#1e1b4b"/>
     </linearGradient>
-    <linearGradient id="mesh" x1="0" y1="0" x2="200" y2="200">
-      <stop offset="0%" stop-color="#60a5fa"/>
-      <stop offset="100%" stop-color="#818cf8"/>
+    <linearGradient id="mesh" x1="300" y1="160" x2="460" y2="330">
+      <stop offset="0%" stop-color="#f59e0b"/>
+      <stop offset="100%" stop-color="#14b8a6"/>
     </linearGradient>
   </defs>
   <!-- Background -->
   <rect width="1200" height="630" fill="url(#bg)"/>
-  <!-- Wireframe sphere icon -->
-  <g transform="translate(380, 240)">
-    <circle cx="0" cy="0" r="80" fill="none" stroke="url(#mesh)" stroke-width="3"/>
-    <ellipse cx="0" cy="0" rx="80" ry="24" fill="none" stroke="#60a5fa" stroke-width="2" opacity="0.6"/>
-    <ellipse cx="0" cy="-24" rx="68" ry="18" fill="none" stroke="#60a5fa" stroke-width="1.5" opacity="0.4"/>
-    <ellipse cx="0" cy="24" rx="68" ry="18" fill="none" stroke="#60a5fa" stroke-width="1.5" opacity="0.4"/>
-    <ellipse cx="0" cy="0" rx="24" ry="80" fill="none" stroke="#60a5fa" stroke-width="2" opacity="0.6"/>
-    <ellipse cx="0" cy="0" rx="56" ry="80" fill="none" stroke="#60a5fa" stroke-width="1.5" opacity="0.3"/>
+  <!-- Wright Compass mark -->
+  <g transform="translate(310, 170) scale(2.4)">
+    <circle cx="32" cy="32" r="24" fill="#0f172a" stroke="#334155" stroke-width="2"/>
+    <path d="M32 8l6.2 17.8L56 32l-17.8 6.2L32 56l-6.2-17.8L8 32l17.8-6.2L32 8z" fill="none" stroke="#f59e0b" stroke-width="4" stroke-linejoin="round"/>
+    <path d="M32 19v26M19 32h26" stroke="#14b8a6" stroke-width="3" stroke-linecap="round"/>
+    <circle cx="32" cy="32" r="4.2" fill="#f8e7c9"/>
   </g>
   <!-- Text -->
   <text x="500" y="230" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif" font-size="72" font-weight="700" fill="#e4e4e7" letter-spacing="-1">
-    m<tspan fill="#60a5fa">AI</tspan>nifold
+    Partwright
   </text>
   <text x="502" y="280" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif" font-size="24" fill="#71717a">
     AI-driven parametric CAD in your browser

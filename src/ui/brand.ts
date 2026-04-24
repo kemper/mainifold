@@ -1,0 +1,8 @@
+export function partwrightMarkSvg(size = 24): string {
+  return `<svg width="${size}" height="${size}" viewBox="0 0 64 64" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+    <circle cx="32" cy="32" r="24" fill="#0f172a" stroke="#334155" stroke-width="2"/>
+    <path d="M32 8l6.2 17.8L56 32l-17.8 6.2L32 56l-6.2-17.8L8 32l17.8-6.2L32 8z" fill="none" stroke="#f59e0b" stroke-width="4" stroke-linejoin="round"/>
+    <path d="M32 19v26M19 32h26" stroke="#14b8a6" stroke-width="3" stroke-linecap="round"/>
+    <circle cx="32" cy="32" r="4.2" fill="#f8e7c9"/>
+  </svg>`;
+}

@@ -222,6 +222,22 @@ function createClipControls(): HTMLElement {
   container.id = 'clip-controls';
   container.className = 'absolute top-2 right-2 z-10 flex items-center gap-2';
 
+  // Dimensions toggle (on by default)
+  const dimBtn = document.createElement('button');
+  dimBtn.id = 'dimensions-toggle';
+  dimBtn.className = 'px-2 py-1 rounded text-xs bg-blue-500/20 backdrop-blur text-blue-400 hover:bg-blue-500/30 transition-colors border border-blue-500/30';
+  dimBtn.textContent = '\uD83D\uDCCF';
+  dimBtn.title = 'Toggle bounding box dimensions';
+  container.appendChild(dimBtn);
+
+  // Orbit lock toggle
+  const lockBtn = document.createElement('button');
+  lockBtn.id = 'orbit-lock-toggle';
+  lockBtn.className = 'px-2 py-1 rounded text-xs bg-zinc-800/80 backdrop-blur text-zinc-400 hover:text-zinc-200 hover:bg-zinc-700/80 transition-colors border border-zinc-600/50';
+  lockBtn.textContent = '\uD83D\uDD13';
+  lockBtn.title = 'Lock camera rotation';
+  container.appendChild(lockBtn);
+
   // Measure toggle button
   const measureBtn = document.createElement('button');
   measureBtn.id = 'measure-toggle';

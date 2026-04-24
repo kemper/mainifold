@@ -1,4 +1,4 @@
-# mAInifold
+# Partwright
 
 A browser-based CAD tool designed for AI-driven 3D modeling. Write JavaScript code, get instant 3D geometry — no backend, no installs.
 
@@ -7,7 +7,7 @@ Built on [manifold-3d](https://github.com/elalish/manifold) (fast WASM boolean e
 ## What it does
 
 - **Code-driven CAD** — Write JS that constructs 3D geometry using primitives, booleans, extrusions, and revolves. Hit Run, see the result.
-- **AI-friendly** — A `window.mainifold` console API lets AI agents create, validate, and iterate on designs programmatically. Structured geometry data (volume, bounding box, cross-sections) is always available in the DOM for verification.
+- **AI-friendly** — A `window.partwright` console API lets AI agents create, validate, and iterate on designs programmatically. Structured geometry data (volume, bounding box, cross-sections) is always available in the DOM for verification.
 - **Session & versioning** — Save multiple design variations, then open a gallery view to compare them side-by-side. Ideal for AI workflows that generate N variations for human review.
 - **Multi-view rendering** — Interactive 3D viewport plus a 4-panel isometric grid (alternating cube corners, every face visible in 2+ views).
 - **Cross-sections** — Slice geometry at any Z height, inspect the 2D profile as SVG.
@@ -45,7 +45,7 @@ Manifold.cube([10, 10, 10], true)
 
 ## AI Agent Setup
 
-AI agents (Claude Code, etc.) interact with the app via `window.mainifold` in the browser. There are several ways to give an AI agent browser access:
+AI agents (Claude Code, etc.) interact with the app via `window.partwright` in the browser. The legacy `window.mainifold` alias still works for older prompts and tools. There are several ways to give an AI agent browser access:
 
 ### Option 1: Claude in Chrome extension (recommended)
 
@@ -75,28 +75,28 @@ Best for: automated/headless workflows, CI pipelines, or when you don't want to 
 
 ### The workflow
 
-Whichever option you use, the AI agent navigates to `http://localhost:5173/editor?view=ai`, then uses the `window.mainifold` console API to create sessions, write geometry code, validate results with assertions, save versions, and hand you a gallery URL for review.
+Whichever option you use, the AI agent navigates to `http://localhost:5173/editor?view=ai`, then uses the `window.partwright` console API to create sessions, write geometry code, validate results with assertions, save versions, and hand you a gallery URL for review.
 
 See `CLAUDE.md` for the full API reference and recommended iteration patterns.
 
 ## Console API
 
-For AI agents and automation, `window.mainifold` exposes:
+For AI agents and automation, `window.partwright` exposes:
 
 ```javascript
-mainifold.run(code)             // Execute code, returns geometry stats
-mainifold.validate(code)        // Syntax/logic check without rendering
-mainifold.getGeometryData()     // Current model stats (volume, bbox, genus, ...)
-mainifold.getCode()             // Read editor contents
-mainifold.setCode(code)         // Write to editor
-mainifold.sliceAtZ(z)           // Cross-section at height z
-mainifold.exportGLB()           // Download GLB
-mainifold.exportSTL()           // Download STL
+partwright.run(code)             // Execute code, returns geometry stats
+partwright.validate(code)        // Syntax/logic check without rendering
+partwright.getGeometryData()     // Current model stats (volume, bbox, genus, ...)
+partwright.getCode()             // Read editor contents
+partwright.setCode(code)         // Write to editor
+partwright.sliceAtZ(z)           // Cross-section at height z
+partwright.exportGLB()           // Download GLB
+partwright.exportSTL()           // Download STL
 
 // Sessions — save/compare design iterations
-await mainifold.createSession("Gear variations")
-await mainifold.runAndSave(code, "v1 - basic")
-mainifold.getGalleryUrl()       // URL for gallery view
+await partwright.createSession("Gear variations")
+await partwright.runAndSave(code, "v1 - basic")
+partwright.getGalleryUrl()       // URL for gallery view
 ```
 
 Geometry stats are also always available as JSON in `#geometry-data` for DOM scraping.
@@ -122,8 +122,8 @@ The app deploys via [Cloudflare Pages](https://pages.cloudflare.com/) with branc
 
 | Branch | Environment | URL |
 |--------|-------------|-----|
-| `staging` | Preview | `staging.mainifold.pages.dev` |
-| `main` | Production | `mainifold.pages.dev` |
+| `staging` | Preview | Cloudflare Pages preview URL |
+| `main` | Production | `www.partwrightstudio.com` |
 
 **Workflow:**
 
@@ -155,7 +155,7 @@ Requires `Cross-Origin-Embedder-Policy` and `Cross-Origin-Opener-Policy` headers
 
 ## Deployment
 
-Hosted on [Cloudflare Pages](https://pages.cloudflare.com/) at [mainifold.pages.dev](https://mainifold.pages.dev). Builds automatically from the `main` branch.
+Hosted on [Cloudflare Pages](https://pages.cloudflare.com/) with the production custom domain [www.partwrightstudio.com](https://www.partwrightstudio.com). Builds automatically from the `main` branch.
 
 - Build: `npm run build` → `dist/`
 - SPA routing via `_redirects`, COEP/COOP/CSP headers via `_headers`
@@ -163,7 +163,7 @@ Hosted on [Cloudflare Pages](https://pages.cloudflare.com/) at [mainifold.pages.
 
 ## Security
 
-mAInifold is designed to be controlled by AI agents, which means you're trusting the app not to embed hidden instructions that trick your AI into doing something harmful. See [SECURITY.md](SECURITY.md) for the full trust model, what the app can and can't do, and how to verify it yourself.
+Partwright is designed to be controlled by AI agents, which means you're trusting the app not to embed hidden instructions that trick your AI into doing something harmful. See [SECURITY.md](SECURITY.md) for the full trust model, what the app can and can't do, and how to verify it yourself.
 
 **TL;DR:** No backend, no outbound network requests, no analytics, no hidden DOM instructions, 7 well-known dependencies, enforced Content Security Policy.
 

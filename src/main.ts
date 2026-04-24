@@ -1,7 +1,7 @@
 import './style.css';
 import { initEngine, executeCode, executeCodeAsync, validateCodeAsync, ensureEngineReady, getModule, getActiveLanguage, setActiveLanguage, type Language } from './geometry/engine';
 import { sliceAtZ, getBoundingBox } from './geometry/crossSection';
-import { initViewport, updateMesh, setClipping, setClipZ, getClipState, getCameraState, getCanvas, getMeshGroup, getCamera } from './renderer/viewport';
+import { initViewport, updateMesh, setClipping, setClipZ, getClipState, getCameraState, getCanvas, getMeshGroup, getCamera, setMeasureLock, setUserOrbitLock, isUserOrbitLocked, setDimensionsVisible, isDimensionsVisible } from './renderer/viewport';
 import { renderCompositeCanvas, renderElevationsToContainer, renderSingleView, renderSliceSVG, setReferenceImages as _setRefImages, clearReferenceImages as _clearRefImages, getReferenceImages as _getRefImages, type ReferenceImages } from './renderer/multiview';
 import { setPhantom, clearPhantom, hasPhantom, type PhantomOptions } from './renderer/phantomGeometry';
 import { initEditor, setValue, getValue, setLanguage as setEditorLanguage } from './editor/codeEditor';
@@ -81,8 +81,8 @@ let geometryDataEl: HTMLElement;
 // Actively manage document.title to reflect current state.
 // Some browser automation tools (MCP servers, extensions) can inadvertently
 // replace the page title with JS evaluation results; this prevents that.
-const BASE_TITLE = 'mAInifold';
-let _expectedTitle = 'mAInifold — AI-Driven Parametric CAD in Your Browser';
+const BASE_TITLE = 'Partwright';
+let _expectedTitle = 'Partwright — AI-Driven Parametric CAD in Your Browser';
 
 function updateDocumentTitle(context?: { page?: 'landing' | 'editor' | 'help' | '404'; sessionName?: string | null }) {
   if (context?.page === 'landing' || context?.page === undefined && shouldShowLanding()) {
@@ -353,6 +353,187 @@ function getGeometryDataObj(): Record<string, unknown> | null {
     return null;
   }
 }
+
+// === Argument validation helpers ==========================================
+//
+// Runtime type/shape validation for the window.partwright API. The public API
+// is reachable from untyped callers (browser console, MCP-driven AI agents,
+// automation scripts) so TypeScript's compile-time guarantees do not apply.
+// These helpers enforce argument contracts explicitly, with chatty error
+// messages pointing at /ai.md anchors so AI callers can self-correct.
+//
+// Convention:
+//   • Methods that already return a value use { error: "..." } on failure.
+//   • Void setters THROW so misuse is loud.
+//   • No coercion — "5" is not a number; wrong types are rejected outright.
+
+/** Thrown by assertion helpers on validation failure. Void setters let this
+ *  propagate; value-returning methods catch via toValidationError(). */
+class ValidationError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'ValidationError';
+  }
+}
+
+function describeValue(val: unknown): string {
+  if (val === null) return 'null';
+  if (val === undefined) return 'undefined';
+  if (Array.isArray(val)) return `array(length=${val.length})`;
+  if (typeof val === 'object') return 'object';
+  if (typeof val === 'string') return `string("${val.length > 40 ? val.slice(0, 40) + '…' : val}")`;
+  return `${typeof val}(${String(val)})`;
+}
+
+/** Run a validation function; if it throws ValidationError, return { error } instead. */
+function guard<T>(fn: () => T): T | { error: string } {
+  try {
+    return fn();
+  } catch (e: unknown) {
+    if (e instanceof ValidationError) return { error: e.message };
+    throw e;
+  }
+}
+
+interface AssertStringOpts { optional?: boolean; allowEmpty?: boolean }
+function assertString(val: unknown, paramName: string, opts: AssertStringOpts = {}): string | undefined {
+  if (val === undefined || val === null) {
+    if (opts.optional) return undefined;
+    throw new ValidationError(`${paramName} is required (expected string, got ${describeValue(val)}). See /ai.md#argument-validation`);
+  }
+  if (typeof val !== 'string') {
+    throw new ValidationError(`${paramName} must be a string, got ${describeValue(val)}. See /ai.md#argument-validation`);
+  }
+  if (!opts.allowEmpty && val.length === 0) {
+    throw new ValidationError(`${paramName} must not be an empty string. See /ai.md#argument-validation`);
+  }
+  return val;
+}
+
+interface AssertNumberOpts { optional?: boolean; min?: number; max?: number; integer?: boolean }
+function assertNumber(val: unknown, paramName: string, opts: AssertNumberOpts = {}): number | undefined {
+  if (val === undefined || val === null) {
+    if (opts.optional) return undefined;
+    throw new ValidationError(`${paramName} is required (expected number, got ${describeValue(val)}). See /ai.md#argument-validation`);
+  }
+  if (typeof val !== 'number' || !Number.isFinite(val)) {
+    throw new ValidationError(`${paramName} must be a finite number, got ${describeValue(val)}. See /ai.md#argument-validation`);
+  }
+  if (opts.integer && !Number.isInteger(val)) {
+    throw new ValidationError(`${paramName} must be an integer, got ${val}. See /ai.md#argument-validation`);
+  }
+  if (opts.min !== undefined && val < opts.min) {
+    throw new ValidationError(`${paramName} must be >= ${opts.min}, got ${val}. See /ai.md#argument-validation`);
+  }
+  if (opts.max !== undefined && val > opts.max) {
+    throw new ValidationError(`${paramName} must be <= ${opts.max}, got ${val}. See /ai.md#argument-validation`);
+  }
+  return val;
+}
+
+interface AssertBooleanOpts { optional?: boolean }
+function assertBoolean(val: unknown, paramName: string, opts: AssertBooleanOpts = {}): boolean | undefined {
+  if (val === undefined || val === null) {
+    if (opts.optional) return undefined;
+    throw new ValidationError(`${paramName} is required (expected boolean, got ${describeValue(val)}). See /ai.md#argument-validation`);
+  }
+  if (typeof val !== 'boolean') {
+    throw new ValidationError(`${paramName} must be a boolean, got ${describeValue(val)}. See /ai.md#argument-validation`);
+  }
+  return val;
+}
+
+interface AssertObjectOpts { optional?: boolean }
+function assertObject(val: unknown, paramName: string, opts: AssertObjectOpts = {}): Record<string, unknown> | undefined {
+  if (val === undefined || val === null) {
+    if (opts.optional) return undefined;
+    throw new ValidationError(`${paramName} is required (expected object, got ${describeValue(val)}). See /ai.md#argument-validation`);
+  }
+  if (typeof val !== 'object' || Array.isArray(val)) {
+    throw new ValidationError(`${paramName} must be a plain object (not array/null), got ${describeValue(val)}. See /ai.md#argument-validation`);
+  }
+  return val as Record<string, unknown>;
+}
+
+function assertFunction(val: unknown, paramName: string): (...args: unknown[]) => unknown {
+  if (typeof val !== 'function') {
+    throw new ValidationError(`${paramName} must be a function, got ${describeValue(val)}. See /ai.md#argument-validation`);
+  }
+  return val as (...args: unknown[]) => unknown;
+}
+
+function assertEnum<T extends string>(val: unknown, allowed: readonly T[], paramName: string): T {
+  if (typeof val !== 'string' || !allowed.includes(val as T)) {
+    throw new ValidationError(`${paramName} must be one of: ${allowed.map(a => `"${a}"`).join(' | ')}. Got ${describeValue(val)}. See /ai.md#argument-validation`);
+  }
+  return val as T;
+}
+
+/** Validate a fixed-length tuple of numbers (e.g. [x,y,z]). */
+function assertNumberTuple(val: unknown, length: number, paramName: string): number[] {
+  if (!Array.isArray(val)) {
+    throw new ValidationError(`${paramName} must be an array of ${length} numbers, got ${describeValue(val)}. See /ai.md#argument-validation`);
+  }
+  if (val.length !== length) {
+    throw new ValidationError(`${paramName} must have exactly ${length} elements, got length=${val.length}. See /ai.md#argument-validation`);
+  }
+  for (let i = 0; i < length; i++) {
+    if (typeof val[i] !== 'number' || !Number.isFinite(val[i])) {
+      throw new ValidationError(`${paramName}[${i}] must be a finite number, got ${describeValue(val[i])}. See /ai.md#argument-validation`);
+    }
+  }
+  return val as number[];
+}
+
+function assertArray(val: unknown, paramName: string): unknown[] {
+  if (!Array.isArray(val)) {
+    throw new ValidationError(`${paramName} must be an array, got ${describeValue(val)}. See /ai.md#argument-validation`);
+  }
+  return val;
+}
+
+/** Reject any keys on `obj` that are not in the `allowed` set.
+ *  Catches typos like `{ widthToDeep: [1,2] }` that would otherwise be silently ignored. */
+function assertNoUnknownKeys(obj: Record<string, unknown>, allowed: readonly string[], paramName: string): void {
+  for (const key of Object.keys(obj)) {
+    if (!allowed.includes(key)) {
+      throw new ValidationError(`${paramName}.${key} is not a recognized field. Allowed: ${allowed.join(', ')}. See /ai.md#argument-validation`);
+    }
+  }
+}
+
+/** Validate a GeometryAssertions object shape. Throws ValidationError on failure. */
+const ASSERTION_FIELDS = [
+  'minVolume', 'maxVolume', 'isManifold', 'maxComponents', 'genus', 'minGenus', 'maxGenus',
+  'minBounds', 'maxBounds', 'minTriangles', 'maxTriangles', 'boundsRatio', 'notes',
+] as const;
+const BOUNDS_RATIO_FIELDS = ['widthToDepth', 'widthToHeight', 'depthToHeight'] as const;
+
+function validateAssertionsShape(assertions: unknown, paramName: string): void {
+  const a = assertObject(assertions, paramName)!;
+  assertNoUnknownKeys(a, ASSERTION_FIELDS, paramName);
+  assertNumber(a.minVolume, `${paramName}.minVolume`, { optional: true });
+  assertNumber(a.maxVolume, `${paramName}.maxVolume`, { optional: true });
+  assertBoolean(a.isManifold, `${paramName}.isManifold`, { optional: true });
+  assertNumber(a.maxComponents, `${paramName}.maxComponents`, { optional: true, min: 0, integer: true });
+  assertNumber(a.genus, `${paramName}.genus`, { optional: true, integer: true });
+  assertNumber(a.minGenus, `${paramName}.minGenus`, { optional: true, integer: true });
+  assertNumber(a.maxGenus, `${paramName}.maxGenus`, { optional: true, integer: true });
+  if (a.minBounds !== undefined) assertNumberTuple(a.minBounds, 3, `${paramName}.minBounds`);
+  if (a.maxBounds !== undefined) assertNumberTuple(a.maxBounds, 3, `${paramName}.maxBounds`);
+  assertNumber(a.minTriangles, `${paramName}.minTriangles`, { optional: true, min: 0, integer: true });
+  assertNumber(a.maxTriangles, `${paramName}.maxTriangles`, { optional: true, min: 0, integer: true });
+  assertString(a.notes, `${paramName}.notes`, { optional: true, allowEmpty: true });
+  if (a.boundsRatio !== undefined) {
+    const br = assertObject(a.boundsRatio, `${paramName}.boundsRatio`)!;
+    assertNoUnknownKeys(br, BOUNDS_RATIO_FIELDS, `${paramName}.boundsRatio`);
+    for (const k of BOUNDS_RATIO_FIELDS) {
+      if (br[k] !== undefined) assertNumberTuple(br[k], 2, `${paramName}.boundsRatio.${k}`);
+    }
+  }
+}
+
+// ===========================================================================
 
 /** Validate a { index } | { id } version-target arg. Returns a parsed descriptor
  *  or { error } with a caller-aware message. Exactly one of index/id must be set. */
@@ -626,7 +807,9 @@ async function main() {
   }
 
   // Expose showHelp for toolbar
-  (window as unknown as Record<string, unknown>).__mainifoldShowHelp = showHelp;
+  const windowRecord = window as unknown as Record<string, unknown>;
+  windowRecord.__partwrightShowHelp = showHelp;
+  windowRecord.__mainifoldShowHelp = showHelp;
 
   // Check which page to show before loading heavy resources
   const showLanding = shouldShowLanding();
@@ -743,8 +926,10 @@ async function main() {
   // Wire up clip controls
   initClipControls(clipControls);
 
-  // Wire up measure toggle
+  // Wire up viewport overlay buttons
+  initDimensionsToggle(clipControls);
   initMeasureToggle(clipControls);
+  initOrbitLockToggle(clipControls);
 
   editorReady = true;
   editorReadyResolve();
@@ -814,7 +999,7 @@ async function main() {
     const warnAgentUI = () => {
       if (agentUIWarningShown) return;
       agentUIWarningShown = true;
-      const msg = 'Detected UI-driven input. This app expects programmatic control from AI agents. Use window.mainifold.runAndSave() -- see /llms.txt';
+      const msg = 'Detected UI-driven input. This app expects programmatic control from AI agents. Use window.partwright.runAndSave() -- see /llms.txt';
       console.warn(msg);
       // Show a non-blocking toast
       const toast = document.createElement('div');
@@ -871,10 +1056,11 @@ async function main() {
     };
   }
 
-  // === Expose window.mainifold console API ===
-  const mainifoldAPI = {
+  // === Expose window.partwright console API ===
+  const partwrightAPI = {
     /** Run code string and update all views. Returns geometry data object. */
     async run(code?: string): Promise<Record<string, unknown>> {
+      assertString(code, 'run(code)', { optional: true, allowEmpty: false });
       const src = code ?? getValue();
       if (code !== undefined) setValue(code);
       await runCodeSync(src);
@@ -893,11 +1079,14 @@ async function main() {
 
     /** Set editor code (does not auto-run — call .run() after) */
     setCode(code: string): void {
+      assertString(code, 'setCode(code)', { allowEmpty: true });
       setValue(code);
     },
 
     /** Slice current manifold at Z height. Returns cross-section data. */
     sliceAtZ(z: number) {
+      const check = guard(() => assertNumber(z, 'sliceAtZ(z)'));
+      if (typeof check === 'object' && check !== null && 'error' in check) return check;
       if (!currentManifold) return { error: 'No geometry loaded' };
       return sliceAtZ(currentManifold, z);
     },
@@ -915,26 +1104,40 @@ async function main() {
 
     /** Export current model as GLB download. Optional filename override. */
     async exportGLB(filename?: string) {
+      assertString(filename, 'exportGLB(filename)', { optional: true });
       await exportGLB(filename);
     },
 
     /** Export current model as STL download. Optional filename override. */
     exportSTL(filename?: string) {
+      assertString(filename, 'exportSTL(filename)', { optional: true });
       if (currentMeshData) exportSTL(currentMeshData, filename);
     },
 
     /** Export current model as OBJ download. Optional filename override. */
     exportOBJ(filename?: string) {
+      assertString(filename, 'exportOBJ(filename)', { optional: true });
       if (currentMeshData) exportOBJ(currentMeshData, filename);
     },
 
     /** Export current model as 3MF download. Optional filename override. */
     export3MF(filename?: string) {
+      assertString(filename, 'export3MF(filename)', { optional: true });
       if (currentMeshData) export3MF(currentMeshData, filename);
     },
 
     /** Validate code without rendering. Returns { valid, error? } */
     async validate(code: string, opts?: { language?: Language }): Promise<{ valid: boolean; error?: string }> {
+      const check = guard(() => {
+        assertString(code, 'validate(code)', { allowEmpty: false });
+        if (opts !== undefined) {
+          const o = assertObject(opts, 'validate(code, opts)')!;
+          assertNoUnknownKeys(o, ['language'], 'validate(opts)');
+          if (o.language !== undefined) assertEnum(o.language, ['manifold-js', 'scad'], 'validate(opts).language');
+        }
+        return true;
+      });
+      if (typeof check === 'object' && check !== null && 'error' in check) return { valid: false, error: check.error };
       const r = await validateCodeAsync(code, opts?.language);
       return r.valid ? { valid: true } : { valid: false, error: r.error };
     },
@@ -946,6 +1149,7 @@ async function main() {
 
     /** Switch active engine language. Lazy-inits SCAD on first switch. */
     async setActiveLanguage(lang: Language): Promise<void> {
+      assertEnum(lang, ['manifold-js', 'scad'], 'setActiveLanguage(lang)');
       await switchLanguage(lang);
     },
 
@@ -953,6 +1157,7 @@ async function main() {
 
     /** Toggle clipping plane on/off */
     toggleClip(enabled?: boolean) {
+      assertBoolean(enabled, 'toggleClip(enabled)', { optional: true });
       const on = enabled ?? !getClipState().enabled;
       setClipping(on);
       syncClipUI();
@@ -961,6 +1166,7 @@ async function main() {
 
     /** Set clipping plane Z height */
     setClipZ(z: number) {
+      assertNumber(z, 'setClipZ(z)');
       setClipZ(z);
       syncClipUI();
       return getClipState();
@@ -978,12 +1184,21 @@ async function main() {
      *  azimuth: degrees, 0 = front (-Y), 90 = right (+X). Default 315.
      *  ortho: true for orthographic projection. Default false. */
     renderView(options?: { elevation?: number; azimuth?: number; ortho?: boolean; size?: number }): string | null {
+      if (options !== undefined) {
+        const o = assertObject(options, 'renderView(options)')!;
+        assertNoUnknownKeys(o, ['elevation', 'azimuth', 'ortho', 'size'], 'renderView(options)');
+        assertNumber(o.elevation, 'renderView(options).elevation', { optional: true, min: -90, max: 90 });
+        assertNumber(o.azimuth, 'renderView(options).azimuth', { optional: true });
+        assertBoolean(o.ortho, 'renderView(options).ortho', { optional: true });
+        assertNumber(o.size, 'renderView(options).size', { optional: true, min: 1, integer: true });
+      }
       if (!currentMeshData) return null;
       return renderSingleView(currentMeshData, options ?? {});
     },
 
     /** Render a cross-section at Z height as an SVG string for visual verification */
     sliceAtZVisual(z: number): { svg: string; area: number; contours: number } | null {
+      assertNumber(z, 'sliceAtZVisual(z)');
       if (!currentManifold) return null;
       const s = sliceAtZ(currentManifold, z);
       if (!s) return null;
@@ -997,6 +1212,12 @@ async function main() {
      *  Keys: front, right, back, left, top, perspective. Values: data URLs or image URLs.
      *  If a session is active, also persists to IndexedDB. */
     setReferenceImages(images: ReferenceImages): void {
+      const REF_KEYS = ['front', 'right', 'back', 'left', 'top', 'perspective'] as const;
+      const obj = assertObject(images, 'setReferenceImages(images)')!;
+      assertNoUnknownKeys(obj, REF_KEYS, 'setReferenceImages(images)');
+      for (const k of REF_KEYS) {
+        if (obj[k] !== undefined) assertString(obj[k], `setReferenceImages(images).${k}`, { allowEmpty: false });
+      }
       _setRefImages(images);
       // Persist to session if one is active
       persistReferenceImages(images as ReferenceImagesData);
@@ -1031,9 +1252,10 @@ async function main() {
 
     /** Create a new session and make it active */
     async createSession(name?: string) {
+      assertString(name, 'createSession(name)', { optional: true });
       const session = await createSession(name, getActiveLanguage());
       await addSessionNote(
-        '[WORKFLOW] Drive this app via window.mainifold (see /ai.md). ' +
+        '[WORKFLOW] Drive this app via window.partwright (see /ai.md). ' +
         'Use runAndSave(code, label, assertions) for iterations; ' +
         'addSessionNote with [REQUIREMENT]/[DECISION]/[MEASUREMENT]/[FEEDBACK]/[ATTEMPT]/[TODO] prefixes; ' +
         'getSessionContext() when resuming.',
@@ -1049,6 +1271,8 @@ async function main() {
 
     /** Open an existing session (loads latest version, restores reference images, restores language) */
     async openSession(id: string) {
+      const check = guard(() => assertString(id, 'openSession(id)', { allowEmpty: false }));
+      if (typeof check === 'object' && check !== null && 'error' in check) return check;
       const version = await openSession(id);
       if (version) {
         // Restore language from session
@@ -1082,11 +1306,13 @@ async function main() {
 
     /** Delete a session and all its versions */
     async deleteSession(id: string) {
+      assertString(id, 'deleteSession(id)', { allowEmpty: false });
       await deleteSession(id);
     },
 
     /** Save current state as a new version in the active session */
     async saveVersion(label?: string) {
+      assertString(label, 'saveVersion(label)', { optional: true });
       const thumbnail = await captureThumbnail();
       const version = await saveVersion(getValue(), getGeometryDataObj(), thumbnail, label);
       return version ? { id: version.id, index: version.index, label: version.label } : null;
@@ -1130,6 +1356,8 @@ async function main() {
 
     /** Navigate to previous or next version */
     async navigateVersion(direction: 'prev' | 'next') {
+      const check = guard(() => assertEnum(direction, ['prev', 'next'] as const, 'navigateVersion(direction)'));
+      if (typeof check === 'object' && check !== null && 'error' in check) return check;
       const version = await navigateVersion(direction);
       if (version) {
         setValue(version.code);
@@ -1141,6 +1369,13 @@ async function main() {
     /** Run code and save as a new version in one call. Returns stat diff vs previous version.
      *  Optional assertions — if provided, validates before saving. Fails fast without saving if assertions don't pass. */
     async runAndSave(code: string, label?: string, assertions?: GeometryAssertions) {
+      const check = guard(() => {
+        assertString(code, 'runAndSave(code)', { allowEmpty: false });
+        assertString(label, 'runAndSave(label)', { optional: true });
+        if (assertions !== undefined) validateAssertionsShape(assertions, 'runAndSave(assertions)');
+        return true;
+      });
+      if (typeof check === 'object' && check !== null && 'error' in check) return check;
       // If assertions provided, validate in isolation first (no side effects if it fails)
       if (assertions) {
         const { geometryData: testData, manifold: testManifold } = await executeIsolated(code);
@@ -1199,8 +1434,14 @@ async function main() {
       const parsed = parseVersionTarget(target, 'forkVersion');
       if ('error' in parsed) return parsed;
       if (typeof transformFn !== 'function') {
-        return { error: 'forkVersion(target, transformFn): transformFn must be a function (code: string) => string' };
+        return { error: 'forkVersion(target, transformFn): transformFn must be a function (code: string) => string. See /ai.md#argument-validation' };
       }
+      const check = guard(() => {
+        assertString(label, 'forkVersion(label)', { optional: true });
+        if (assertions !== undefined) validateAssertionsShape(assertions, 'forkVersion(assertions)');
+        return true;
+      });
+      if (typeof check === 'object' && check !== null && 'error' in check) return check;
       if (!getState().session) {
         return { error: 'No active session. Call openSession(id) or createSession() first.' };
       }
@@ -1280,6 +1521,8 @@ async function main() {
 
     /** Add a standalone note to the current session (requirements, feedback, decisions) */
     async addSessionNote(text: string) {
+      const check = guard(() => assertString(text, 'addSessionNote(text)', { allowEmpty: false }));
+      if (typeof check === 'object' && check !== null && 'error' in check) return check;
       const note = await addSessionNote(text);
       if (!note) return { error: 'No active session' };
       return { id: note.id, text: note.text, timestamp: note.timestamp };
@@ -1293,12 +1536,20 @@ async function main() {
 
     /** Delete a session note by ID */
     async deleteSessionNote(noteId: string) {
+      const check = guard(() => assertString(noteId, 'deleteSessionNote(noteId)', { allowEmpty: false }));
+      if (typeof check === 'object' && check !== null && 'error' in check) return check;
       await deleteSessionNote(noteId);
       return { success: true };
     },
 
     /** Update a session note's text by ID */
     async updateSessionNote(noteId: string, text: string) {
+      const check = guard(() => {
+        assertString(noteId, 'updateSessionNote(noteId)', { allowEmpty: false });
+        assertString(text, 'updateSessionNote(text)', { allowEmpty: false });
+        return true;
+      });
+      if (typeof check === 'object' && check !== null && 'error' in check) return check;
       await updateSessionNote(noteId, text);
       return { success: true };
     },
@@ -1312,11 +1563,44 @@ async function main() {
 
     /** Export a session as JSON (defaults to current session) */
     async exportSession(sessionId?: string) {
+      assertString(sessionId, 'exportSession(sessionId)', { optional: true });
       return exportSession(sessionId);
     },
 
     /** Import a session from JSON data, regenerating thumbnails */
     async importSession(data: ExportedSession) {
+      const check = guard(() => {
+        const d = assertObject(data, 'importSession(data)')!;
+        const brandVersion = d.partwright ?? d.mainifold;
+        assertString(brandVersion, 'importSession(data).partwright', { allowEmpty: false });
+        const s = assertObject(d.session, 'importSession(data).session')!;
+        assertString(s.name, 'importSession(data).session.name', { allowEmpty: true });
+        assertNumber(s.created, 'importSession(data).session.created');
+        assertNumber(s.updated, 'importSession(data).session.updated');
+        const versions = assertArray(d.versions, 'importSession(data).versions');
+        for (let i = 0; i < versions.length; i++) {
+          const v = assertObject(versions[i], `importSession(data).versions[${i}]`)!;
+          assertNumber(v.index, `importSession(data).versions[${i}].index`, { integer: true });
+          assertString(v.code, `importSession(data).versions[${i}].code`, { allowEmpty: true });
+          assertString(v.label, `importSession(data).versions[${i}].label`, { allowEmpty: true });
+          assertNumber(v.timestamp, `importSession(data).versions[${i}].timestamp`);
+          if (v.notes !== undefined) assertString(v.notes, `importSession(data).versions[${i}].notes`, { allowEmpty: true });
+          // geometryData may be null or an object; don't over-specify shape (historical data varies)
+          if (v.geometryData !== null && v.geometryData !== undefined) {
+            assertObject(v.geometryData, `importSession(data).versions[${i}].geometryData`);
+          }
+        }
+        if (d.notes !== undefined) {
+          const notes = assertArray(d.notes, 'importSession(data).notes');
+          for (let i = 0; i < notes.length; i++) {
+            const n = assertObject(notes[i], `importSession(data).notes[${i}]`)!;
+            assertString(n.text, `importSession(data).notes[${i}].text`, { allowEmpty: true });
+            assertNumber(n.timestamp, `importSession(data).notes[${i}].timestamp`);
+          }
+        }
+        return true;
+      });
+      if (typeof check === 'object' && check !== null && 'error' in check) return check;
       const session = await importSession(data, async (code: string) => {
         await runCodeSync(code);
         return captureThumbnail();
@@ -1354,6 +1638,10 @@ async function main() {
 
     /** Run code without mutating editor, viewport, or session state. Returns geometry stats + thumbnail. */
     async runIsolated(code: string) {
+      const check = guard(() => assertString(code, 'runIsolated(code)', { allowEmpty: false }));
+      if (typeof check === 'object' && check !== null && 'error' in check) {
+        return { geometryData: { status: 'error', error: check.error }, thumbnail: null };
+      }
       const { geometryData, meshData, manifold } = await executeIsolated(code);
 
       let thumbnail: string | null = null;
@@ -1373,6 +1661,14 @@ async function main() {
 
     /** Run code and check geometry against assertions. Does not mutate global state. */
     async runAndAssert(code: string, assertions: GeometryAssertions) {
+      const check = guard(() => {
+        assertString(code, 'runAndAssert(code)', { allowEmpty: false });
+        validateAssertionsShape(assertions, 'runAndAssert(assertions)');
+        return true;
+      });
+      if (typeof check === 'object' && check !== null && 'error' in check) {
+        return { passed: false, failures: [check.error], stats: null };
+      }
       const { geometryData, manifold } = await executeIsolated(code);
 
       // Clean up manifold
@@ -1393,6 +1689,10 @@ async function main() {
 
     /** Run code and decompose result into individual components for debugging. Does not mutate global state. */
     async runAndExplain(code: string) {
+      const check = guard(() => assertString(code, 'runAndExplain(code)', { allowEmpty: false }));
+      if (typeof check === 'object' && check !== null && 'error' in check) {
+        return { stats: { status: 'error', error: check.error }, components: null };
+      }
       const { geometryData, manifold } = await executeIsolated(code);
 
       if (geometryData.status === 'error' || !manifold) {
@@ -1503,6 +1803,14 @@ async function main() {
      *  The patchFn receives the current code string and returns modified code.
      *  Runs in isolation — no side effects on editor/viewport/session. */
     async modifyAndTest(patchFn: (code: string) => string, assertions?: GeometryAssertions) {
+      const check = guard(() => {
+        assertFunction(patchFn, 'modifyAndTest(patchFn)');
+        if (assertions !== undefined) validateAssertionsShape(assertions, 'modifyAndTest(assertions)');
+        return true;
+      });
+      if (typeof check === 'object' && check !== null && 'error' in check) {
+        return { error: check.error, modifiedCode: null, stats: null };
+      }
       const currentCode = getValue();
       let modifiedCode: string;
       try {
@@ -1529,6 +1837,21 @@ async function main() {
 
     /** Query multiple properties of the current geometry in a single call. Avoids multiple round-trips. */
     query(opts: { sliceAt?: number[]; decompose?: boolean; boundingBox?: boolean }) {
+      const check = guard(() => {
+        const o = assertObject(opts, 'query(opts)')!;
+        assertNoUnknownKeys(o, ['sliceAt', 'decompose', 'boundingBox'], 'query(opts)');
+        if (o.sliceAt !== undefined) {
+          const arr = assertArray(o.sliceAt, 'query(opts).sliceAt');
+          for (let i = 0; i < arr.length; i++) {
+            assertNumber(arr[i], `query(opts).sliceAt[${i}]`);
+          }
+        }
+        assertBoolean(o.decompose, 'query(opts).decompose', { optional: true });
+        assertBoolean(o.boundingBox, 'query(opts).boundingBox', { optional: true });
+        return true;
+      });
+      if (typeof check === 'object' && check !== null && 'error' in check) return check;
+
       const result: Record<string, unknown> = {};
 
       if (!currentManifold) {
@@ -1572,6 +1895,21 @@ async function main() {
 
     /** Create a session and populate it with multiple versions in one call */
     async createSessionWithVersions(name: string, versions: { code: string; label?: string }[]) {
+      const check = guard(() => {
+        assertString(name, 'createSessionWithVersions(name)', { allowEmpty: false });
+        const arr = assertArray(versions, 'createSessionWithVersions(versions)');
+        if (arr.length === 0) {
+          throw new ValidationError('createSessionWithVersions(versions): must contain at least one version. See /ai.md#argument-validation');
+        }
+        for (let i = 0; i < arr.length; i++) {
+          const v = assertObject(arr[i], `createSessionWithVersions(versions[${i}])`)!;
+          assertNoUnknownKeys(v, ['code', 'label'], `createSessionWithVersions(versions[${i}])`);
+          assertString(v.code, `createSessionWithVersions(versions[${i}].code)`, { allowEmpty: false });
+          assertString(v.label, `createSessionWithVersions(versions[${i}].label)`, { optional: true });
+        }
+        return true;
+      });
+      if (typeof check === 'object' && check !== null && 'error' in check) return check;
       const session = await createSession(name, getActiveLanguage());
       const results = [];
 
@@ -1598,6 +1936,7 @@ async function main() {
 
     /** Analyze Z-profile of current geometry — returns features at each height with radii, areas, positions */
     analyzeProfile(sampleCount?: number): ZProfile | null {
+      assertNumber(sampleCount, 'analyzeProfile(sampleCount)', { optional: true, min: 1, integer: true });
       if (!currentManifold) return null;
       const bbox = getBoundingBox(currentManifold);
       if (!bbox) return null;
@@ -1606,6 +1945,8 @@ async function main() {
 
     /** Analyze Z-profile of code in isolation — no side effects */
     async analyzeProfileIsolated(code: string, sampleCount?: number): Promise<{ profile: ZProfile | null; stats: Record<string, unknown> }> {
+      assertString(code, 'analyzeProfileIsolated(code)', { allowEmpty: false });
+      assertNumber(sampleCount, 'analyzeProfileIsolated(sampleCount)', { optional: true, min: 1, integer: true });
       const { geometryData, manifold } = await executeIsolated(code);
       if (geometryData.status === 'error' || !manifold) {
         return { profile: null, stats: geometryData };
@@ -1620,17 +1961,22 @@ async function main() {
 
     /** Probe geometry at an XY coordinate — shoots ray down Z axis, returns all hit Z values */
     measureAt(xy: [number, number]): ProbeResult | null {
+      assertNumberTuple(xy, 2, 'measureAt(xy)');
       if (!currentMeshData) return null;
       return probeAtXY(currentMeshData, xy[0], xy[1]);
     },
 
     /** Euclidean distance between two 3D points */
     measureBetween(p1: [number, number, number], p2: [number, number, number]): number {
+      assertNumberTuple(p1, 3, 'measureBetween(p1)');
+      assertNumberTuple(p2, 3, 'measureBetween(p2)');
       return measureDistance(p1, p2);
     },
 
     /** General ray query — cast from origin in direction, return all hits */
     probeRay(origin: [number, number, number], direction: [number, number, number]): GeneralRayResult | null {
+      assertNumberTuple(origin, 3, 'probeRay(origin)');
+      assertNumberTuple(direction, 3, 'probeRay(direction)');
       if (!currentMeshData) return null;
       return probeRay(currentMeshData, origin, direction);
     },
@@ -1656,11 +2002,14 @@ async function main() {
 
     /** Programmatic tab switching */
     setView(tab: 'interactive' | 'ai' | 'elevations' | 'gallery' | 'notes'): void {
+      assertEnum(tab, ['interactive', 'ai', 'elevations', 'gallery', 'notes'] as const, 'setView(tab)');
       switchTab(tab);
     },
 
     /** Rename a session */
     async renameSession(newName: string, id?: string): Promise<void> {
+      assertString(newName, 'renameSession(newName)', { allowEmpty: false });
+      assertString(id, 'renameSession(id)', { optional: true, allowEmpty: false });
       const targetId = id ?? getState().session?.id;
       if (!targetId) throw new Error('No active session and no id provided');
       await renameSession(targetId, newName);
@@ -1670,6 +2019,20 @@ async function main() {
 
     /** Set translucent reference geometry for fitment checking. Code is executed in isolation (always manifold-js). */
     setReferenceGeometry(code: string, options?: PhantomOptions): { success: boolean; error?: string; boundingBox?: unknown; volume?: number } {
+      const check = guard(() => {
+        assertString(code, 'setReferenceGeometry(code)', { allowEmpty: false });
+        if (options !== undefined) {
+          const opts = assertObject(options, 'setReferenceGeometry(code, options)')!;
+          assertNoUnknownKeys(opts, ['color', 'opacity', 'wireframe'], 'setReferenceGeometry(options)');
+          assertNumber(opts.color, 'setReferenceGeometry(options).color', { optional: true, min: 0, max: 0xffffff, integer: true });
+          assertNumber(opts.opacity, 'setReferenceGeometry(options).opacity', { optional: true, min: 0, max: 1 });
+          assertBoolean(opts.wireframe, 'setReferenceGeometry(options).wireframe', { optional: true });
+        }
+        return true;
+      });
+      if (typeof check === 'object' && check !== null && 'error' in check) {
+        return { success: false, error: check.error };
+      }
       const result = executeCode(code, 'manifold-js');
       if (result.error) {
         return { success: false, error: result.error };
@@ -1705,6 +2068,7 @@ async function main() {
 
     /** Declare the unit system (metadata only — no coordinate transformation) */
     setUnits(unit: UnitSystem): void {
+      assertEnum(unit, ['mm', 'cm', 'in', 'unitless'] as const, 'setUnits(unit)');
       _setUnits(unit);
     },
 
@@ -1715,17 +2079,21 @@ async function main() {
 
     // === Phase 5: Measuring Tool ===
 
-    /** Toggle interactive measure mode — click two points to measure distance */
+    /** Toggle interactive measure mode — click two points to measure distance.
+     *  Also locks camera rotation while measuring. */
     measureMode(enabled?: boolean): void {
+      assertBoolean(enabled, 'measureMode(enabled)', { optional: true });
       const state = getMeasureState();
       if (enabled === undefined) {
         // Toggle
-        if (state.active) deactivateMeasure();
-        else activateMeasure();
+        if (state.active) { deactivateMeasure(); setMeasureLock(false); }
+        else { activateMeasure(); setMeasureLock(true); }
       } else if (enabled) {
         activateMeasure();
+        setMeasureLock(true);
       } else {
         deactivateMeasure();
+        setMeasureLock(false);
       }
     },
 
@@ -1736,18 +2104,21 @@ async function main() {
 
     /** Programmatic measurement between two 3D points (no clicking needed) */
     measurePoints(p1: [number, number, number], p2: [number, number, number]): number {
+      assertNumberTuple(p1, 3, 'measurePoints(p1)');
+      assertNumberTuple(p2, 3, 'measurePoints(p2)');
       return measureDistance(p1, p2);
     },
 
     /** Self-documenting help -- returns structured object and logs readable summary */
     help(method?: string): Record<string, unknown> {
+      assertString(method, 'help(method)', { optional: true, allowEmpty: false });
       const methods: Record<string, { signature: string; docs: string }> = {
         // Core
-        'run':             { signature: 'run(code?) -- Run code, update views, return geometry stats', docs: '/ai.md#console-api--windowmainifold' },
+        'run':             { signature: 'run(code?) -- Run code, update views, return geometry stats', docs: '/ai.md#console-api--windowpartwright' },
         'getGeometryData': { signature: 'getGeometryData() -- Current stats as JSON object', docs: '/ai.md#geometry-data' },
-        'validate':        { signature: 'validate(code) -- Check code without rendering -> {valid, error?}', docs: '/ai.md#console-api--windowmainifold' },
-        'getCode':         { signature: 'getCode() -- Read editor contents', docs: '/ai.md#console-api--windowmainifold' },
-        'setCode':         { signature: 'setCode(code) -- Set editor contents (no auto-run)', docs: '/ai.md#console-api--windowmainifold' },
+        'validate':        { signature: 'validate(code) -- Check code without rendering -> {valid, error?}', docs: '/ai.md#console-api--windowpartwright' },
+        'getCode':         { signature: 'getCode() -- Read editor contents', docs: '/ai.md#console-api--windowpartwright' },
+        'setCode':         { signature: 'setCode(code) -- Set editor contents (no auto-run)', docs: '/ai.md#console-api--windowpartwright' },
         // Isolated execution
         'runIsolated':     { signature: 'await runIsolated(code) -- Test without side effects -> {geometryData, thumbnail}', docs: '/ai.md#testing-without-side-effects' },
         'runAndAssert':    { signature: 'await runAndAssert(code, assertions) -- Validate geometry -> {passed, failures?, stats}', docs: '/ai.md#assertions----structured-validation' },
@@ -1755,33 +2126,33 @@ async function main() {
         'modifyAndTest':   { signature: 'await modifyAndTest(patchFn, assertions?) -- Modify + test without committing', docs: '/ai.md#modify-and-test' },
         'query':           { signature: 'query({sliceAt?, decompose?, boundingBox?}) -- Multi-query current geometry', docs: '/ai.md#multi-query-current-geometry' },
         // Sessions
-        'createSession':   { signature: 'await createSession(name?) -- Create session -> {id, url, galleryUrl}', docs: '/ai.md#console-api--windowmainifold' },
+        'createSession':   { signature: 'await createSession(name?) -- Create session -> {id, url, galleryUrl}', docs: '/ai.md#console-api--windowpartwright' },
         'runAndSave':      { signature: 'await runAndSave(code, label?, assertions?) -- Assert + save version in one call', docs: '/ai.md#assert--save-in-one-call' },
-        'saveVersion':     { signature: 'await saveVersion(label?) -- Save current state as version', docs: '/ai.md#console-api--windowmainifold' },
-        'listVersions':    { signature: 'await listVersions() -- List all versions in session', docs: '/ai.md#console-api--windowmainifold' },
-        'loadVersion':     { signature: 'await loadVersion({index} | {id}) -- Load version into editor -> {id, index, label, code, geometryData} or {error}', docs: '/ai.md#console-api--windowmainifold' },
+        'saveVersion':     { signature: 'await saveVersion(label?) -- Save current state as version', docs: '/ai.md#console-api--windowpartwright' },
+        'listVersions':    { signature: 'await listVersions() -- List all versions in session', docs: '/ai.md#console-api--windowpartwright' },
+        'loadVersion':     { signature: 'await loadVersion({index} | {id}) -- Load version into editor -> {id, index, label, code, geometryData} or {error}', docs: '/ai.md#console-api--windowpartwright' },
         'forkVersion':     { signature: 'await forkVersion({index} | {id}, transformFn, label?, assertions?) -- Load + modify + validate + save in one call', docs: '/ai.md#forking-a-prior-version' },
         'openSession':     { signature: 'await openSession(id) -- Open existing session', docs: '/ai.md#resuming-a-session' },
-        'listSessions':    { signature: 'await listSessions() -- List all sessions', docs: '/ai.md#console-api--windowmainifold' },
+        'listSessions':    { signature: 'await listSessions() -- List all sessions', docs: '/ai.md#console-api--windowpartwright' },
         'getSessionContext': { signature: 'await getSessionContext() -- Get full session context (for resuming)', docs: '/ai.md#resuming-a-session' },
-        'getGalleryUrl':   { signature: 'getGalleryUrl() -- URL for gallery view (human review)', docs: '/ai.md#console-api--windowmainifold' },
+        'getGalleryUrl':   { signature: 'getGalleryUrl() -- URL for gallery view (human review)', docs: '/ai.md#console-api--windowpartwright' },
         // Notes
         'addSessionNote':  { signature: 'await addSessionNote(text) -- Add note with [PREFIX] tag', docs: '/ai.md#session-notes----tracking-design-context' },
         'listSessionNotes': { signature: 'await listSessionNotes() -- List all session notes', docs: '/ai.md#session-notes----tracking-design-context' },
         // Inspection
-        'sliceAtZ':        { signature: 'sliceAtZ(z) -- Cross-section at height -> {polygons, svg, area}', docs: '/ai.md#console-api--windowmainifold' },
-        'getBoundingBox':  { signature: 'getBoundingBox() -- -> {min, max}', docs: '/ai.md#console-api--windowmainifold' },
+        'sliceAtZ':        { signature: 'sliceAtZ(z) -- Cross-section at height -> {polygons, svg, area}', docs: '/ai.md#console-api--windowpartwright' },
+        'getBoundingBox':  { signature: 'getBoundingBox() -- -> {min, max}', docs: '/ai.md#console-api--windowpartwright' },
         'renderView':      { signature: 'renderView({elevation?, azimuth?, ortho?, size?}) -- Render from any angle -> data URL', docs: '/ai.md#visual-verification' },
-        'analyzeProfile':  { signature: 'analyzeProfile(sampleCount?) -- Z-profile feature summary', docs: '/ai.md#console-api--windowmainifold' },
-        'measureAt':       { signature: 'measureAt([x,y]) -- Ray-cast probe at XY -> {hits, thickness, topZ, bottomZ}', docs: '/ai.md#console-api--windowmainifold' },
+        'analyzeProfile':  { signature: 'analyzeProfile(sampleCount?) -- Z-profile feature summary', docs: '/ai.md#console-api--windowpartwright' },
+        'measureAt':       { signature: 'measureAt([x,y]) -- Ray-cast probe at XY -> {hits, thickness, topZ, bottomZ}', docs: '/ai.md#console-api--windowpartwright' },
         // View
         'setView':         { signature: 'setView(tab) -- Switch tab: "interactive", "ai", "elevations", "gallery"', docs: '/ai.md#view-tabs' },
         'getViewState':    { signature: 'getViewState() -- Current tab and camera state', docs: '/ai.md#view-tabs' },
         // Export
-        'exportGLB':       { signature: 'await exportGLB() -- Download GLB file', docs: '/ai.md#console-api--windowmainifold' },
-        'exportSTL':       { signature: 'exportSTL() -- Download STL file', docs: '/ai.md#console-api--windowmainifold' },
-        'exportOBJ':       { signature: 'exportOBJ() -- Download OBJ file', docs: '/ai.md#console-api--windowmainifold' },
-        'export3MF':       { signature: 'export3MF() -- Download 3MF file', docs: '/ai.md#console-api--windowmainifold' },
+        'exportGLB':       { signature: 'await exportGLB() -- Download GLB file', docs: '/ai.md#console-api--windowpartwright' },
+        'exportSTL':       { signature: 'exportSTL() -- Download STL file', docs: '/ai.md#console-api--windowpartwright' },
+        'exportOBJ':       { signature: 'exportOBJ() -- Download OBJ file', docs: '/ai.md#console-api--windowpartwright' },
+        'export3MF':       { signature: 'export3MF() -- Download 3MF file', docs: '/ai.md#console-api--windowpartwright' },
       };
 
       if (method) {
@@ -1794,30 +2165,30 @@ async function main() {
       }
 
       const result = {
-        app: 'mAInifold -- AI-driven parametric CAD in the browser',
+        app: 'Partwright -- AI-driven parametric CAD in the browser',
         docs: '/ai.md',
         constraints: {
           codeMustReturn: 'Code must end with: return <Manifold object>;',
           noUIAutomation: 'Do not drive the app with clicks or keystrokes. Use this API.',
         },
         quickstart: [
-          'mainifold.help()                        // You are here',
-          'await mainifold.createSession("name")   // Start a named session',
-          'await mainifold.runAndSave(code, "v1", {isManifold: true, maxComponents: 1})',
+          'partwright.help()                        // You are here',
+          'await partwright.createSession("name")   // Start a named session',
+          'await partwright.runAndSave(code, "v1", {isManifold: true, maxComponents: 1})',
         ],
         methods,
       };
 
       // Also log a readable summary to the console
       const lines = [
-        'mAInifold -- AI-driven parametric CAD. Full docs: /ai.md',
+        'Partwright -- AI-driven parametric CAD. Full docs: /ai.md',
         '',
         'Code must end with: return <Manifold object>;',
         'Do not drive the UI with clicks/keystrokes -- use this API.',
         '',
         'Quickstart:',
-        '  await mainifold.createSession("name")',
-        '  await mainifold.runAndSave(code, "v1", {isManifold: true, maxComponents: 1})',
+        '  await partwright.createSession("name")',
+        '  await partwright.runAndSave(code, "v1", {isManifold: true, maxComponents: 1})',
         '',
         'Methods:',
         ...Object.entries(methods).map(([, v]) => `  ${v.signature}`),
@@ -1828,10 +2199,12 @@ async function main() {
     },
   };
 
-  (window as unknown as Record<string, unknown>).mainifold = mainifoldAPI;
+  const apiWindow = window as unknown as Record<string, unknown>;
+  apiWindow.partwright = partwrightAPI;
+  apiWindow.mainifold = partwrightAPI;
 
   // Log API availability for AI agents
-  console.info('mAInifold: AI agents should use window.mainifold -- start with mainifold.help(). See /llms.txt');
+  console.info('Partwright: AI agents should use window.partwright -- start with partwright.help(). window.mainifold remains as a legacy alias. See /llms.txt');
 
   // === Internal functions ===
 
@@ -1944,11 +2317,44 @@ async function main() {
       const state = getMeasureState();
       if (state.active) {
         deactivateMeasure();
+        setMeasureLock(false);
         measureBtn.className = inactiveClass;
       } else {
         activateMeasure();
+        setMeasureLock(true);
         measureBtn.className = activeClass;
       }
+    });
+  }
+
+  function initDimensionsToggle(container: HTMLElement) {
+    const dimBtn = container.querySelector('#dimensions-toggle') as HTMLButtonElement;
+    if (!dimBtn) return;
+
+    const inactiveClass = 'px-2 py-1 rounded text-xs bg-zinc-800/80 backdrop-blur text-zinc-400 hover:text-zinc-200 hover:bg-zinc-700/80 transition-colors border border-zinc-600/50';
+    const activeClass = 'px-2 py-1 rounded text-xs bg-blue-500/20 backdrop-blur text-blue-400 hover:bg-blue-500/30 transition-colors border border-blue-500/30';
+
+    dimBtn.addEventListener('click', () => {
+      const nowVisible = !isDimensionsVisible();
+      setDimensionsVisible(nowVisible);
+      dimBtn.className = nowVisible ? activeClass : inactiveClass;
+      dimBtn.title = nowVisible ? 'Hide bounding box dimensions' : 'Show bounding box dimensions';
+    });
+  }
+
+  function initOrbitLockToggle(container: HTMLElement) {
+    const lockBtn = container.querySelector('#orbit-lock-toggle') as HTMLButtonElement;
+    if (!lockBtn) return;
+
+    const inactiveClass = 'px-2 py-1 rounded text-xs bg-zinc-800/80 backdrop-blur text-zinc-400 hover:text-zinc-200 hover:bg-zinc-700/80 transition-colors border border-zinc-600/50';
+    const activeClass = 'px-2 py-1 rounded text-xs bg-amber-500/20 backdrop-blur text-amber-400 hover:bg-amber-500/30 transition-colors border border-amber-500/30';
+
+    lockBtn.addEventListener('click', () => {
+      const locked = !isUserOrbitLocked();
+      setUserOrbitLock(locked);
+      lockBtn.className = locked ? activeClass : inactiveClass;
+      lockBtn.textContent = locked ? '\uD83D\uDD12' : '\uD83D\uDD13';
+      lockBtn.title = locked ? 'Unlock camera rotation' : 'Lock camera rotation';
     });
   }
 }

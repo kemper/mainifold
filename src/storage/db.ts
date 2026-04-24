@@ -38,7 +38,9 @@ export interface SessionNote {
   timestamp: number;
 }
 
-const DB_NAME = 'mainifold';
+const DB_NAME = 'partwright';
+const LEGACY_DB_NAME = 'mainifold';
+const LEGACY_MIGRATION_KEY = 'partwright-migrated-mainifold-db';
 const DB_VERSION = 2;
 
 let dbPromise: Promise<IDBDatabase> | null = null;
@@ -62,7 +64,12 @@ function openDB(): Promise<IDBDatabase> {
         store.createIndex('sessionId', 'sessionId', { unique: false });
       }
     };
-    req.onsuccess = () => resolve(req.result);
+    req.onsuccess = () => {
+      const db = req.result;
+      migrateLegacyData(db)
+        .catch(err => console.warn('Partwright: legacy session migration skipped:', err))
+        .finally(() => resolve(db));
+    };
     req.onerror = () => reject(req.error);
   });
   return dbPromise;
@@ -86,6 +93,109 @@ function reqToPromise<T>(req: IDBRequest<T>): Promise<T> {
     req.onsuccess = () => resolve(req.result);
     req.onerror = () => reject(req.error);
   });
+}
+
+function txComplete(txn: IDBTransaction): Promise<void> {
+  return new Promise((resolve, reject) => {
+    txn.oncomplete = () => resolve();
+    txn.onerror = () => reject(txn.error);
+    txn.onabort = () => reject(txn.error);
+  });
+}
+
+function hasLegacyMigrationRun(): boolean {
+  try {
+    return localStorage.getItem(LEGACY_MIGRATION_KEY) === 'true';
+  } catch {
+    return false;
+  }
+}
+
+function markLegacyMigrationRun(): void {
+  try {
+    localStorage.setItem(LEGACY_MIGRATION_KEY, 'true');
+  } catch {
+    // Ignore storage failures; migration is only a convenience for local sessions.
+  }
+}
+
+async function legacyDBExists(): Promise<boolean> {
+  const factory = indexedDB as IDBFactory & { databases?: () => Promise<{ name?: string | null }[]> };
+  if (!factory.databases) return true;
+  const databases = await factory.databases();
+  return databases.some(db => db.name === LEGACY_DB_NAME);
+}
+
+function openExistingDB(name: string): Promise<IDBDatabase | null> {
+  return new Promise(resolve => {
+    const req = indexedDB.open(name);
+    req.onupgradeneeded = () => {
+      req.transaction?.abort();
+    };
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => resolve(null);
+    req.onblocked = () => resolve(null);
+  });
+}
+
+async function getAllFromStore<T>(db: IDBDatabase, storeName: string): Promise<T[]> {
+  if (!db.objectStoreNames.contains(storeName)) return [];
+  const txn = db.transaction(storeName, 'readonly');
+  const records = await reqToPromise(txn.objectStore(storeName).getAll()) as T[];
+  await txComplete(txn);
+  return records;
+}
+
+async function getStoreCount(db: IDBDatabase, storeName: string): Promise<number> {
+  if (!db.objectStoreNames.contains(storeName)) return 0;
+  const txn = db.transaction(storeName, 'readonly');
+  const count = await reqToPromise(txn.objectStore(storeName).count());
+  await txComplete(txn);
+  return count;
+}
+
+async function migrateLegacyData(targetDb: IDBDatabase): Promise<void> {
+  if (hasLegacyMigrationRun()) return;
+
+  const targetSessionCount = await getStoreCount(targetDb, 'sessions');
+  if (targetSessionCount > 0) {
+    markLegacyMigrationRun();
+    return;
+  }
+
+  if (!(await legacyDBExists())) {
+    markLegacyMigrationRun();
+    return;
+  }
+
+  const legacyDb = await openExistingDB(LEGACY_DB_NAME);
+  if (!legacyDb) {
+    markLegacyMigrationRun();
+    return;
+  }
+
+  try {
+    const [sessions, versions, notes] = await Promise.all([
+      getAllFromStore<Session>(legacyDb, 'sessions'),
+      getAllFromStore<Version>(legacyDb, 'versions'),
+      getAllFromStore<SessionNote>(legacyDb, 'notes'),
+    ]);
+
+    if (sessions.length === 0 && versions.length === 0 && notes.length === 0) {
+      markLegacyMigrationRun();
+      return;
+    }
+
+    const txn = targetDb.transaction(['sessions', 'versions', 'notes'], 'readwrite');
+    for (const session of sessions) txn.objectStore('sessions').put(session);
+    for (const version of versions) txn.objectStore('versions').put(version);
+    for (const note of notes) txn.objectStore('notes').put(note);
+    await txComplete(txn);
+    console.info(`Partwright: migrated ${sessions.length} legacy session(s) from previous app storage.`);
+    markLegacyMigrationRun();
+  } finally {
+    legacyDb.close();
+  }
 }
 
 // === Sessions ===
