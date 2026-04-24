@@ -133,8 +133,9 @@ export function updateMesh(meshData: MeshData): void {
   }
 
   const geometry = meshGLToBufferGeometry(meshData);
+  const hasColors = geometry.hasAttribute('color');
 
-  const solidMat = createDefaultMaterial();
+  const solidMat = createDefaultMaterial(hasColors);
   const wireMat = createWireframeMaterial();
 
   // Apply clipping planes to materials
@@ -273,17 +274,64 @@ function removeClipPlaneVisual() {
 
 function meshGLToBufferGeometry(mesh: MeshData): THREE.BufferGeometry {
   const geometry = new THREE.BufferGeometry();
-  const positions = new Float32Array(mesh.numVert * 3);
 
-  for (let i = 0; i < mesh.numVert; i++) {
-    positions[i * 3] = mesh.vertProperties[i * mesh.numProp];
-    positions[i * 3 + 1] = mesh.vertProperties[i * mesh.numProp + 1];
-    positions[i * 3 + 2] = mesh.vertProperties[i * mesh.numProp + 2];
+  if (mesh.triColors) {
+    // With per-triangle colors, we must unindex (duplicate vertices per triangle)
+    // so each triangle's 3 vertices can carry that triangle's color.
+    const numTri = mesh.numTri;
+    const positions = new Float32Array(numTri * 3 * 3);
+    const colors = new Float32Array(numTri * 3 * 3);
+    const { vertProperties, triVerts, numProp, triColors } = mesh;
+
+    for (let t = 0; t < numTri; t++) {
+      const v0 = triVerts[t * 3];
+      const v1 = triVerts[t * 3 + 1];
+      const v2 = triVerts[t * 3 + 2];
+
+      // Positions
+      for (let c = 0; c < 3; c++) {
+        positions[t * 9 + c] = vertProperties[v0 * numProp + c];
+        positions[t * 9 + 3 + c] = vertProperties[v1 * numProp + c];
+        positions[t * 9 + 6 + c] = vertProperties[v2 * numProp + c];
+      }
+
+      // Colors (same for all 3 vertices of the triangle)
+      const r = triColors[t * 3] / 255;
+      const g = triColors[t * 3 + 1] / 255;
+      const b = triColors[t * 3 + 2] / 255;
+
+      // Check if this triangle is painted (has a color region)
+      const painted = (triColors as Uint8Array & { _painted?: Uint8Array })._painted;
+      const isPainted = painted ? painted[t] === 1 : (r !== 0 || g !== 0 || b !== 0);
+
+      // Unpainted triangles get the default blue (#4a9eff)
+      const cr = isPainted ? r : 0x4a / 255;
+      const cg = isPainted ? g : 0x9e / 255;
+      const cb = isPainted ? b : 0xff / 255;
+
+      for (let v = 0; v < 3; v++) {
+        colors[t * 9 + v * 3] = cr;
+        colors[t * 9 + v * 3 + 1] = cg;
+        colors[t * 9 + v * 3 + 2] = cb;
+      }
+    }
+
+    geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+    geometry.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+    geometry.computeVertexNormals();
+  } else {
+    // No colors — use indexed geometry (original path)
+    const positions = new Float32Array(mesh.numVert * 3);
+    for (let i = 0; i < mesh.numVert; i++) {
+      positions[i * 3] = mesh.vertProperties[i * mesh.numProp];
+      positions[i * 3 + 1] = mesh.vertProperties[i * mesh.numProp + 1];
+      positions[i * 3 + 2] = mesh.vertProperties[i * mesh.numProp + 2];
+    }
+    geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+    geometry.setIndex(new THREE.BufferAttribute(mesh.triVerts, 1));
+    geometry.computeVertexNormals();
   }
 
-  geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
-  geometry.setIndex(new THREE.BufferAttribute(mesh.triVerts, 1));
-  geometry.computeVertexNormals();
   return geometry;
 }
 

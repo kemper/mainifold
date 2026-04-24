@@ -26,6 +26,11 @@ import { checkContainment, type ContainmentWarning } from './geometry/containmen
 import { setUnits as _setUnits, getUnits as _getUnits, type UnitSystem } from './geometry/units';
 import { initMeasureTool, activate as activateMeasure, deactivate as deactivateMeasure, getState as getMeasureState } from './ui/measureTool';
 import { maybeStartTour, resetTour, startTour } from './ui/tour';
+import { initPaintUI } from './color/paintUI';
+import { updatePaintMesh, setOnRegionPainted, isActive as isPaintActive } from './color/paintMode';
+import { applyTriColors, hasRegions as hasColorRegions, onChange as onColorRegionsChange, clearRegions, serialize as serializeRegions, addRegion, getRegions, type SerializedColorRegion } from './color/regions';
+import { initEditorLock, syncLockState, setUnlockHandlers } from './color/editorLock';
+import { buildAdjacency, findCoplanarRegion, resolveSeed } from './color/adjacency';
 import {
   getSessionIdFromURL,
   getVersionFromURL,
@@ -354,6 +359,54 @@ function getGeometryDataObj(): Record<string, unknown> | null {
   }
 }
 
+/** Rehydrate color regions from a version's geometryData.
+ *  Rebuilds adjacency + BFS for coplanar descriptors against the current mesh. */
+function rehydrateColorRegions(geometryData: Record<string, unknown> | null): void {
+  clearRegions();
+
+  if (!geometryData || !currentMeshData) return;
+  const regions = geometryData.colorRegions as SerializedColorRegion[] | undefined;
+  if (!regions || regions.length === 0) return;
+
+  const mesh = currentMeshData;
+  const adjacency = buildAdjacency(mesh);
+
+  for (const region of regions) {
+    let triangles = new Set<number>();
+
+    if (region.descriptor.kind === 'coplanar') {
+      const { seedPoint, seedNormal, normalTolerance } = region.descriptor;
+      const seedTri = resolveSeed(seedPoint, seedNormal, mesh, adjacency, normalTolerance);
+      if (seedTri >= 0) {
+        triangles = findCoplanarRegion(seedTri, adjacency, normalTolerance);
+      }
+    } else if (region.descriptor.kind === 'triangles') {
+      triangles = new Set(region.descriptor.ids);
+    }
+
+    if (triangles.size > 0) {
+      addRegion(region.name, region.color, region.source, region.descriptor, triangles);
+    }
+  }
+
+  syncLockState();
+
+  // Re-render with colors if regions were rehydrated
+  if (hasColorRegions() && currentMeshData) {
+    const colored = applyTriColors(currentMeshData);
+    updateMesh(colored);
+  }
+}
+
+/** Include color regions in geometry data for saving. */
+function enrichGeometryDataWithColors(geoData: Record<string, unknown> | null): Record<string, unknown> | null {
+  if (!geoData) return geoData;
+  if (hasColorRegions()) {
+    geoData.colorRegions = serializeRegions();
+  }
+  return geoData;
+}
+
 // === Argument validation helpers ==========================================
 //
 // Runtime type/shape validation for the window.partwright API. The public API
@@ -638,7 +691,7 @@ async function main() {
       if (currentMeshData) exportOBJ(currentMeshData);
     },
     onExport3MF: () => {
-      if (currentMeshData) export3MF(currentMeshData);
+      if (currentMeshData) export3MF(hasColorRegions() ? applyTriColors(currentMeshData) : currentMeshData);
     },
     onExampleSelect: async (entry: ExampleEntry) => {
       // Auto-switch engine + editor mode if the example uses a different language.
@@ -674,12 +727,16 @@ async function main() {
   createSessionBar(editorUI, {
     onSaveVersion: async () => ({
       code: getValue(),
-      geometryData: getGeometryDataObj(),
+      geometryData: enrichGeometryDataWithColors(getGeometryDataObj()),
       thumbnail: await captureThumbnail(),
     }),
-    onLoadVersion: (code: string) => {
+    onLoadVersion: async (code: string) => {
       setValue(code);
-      runCode(code);
+      await runCodeSync(code);
+      const loadedVersion = getState().currentVersion;
+      if (loadedVersion) {
+        rehydrateColorRegions(loadedVersion.geometryData);
+      }
     },
     onOpenGallery: () => {
       switchTab('gallery');
@@ -711,9 +768,14 @@ async function main() {
   initViewsPanel(viewsContainer);
 
   // Init gallery
-  createGalleryView(galleryContainer, (code: string) => {
+  createGalleryView(galleryContainer, async (code: string) => {
     setValue(code);
-    runCode(code);
+    await runCodeSync(code);
+    // Rehydrate color regions from the loaded version
+    const loadedVersion = getState().currentVersion;
+    if (loadedVersion) {
+      rehydrateColorRegions(loadedVersion.geometryData);
+    }
     switchTab('interactive');
   });
 
@@ -928,8 +990,61 @@ async function main() {
 
   // Wire up viewport overlay buttons
   initDimensionsToggle(clipControls);
+  initPaintUI(clipControls);
   initMeasureToggle(clipControls);
   initOrbitLockToggle(clipControls);
+
+  // Initialize editor lock
+  initEditorLock(editorContainer);
+
+  // Set up unlock handlers
+  setUnlockHandlers(
+    // Fork: save the colored version first, then create a new uncolored version
+    async (colorData) => {
+      // Save current version with color data if in a session
+      if (getState().session && currentMeshData) {
+        const code = getValue();
+        const geometryData = getGeometryDataObj() ?? {};
+        geometryData.colorRegions = colorData;
+        await saveVersion(code, geometryData, null, 'colored', undefined);
+      }
+      // Editor is now unlocked (clearRegions already called), re-render without colors
+      if (currentMeshData) {
+        updateMesh(currentMeshData);
+        updateMultiView(currentMeshData);
+        renderElevationsToContainer(elevationsContainer, currentMeshData);
+      }
+    },
+    // Clear: just re-render without colors (clearRegions already called)
+    () => {
+      if (currentMeshData) {
+        updateMesh(currentMeshData);
+        updateMultiView(currentMeshData);
+        renderElevationsToContainer(elevationsContainer, currentMeshData);
+      }
+    },
+  );
+
+  // When a color region is painted, re-render the mesh with colors and sync lock
+  setOnRegionPainted(() => {
+    if (currentMeshData) {
+      const colored = applyTriColors(currentMeshData);
+      updateMesh(colored);
+      updateMultiView(colored);
+      renderElevationsToContainer(elevationsContainer, colored);
+    }
+    syncLockState();
+  });
+
+  // Also listen for any region change (e.g. clear) to re-render
+  onColorRegionsChange(() => {
+    syncLockState();
+    if (!isPaintActive()) return; // only auto-refresh while paint mode is on
+    if (currentMeshData) {
+      const colored = applyTriColors(currentMeshData);
+      updateMesh(colored);
+    }
+  });
 
   editorReady = true;
   editorReadyResolve();
@@ -954,7 +1069,9 @@ async function main() {
           await ensureEngineReady(sessionLang);
         }
         setValue(version.code);
-        runCode(version.code);
+        await runCodeSync(version.code);
+        // Rehydrate color regions from loaded version
+        rehydrateColorRegions(version.geometryData);
         const refImages = await getReferenceImagesFromSession();
         if (refImages) {
           _setRefImages(refImages as ReferenceImages);
@@ -1123,7 +1240,7 @@ async function main() {
     /** Export current model as 3MF download. Optional filename override. */
     export3MF(filename?: string) {
       assertString(filename, 'export3MF(filename)', { optional: true });
-      if (currentMeshData) export3MF(currentMeshData, filename);
+      if (currentMeshData) export3MF(hasColorRegions() ? applyTriColors(currentMeshData) : currentMeshData, filename);
     },
 
     /** Validate code without rendering. Returns { valid, error? } */
@@ -1314,7 +1431,7 @@ async function main() {
     async saveVersion(label?: string) {
       assertString(label, 'saveVersion(label)', { optional: true });
       const thumbnail = await captureThumbnail();
-      const version = await saveVersion(getValue(), getGeometryDataObj(), thumbnail, label);
+      const version = await saveVersion(getValue(), enrichGeometryDataWithColors(getGeometryDataObj()), thumbnail, label);
       return version ? { id: version.id, index: version.index, label: version.label } : null;
     },
 
@@ -1345,6 +1462,7 @@ async function main() {
       }
       setValue(version.code);
       await runCodeSync(version.code);
+      rehydrateColorRegions(version.geometryData);
       return {
         id: version.id,
         index: version.index,
@@ -1362,6 +1480,7 @@ async function main() {
       if (version) {
         setValue(version.code);
         await runCodeSync(version.code);
+        rehydrateColorRegions(version.geometryData);
       }
       return version ? { id: version.id, index: version.index, label: version.label } : null;
     },
@@ -1402,7 +1521,7 @@ async function main() {
       await runCodeSync(code);
       const newGeoData = JSON.parse(geometryDataEl.textContent || '{}');
       const thumbnail = await captureThumbnail();
-      const version = await saveVersion(code, getGeometryDataObj(), thumbnail, label, assertions?.notes);
+      const version = await saveVersion(code, enrichGeometryDataWithColors(getGeometryDataObj()), thumbnail, label, assertions?.notes);
 
       let diff = null;
       if (prevGeoData && prevGeoData.status === 'ok' && newGeoData.status === 'ok') {
@@ -2109,6 +2228,65 @@ async function main() {
       return measureDistance(p1, p2);
     },
 
+    // === Color Regions API ===
+
+    /** Paint a coplanar region by specifying a point and normal on the model surface.
+     *  Returns the created region or {error}. */
+    paintRegion(opts: { point: [number, number, number]; normal: [number, number, number]; color: [number, number, number]; name?: string; tolerance?: number }) {
+      if (!currentMeshData) return { error: 'No geometry loaded' };
+      if (!opts || typeof opts !== 'object') return { error: 'paintRegion requires {point, normal, color}' };
+      const { point, normal, color, name, tolerance } = opts;
+      if (!Array.isArray(point) || point.length !== 3) return { error: 'point must be [x,y,z]' };
+      if (!Array.isArray(normal) || normal.length !== 3) return { error: 'normal must be [nx,ny,nz]' };
+      if (!Array.isArray(color) || color.length !== 3) return { error: 'color must be [r,g,b] with values 0..1' };
+
+      const normalTolerance = tolerance ?? 0.9995;
+      const adjacency = buildAdjacency(currentMeshData);
+      const seedTri = resolveSeed(point as [number, number, number], normal as [number, number, number], currentMeshData, adjacency, normalTolerance);
+      if (seedTri < 0) return { error: 'No matching face found at the given point/normal' };
+
+      const triangles = findCoplanarRegion(seedTri, adjacency, normalTolerance);
+      const regionName = name ?? `Region ${getRegions().length + 1}`;
+      const region = addRegion(
+        regionName,
+        color as [number, number, number],
+        'face-pick',
+        { kind: 'coplanar', seedPoint: point as [number, number, number], seedNormal: normal as [number, number, number], normalTolerance },
+        triangles,
+      );
+
+      // Re-render with colors
+      const colored = applyTriColors(currentMeshData);
+      updateMesh(colored);
+      updateMultiView(colored);
+      syncLockState();
+
+      return { id: region.id, name: region.name, triangles: triangles.size };
+    },
+
+    /** List all color regions on the current geometry */
+    listRegions() {
+      return getRegions().map(r => ({
+        id: r.id,
+        name: r.name,
+        color: r.color,
+        source: r.source,
+        triangles: r.triangles.size,
+        order: r.order,
+      }));
+    },
+
+    /** Clear all color regions */
+    clearColors() {
+      clearRegions();
+      if (currentMeshData) {
+        updateMesh(currentMeshData);
+        updateMultiView(currentMeshData);
+      }
+      syncLockState();
+      return { cleared: true };
+    },
+
     /** Self-documenting help -- returns structured object and logs readable summary */
     help(method?: string): Record<string, unknown> {
       assertString(method, 'help(method)', { optional: true, allowEmpty: false });
@@ -2153,6 +2331,10 @@ async function main() {
         'exportSTL':       { signature: 'exportSTL() -- Download STL file', docs: '/ai.md#console-api--windowpartwright' },
         'exportOBJ':       { signature: 'exportOBJ() -- Download OBJ file', docs: '/ai.md#console-api--windowpartwright' },
         'export3MF':       { signature: 'export3MF() -- Download 3MF file', docs: '/ai.md#console-api--windowpartwright' },
+        // Color regions
+        'paintRegion':     { signature: 'paintRegion({point, normal, color, name?, tolerance?}) -- Paint coplanar face region', docs: '/ai.md#color-regions' },
+        'listRegions':     { signature: 'listRegions() -- List all color regions', docs: '/ai.md#color-regions' },
+        'clearColors':     { signature: 'clearColors() -- Remove all color regions', docs: '/ai.md#color-regions' },
       };
 
       if (method) {
@@ -2234,9 +2416,14 @@ async function main() {
     if (result.mesh) {
       currentMeshData = result.mesh;
       currentManifold = result.manifold;
-      updateMesh(result.mesh);
-      updateMultiView(result.mesh);
-      renderElevationsToContainer(elevationsContainer, result.mesh);
+
+      // Apply any existing color regions to the mesh
+      const displayMesh = hasColorRegions() ? applyTriColors(result.mesh) : result.mesh;
+      updateMesh(displayMesh);
+      updateMultiView(displayMesh);
+      renderElevationsToContainer(elevationsContainer, displayMesh);
+      updatePaintMesh(result.mesh); // always pass uncolored mesh for adjacency
+
       updateGeometryData(elapsed, src);
       syncClipSliderBounds();
       setStatus(statusBar, 'ready', 'Ready');

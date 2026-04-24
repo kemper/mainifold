@@ -10,6 +10,7 @@ export type EditorLanguage = 'manifold-js' | 'scad';
 let editorView: EditorView | null = null;
 let debounceTimer: number | null = null;
 const languageCompartment = new Compartment();
+const readOnlyCompartment = new Compartment();
 
 // Minimal OpenSCAD StreamLanguage — keyword/builtin/comment/string/number coloring.
 const SCAD_KEYWORDS = new Set([
@@ -68,6 +69,7 @@ export function initEditor(
     extensions: [
       basicSetup,
       languageCompartment.of(languageExt(initialLanguage)),
+      readOnlyCompartment.of(EditorState.readOnly.of(false)),
       oneDark,
       EditorView.updateListener.of((update) => {
         if (update.docChanged) {
@@ -108,5 +110,12 @@ export function setValue(code: string): void {
   if (!editorView) return;
   editorView.dispatch({
     changes: { from: 0, to: editorView.state.doc.length, insert: code },
+  });
+}
+
+export function setReadOnly(readOnly: boolean): void {
+  if (!editorView) return;
+  editorView.dispatch({
+    effects: readOnlyCompartment.reconfigure(EditorState.readOnly.of(readOnly)),
   });
 }
