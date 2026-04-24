@@ -222,6 +222,14 @@ function createClipControls(): HTMLElement {
   container.id = 'clip-controls';
   container.className = 'absolute top-2 right-2 z-10 flex items-center gap-2';
 
+  // Grid toggle (off by default)
+  const gridBtn = document.createElement('button');
+  gridBtn.id = 'grid-toggle';
+  gridBtn.className = 'px-2 py-1 rounded text-xs bg-zinc-800/80 backdrop-blur text-zinc-400 hover:text-zinc-200 hover:bg-zinc-700/80 transition-colors border border-zinc-600/50';
+  gridBtn.textContent = '\u25A6';
+  gridBtn.title = 'Show grid plane';
+  container.appendChild(gridBtn);
+
   // Dimensions toggle (on by default)
   const dimBtn = document.createElement('button');
   dimBtn.id = 'dimensions-toggle';
