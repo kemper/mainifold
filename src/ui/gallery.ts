@@ -148,6 +148,33 @@ function createTile(version: Version): HTMLElement {
 
   info.appendChild(header);
 
+  // Color region badge — show swatch dots if version has color regions
+  if (version.geometryData) {
+    const colorRegions = (version.geometryData as Record<string, unknown>).colorRegions as
+      { color: [number, number, number] }[] | undefined;
+    if (colorRegions && colorRegions.length > 0) {
+      const badge = document.createElement('div');
+      badge.className = 'flex items-center gap-0.5 ml-1';
+      badge.title = `${colorRegions.length} color region${colorRegions.length > 1 ? 's' : ''}`;
+
+      const shown = colorRegions.slice(0, 3);
+      for (const region of shown) {
+        const dot = document.createElement('span');
+        dot.className = 'inline-block w-2.5 h-2.5 rounded-sm';
+        const [r, g, b] = region.color;
+        dot.style.backgroundColor = `rgb(${Math.round(r * 255)},${Math.round(g * 255)},${Math.round(b * 255)})`;
+        badge.appendChild(dot);
+      }
+      if (colorRegions.length > 3) {
+        const more = document.createElement('span');
+        more.className = 'text-[9px] text-zinc-500';
+        more.textContent = `+${colorRegions.length - 3}`;
+        badge.appendChild(more);
+      }
+      header.appendChild(badge);
+    }
+  }
+
   // Stats from geometryData
   if (version.geometryData) {
     const stats = document.createElement('div');

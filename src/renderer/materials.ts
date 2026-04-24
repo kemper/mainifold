@@ -1,10 +1,11 @@
 import * as THREE from 'three';
 
-export function createDefaultMaterial(): THREE.MeshPhongMaterial {
+export function createDefaultMaterial(vertexColors = false): THREE.MeshPhongMaterial {
   return new THREE.MeshPhongMaterial({
-    color: 0x4a9eff,
+    color: vertexColors ? 0xffffff : 0x4a9eff,
     shininess: 40,
     side: THREE.DoubleSide,
+    vertexColors,
   });
 }
 
@@ -17,11 +18,12 @@ export function createWireframeMaterial(): THREE.MeshBasicMaterial {
   });
 }
 
-export function createWhiteMaterial(): THREE.MeshPhongMaterial {
+export function createWhiteMaterial(vertexColors = false): THREE.MeshPhongMaterial {
   return new THREE.MeshPhongMaterial({
     color: 0xffffff,
     shininess: 30,
     side: THREE.DoubleSide,
+    vertexColors,
   });
 }
 

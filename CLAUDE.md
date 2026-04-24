@@ -44,6 +44,11 @@ After any changes that touch routing, Vite config, index.html, or initialization
 5. **AI agent bypass**: `http://localhost:5173/editor?view=ai` should skip the landing page and go straight to the editor with AI Views tab selected.
 6. **Session loading**: Click a session tile on the landing page — should load the session code in the editor, show the session name in the session bar, and update the URL to `/editor?session=<id>`.
 7. **Build**: `npm run build` should succeed with no TypeScript errors.
+8. **Paint mode**: Click the Paint button in the viewport overlay. A color picker panel should appear. Click a face on the model — it should paint the coplanar region in the selected color. The Paint button badge should show the region count.
+9. **Editor lock**: After painting a face, the editor should show a lock banner ("This version has color regions applied.") and become read-only. The run button should be disabled.
+10. **Unlock modal**: Click "Unlock to edit" — a modal should appear with two options (preserve/destructive). Clicking "Unlock editor" with the default "preserve" option should save the colored version and create a new uncolored version. The editor should unlock.
+11. **Gallery badges**: Colored versions in the gallery should show small color-swatch dots next to the version label.
+12. **Color export**: With color regions painted, export GLB — the file should carry vertex colors. Export 3MF — the file should include `<basematerials>` and per-triangle `pid` attributes.
 
 ## AI Agent Workflow & API Reference
 
