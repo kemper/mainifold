@@ -15,10 +15,17 @@ export function export3MF(meshData: MeshData, customName?: string): void {
   }
 
   // Collect distinct colors for basematerials (if triColors present)
+  // Index 0 is always the default base color for unpainted triangles
+  const DEFAULT_COLOR = '#4a9eff';
   const colorMap = new Map<string, number>(); // hex -> material index
   const materialColors: string[] = [];
+  let hasColors = false;
 
   if (triColors) {
+    // Reserve index 0 for the default color
+    colorMap.set(DEFAULT_COLOR, 0);
+    materialColors.push(DEFAULT_COLOR);
+
     const painted = (triColors as Uint8Array & { _painted?: Uint8Array })._painted;
     for (let t = 0; t < numTri; t++) {
       const isPainted = painted ? painted[t] === 1 : (triColors[t * 3] !== 0 || triColors[t * 3 + 1] !== 0 || triColors[t * 3 + 2] !== 0);
@@ -32,12 +39,11 @@ export function export3MF(meshData: MeshData, customName?: string): void {
         colorMap.set(hex, materialColors.length);
         materialColors.push(hex);
       }
+      hasColors = true;
     }
   }
 
-  const hasColors = materialColors.length > 0;
-
-  // Build triangles XML
+  // Build triangles XML — when colors exist, every triangle gets a pid
   const triangles: string[] = [];
   for (let t = 0; t < numTri; t++) {
     const v1 = triVerts[t * 3];
@@ -52,10 +58,11 @@ export function export3MF(meshData: MeshData, customName?: string): void {
         const g = triColors[t * 3 + 1].toString(16).padStart(2, '0');
         const b = triColors[t * 3 + 2].toString(16).padStart(2, '0');
         const hex = `#${r}${g}${b}`;
-        const pid = colorMap.get(hex)!;
-        triangles.push(`          <triangle v1="${v1}" v2="${v2}" v3="${v3}" pid="2" p1="${pid}" />`);
+        const matIdx = colorMap.get(hex)!;
+        triangles.push(`          <triangle v1="${v1}" v2="${v2}" v3="${v3}" pid="2" p1="${matIdx}" />`);
       } else {
-        triangles.push(`          <triangle v1="${v1}" v2="${v2}" v3="${v3}" />`);
+        // Unpainted triangles get the default base color
+        triangles.push(`          <triangle v1="${v1}" v2="${v2}" v3="${v3}" pid="2" p1="0" />`);
       }
     } else {
       triangles.push(`          <triangle v1="${v1}" v2="${v2}" v3="${v3}" />`);
@@ -66,7 +73,7 @@ export function export3MF(meshData: MeshData, customName?: string): void {
   let basematerialsXml = '';
   if (hasColors) {
     const bases = materialColors.map((hex, i) =>
-      `      <base name="Color ${i + 1}" displaycolor="${hex}" />`
+      `      <base name="${i === 0 ? 'Default' : 'Color ' + i}" displaycolor="${hex}" />`
     ).join('\n');
     basematerialsXml = `
     <basematerials id="2">
@@ -85,7 +92,7 @@ ${bases}
   <metadata name="Title">${title}</metadata>
   <metadata name="Application">Partwright</metadata>
   <resources>${basematerialsXml}
-    <object id="1" type="model">
+    <object id="1" type="model"${hasColors ? ' pid="2" pindex="0"' : ''}>
       <mesh>
         <vertices>
 ${vertices.join('\n')}
