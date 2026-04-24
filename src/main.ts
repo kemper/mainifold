@@ -1,10 +1,10 @@
 import './style.css';
 import { initEngine, executeCode, executeCodeAsync, validateCodeAsync, ensureEngineReady, getModule, getActiveLanguage, setActiveLanguage, type Language } from './geometry/engine';
 import { sliceAtZ, getBoundingBox } from './geometry/crossSection';
-import { initViewport, updateMesh, setClipping, setClipZ, getClipState, getCameraState, getCanvas, getMeshGroup, getCamera, setMeasureLock, setUserOrbitLock, isUserOrbitLocked, setDimensionsVisible, isDimensionsVisible } from './renderer/viewport';
+import { initViewport, updateMesh, setClipping, setClipZ, getClipState, getCameraState, getCanvas, getMeshGroup, getCamera, setMeasureLock, setUserOrbitLock, isUserOrbitLocked, setDimensionsVisible, isDimensionsVisible, setGridVisible, isGridVisible } from './renderer/viewport';
 import { renderCompositeCanvas, renderElevationsToContainer, renderSingleView, renderSliceSVG, setReferenceImages as _setRefImages, clearReferenceImages as _clearRefImages, getReferenceImages as _getRefImages, type ReferenceImages } from './renderer/multiview';
 import { setPhantom, clearPhantom, hasPhantom, type PhantomOptions } from './renderer/phantomGeometry';
-import { initEditor, setValue, getValue, setLanguage as setEditorLanguage } from './editor/codeEditor';
+import { initEditor, setValue, getValue, setLanguage as setEditorLanguage, setEditorDiagnostics, clearEditorDiagnostics, revealFirstDiagnostic } from './editor/codeEditor';
 import { createLayout, type TabName } from './ui/layout';
 import { createToolbar, isAutoRun, setToolbarLanguage } from './ui/toolbar';
 import { createLandingPage } from './ui/landing';
@@ -20,7 +20,7 @@ import { exportGLB } from './export/gltf';
 import { exportSTL } from './export/stl';
 import { exportOBJ } from './export/obj';
 import { export3MF } from './export/threemf';
-import type { MeshData } from './geometry/types';
+import type { MeshData, SourceDiagnostic } from './geometry/types';
 import { analyzeZProfile, type ZProfile } from './geometry/profileAnalysis';
 import { probeAtXY, probeRay, measureDistance, type ProbeResult, type GeneralRayResult } from './geometry/rayCast';
 import { checkContainment, type ContainmentWarning } from './geometry/containmentCheck';
@@ -132,6 +132,57 @@ function simpleHash(str: string): string {
     h = ((h << 5) - h + str.charCodeAt(i)) | 0;
   }
   return (h >>> 0).toString(16).padStart(8, '0');
+}
+
+function firstErrorLine(error: string): string {
+  return error
+    .split('\n')
+    .map(line => line.trim())
+    .find(Boolean) ?? error;
+}
+
+function summarizeDiagnostics(error: string, diagnostics: SourceDiagnostic[] = []): string {
+  const primary = diagnostics[0];
+  if (primary?.line) {
+    const label = primary.source === 'OpenSCAD' ? 'OpenSCAD error' : 'Syntax error';
+    return `${label} on line ${primary.line}${primary.column ? `:${primary.column}` : ''}`;
+  }
+
+  const summary = firstErrorLine(error);
+  return summary.length > 80 ? `${summary.slice(0, 77)}...` : summary;
+}
+
+function renderEditorError(panel: HTMLElement, error: string, diagnostics: SourceDiagnostic[] = []): void {
+  const primary = diagnostics[0];
+  const title = document.createElement('div');
+  title.className = 'font-semibold text-red-200';
+  title.textContent = summarizeDiagnostics(error, diagnostics);
+
+  const location = document.createElement('div');
+  location.className = 'mt-1 text-red-200/80';
+  location.textContent = primary?.line
+    ? `${primary.source ?? 'Error'} at line ${primary.line}${primary.column ? `, column ${primary.column}` : ''}`
+    : primary?.source ?? 'Error';
+
+  const details = document.createElement('pre');
+  details.className = 'mt-2 max-h-32 overflow-auto whitespace-pre-wrap font-mono text-[11px] leading-4 text-red-100/90';
+  details.textContent = error;
+
+  panel.replaceChildren(title, location, details);
+
+  if (primary?.hint) {
+    const hint = document.createElement('div');
+    hint.className = 'mt-2 text-red-100';
+    hint.textContent = `Hint: ${primary.hint}`;
+    panel.appendChild(hint);
+  }
+
+  panel.classList.remove('hidden');
+}
+
+function clearEditorErrorPanel(panel: HTMLElement): void {
+  panel.classList.add('hidden');
+  panel.replaceChildren();
 }
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -786,7 +837,7 @@ async function main() {
   });
 
   // Create layout
-  const { editorContainer, viewportPane, viewsContainer, elevationsContainer, galleryContainer, diffContainer, notesContainer, statusBar, clipControls, switchTab } = createLayout(editorUI);
+  const { editorContainer, editorErrorPanel, viewportPane, viewsContainer, elevationsContainer, galleryContainer, diffContainer, notesContainer, statusBar, clipControls, switchTab } = createLayout(editorUI);
 
   // Init views panel
   initViewsPanel(viewsContainer);
@@ -1062,6 +1113,7 @@ async function main() {
   initClipControls(clipControls);
 
   // Wire up viewport overlay buttons
+  initGridToggle(clipControls);
   initDimensionsToggle(clipControls);
   initPaintUI(clipControls);
   initMeasureToggle(clipControls);
@@ -1218,7 +1270,13 @@ async function main() {
     if (result.error) {
       recordError(result.error);
       return {
-        geometryData: { status: 'error' as const, error: result.error, executionTimeMs: elapsed, codeHash: simpleHash(code) },
+        geometryData: {
+          status: 'error' as const,
+          error: result.error,
+          diagnostics: result.diagnostics ?? [],
+          executionTimeMs: elapsed,
+          codeHash: simpleHash(code),
+        },
         meshData: null as MeshData | null,
         manifold: null as unknown,
       };
@@ -1303,7 +1361,7 @@ async function main() {
     },
 
     /** Validate code without rendering. Returns { valid, error? } */
-    async validate(code: string, opts?: { language?: Language }): Promise<{ valid: boolean; error?: string }> {
+    async validate(code: string, opts?: { language?: Language }): Promise<{ valid: boolean; error?: string; diagnostics?: SourceDiagnostic[] }> {
       const check = guard(() => {
         assertString(code, 'validate(code)', { allowEmpty: false });
         if (opts !== undefined) {
@@ -1315,7 +1373,7 @@ async function main() {
       });
       if (typeof check === 'object' && check !== null && 'error' in check) return { valid: false, error: check.error };
       const r = await validateCodeAsync(code, opts?.language);
-      return r.valid ? { valid: true } : { valid: false, error: r.error };
+      return r.valid ? { valid: true } : { valid: false, error: r.error, diagnostics: r.diagnostics ?? [] };
     },
 
     /** Get active engine language */
@@ -2446,6 +2504,8 @@ async function main() {
   function runCode(code?: string) {
     const src = code ?? getValue();
     setStatus(statusBar, 'running', 'Running...');
+    clearEditorDiagnostics();
+    clearEditorErrorPanel(editorErrorPanel);
 
     requestAnimationFrame(async () => {
       await runCodeSync(src);
@@ -2461,12 +2521,24 @@ async function main() {
 
     if (result.error) {
       recordError(result.error);
-      setStatus(statusBar, 'error', result.error);
-      geometryDataEl.textContent = JSON.stringify({ status: 'error', error: result.error, executionTimeMs: elapsed, codeHash: simpleHash(src) });
+      const diagnostics = result.diagnostics ?? [];
+      setStatus(statusBar, 'error', summarizeDiagnostics(result.error, diagnostics));
+      setEditorDiagnostics(diagnostics);
+      renderEditorError(editorErrorPanel, result.error, diagnostics);
+      revealFirstDiagnostic();
+      geometryDataEl.textContent = JSON.stringify({
+        status: 'error',
+        error: result.error,
+        diagnostics,
+        executionTimeMs: elapsed,
+        codeHash: simpleHash(src),
+      });
       return;
     }
 
     if (result.mesh) {
+      clearEditorDiagnostics();
+      clearEditorErrorPanel(editorErrorPanel);
       currentMeshData = result.mesh;
       currentManifold = result.manifold;
 
@@ -2567,6 +2639,21 @@ async function main() {
     });
   }
 
+  function initGridToggle(container: HTMLElement) {
+    const gridBtn = container.querySelector('#grid-toggle') as HTMLButtonElement;
+    if (!gridBtn) return;
+
+    const inactiveClass = 'px-2 py-1 rounded text-xs bg-zinc-800/80 backdrop-blur text-zinc-400 hover:text-zinc-200 hover:bg-zinc-700/80 transition-colors border border-zinc-600/50';
+    const activeClass = 'px-2 py-1 rounded text-xs bg-blue-500/20 backdrop-blur text-blue-400 hover:bg-blue-500/30 transition-colors border border-blue-500/30';
+
+    gridBtn.addEventListener('click', () => {
+      const nowVisible = !isGridVisible();
+      setGridVisible(nowVisible);
+      gridBtn.className = nowVisible ? activeClass : inactiveClass;
+      gridBtn.title = nowVisible ? 'Hide grid plane' : 'Show grid plane';
+    });
+  }
+
   function initDimensionsToggle(container: HTMLElement) {
     const dimBtn = container.querySelector('#dimensions-toggle') as HTMLButtonElement;
     if (!dimBtn) return;
@@ -2601,7 +2688,8 @@ async function main() {
 
 function setStatus(el: HTMLElement, state: 'ready' | 'running' | 'error' | 'loading', text: string) {
   el.textContent = text;
-  el.className = 'text-xs font-mono max-w-xs truncate ';
+  el.title = text;
+  el.className = 'text-xs font-mono max-w-[60%] truncate text-right ';
   switch (state) {
     case 'ready':
       el.className += 'text-emerald-400';

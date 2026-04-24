@@ -3,6 +3,7 @@ export type TabName = 'interactive' | 'ai' | 'elevations' | 'gallery' | 'diff' |
 export interface LayoutElements {
   editorPane: HTMLElement;
   editorContainer: HTMLElement;
+  editorErrorPanel: HTMLElement;
   viewportPane: HTMLElement;
   viewsContainer: HTMLElement;
   elevationsContainer: HTMLElement;
@@ -43,6 +44,11 @@ export function createLayout(appContainer: HTMLElement): LayoutElements {
   editorHeader.appendChild(statusBar);
 
   editorPane.appendChild(editorHeader);
+
+  const editorErrorPanel = document.createElement('div');
+  editorErrorPanel.id = 'editor-error-panel';
+  editorErrorPanel.className = 'hidden border-b border-red-500/30 bg-red-950/40 px-3 py-2 text-xs text-red-100';
+  editorPane.appendChild(editorErrorPanel);
 
   const editorContainer = document.createElement('div');
   editorContainer.id = 'editor-container';
@@ -238,7 +244,7 @@ export function createLayout(appContainer: HTMLElement): LayoutElements {
 
   appContainer.appendChild(main);
 
-  return { editorPane, editorContainer, viewportPane, viewsContainer, elevationsContainer, galleryContainer, diffContainer, notesContainer, statusBar, clipControls, switchTab };
+  return { editorPane, editorContainer, editorErrorPanel, viewportPane, viewsContainer, elevationsContainer, galleryContainer, diffContainer, notesContainer, statusBar, clipControls, switchTab };
 }
 
 function createTab(label: string, active: boolean): HTMLButtonElement {
@@ -255,6 +261,14 @@ function createClipControls(): HTMLElement {
   const container = document.createElement('div');
   container.id = 'clip-controls';
   container.className = 'absolute top-2 right-2 z-10 flex items-center gap-2';
+
+  // Grid toggle (off by default)
+  const gridBtn = document.createElement('button');
+  gridBtn.id = 'grid-toggle';
+  gridBtn.className = 'px-2 py-1 rounded text-xs bg-zinc-800/80 backdrop-blur text-zinc-400 hover:text-zinc-200 hover:bg-zinc-700/80 transition-colors border border-zinc-600/50';
+  gridBtn.textContent = '\u25A6';
+  gridBtn.title = 'Show grid plane';
+  container.appendChild(gridBtn);
 
   // Dimensions toggle (on by default)
   const dimBtn = document.createElement('button');
