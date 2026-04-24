@@ -999,16 +999,22 @@ async function main() {
 
   // Set up unlock handlers
   setUnlockHandlers(
-    // Fork: save the colored version, then create a new uncolored version
+    // Fork: save the colored version (if needed), then create a new uncolored version
     async (colorData) => {
       if (getState().session && currentMeshData) {
         const code = getValue();
-        const thumbnail = await captureThumbnail();
 
-        // 1. Save the colored version (force to bypass duplicate-code check)
-        const coloredGeoData = getGeometryDataObj() ?? {};
-        coloredGeoData.colorRegions = colorData;
-        await saveVersion(code, coloredGeoData, thumbnail, 'colored', undefined, { force: true });
+        // 1. Only save the colored version if it doesn't already have colorRegions persisted
+        const currentVersion = getState().currentVersion;
+        const alreadyPersisted = currentVersion?.geometryData &&
+          Array.isArray((currentVersion.geometryData as Record<string, unknown>).colorRegions);
+
+        if (!alreadyPersisted) {
+          const thumbnail = await captureThumbnail();
+          const coloredGeoData = getGeometryDataObj() ?? {};
+          coloredGeoData.colorRegions = colorData;
+          await saveVersion(code, coloredGeoData, thumbnail, 'colored', undefined, { force: true });
+        }
 
         // 2. Re-render without colors, then save an uncolored sibling
         updateMesh(currentMeshData, { skipAutoFrame: true });
