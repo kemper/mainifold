@@ -13,6 +13,7 @@ import { createNotFoundPage } from './ui/notFound';
 import { initViewsPanel, updateMultiView } from './ui/panels';
 import { createSessionBar } from './ui/sessionBar';
 import { createGalleryView, refreshGallery } from './ui/gallery';
+import { createDiffView, refreshDiff } from './ui/diffView';
 import { createNotesView, refreshNotes } from './ui/notes';
 import { initSessionList, showSessionList } from './ui/sessionList';
 import { exportGLB } from './export/gltf';
@@ -572,7 +573,7 @@ function shouldShowLanding(): boolean {
   const params = new URLSearchParams(window.location.search);
   // Landing if at root path AND no query params that indicate a specific view
   const isRootPath = path === '/' || path === '';
-  return isRootPath && !params.has('view') && !params.has('session') && !params.has('gallery') && !params.has('notes');
+  return isRootPath && !params.has('view') && !params.has('session') && !params.has('gallery') && !params.has('diff') && !params.has('notes');
 }
 
 function shouldShowHelp(): boolean {
@@ -705,7 +706,7 @@ async function main() {
   });
 
   // Create layout
-  const { editorContainer, viewportPane, viewsContainer, elevationsContainer, galleryContainer, notesContainer, statusBar, clipControls, switchTab } = createLayout(editorUI);
+  const { editorContainer, viewportPane, viewsContainer, elevationsContainer, galleryContainer, diffContainer, notesContainer, statusBar, clipControls, switchTab } = createLayout(editorUI);
 
   // Init views panel
   initViewsPanel(viewsContainer);
@@ -717,12 +718,20 @@ async function main() {
     switchTab('interactive');
   });
 
+  // Init diff view
+  createDiffView(diffContainer, (code: string) => {
+    setValue(code);
+    runCode(code);
+    switchTab('interactive');
+  });
+
   // Init notes panel
   createNotesView(notesContainer);
 
   // Refresh gallery/notes whenever their tabs are selected
   window.addEventListener('tab-switched', ((e: CustomEvent) => {
     if (e.detail.tab === 'gallery') refreshGallery();
+    if (e.detail.tab === 'diff') refreshDiff();
     if (e.detail.tab === 'notes') refreshNotes();
   }) as EventListener);
 
@@ -1994,6 +2003,7 @@ async function main() {
       const params = new URLSearchParams(window.location.search);
       let tab = 'interactive';
       if (params.has('gallery')) tab = 'gallery';
+      else if (params.has('diff')) tab = 'diff';
       else if (params.has('notes')) tab = 'notes';
       else if (params.get('view') === 'ai') tab = 'ai';
       else if (params.get('view') === 'elevations') tab = 'elevations';
@@ -2001,8 +2011,8 @@ async function main() {
     },
 
     /** Programmatic tab switching */
-    setView(tab: 'interactive' | 'ai' | 'elevations' | 'gallery' | 'notes'): void {
-      assertEnum(tab, ['interactive', 'ai', 'elevations', 'gallery', 'notes'] as const, 'setView(tab)');
+    setView(tab: 'interactive' | 'ai' | 'elevations' | 'gallery' | 'diff' | 'notes'): void {
+      assertEnum(tab, ['interactive', 'ai', 'elevations', 'gallery', 'diff', 'notes'] as const, 'setView(tab)');
       switchTab(tab);
     },
 
@@ -2146,7 +2156,7 @@ async function main() {
         'analyzeProfile':  { signature: 'analyzeProfile(sampleCount?) -- Z-profile feature summary', docs: '/ai.md#console-api--windowpartwright' },
         'measureAt':       { signature: 'measureAt([x,y]) -- Ray-cast probe at XY -> {hits, thickness, topZ, bottomZ}', docs: '/ai.md#console-api--windowpartwright' },
         // View
-        'setView':         { signature: 'setView(tab) -- Switch tab: "interactive", "ai", "elevations", "gallery"', docs: '/ai.md#view-tabs' },
+        'setView':         { signature: 'setView(tab) -- Switch tab: "interactive", "ai", "elevations", "gallery", "diff"', docs: '/ai.md#view-tabs' },
         'getViewState':    { signature: 'getViewState() -- Current tab and camera state', docs: '/ai.md#view-tabs' },
         // Export
         'exportGLB':       { signature: 'await exportGLB() -- Download GLB file', docs: '/ai.md#console-api--windowpartwright' },

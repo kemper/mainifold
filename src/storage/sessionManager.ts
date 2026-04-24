@@ -85,6 +85,7 @@ function updateURL() {
     params.delete('session');
     params.delete('v');
     params.delete('gallery');
+    params.delete('diff');
   }
   const qs = params.toString().replace(/=(?=&|$)/g, '');
   const newUrl = qs
