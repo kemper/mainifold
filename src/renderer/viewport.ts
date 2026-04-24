@@ -119,7 +119,7 @@ export function initViewport(container: HTMLElement): {
   return { scene, camera, renderer };
 }
 
-export function updateMesh(meshData: MeshData): void {
+export function updateMesh(meshData: MeshData, options?: { skipAutoFrame?: boolean }): void {
   // Clear previous
   while (meshGroup.children.length > 0) {
     const child = meshGroup.children[0];
@@ -158,29 +158,32 @@ export function updateMesh(meshData: MeshData): void {
     meshGroup.add(capMesh);
   }
 
-  // Auto-frame the camera
+  // Auto-frame the camera (skip when only colors changed)
   const box = new THREE.Box3().setFromObject(meshGroup);
-  const center = box.getCenter(new THREE.Vector3());
-  const size = box.getSize(new THREE.Vector3());
-  const maxDim = Math.max(size.x, size.y, size.z);
 
-  // Update model bounds for clip slider
-  modelBounds = { min: box.min.z, max: box.max.z };
+  if (!options?.skipAutoFrame) {
+    const center = box.getCenter(new THREE.Vector3());
+    const size = box.getSize(new THREE.Vector3());
+    const maxDim = Math.max(size.x, size.y, size.z);
 
-  // Update bounding box dimension annotations
-  updateDimensionLines(box);
+    // Update model bounds for clip slider
+    modelBounds = { min: box.min.z, max: box.max.z };
 
-  controls.target.copy(center);
-  camera.position.set(
-    center.x + maxDim * 1.2,
-    center.y - maxDim * 1.2,
-    center.z + maxDim * 1.2,
-  );
-  controls.update();
+    // Update bounding box dimension annotations
+    updateDimensionLines(box);
 
-  // Update clip plane position if clipping
-  if (clippingEnabled) {
-    updateClipPlaneVisual();
+    controls.target.copy(center);
+    camera.position.set(
+      center.x + maxDim * 1.2,
+      center.y - maxDim * 1.2,
+      center.z + maxDim * 1.2,
+    );
+    controls.update();
+
+    // Update clip plane position if clipping
+    if (clippingEnabled) {
+      updateClipPlaneVisual();
+    }
   }
 }
 

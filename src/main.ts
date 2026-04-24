@@ -394,7 +394,7 @@ function rehydrateColorRegions(geometryData: Record<string, unknown> | null): vo
   // Re-render with colors if regions were rehydrated
   if (hasColorRegions() && currentMeshData) {
     const colored = applyTriColors(currentMeshData);
-    updateMesh(colored);
+    updateMesh(colored, { skipAutoFrame: true });
   }
 }
 
@@ -1010,7 +1010,7 @@ async function main() {
       }
       // Editor is now unlocked (clearRegions already called), re-render without colors
       if (currentMeshData) {
-        updateMesh(currentMeshData);
+        updateMesh(currentMeshData, { skipAutoFrame: true });
         updateMultiView(currentMeshData);
         renderElevationsToContainer(elevationsContainer, currentMeshData);
       }
@@ -1018,7 +1018,7 @@ async function main() {
     // Clear: just re-render without colors (clearRegions already called)
     () => {
       if (currentMeshData) {
-        updateMesh(currentMeshData);
+        updateMesh(currentMeshData, { skipAutoFrame: true });
         updateMultiView(currentMeshData);
         renderElevationsToContainer(elevationsContainer, currentMeshData);
       }
@@ -1029,7 +1029,7 @@ async function main() {
   setOnRegionPainted(() => {
     if (currentMeshData) {
       const colored = applyTriColors(currentMeshData);
-      updateMesh(colored);
+      updateMesh(colored, { skipAutoFrame: true });
       updateMultiView(colored);
       renderElevationsToContainer(elevationsContainer, colored);
     }
@@ -1042,7 +1042,7 @@ async function main() {
     if (!isPaintActive()) return; // only auto-refresh while paint mode is on
     if (currentMeshData) {
       const colored = applyTriColors(currentMeshData);
-      updateMesh(colored);
+      updateMesh(colored, { skipAutoFrame: true });
     }
   });
 
@@ -2257,7 +2257,7 @@ async function main() {
 
       // Re-render with colors
       const colored = applyTriColors(currentMeshData);
-      updateMesh(colored);
+      updateMesh(colored, { skipAutoFrame: true });
       updateMultiView(colored);
       syncLockState();
 
@@ -2280,7 +2280,7 @@ async function main() {
     clearColors() {
       clearRegions();
       if (currentMeshData) {
-        updateMesh(currentMeshData);
+        updateMesh(currentMeshData, { skipAutoFrame: true });
         updateMultiView(currentMeshData);
       }
       syncLockState();
