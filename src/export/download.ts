@@ -52,7 +52,7 @@ export function getExportFilename(extension: string, customName?: string): strin
 
 /**
  * Get a human-readable export name for embedding in file metadata (headers, comments).
- * Returns session name if active, otherwise "mAInifold Export".
+ * Returns session name if active, otherwise "Partwright Export".
  */
 export function getExportTitle(): string {
   const state = getState();
@@ -63,7 +63,7 @@ export function getExportTitle(): string {
     }
     return title;
   }
-  return 'mAInifold Export';
+  return 'Partwright Export';
 }
 
 /** Trigger a browser download for a Blob. */

@@ -8,8 +8,8 @@
 //   - NANOBANANA_API_KEY environment variable set
 //
 // Output: saves <basename>.ref.<angle>.{png,jpg} files + <basename>.references.json
-// Load into mainifold via "Load Refs" button or console:
-//   mainifold.setReferenceImages({ perspective: "data:...", front: "data:...", ... })
+// Load into partwright via "Load Refs" button or console:
+//   partwright.setReferenceImages({ perspective: "data:...", front: "data:...", ... })
 
 const { execSync } = require('child_process');
 const path = require('path');
@@ -210,9 +210,9 @@ function main() {
   console.log(`Original photo included as perspective reference`);
   console.log(`References bundle: ${refsPath}`);
   console.log('');
-  console.log('To load in mainifold:');
+  console.log('To load in partwright:');
   console.log('  1. Click "Load Refs" in the session bar and select the .ref.*.png files, OR');
-  console.log('  2. In browser console, paste the references.json content into mainifold.setReferenceImages(...)');
+  console.log('  2. In browser console, paste the references.json content into partwright.setReferenceImages(...)');
 }
 
 main();

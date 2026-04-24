@@ -81,8 +81,8 @@ let geometryDataEl: HTMLElement;
 // Actively manage document.title to reflect current state.
 // Some browser automation tools (MCP servers, extensions) can inadvertently
 // replace the page title with JS evaluation results; this prevents that.
-const BASE_TITLE = 'mAInifold';
-let _expectedTitle = 'mAInifold — AI-Driven Parametric CAD in Your Browser';
+const BASE_TITLE = 'Partwright';
+let _expectedTitle = 'Partwright — AI-Driven Parametric CAD in Your Browser';
 
 function updateDocumentTitle(context?: { page?: 'landing' | 'editor' | 'help' | '404'; sessionName?: string | null }) {
   if (context?.page === 'landing' || context?.page === undefined && shouldShowLanding()) {
@@ -356,7 +356,7 @@ function getGeometryDataObj(): Record<string, unknown> | null {
 
 // === Argument validation helpers ==========================================
 //
-// Runtime type/shape validation for the window.mainifold API. The public API
+// Runtime type/shape validation for the window.partwright API. The public API
 // is reachable from untyped callers (browser console, MCP-driven AI agents,
 // automation scripts) so TypeScript's compile-time guarantees do not apply.
 // These helpers enforce argument contracts explicitly, with chatty error
@@ -807,7 +807,9 @@ async function main() {
   }
 
   // Expose showHelp for toolbar
-  (window as unknown as Record<string, unknown>).__mainifoldShowHelp = showHelp;
+  const windowRecord = window as unknown as Record<string, unknown>;
+  windowRecord.__partwrightShowHelp = showHelp;
+  windowRecord.__mainifoldShowHelp = showHelp;
 
   // Check which page to show before loading heavy resources
   const showLanding = shouldShowLanding();
@@ -997,7 +999,7 @@ async function main() {
     const warnAgentUI = () => {
       if (agentUIWarningShown) return;
       agentUIWarningShown = true;
-      const msg = 'Detected UI-driven input. This app expects programmatic control from AI agents. Use window.mainifold.runAndSave() -- see /llms.txt';
+      const msg = 'Detected UI-driven input. This app expects programmatic control from AI agents. Use window.partwright.runAndSave() -- see /llms.txt';
       console.warn(msg);
       // Show a non-blocking toast
       const toast = document.createElement('div');
@@ -1054,8 +1056,8 @@ async function main() {
     };
   }
 
-  // === Expose window.mainifold console API ===
-  const mainifoldAPI = {
+  // === Expose window.partwright console API ===
+  const partwrightAPI = {
     /** Run code string and update all views. Returns geometry data object. */
     async run(code?: string): Promise<Record<string, unknown>> {
       assertString(code, 'run(code)', { optional: true, allowEmpty: false });
@@ -1253,7 +1255,7 @@ async function main() {
       assertString(name, 'createSession(name)', { optional: true });
       const session = await createSession(name, getActiveLanguage());
       await addSessionNote(
-        '[WORKFLOW] Drive this app via window.mainifold (see /ai.md). ' +
+        '[WORKFLOW] Drive this app via window.partwright (see /ai.md). ' +
         'Use runAndSave(code, label, assertions) for iterations; ' +
         'addSessionNote with [REQUIREMENT]/[DECISION]/[MEASUREMENT]/[FEEDBACK]/[ATTEMPT]/[TODO] prefixes; ' +
         'getSessionContext() when resuming.',
@@ -1569,7 +1571,8 @@ async function main() {
     async importSession(data: ExportedSession) {
       const check = guard(() => {
         const d = assertObject(data, 'importSession(data)')!;
-        assertString(d.mainifold, 'importSession(data).mainifold', { allowEmpty: false });
+        const brandVersion = d.partwright ?? d.mainifold;
+        assertString(brandVersion, 'importSession(data).partwright', { allowEmpty: false });
         const s = assertObject(d.session, 'importSession(data).session')!;
         assertString(s.name, 'importSession(data).session.name', { allowEmpty: true });
         assertNumber(s.created, 'importSession(data).session.created');
@@ -2111,11 +2114,11 @@ async function main() {
       assertString(method, 'help(method)', { optional: true, allowEmpty: false });
       const methods: Record<string, { signature: string; docs: string }> = {
         // Core
-        'run':             { signature: 'run(code?) -- Run code, update views, return geometry stats', docs: '/ai.md#console-api--windowmainifold' },
+        'run':             { signature: 'run(code?) -- Run code, update views, return geometry stats', docs: '/ai.md#console-api--windowpartwright' },
         'getGeometryData': { signature: 'getGeometryData() -- Current stats as JSON object', docs: '/ai.md#geometry-data' },
-        'validate':        { signature: 'validate(code) -- Check code without rendering -> {valid, error?}', docs: '/ai.md#console-api--windowmainifold' },
-        'getCode':         { signature: 'getCode() -- Read editor contents', docs: '/ai.md#console-api--windowmainifold' },
-        'setCode':         { signature: 'setCode(code) -- Set editor contents (no auto-run)', docs: '/ai.md#console-api--windowmainifold' },
+        'validate':        { signature: 'validate(code) -- Check code without rendering -> {valid, error?}', docs: '/ai.md#console-api--windowpartwright' },
+        'getCode':         { signature: 'getCode() -- Read editor contents', docs: '/ai.md#console-api--windowpartwright' },
+        'setCode':         { signature: 'setCode(code) -- Set editor contents (no auto-run)', docs: '/ai.md#console-api--windowpartwright' },
         // Isolated execution
         'runIsolated':     { signature: 'await runIsolated(code) -- Test without side effects -> {geometryData, thumbnail}', docs: '/ai.md#testing-without-side-effects' },
         'runAndAssert':    { signature: 'await runAndAssert(code, assertions) -- Validate geometry -> {passed, failures?, stats}', docs: '/ai.md#assertions----structured-validation' },
@@ -2123,33 +2126,33 @@ async function main() {
         'modifyAndTest':   { signature: 'await modifyAndTest(patchFn, assertions?) -- Modify + test without committing', docs: '/ai.md#modify-and-test' },
         'query':           { signature: 'query({sliceAt?, decompose?, boundingBox?}) -- Multi-query current geometry', docs: '/ai.md#multi-query-current-geometry' },
         // Sessions
-        'createSession':   { signature: 'await createSession(name?) -- Create session -> {id, url, galleryUrl}', docs: '/ai.md#console-api--windowmainifold' },
+        'createSession':   { signature: 'await createSession(name?) -- Create session -> {id, url, galleryUrl}', docs: '/ai.md#console-api--windowpartwright' },
         'runAndSave':      { signature: 'await runAndSave(code, label?, assertions?) -- Assert + save version in one call', docs: '/ai.md#assert--save-in-one-call' },
-        'saveVersion':     { signature: 'await saveVersion(label?) -- Save current state as version', docs: '/ai.md#console-api--windowmainifold' },
-        'listVersions':    { signature: 'await listVersions() -- List all versions in session', docs: '/ai.md#console-api--windowmainifold' },
-        'loadVersion':     { signature: 'await loadVersion({index} | {id}) -- Load version into editor -> {id, index, label, code, geometryData} or {error}', docs: '/ai.md#console-api--windowmainifold' },
+        'saveVersion':     { signature: 'await saveVersion(label?) -- Save current state as version', docs: '/ai.md#console-api--windowpartwright' },
+        'listVersions':    { signature: 'await listVersions() -- List all versions in session', docs: '/ai.md#console-api--windowpartwright' },
+        'loadVersion':     { signature: 'await loadVersion({index} | {id}) -- Load version into editor -> {id, index, label, code, geometryData} or {error}', docs: '/ai.md#console-api--windowpartwright' },
         'forkVersion':     { signature: 'await forkVersion({index} | {id}, transformFn, label?, assertions?) -- Load + modify + validate + save in one call', docs: '/ai.md#forking-a-prior-version' },
         'openSession':     { signature: 'await openSession(id) -- Open existing session', docs: '/ai.md#resuming-a-session' },
-        'listSessions':    { signature: 'await listSessions() -- List all sessions', docs: '/ai.md#console-api--windowmainifold' },
+        'listSessions':    { signature: 'await listSessions() -- List all sessions', docs: '/ai.md#console-api--windowpartwright' },
         'getSessionContext': { signature: 'await getSessionContext() -- Get full session context (for resuming)', docs: '/ai.md#resuming-a-session' },
-        'getGalleryUrl':   { signature: 'getGalleryUrl() -- URL for gallery view (human review)', docs: '/ai.md#console-api--windowmainifold' },
+        'getGalleryUrl':   { signature: 'getGalleryUrl() -- URL for gallery view (human review)', docs: '/ai.md#console-api--windowpartwright' },
         // Notes
         'addSessionNote':  { signature: 'await addSessionNote(text) -- Add note with [PREFIX] tag', docs: '/ai.md#session-notes----tracking-design-context' },
         'listSessionNotes': { signature: 'await listSessionNotes() -- List all session notes', docs: '/ai.md#session-notes----tracking-design-context' },
         // Inspection
-        'sliceAtZ':        { signature: 'sliceAtZ(z) -- Cross-section at height -> {polygons, svg, area}', docs: '/ai.md#console-api--windowmainifold' },
-        'getBoundingBox':  { signature: 'getBoundingBox() -- -> {min, max}', docs: '/ai.md#console-api--windowmainifold' },
+        'sliceAtZ':        { signature: 'sliceAtZ(z) -- Cross-section at height -> {polygons, svg, area}', docs: '/ai.md#console-api--windowpartwright' },
+        'getBoundingBox':  { signature: 'getBoundingBox() -- -> {min, max}', docs: '/ai.md#console-api--windowpartwright' },
         'renderView':      { signature: 'renderView({elevation?, azimuth?, ortho?, size?}) -- Render from any angle -> data URL', docs: '/ai.md#visual-verification' },
-        'analyzeProfile':  { signature: 'analyzeProfile(sampleCount?) -- Z-profile feature summary', docs: '/ai.md#console-api--windowmainifold' },
-        'measureAt':       { signature: 'measureAt([x,y]) -- Ray-cast probe at XY -> {hits, thickness, topZ, bottomZ}', docs: '/ai.md#console-api--windowmainifold' },
+        'analyzeProfile':  { signature: 'analyzeProfile(sampleCount?) -- Z-profile feature summary', docs: '/ai.md#console-api--windowpartwright' },
+        'measureAt':       { signature: 'measureAt([x,y]) -- Ray-cast probe at XY -> {hits, thickness, topZ, bottomZ}', docs: '/ai.md#console-api--windowpartwright' },
         // View
         'setView':         { signature: 'setView(tab) -- Switch tab: "interactive", "ai", "elevations", "gallery"', docs: '/ai.md#view-tabs' },
         'getViewState':    { signature: 'getViewState() -- Current tab and camera state', docs: '/ai.md#view-tabs' },
         // Export
-        'exportGLB':       { signature: 'await exportGLB() -- Download GLB file', docs: '/ai.md#console-api--windowmainifold' },
-        'exportSTL':       { signature: 'exportSTL() -- Download STL file', docs: '/ai.md#console-api--windowmainifold' },
-        'exportOBJ':       { signature: 'exportOBJ() -- Download OBJ file', docs: '/ai.md#console-api--windowmainifold' },
-        'export3MF':       { signature: 'export3MF() -- Download 3MF file', docs: '/ai.md#console-api--windowmainifold' },
+        'exportGLB':       { signature: 'await exportGLB() -- Download GLB file', docs: '/ai.md#console-api--windowpartwright' },
+        'exportSTL':       { signature: 'exportSTL() -- Download STL file', docs: '/ai.md#console-api--windowpartwright' },
+        'exportOBJ':       { signature: 'exportOBJ() -- Download OBJ file', docs: '/ai.md#console-api--windowpartwright' },
+        'export3MF':       { signature: 'export3MF() -- Download 3MF file', docs: '/ai.md#console-api--windowpartwright' },
       };
 
       if (method) {
@@ -2162,30 +2165,30 @@ async function main() {
       }
 
       const result = {
-        app: 'mAInifold -- AI-driven parametric CAD in the browser',
+        app: 'Partwright -- AI-driven parametric CAD in the browser',
         docs: '/ai.md',
         constraints: {
           codeMustReturn: 'Code must end with: return <Manifold object>;',
           noUIAutomation: 'Do not drive the app with clicks or keystrokes. Use this API.',
         },
         quickstart: [
-          'mainifold.help()                        // You are here',
-          'await mainifold.createSession("name")   // Start a named session',
-          'await mainifold.runAndSave(code, "v1", {isManifold: true, maxComponents: 1})',
+          'partwright.help()                        // You are here',
+          'await partwright.createSession("name")   // Start a named session',
+          'await partwright.runAndSave(code, "v1", {isManifold: true, maxComponents: 1})',
         ],
         methods,
       };
 
       // Also log a readable summary to the console
       const lines = [
-        'mAInifold -- AI-driven parametric CAD. Full docs: /ai.md',
+        'Partwright -- AI-driven parametric CAD. Full docs: /ai.md',
         '',
         'Code must end with: return <Manifold object>;',
         'Do not drive the UI with clicks/keystrokes -- use this API.',
         '',
         'Quickstart:',
-        '  await mainifold.createSession("name")',
-        '  await mainifold.runAndSave(code, "v1", {isManifold: true, maxComponents: 1})',
+        '  await partwright.createSession("name")',
+        '  await partwright.runAndSave(code, "v1", {isManifold: true, maxComponents: 1})',
         '',
         'Methods:',
         ...Object.entries(methods).map(([, v]) => `  ${v.signature}`),
@@ -2196,10 +2199,12 @@ async function main() {
     },
   };
 
-  (window as unknown as Record<string, unknown>).mainifold = mainifoldAPI;
+  const apiWindow = window as unknown as Record<string, unknown>;
+  apiWindow.partwright = partwrightAPI;
+  apiWindow.mainifold = partwrightAPI;
 
   // Log API availability for AI agents
-  console.info('mAInifold: AI agents should use window.mainifold -- start with mainifold.help(). See /llms.txt');
+  console.info('Partwright: AI agents should use window.partwright -- start with partwright.help(). window.mainifold remains as a legacy alias. See /llms.txt');
 
   // === Internal functions ===
 

@@ -1,6 +1,6 @@
 {
-  "name": "mAInifold",
-  "short_name": "mAInifold",
+  "name": "Partwright",
+  "short_name": "Partwright",
   "description": "AI-driven parametric CAD in your browser",
   "start_url": "/",
   "display": "standalone",

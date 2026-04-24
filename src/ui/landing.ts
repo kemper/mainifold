@@ -2,6 +2,7 @@
 
 import { listSessions, type Session } from '../storage/sessionManager';
 import { getLatestVersion, getVersionCount } from '../storage/db';
+import { partwrightMarkSvg } from './brand';
 
 export interface LandingCallbacks {
   onOpenEditor: () => void;
@@ -23,15 +24,7 @@ export async function createLandingPage(
 
   const title = document.createElement('div');
   title.className = 'flex items-center gap-4 mb-3';
-  title.innerHTML = `<svg width="48" height="48" viewBox="0 0 64 64" fill="none" xmlns="http://www.w3.org/2000/svg">
-    <defs><linearGradient id="lg" x1="0" y1="0" x2="64" y2="64"><stop offset="0%" stop-color="#60a5fa"/><stop offset="100%" stop-color="#818cf8"/></linearGradient></defs>
-    <circle cx="32" cy="32" r="26" fill="none" stroke="url(#lg)" stroke-width="2"/>
-    <ellipse cx="32" cy="32" rx="26" ry="8" fill="none" stroke="#60a5fa" stroke-width="1.5" opacity="0.6"/>
-    <ellipse cx="32" cy="24" rx="22" ry="6" fill="none" stroke="#60a5fa" stroke-width="1" opacity="0.4"/>
-    <ellipse cx="32" cy="40" rx="22" ry="6" fill="none" stroke="#60a5fa" stroke-width="1" opacity="0.4"/>
-    <ellipse cx="32" cy="32" rx="8" ry="26" fill="none" stroke="#60a5fa" stroke-width="1.5" opacity="0.6"/>
-    <ellipse cx="32" cy="32" rx="18" ry="26" fill="none" stroke="#60a5fa" stroke-width="1" opacity="0.3"/>
-  </svg><h1 class="text-4xl font-bold tracking-tight">m<span class="text-blue-400">AI</span>nifold</h1>`;
+  title.innerHTML = `${partwrightMarkSvg(48)}<h1 class="text-4xl font-bold tracking-tight">Partwright</h1>`;
 
   const tagline = document.createElement('p');
   tagline.className = 'text-lg text-zinc-400 mb-4';
@@ -110,7 +103,7 @@ export async function createLandingPage(
   const agentLink = document.createElement('a');
   agentLink.className = 'text-xs text-zinc-600 hover:text-zinc-400 transition-colors';
   agentLink.href = '/ai.md';
-  agentLink.textContent = 'Using mAInifold with an AI agent? See the agent instructions';
+  agentLink.textContent = 'Using Partwright with an AI agent? See the agent instructions';
   footer.appendChild(agentLink);
   page.appendChild(footer);
 

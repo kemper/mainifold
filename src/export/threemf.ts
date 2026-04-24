@@ -29,7 +29,7 @@ export function export3MF(meshData: MeshData, customName?: string): void {
   const modelXml = `<?xml version="1.0" encoding="UTF-8"?>
 <model unit="${get3MFUnitString()}" xml:lang="en-US" xmlns="http://schemas.microsoft.com/3dmanufacturing/core/2015/02">
   <metadata name="Title">${title}</metadata>
-  <metadata name="Application">mAInifold</metadata>
+  <metadata name="Application">Partwright</metadata>
   <resources>
     <object id="1" type="model">
       <mesh>
