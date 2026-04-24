@@ -1,16 +1,24 @@
 # mAInifold
 
-> AI-driven parametric CAD in the browser. All interaction is via the `window.mainifold` JavaScript API.
+> AI-driven parametric CAD in the browser. Supports JavaScript (manifold-3d API) and OpenSCAD (.scad). All interaction is via the `window.mainifold` console API.
 
 ## Quickstart
 
 ```js
 mainifold.help()                        // List all available methods
-await mainifold.createSession("name")   // Start a named session
+await mainifold.createSession("name")   // Start a named session (uses active language)
 await mainifold.runAndSave(code, "v1 - description", {
   isManifold: true, maxComponents: 1    // Validate before saving
 })
-// Code must end with: return <Manifold object>;
+// JS code must end with: return <Manifold object>;
+// SCAD code uses standard OpenSCAD syntax (no return)
+```
+
+## Language switching
+
+```js
+mainifold.getActiveLanguage()            // -> 'manifold-js' or 'scad'
+await mainifold.setActiveLanguage('scad') // Switch to OpenSCAD
 ```
 
 ## Docs

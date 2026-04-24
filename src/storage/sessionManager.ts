@@ -25,7 +25,7 @@ import {
 
 export interface ExportedSession {
   mainifold: string;
-  session: { name: string; created: number; updated: number; referenceImages?: ReferenceImagesData | null };
+  session: { name: string; created: number; updated: number; referenceImages?: ReferenceImagesData | null; language?: 'manifold-js' | 'scad' };
   versions: {
     index: number;
     code: string;
@@ -107,8 +107,12 @@ export function isGalleryMode(): boolean {
 
 // === Session operations ===
 
-export async function createSession(name?: string): Promise<Session> {
-  const session = await dbCreateSession(name);
+export async function createSession(name?: string, language?: 'manifold-js' | 'scad'): Promise<Session> {
+  // Clean up the previous session if it was empty
+  if (currentState.session) {
+    await deleteIfEmpty(currentState.session.id);
+  }
+  const session = await dbCreateSession(name, language);
   currentState = { session, currentVersion: null, versionCount: 0 };
   updateURL();
   notify();
@@ -116,6 +120,11 @@ export async function createSession(name?: string): Promise<Session> {
 }
 
 export async function openSession(id: string, versionIndex?: number): Promise<Version | null> {
+  // Clean up the previous session if it was empty (no versions, no notes)
+  if (currentState.session && currentState.session.id !== id) {
+    await deleteIfEmpty(currentState.session.id);
+  }
+
   const session = await getSession(id);
   if (!session) return null;
 
@@ -136,6 +145,10 @@ export async function openSession(id: string, versionIndex?: number): Promise<Ve
 }
 
 export async function closeSession(): Promise<void> {
+  // Clean up the session we're closing if it was empty
+  if (currentState.session) {
+    await deleteIfEmpty(currentState.session.id);
+  }
   currentState = { session: null, currentVersion: null, versionCount: 0 };
   updateURL();
   notify();
@@ -319,7 +332,7 @@ export function getRecentErrors(): { error: string; timestamp: number }[] {
 // === Session context (single call for AI agents) ===
 
 export interface SessionContext {
-  session: { id: string; name: string; created: number; updated: number };
+  session: { id: string; name: string; created: number; updated: number; language: 'manifold-js' | 'scad' };
   versions: {
     index: number;
     label: string;
@@ -341,6 +354,8 @@ export interface SessionContext {
     apiDocsUrl: string;
     recommendedEntrypoint: string;
     codeMustReturnManifold: boolean;
+    language: 'manifold-js' | 'scad';
+    supportedLanguages: string[];
     recentErrors: { error: string; timestamp: number }[];
   };
 }
@@ -358,6 +373,7 @@ export async function getSessionContext(): Promise<SessionContext | null> {
       name: session.name,
       created: session.created,
       updated: session.updated,
+      language: session.language ?? 'manifold-js',
     },
     versions: versions.map(v => {
       const geo = v.geometryData as Record<string, unknown> | null;
@@ -385,7 +401,9 @@ export async function getSessionContext(): Promise<SessionContext | null> {
     agentHints: {
       apiDocsUrl: '/ai.md',
       recommendedEntrypoint: 'runAndSave',
-      codeMustReturnManifold: true,
+      codeMustReturnManifold: (session.language ?? 'manifold-js') === 'manifold-js',
+      language: session.language ?? 'manifold-js',
+      supportedLanguages: ['manifold-js', 'scad'],
       recentErrors: getRecentErrors(),
     },
   };
@@ -429,7 +447,7 @@ export async function exportSession(sessionId?: string): Promise<ExportedSession
 
   return {
     mainifold: '1.0',
-    session: { name: session.name, created: session.created, updated: session.updated, referenceImages: session.referenceImages ?? null },
+    session: { name: session.name, created: session.created, updated: session.updated, referenceImages: session.referenceImages ?? null, ...(session.language ? { language: session.language } : {}) },
     versions: versions.map(v => ({
       index: v.index,
       code: v.code,
@@ -446,7 +464,7 @@ export async function importSession(
   data: ExportedSession,
   regenerateThumbnail?: (code: string) => Promise<Blob | null>,
 ): Promise<Session> {
-  const session = await dbCreateSession(data.session.name);
+  const session = await dbCreateSession(data.session.name, data.session.language);
 
   // Restore reference images if present in the exported data
   if (data.session.referenceImages) {

@@ -1,16 +1,18 @@
 # mAInifold -- AI Agent Instructions
 
-mAInifold is a browser-based parametric CAD tool powered by manifold-3d (WASM). You write JavaScript that constructs 3D geometry and returns a `Manifold` object, which renders live. All interaction is via the `window.mainifold` programmatic API -- do not drive the app through clicks or keystrokes.
+mAInifold is a browser-based parametric CAD tool with two modeling engines: **manifold-js** (default, JavaScript DSL with manifold-3d API) and **OpenSCAD** (SCAD language via WASM). You write code that constructs 3D geometry, which renders live. All interaction is via the `window.mainifold` programmatic API -- do not drive the app through clicks or keystrokes.
 
 **Coordinate system:** Right-handed, Z-up. XY plane is the ground. Units are arbitrary.
 
 ## Contents
 
 - [Before you start](#before-you-start)
+- [Choosing an engine](#choosing-an-engine)
 - [Common agent mistakes](#common-agent-mistakes)
 - [Console API -- window.mainifold](#console-api--windowmainifold)
 - [Geometry data](#geometry-data)
 - [Writing model code](#writing-model-code)
+- [Writing OpenSCAD code](#writing-openscad-code)
 - [Common pitfalls for boolean operations](#common-pitfalls-for-boolean-operations)
 - [Print-safe geometry](#print-safe-geometry)
 - [Reference images](#reference-images)
@@ -23,9 +25,39 @@ mAInifold is a browser-based parametric CAD tool powered by manifold-3d (WASM). 
 ## Before you start
 
 1. **Use `window.mainifold`** -- that's the programmatic API. Do NOT drive the app with clicks, keystrokes, or DOM manipulation.
-2. **Code must end with `return manifoldObject;`** -- a bare trailing expression won't work.
-3. **Use `runAndSave(code, label, {isManifold: true, maxComponents: 1})`** to validate and commit a version.
-4. **Log decisions with `addSessionNote("[PREFIX] ...")`** -- prefixes: `[REQUIREMENT]`, `[DECISION]`, `[FEEDBACK]`, `[MEASUREMENT]`, `[ATTEMPT]`, `[TODO]`.
+2. **Pick your engine:** manifold-js (default) or OpenSCAD. See [Choosing an engine](#choosing-an-engine).
+3. **manifold-js code must end with `return manifoldObject;`** -- a bare trailing expression won't work. OpenSCAD code uses standard SCAD syntax (no `return`).
+4. **Use `runAndSave(code, label, {isManifold: true, maxComponents: 1})`** to validate and commit a version.
+5. **Log decisions with `addSessionNote("[PREFIX] ...")`** -- prefixes: `[REQUIREMENT]`, `[DECISION]`, `[FEEDBACK]`, `[MEASUREMENT]`, `[ATTEMPT]`, `[TODO]`.
+
+## Choosing an engine
+
+mAInifold supports two modeling engines. Pick whichever is best for the task:
+
+| | **manifold-js** (default) | **OpenSCAD** (SCAD) |
+|---|---|---|
+| Language | JavaScript | OpenSCAD `.scad` |
+| Best for | Algorithmic/parametric geometry, complex math, programmatic iteration | Standard OpenSCAD idioms, porting existing `.scad` files, users who think in CSG |
+| Code style | `return Manifold.cube([10,10,10], true);` | `cube([10,10,10], center=true);` |
+| Strengths | Fast execution, rich JS ecosystem, direct Manifold API access | Familiar to OpenSCAD users, large body of existing `.scad` code online |
+| Limitations | Must learn the manifold-3d API | No `text()` (fonts not loaded), no `use<>`/`include<>` with external libraries, slower (fresh WASM instance per run) |
+
+### Switching engines
+
+```js
+// Check current engine
+mainifold.getActiveLanguage()        // -> 'manifold-js' or 'scad'
+
+// Switch engine (also updates the code editor's syntax highlighting)
+await mainifold.setActiveLanguage('scad')
+await mainifold.setActiveLanguage('manifold-js')
+
+// Run code with a specific engine (one-shot, doesn't change active engine)
+await mainifold.run(scadCode)        // uses active engine
+// To force a specific engine, switch first then run
+```
+
+Selecting a SCAD example from the toolbar dropdown auto-switches to OpenSCAD mode. Session versions remember which engine was used and restore it when loaded.
 
 ## Common agent mistakes
 
@@ -57,6 +89,8 @@ mainifold.setCode(code)       // Set editor contents (no auto-run)
 mainifold.sliceAtZ(z)         // Cross-section -> {polygons, svg, boundingBox, area}
 mainifold.getBoundingBox()    // -> {min:[x,y,z], max:[x,y,z]}
 mainifold.getModule()         // Raw manifold-3d WASM module
+mainifold.getActiveLanguage() // -> 'manifold-js' or 'scad'
+await mainifold.setActiveLanguage(lang) // Switch engine + editor mode ('manifold-js' | 'scad')
 mainifold.toggleClip(on?)     // Toggle 3D clipping plane -> {enabled, z, min, max}
 mainifold.setClipZ(z)         // Set clip height -> {enabled, z, min, max}
 mainifold.getClipState()      // -> {enabled, z, min, max}
@@ -196,6 +230,34 @@ Booleans:   .add(other)  .subtract(other)  .intersect(other)  .hull()
 Modify:     .offset(delta, joinType?, miterLimit?, segments?)  .simplify(epsilon?)
 Queries:    .area()  .isEmpty()  .numVert()  .numContour()  .bounds()
 Output:     .toPolygons()  .decompose()  .delete()
+```
+
+## Writing OpenSCAD code
+
+When the engine is set to `scad`, code is compiled by OpenSCAD (WASM) instead of running as JavaScript.
+
+**Key differences from manifold-js:**
+- **No `return` statement** -- SCAD uses implicit top-level geometry. Just write `cube(10);`, not `return Manifold.cube(...)`.
+- **SCAD syntax** -- standard OpenSCAD: `module`, `function`, `for`, `let`, `if/else`, `use`, `include`.
+- **Built-in primitives** -- `cube`, `sphere`, `cylinder`, `polyhedron`, `polygon`, `circle`, `square`, `text` (text not available -- fonts not loaded).
+- **Transforms** -- `translate`, `rotate`, `scale`, `mirror`, `multmatrix`, `color`, `resize`.
+- **Booleans** -- `union()`, `difference()`, `intersection()`, `hull()`, `minkowski()`.
+- **Extrusion** -- `linear_extrude(height, twist, slices, scale)`, `rotate_extrude(angle)`.
+- **The `--enable=manifold` flag is set automatically** -- OpenSCAD uses the same manifold-3d boolean backend, so CSG results match the JS engine.
+
+**Known limitations (v1):**
+- `text()` is not available (font data not loaded to save ~8MB).
+- `use <...>` / `include <...>` with external `.scad` libraries does not work (no external file system). Inline all modules.
+- BOSL2 and MCAD libraries are not available.
+- Each SCAD run creates a fresh WASM instance (~100-300ms overhead). For fast iteration, manifold-js is snappier.
+
+**Example SCAD code:**
+```scad
+// Cube with cylindrical hole
+difference() {
+  cube([10, 10, 10], center=true);
+  cylinder(h=12, r=4, center=true, $fn=32);
+}
 ```
 
 ## Common pitfalls for boolean operations

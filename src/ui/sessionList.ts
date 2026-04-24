@@ -14,11 +14,11 @@ import {
 import { getVersionCount } from '../storage/db';
 
 let modalEl: HTMLElement | null = null;
-let onLoadVersion: ((code: string) => void) | null = null;
+let onLoadVersion: ((code: string) => void | Promise<void>) | null = null;
 let regenerateThumbnailFn: ((code: string) => Promise<Blob | null>) | null = null;
 
 export function initSessionList(
-  loadCode: (code: string) => void,
+  loadCode: (code: string) => void | Promise<void>,
   regenerateThumbnail?: (code: string) => Promise<Blob | null>,
 ): void {
   onLoadVersion = loadCode;
@@ -153,7 +153,7 @@ async function createSessionRow(session: Session): Promise<HTMLElement> {
   row.addEventListener('click', async () => {
     const version = await openSession(session.id);
     if (version && onLoadVersion) {
-      onLoadVersion(version.code);
+      await onLoadVersion(version.code);
     }
     closeModal();
   });
@@ -168,8 +168,10 @@ async function createSessionRow(session: Session): Promise<HTMLElement> {
   info.appendChild(name);
 
   const meta = document.createElement('div');
-  meta.className = 'text-xs text-zinc-500 font-mono mt-0.5';
-  meta.textContent = `${count} version${count !== 1 ? 's' : ''} · ${formatDate(session.updated)}`;
+  meta.className = 'text-xs text-zinc-500 font-mono mt-0.5 flex items-center gap-1.5';
+  const langLabel = session.language === 'scad' ? 'SCAD' : 'JS';
+  const langColor = session.language === 'scad' ? 'text-amber-400 border-amber-400/30' : 'text-blue-400 border-blue-400/30';
+  meta.innerHTML = `<span class="text-[10px] font-semibold border rounded px-1 ${langColor}">${langLabel}</span>${count} version${count !== 1 ? 's' : ''} · ${formatDate(session.updated)}`;
   info.appendChild(meta);
 
   row.appendChild(info);

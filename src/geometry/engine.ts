@@ -1,82 +1,109 @@
 import type { MeshResult } from './types';
+import type { Engine, Language, ValidateResult } from './engines/types';
+import { DEFAULT_LANGUAGE, isLanguage } from './engines/types';
+import { manifoldJsEngine, getManifoldModule } from './engines/manifoldJs';
+import { openscadEngine, runScadAsync, validateScadAsync } from './engines/openscad';
 
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-let manifoldModule: any = null;
+export type { Language };
+export { isLanguage, DEFAULT_LANGUAGE };
 
-export async function initEngine() {
-  if (manifoldModule) return manifoldModule;
-  const Module = await import('manifold-3d');
-  manifoldModule = await Module.default();
-  manifoldModule.setup();
-  return manifoldModule;
+const engines: Record<Language, Engine> = {
+  'manifold-js': manifoldJsEngine,
+  'scad': openscadEngine,
+};
+
+let activeLanguage: Language = DEFAULT_LANGUAGE;
+
+export function getActiveLanguage(): Language {
+  return activeLanguage;
 }
 
+export function setActiveLanguage(lang: Language): void {
+  if (!isLanguage(lang)) return;
+  activeLanguage = lang;
+}
+
+/** Initialize the specified engine (defaults to the manifold-js engine, which
+ * is always eager-loaded since OpenSCAD needs it for the round-trip). */
+export async function initEngine(lang: Language = DEFAULT_LANGUAGE): Promise<void> {
+  // Always make sure manifold-js is ready (exports + slicing + ofMesh rely on it).
+  await manifoldJsEngine.init();
+  if (lang !== 'manifold-js') {
+    await engines[lang].init();
+  }
+}
+
+/** The manifold-3d module — used by crossSection.ts, exports, and the SCAD round-trip. */
 export function getModule() {
-  return manifoldModule;
+  return getManifoldModule();
 }
 
-export function executeCode(jsCode: string): MeshResult {
-  if (!manifoldModule) {
-    return { mesh: null, manifold: null, error: 'Engine not initialized' };
-  }
+/** Resolve which language to use. Explicit lang arg wins; otherwise active language. */
+function pickLang(lang?: Language): Language {
+  if (lang && isLanguage(lang)) return lang;
+  return activeLanguage;
+}
 
-  const {
-    Manifold,
-    CrossSection,
-    setMinCircularAngle,
-    setMinCircularEdgeLength,
-    setCircularSegments,
-  } = manifoldModule;
-
-  const api = {
-    Manifold,
-    CrossSection,
-    setMinCircularAngle,
-    setMinCircularEdgeLength,
-    setCircularSegments,
-  };
-
-  let result: InstanceType<typeof Manifold> | null = null;
-  try {
-    const fn = new Function('api', `"use strict";\n${jsCode}`);
-    result = fn(api);
-
-    if (!result || typeof result.getMesh !== 'function') {
-      return {
-        mesh: null,
-        manifold: null,
-        error: 'Code must return a Manifold object. Did you forget to `return` the final Manifold? See /ai.md#before-you-start',
-      };
-    }
-
-    const mesh = result.getMesh();
+/** Synchronous execution — works for manifold-js. For SCAD, use executeCodeAsync(). */
+export function executeCode(source: string, lang?: Language): MeshResult {
+  const l = pickLang(lang);
+  if (l === 'scad') {
     return {
-      mesh: {
-        vertProperties: mesh.vertProperties,
-        triVerts: mesh.triVerts,
-        numVert: mesh.numVert,
-        numTri: mesh.numTri,
-        numProp: mesh.numProp,
-      },
-      manifold: result,
-      error: null,
+      mesh: null,
+      manifold: null,
+      error: 'OpenSCAD requires async execution — use executeCodeAsync() instead.',
     };
-  } catch (e: unknown) {
-    let msg = e instanceof Error ? e.message : String(e);
-
-    // Enhance common WASM error messages with actionable hints
-    if (msg.includes('BindingError') && msg.includes('deleted object')) {
-      msg += '\n💡 Hint: A Manifold or CrossSection was used after being deleted. Avoid calling .delete() on objects you still need, or store intermediate results before cleanup.';
-    } else if (msg.includes('function _Cylinder called with')) {
-      msg += '\n💡 Hint: Manifold.cylinder(height, radiusLow, radiusHigh?, segments?) — check argument count and order.';
-    } else if (msg.includes('function _Cube called with')) {
-      msg += '\n💡 Hint: Manifold.cube([x, y, z], center?) — first arg must be an array of 3 numbers.';
-    } else if (msg.includes('Missing field')) {
-      msg += '\n💡 Hint: You may have passed an array where an object was expected, or vice versa. Check the API signature.';
-    } else if (msg.includes('unreachable') || msg.includes('RuntimeError')) {
-      msg += '\n💡 Hint: WASM runtime error — likely caused by degenerate geometry (zero-area face, self-intersection, or invalid boolean). Try simplifying the operation or checking input dimensions.';
-    }
-
-    return { mesh: null, manifold: null, error: msg };
   }
+  const engine = engines[l];
+  if (!engine.isReady()) {
+    return {
+      mesh: null,
+      manifold: null,
+      error: `${engine.id} engine not initialized yet — try again after loading completes.`,
+    };
+  }
+  return engine.run(source);
+}
+
+/** Async execution — works for all engines. SCAD creates a fresh WASM instance per run. */
+export async function executeCodeAsync(source: string, lang?: Language): Promise<MeshResult> {
+  const l = pickLang(lang);
+  if (l === 'scad') {
+    return runScadAsync(source);
+  }
+  // manifold-js is sync — just wrap it
+  return executeCode(source, l);
+}
+
+/** Ensure the specified engine is initialized. Async; use to pre-warm SCAD. */
+export async function ensureEngineReady(lang: Language): Promise<void> {
+  if (!engines[lang].isReady()) {
+    await engines[lang].init();
+  }
+}
+
+/** Sync validation — works for manifold-js. */
+export function validateCode(source: string, lang?: Language): ValidateResult {
+  const l = pickLang(lang);
+  if (l === 'scad') {
+    return { valid: false, error: 'OpenSCAD validation requires async — use validateCodeAsync()' };
+  }
+  const engine = engines[l];
+  if (!engine.isReady()) {
+    return { valid: false, error: `${engine.id} engine not initialized` };
+  }
+  return engine.validate(source);
+}
+
+/** Async validation — works for all engines. */
+export async function validateCodeAsync(source: string, lang?: Language): Promise<ValidateResult> {
+  const l = pickLang(lang);
+  if (l === 'scad') {
+    return validateScadAsync(source);
+  }
+  return validateCode(source, l);
+}
+
+export function isEngineReady(lang: Language): boolean {
+  return engines[lang].isReady();
 }

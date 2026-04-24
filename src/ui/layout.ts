@@ -26,6 +26,7 @@ export function createLayout(appContainer: HTMLElement): LayoutElements {
   editorHeader.className = 'flex items-center justify-between px-3 py-1.5 bg-zinc-800 border-b border-zinc-700';
 
   const editorTitle = document.createElement('span');
+  editorTitle.id = 'editor-title';
   editorTitle.className = 'text-xs text-zinc-400 font-mono';
   editorTitle.textContent = 'editor.js';
   editorHeader.appendChild(editorTitle);

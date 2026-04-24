@@ -14,8 +14,15 @@ const STEPS: TourStep[] = [
     target: '#editor-container',
     title: 'Code Editor',
     description:
-      'Write JavaScript to create 3D geometry using primitives, booleans, and transforms. When an AI agent is driving, it writes and updates code here automatically.',
+      'Write code to create 3D geometry using primitives, booleans, and transforms. Supports JavaScript (manifold-3d API) and OpenSCAD (.scad). When an AI agent is driving, it writes and updates code here automatically.',
     placement: 'right',
+  },
+  {
+    target: '#lang-toggle',
+    title: 'Language Toggle',
+    description:
+      'Switch between JavaScript and OpenSCAD. JS is the default with fast iteration. SCAD uses standard OpenSCAD syntax. Switching creates a new session.',
+    placement: 'bottom',
   },
   {
     target: '#btn-auto-run',
