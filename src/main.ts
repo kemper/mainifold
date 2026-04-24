@@ -1,7 +1,7 @@
 import './style.css';
 import { initEngine, executeCode, executeCodeAsync, validateCodeAsync, ensureEngineReady, getModule, getActiveLanguage, setActiveLanguage, type Language } from './geometry/engine';
 import { sliceAtZ, getBoundingBox } from './geometry/crossSection';
-import { initViewport, updateMesh, setClipping, setClipZ, getClipState, getCameraState, getCanvas, getMeshGroup, getCamera } from './renderer/viewport';
+import { initViewport, updateMesh, setClipping, setClipZ, getClipState, getCameraState, getCanvas, getMeshGroup, getCamera, setMeasureLock, setUserOrbitLock, isUserOrbitLocked, setDimensionsVisible, isDimensionsVisible } from './renderer/viewport';
 import { renderCompositeCanvas, renderElevationsToContainer, renderSingleView, renderSliceSVG, setReferenceImages as _setRefImages, clearReferenceImages as _clearRefImages, getReferenceImages as _getRefImages, type ReferenceImages } from './renderer/multiview';
 import { setPhantom, clearPhantom, hasPhantom, type PhantomOptions } from './renderer/phantomGeometry';
 import { initEditor, setValue, getValue, setLanguage as setEditorLanguage } from './editor/codeEditor';
@@ -924,8 +924,10 @@ async function main() {
   // Wire up clip controls
   initClipControls(clipControls);
 
-  // Wire up measure toggle
+  // Wire up viewport overlay buttons
+  initDimensionsToggle(clipControls);
   initMeasureToggle(clipControls);
+  initOrbitLockToggle(clipControls);
 
   editorReady = true;
   editorReadyResolve();
@@ -2074,18 +2076,21 @@ async function main() {
 
     // === Phase 5: Measuring Tool ===
 
-    /** Toggle interactive measure mode — click two points to measure distance */
+    /** Toggle interactive measure mode — click two points to measure distance.
+     *  Also locks camera rotation while measuring. */
     measureMode(enabled?: boolean): void {
       assertBoolean(enabled, 'measureMode(enabled)', { optional: true });
       const state = getMeasureState();
       if (enabled === undefined) {
         // Toggle
-        if (state.active) deactivateMeasure();
-        else activateMeasure();
+        if (state.active) { deactivateMeasure(); setMeasureLock(false); }
+        else { activateMeasure(); setMeasureLock(true); }
       } else if (enabled) {
         activateMeasure();
+        setMeasureLock(true);
       } else {
         deactivateMeasure();
+        setMeasureLock(false);
       }
     },
 
@@ -2307,11 +2312,44 @@ async function main() {
       const state = getMeasureState();
       if (state.active) {
         deactivateMeasure();
+        setMeasureLock(false);
         measureBtn.className = inactiveClass;
       } else {
         activateMeasure();
+        setMeasureLock(true);
         measureBtn.className = activeClass;
       }
+    });
+  }
+
+  function initDimensionsToggle(container: HTMLElement) {
+    const dimBtn = container.querySelector('#dimensions-toggle') as HTMLButtonElement;
+    if (!dimBtn) return;
+
+    const inactiveClass = 'px-2 py-1 rounded text-xs bg-zinc-800/80 backdrop-blur text-zinc-400 hover:text-zinc-200 hover:bg-zinc-700/80 transition-colors border border-zinc-600/50';
+    const activeClass = 'px-2 py-1 rounded text-xs bg-blue-500/20 backdrop-blur text-blue-400 hover:bg-blue-500/30 transition-colors border border-blue-500/30';
+
+    dimBtn.addEventListener('click', () => {
+      const nowVisible = !isDimensionsVisible();
+      setDimensionsVisible(nowVisible);
+      dimBtn.className = nowVisible ? activeClass : inactiveClass;
+      dimBtn.title = nowVisible ? 'Hide bounding box dimensions' : 'Show bounding box dimensions';
+    });
+  }
+
+  function initOrbitLockToggle(container: HTMLElement) {
+    const lockBtn = container.querySelector('#orbit-lock-toggle') as HTMLButtonElement;
+    if (!lockBtn) return;
+
+    const inactiveClass = 'px-2 py-1 rounded text-xs bg-zinc-800/80 backdrop-blur text-zinc-400 hover:text-zinc-200 hover:bg-zinc-700/80 transition-colors border border-zinc-600/50';
+    const activeClass = 'px-2 py-1 rounded text-xs bg-amber-500/20 backdrop-blur text-amber-400 hover:bg-amber-500/30 transition-colors border border-amber-500/30';
+
+    lockBtn.addEventListener('click', () => {
+      const locked = !isUserOrbitLocked();
+      setUserOrbitLock(locked);
+      lockBtn.className = locked ? activeClass : inactiveClass;
+      lockBtn.textContent = locked ? '\uD83D\uDD12' : '\uD83D\uDD13';
+      lockBtn.title = locked ? 'Unlock camera rotation' : 'Lock camera rotation';
     });
   }
 }
