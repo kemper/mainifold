@@ -1,14 +1,7 @@
-<svg width="32" height="32" viewBox="0 0 64 64" fill="none" xmlns="http://www.w3.org/2000/svg">
-  <defs>
-    <linearGradient id="g" x1="0" y1="0" x2="64" y2="64">
-      <stop offset="0%" stop-color="#60a5fa"/>
-      <stop offset="100%" stop-color="#818cf8"/>
-    </linearGradient>
-  </defs>
-  <circle cx="32" cy="32" r="26" fill="none" stroke="url(#g)" stroke-width="2.5"/>
-  <ellipse cx="32" cy="32" rx="26" ry="8" fill="none" stroke="#60a5fa" stroke-width="1.5" opacity="0.6"/>
-  <ellipse cx="32" cy="24" rx="22" ry="6" fill="none" stroke="#60a5fa" stroke-width="1.2" opacity="0.4"/>
-  <ellipse cx="32" cy="40" rx="22" ry="6" fill="none" stroke="#60a5fa" stroke-width="1.2" opacity="0.4"/>
-  <ellipse cx="32" cy="32" rx="8" ry="26" fill="none" stroke="#60a5fa" stroke-width="1.5" opacity="0.6"/>
-  <ellipse cx="32" cy="32" rx="18" ry="26" fill="none" stroke="#60a5fa" stroke-width="1" opacity="0.3"/>
+<svg width="64" height="64" viewBox="0 0 64 64" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <circle cx="32" cy="32" r="28" fill="#0f172a"/>
+  <circle cx="32" cy="32" r="24" fill="#0f172a" stroke="#334155" stroke-width="2"/>
+  <path d="M32 8l6.2 17.8L56 32l-17.8 6.2L32 56l-6.2-17.8L8 32l17.8-6.2L32 8z" fill="none" stroke="#f59e0b" stroke-width="4" stroke-linejoin="round"/>
+  <path d="M32 19v26M19 32h26" stroke="#14b8a6" stroke-width="3" stroke-linecap="round"/>
+  <circle cx="32" cy="32" r="4.2" fill="#f8e7c9"/>
 </svg>

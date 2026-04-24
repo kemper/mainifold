@@ -40,7 +40,7 @@ export function updateMultiView(meshData: MeshData): void {
 
 function downloadCanvasAsPNG(canvas: HTMLCanvasElement) {
   const link = document.createElement('a');
-  link.download = 'mainifold-views.png';
+  link.download = 'partwright-views.png';
   link.href = canvas.toDataURL('image/png');
   link.click();
 }

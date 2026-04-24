@@ -1,4 +1,4 @@
-# mAInifold — AI-Driven Browser CAD Tool
+# Partwright — AI-Driven Browser CAD Tool
 
 ## Quick Start
 
@@ -13,9 +13,9 @@ Requires COEP/COOP headers (configured in vite.config.ts) for SharedArrayBuffer 
 
 ## Deployment
 
-Hosted on **Cloudflare Pages** at `mainifold.pages.dev` with branch-based environments:
+Hosted on **Cloudflare Pages** with production custom domain `www.partwrightstudio.com` and branch-based environments:
 
-- **`staging`** branch → preview deploy at `staging.mainifold.pages.dev`
+- **`staging`** branch → Cloudflare Pages preview deploy
 - **`main`** branch → production deploy (protected, requires PR review)
 
 **All work should be merged to `staging` first.** Do not push directly to `main`. The workflow is:
@@ -28,13 +28,13 @@ Hosted on **Cloudflare Pages** at `mainifold.pages.dev` with branch-based enviro
 - **Output directory:** `dist/`
 - **SPA routing:** `public/_redirects` (`/* /index.html 200`)
 - **Headers:** `public/_headers` (COEP, COOP, CSP) — Cloudflare Pages serves these automatically
-- **Environment variable:** Set `SITE_URL` in Cloudflare Pages dashboard (Settings > Environment variables) to the production URL (e.g., `https://mainifold.pages.dev`). This is used at build time by the `absoluteUrls` Vite plugin to make Open Graph image URLs and canonical links absolute. If `SITE_URL` is not set, the plugin falls back to `CF_PAGES_URL` (provided automatically by Cloudflare Pages for each deployment).
+- **Environment variable:** Set `SITE_URL` in Cloudflare Pages dashboard (Settings > Environment variables) to the production URL (`https://www.partwrightstudio.com`). This is used at build time by the `absoluteUrls` Vite plugin to make Open Graph image URLs and canonical links absolute. If `SITE_URL` is not set, the plugin falls back to `CF_PAGES_URL` (provided automatically by Cloudflare Pages for each deployment).
 
 ## Smoke Test — Verifying the App Works
 
 After any changes that touch routing, Vite config, index.html, or initialization code, verify these things still work:
 
-1. **Landing page**: Navigate to `http://localhost:5173/` — should show the hero section ("mAInifold", "AI-driven parametric CAD in your browser"), CTA buttons, and a Recent Sessions grid (or empty state).
+1. **Landing page**: Navigate to `http://localhost:5173/` — should show the hero section ("Partwright", "AI-driven parametric CAD in your browser"), CTA buttons, and a Recent Sessions grid (or empty state).
 2. **Open Editor**: Click "Open Editor" on the landing page — URL should change to `/editor`, status should show "Ready" (green), the code editor should appear on the left with a default example, and a 3D model should render in the viewport on the right.
 3. **WASM engine loads**: The status indicator (between editor header and tabs) should say "Ready" in green, NOT "Loading WASM..." or "WASM failed". If it shows "WASM failed", check:
    - `coi-serviceworker.js` loads without 404 (check Network tab)
@@ -47,7 +47,7 @@ After any changes that touch routing, Vite config, index.html, or initialization
 
 ## AI Agent Workflow & API Reference
 
-For the full Manifold/CrossSection API, `window.mainifold` console API, session workflow, verification patterns, and photo-to-model workflow, see `public/ai.md`.
+For the full Manifold/CrossSection API, `window.partwright` console API, session workflow, verification patterns, and photo-to-model workflow, see `public/ai.md`. The legacy `window.mainifold` alias remains available for older prompts.
 
 Key rules:
 - **Always use sessions** for user-requested geometry — never create files in `examples/`

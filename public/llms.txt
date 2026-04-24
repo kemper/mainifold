@@ -1,13 +1,13 @@
-# mAInifold
+# Partwright
 
-> AI-driven parametric CAD in the browser. Supports JavaScript (manifold-3d API) and OpenSCAD (.scad). All interaction is via the `window.mainifold` console API.
+> AI-driven parametric CAD in the browser. Supports JavaScript (manifold-3d API) and OpenSCAD (.scad). All interaction is via the `window.partwright` console API. `window.mainifold` is a legacy alias.
 
 ## Quickstart
 
 ```js
-mainifold.help()                        // List all available methods
-await mainifold.createSession("name")   // Start a named session (uses active language)
-await mainifold.runAndSave(code, "v1 - description", {
+partwright.help()                        // List all available methods
+await partwright.createSession("name")   // Start a named session (uses active language)
+await partwright.runAndSave(code, "v1 - description", {
   isManifold: true, maxComponents: 1    // Validate before saving
 })
 // JS code must end with: return <Manifold object>;
@@ -17,11 +17,11 @@ await mainifold.runAndSave(code, "v1 - description", {
 ## Language switching
 
 ```js
-mainifold.getActiveLanguage()            // -> 'manifold-js' or 'scad'
-await mainifold.setActiveLanguage('scad') // Switch to OpenSCAD
+partwright.getActiveLanguage()            // -> 'manifold-js' or 'scad'
+await partwright.setActiveLanguage('scad') // Switch to OpenSCAD
 ```
 
 ## Docs
 
 - [Full API reference and workflow guide](/ai.md)
-- `mainifold.help()` in the browser console for live method discovery
+- `partwright.help()` in the browser console for live method discovery

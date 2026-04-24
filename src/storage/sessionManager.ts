@@ -24,7 +24,8 @@ import {
 } from './db';
 
 export interface ExportedSession {
-  mainifold: string;
+  partwright?: string;
+  mainifold?: string;
   session: { name: string; created: number; updated: number; referenceImages?: ReferenceImagesData | null; language?: 'manifold-js' | 'scad' };
   versions: {
     index: number;
@@ -446,7 +447,7 @@ export async function exportSession(sessionId?: string): Promise<ExportedSession
   const notes = await dbListNotes(id);
 
   return {
-    mainifold: '1.0',
+    partwright: '1.0',
     session: { name: session.name, created: session.created, updated: session.updated, referenceImages: session.referenceImages ?? null, ...(session.language ? { language: session.language } : {}) },
     versions: versions.map(v => ({
       index: v.index,

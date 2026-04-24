@@ -1,6 +1,6 @@
 # Security Model
 
-mAInifold is a client-side CAD tool designed to be controlled by AI agents. This document explains the security properties of the app so you can make an informed decision about running it with your AI.
+Partwright is a client-side CAD tool designed to be controlled by AI agents. This document explains the security properties of the app so you can make an informed decision about running it with your AI.
 
 ## Threat model: AI prompt injection
 
@@ -10,7 +10,7 @@ When you point an AI agent (Claude, GPT, etc.) at a web app, the app becomes an 
 - Running destructive commands
 - Making unauthorized API calls
 
-### Why mAInifold is safe
+### Why Partwright is safe
 
 **No backend, no network.** The app runs entirely in your browser. There are no servers, no API calls, no telemetry, no analytics. The Content Security Policy enforces `connect-src 'self'` — the app literally cannot make outbound network requests.
 
@@ -39,7 +39,7 @@ There are no network libraries, no analytics SDKs, no ad frameworks.
 
 The geometry editor executes user-written JavaScript via `new Function('api', code)`. This is **not a security sandbox** — it's equivalent to `eval()` with strict mode. User code can access `window`, `document`, and browser APIs.
 
-This is by design: mAInifold is a code editor, like CodePen or JSFiddle. You should only run code you trust, just as you would in a browser dev console.
+This is by design: Partwright is a code editor, like CodePen or JSFiddle. You should only run code you trust, just as you would in a browser dev console.
 
 The `api` parameter provides only geometry primitives (`Manifold`, `CrossSection`, etc.) — no browser APIs are passed in. But the sandbox boundary is convention, not enforcement.
 

@@ -1,6 +1,6 @@
 // First-visit guided tour — spotlight-based coach marks
 
-const STORAGE_KEY = 'mainifold-tour-completed';
+const STORAGE_KEY = 'partwright-tour-completed';
 
 interface TourStep {
   target: string;
