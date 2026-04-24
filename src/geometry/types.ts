@@ -6,10 +6,26 @@ export interface MeshData {
   numProp: number;
 }
 
+export type DiagnosticSeverity = 'error' | 'warning' | 'info' | 'hint';
+
+export interface SourceDiagnostic {
+  message: string;
+  severity: DiagnosticSeverity;
+  source?: string;
+  hint?: string;
+  from?: number;
+  to?: number;
+  line?: number;
+  column?: number;
+  endLine?: number;
+  endColumn?: number;
+}
+
 export interface MeshResult {
   mesh: MeshData | null;
   manifold: unknown | null;
   error: string | null;
+  diagnostics?: SourceDiagnostic[];
 }
 
 export interface CrossSectionResult {

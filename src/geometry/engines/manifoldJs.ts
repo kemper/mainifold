@@ -1,4 +1,5 @@
 import type { Engine, MeshResult, ValidateResult } from './types';
+import { javaScriptSyntaxDiagnostics, runtimeDiagnostic } from '../sourceDiagnostics';
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 let manifoldModule: any = null;
@@ -49,10 +50,12 @@ export const manifoldJsEngine: Engine = {
       result = fn(api);
 
       if (!result || typeof result.getMesh !== 'function') {
+        const error = 'Code must return a Manifold object. Did you forget to `return` the final Manifold? See /ai.md#before-you-start';
         return {
           mesh: null,
           manifold: null,
-          error: 'Code must return a Manifold object. Did you forget to `return` the final Manifold? See /ai.md#before-you-start',
+          error,
+          diagnostics: runtimeDiagnostic(error, 'Add a final `return` statement that returns the Manifold you want to render.', 'JavaScript'),
         };
       }
 
@@ -70,21 +73,29 @@ export const manifoldJsEngine: Engine = {
       };
     } catch (e: unknown) {
       let msg = e instanceof Error ? e.message : String(e);
+      const isSyntaxError = e instanceof SyntaxError;
+      let hint: string | undefined;
 
       // Enhance common WASM error messages with actionable hints
       if (msg.includes('BindingError') && msg.includes('deleted object')) {
-        msg += '\n💡 Hint: A Manifold or CrossSection was used after being deleted. Avoid calling .delete() on objects you still need, or store intermediate results before cleanup.';
+        hint = 'A Manifold or CrossSection was used after being deleted. Avoid calling .delete() on objects you still need, or store intermediate results before cleanup.';
       } else if (msg.includes('function _Cylinder called with')) {
-        msg += '\n💡 Hint: Manifold.cylinder(height, radiusLow, radiusHigh?, segments?) — check argument count and order.';
+        hint = 'Manifold.cylinder(height, radiusLow, radiusHigh?, segments?) — check argument count and order.';
       } else if (msg.includes('function _Cube called with')) {
-        msg += '\n💡 Hint: Manifold.cube([x, y, z], center?) — first arg must be an array of 3 numbers.';
+        hint = 'Manifold.cube([x, y, z], center?) — first arg must be an array of 3 numbers.';
       } else if (msg.includes('Missing field')) {
-        msg += '\n💡 Hint: You may have passed an array where an object was expected, or vice versa. Check the API signature.';
+        hint = 'You may have passed an array where an object was expected, or vice versa. Check the API signature.';
       } else if (msg.includes('unreachable') || msg.includes('RuntimeError')) {
-        msg += '\n💡 Hint: WASM runtime error — likely caused by degenerate geometry (zero-area face, self-intersection, or invalid boolean). Try simplifying the operation or checking input dimensions.';
+        hint = 'WASM runtime error — likely caused by degenerate geometry, a self-intersection, or an invalid boolean. Try simplifying the operation or checking input dimensions.';
       }
 
-      return { mesh: null, manifold: null, error: msg };
+      if (hint) msg += `\nHint: ${hint}`;
+      return {
+        mesh: null,
+        manifold: null,
+        error: msg,
+        diagnostics: isSyntaxError ? javaScriptSyntaxDiagnostics(jsCode, msg, e) : runtimeDiagnostic(msg, hint, 'JavaScript'),
+      };
     }
   },
 
@@ -94,7 +105,12 @@ export const manifoldJsEngine: Engine = {
       new Function('api', `"use strict";\n${jsCode}`);
       return { valid: true };
     } catch (e) {
-      return { valid: false, error: e instanceof Error ? e.message : String(e) };
+      const error = e instanceof Error ? e.message : String(e);
+      return {
+        valid: false,
+        error,
+        diagnostics: e instanceof SyntaxError ? javaScriptSyntaxDiagnostics(jsCode, error, e) : runtimeDiagnostic(error, undefined, 'JavaScript'),
+      };
     }
   },
 };
