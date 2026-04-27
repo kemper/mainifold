@@ -5,12 +5,12 @@ import {
   createSession,
   deleteSession,
   openSession,
-  exportSession,
   importSession,
   clearAllSessions,
   type Session,
   type ExportedSession,
 } from '../storage/sessionManager';
+import { exportSessionJSON } from '../export/session';
 import { getVersionCount } from '../storage/db';
 
 let modalEl: HTMLElement | null = null;
@@ -182,14 +182,7 @@ async function createSessionRow(session: Session): Promise<HTMLElement> {
   expBtn.textContent = 'Export';
   expBtn.addEventListener('click', async (e) => {
     e.stopPropagation();
-    const data = await exportSession(session.id);
-    if (!data) return;
-    const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
-    const link = document.createElement('a');
-    link.href = URL.createObjectURL(blob);
-    link.download = `${session.name.replace(/[^a-zA-Z0-9_-]/g, '_')}.partwright.json`;
-    link.click();
-    URL.revokeObjectURL(link.href);
+    await exportSessionJSON(session.id);
   });
   row.appendChild(expBtn);
 
