@@ -898,6 +898,9 @@ async function main() {
   let engineOk = false;
   let helpHasAppBackTarget = false;
   let notFoundEl: HTMLElement | null = null;
+  // Declared early so async callbacks (e.g. runCodeSync triggered during
+  // initial syncEditorFromURL) don't hit a TDZ error before this point.
+  let _running = false;
 
   async function ensureEditorReady() {
     if (!editorReady) await editorReadyPromise;
@@ -1260,7 +1263,8 @@ async function main() {
   }
 
   // === Execution state ===
-  let _running = false;
+  // (`_running` is declared at the top of main() so async callbacks fired
+  // during initial load don't hit a Temporal Dead Zone error.)
 
   async function executeIsolated(code: string, lang?: Language) {
     const t0 = performance.now();
