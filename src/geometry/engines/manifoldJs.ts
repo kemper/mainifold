@@ -67,6 +67,8 @@ export const manifoldJsEngine: Engine = {
           numVert: mesh.numVert,
           numTri: mesh.numTri,
           numProp: mesh.numProp,
+          mergeFromVert: mesh.mergeFromVert,
+          mergeToVert: mesh.mergeToVert,
         },
         manifold: result,
         error: null,

@@ -23,6 +23,8 @@ Also extracted the ZIP builder from threemf.ts into a shared `src/export/zip.ts`
 
 OBJ files caused "3 non-manifold edges" warnings and slicing failures ("empty layer between 2 and 5.2"). Two root causes:
 
-1. **Split vertices** — manifold-3d `getMesh()` duplicates vertices at property boundaries. In an indexed format like OBJ, shared edges had different vertex indices for the same physical position, making them topologically non-manifold. Fix: deduplicate vertices by position before writing.
+1. **Split vertices** — manifold-3d `getMesh()` duplicates vertices at property boundaries. String-based dedup missed merges where positions differed by tiny floating-point amounts. Fix: use manifold-3d's authoritative `mergeFromVert`/`mergeToVert` vectors via union-find, with quantized position dedup (1e-5) as fallback. Also pass merge vectors through MeshData from both manifold-js and OpenSCAD engines.
 
-2. **Missing face normals** — without `vn` entries, slicers infer inside/outside from winding order alone, which can fail on complex geometry. Fix: compute face normals via cross product (same as STL exporter) and write `f v//vn` format.
+2. **Degenerate triangles** — after vertex merging, some triangles collapse (two+ vertices map to same index). These create non-manifold edges. Fix: filter degenerate triangles before writing.
+
+3. **Missing face normals** — without `vn` entries, slicers infer inside/outside from winding order alone, which can fail on complex geometry. Fix: compute face normals via cross product (same as STL exporter) and write `f v//vn` format.

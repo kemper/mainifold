@@ -4,31 +4,91 @@ import { buildZip } from './zip';
 
 const DEFAULT_COLOR = '#4a9eff';
 
-export function exportOBJ(meshData: MeshData, customName?: string): void {
-  const { vertProperties, triVerts, numVert, numTri, numProp, triColors } = meshData;
-  const title = getExportTitle();
+/**
+ * Build a vertex remap table that merges duplicate vertices into canonical indices.
+ *
+ * Uses merge vectors from manifold-3d (authoritative) when available, otherwise
+ * falls back to quantized position dedup (same tolerance as scadToManifold.ts).
+ * Returns { remap, uniquePositions }.
+ */
+function buildVertexRemap(meshData: MeshData) {
+  const { vertProperties, numVert, numProp, mergeFromVert, mergeToVert } = meshData;
 
-  // --- Vertex deduplication ---
-  // manifold-3d getMesh() duplicates vertices at property boundaries (numPropVert >= numVert).
-  // In OBJ (an indexed format), two triangles sharing a physical edge must reference the same
-  // vertex index — otherwise slicers flag the edge as non-manifold. Merge vertices by position.
-  const posToIndex = new Map<string, number>();
-  const uniquePositions: number[] = []; // flat xyz
-  const vertRemap = new Uint32Array(numVert); // old index -> merged index
+  // Union-find for vertex merging
+  const parent = new Uint32Array(numVert);
+  for (let i = 0; i < numVert; i++) parent[i] = i;
+
+  function find(x: number): number {
+    while (parent[x] !== x) { parent[x] = parent[parent[x]]; x = parent[x]; }
+    return x;
+  }
+  function union(a: number, b: number) {
+    const ra = find(a), rb = find(b);
+    if (ra !== rb) parent[ra] = rb;
+  }
+
+  // Phase 1: merge vectors from manifold-3d (exact pairs)
+  if (mergeFromVert && mergeToVert && mergeFromVert.length === mergeToVert.length) {
+    for (let i = 0; i < mergeFromVert.length; i++) {
+      union(mergeFromVert[i], mergeToVert[i]);
+    }
+  }
+
+  // Phase 2: quantized position dedup as fallback (catches anything merge vectors missed,
+  // or handles meshes without merge vectors like raw STL imports)
+  const quantize = (v: number) => Math.round(v * 1e5);
+  const posMap = new Map<string, number>();
+  for (let i = 0; i < numVert; i++) {
+    const x = quantize(vertProperties[i * numProp]);
+    const y = quantize(vertProperties[i * numProp + 1]);
+    const z = quantize(vertProperties[i * numProp + 2]);
+    const key = `${x},${y},${z}`;
+    const existing = posMap.get(key);
+    if (existing !== undefined) {
+      union(i, existing);
+    } else {
+      posMap.set(key, i);
+    }
+  }
+
+  // Flatten: assign sequential indices to unique roots
+  const rootToIndex = new Map<number, number>();
+  const uniquePositions: number[] = [];
+  const remap = new Uint32Array(numVert);
 
   for (let i = 0; i < numVert; i++) {
-    const x = vertProperties[i * numProp];
-    const y = vertProperties[i * numProp + 1];
-    const z = vertProperties[i * numProp + 2];
-    const key = `${x},${y},${z}`;
-    const existing = posToIndex.get(key);
-    if (existing !== undefined) {
-      vertRemap[i] = existing;
-    } else {
-      const idx = uniquePositions.length / 3;
-      posToIndex.set(key, idx);
-      uniquePositions.push(x, y, z);
-      vertRemap[i] = idx;
+    const root = find(i);
+    let idx = rootToIndex.get(root);
+    if (idx === undefined) {
+      idx = uniquePositions.length / 3;
+      rootToIndex.set(root, idx);
+      // Use the root vertex's position as the canonical position
+      uniquePositions.push(
+        vertProperties[root * numProp],
+        vertProperties[root * numProp + 1],
+        vertProperties[root * numProp + 2],
+      );
+    }
+    remap[i] = idx;
+  }
+
+  return { remap, uniquePositions };
+}
+
+export function exportOBJ(meshData: MeshData, customName?: string): void {
+  const { vertProperties, triVerts, numTri, numProp, triColors } = meshData;
+  const title = getExportTitle();
+
+  const { remap, uniquePositions } = buildVertexRemap(meshData);
+
+  // Build non-degenerate triangle list (filter triangles that collapsed during merge)
+  const validTris: number[] = [];
+  for (let t = 0; t < numTri; t++) {
+    const a = remap[triVerts[t * 3]];
+    const b = remap[triVerts[t * 3 + 1]];
+    const c = remap[triVerts[t * 3 + 2]];
+    if (a !== b && b !== c && a !== c) {
+      validTris.push(t);
     }
   }
 
@@ -36,7 +96,7 @@ export function exportOBJ(meshData: MeshData, customName?: string): void {
   let hasColors = false;
   if (triColors) {
     const painted = (triColors as Uint8Array & { _painted?: Uint8Array })._painted;
-    for (let t = 0; t < numTri; t++) {
+    for (const t of validTris) {
       const isPainted = painted
         ? painted[t] === 1
         : (triColors[t * 3] !== 0 || triColors[t * 3 + 1] !== 0 || triColors[t * 3 + 2] !== 0);
@@ -57,8 +117,11 @@ export function exportOBJ(meshData: MeshData, customName?: string): void {
     lines.push(`v ${uniquePositions[i * 3]} ${uniquePositions[i * 3 + 1]} ${uniquePositions[i * 3 + 2]}`);
   }
 
-  // Face normals (one per triangle, computed via cross product)
-  for (let t = 0; t < numTri; t++) {
+  // Face normals (one per valid triangle, computed via cross product)
+  // normalIndex maps original triangle index → 1-based normal index in the vn list
+  const normalIndex = new Map<number, number>();
+  let vnCount = 0;
+  for (const t of validTris) {
     const i0 = triVerts[t * 3];
     const i1 = triVerts[t * 3 + 1];
     const i2 = triVerts[t * 3 + 2];
@@ -76,18 +139,19 @@ export function exportOBJ(meshData: MeshData, customName?: string): void {
     nx /= len; ny /= len; nz /= len;
 
     lines.push(`vn ${nx} ${ny} ${nz}`);
+    vnCount++;
+    normalIndex.set(t, vnCount); // 1-based
   }
 
-  // Helper to format a face vertex as "vertIdx//normalIdx" (both 1-based)
-  const fv = (origVert: number, normalIdx1: number) =>
-    `${vertRemap[origVert] + 1}//${normalIdx1}`;
+  // Helper: format face vertex as "vertIdx//normalIdx" (both 1-based)
+  const fv = (origVert: number, nIdx: number) => `${remap[origVert] + 1}//${nIdx}`;
 
   if (hasColors && triColors) {
     const painted = (triColors as Uint8Array & { _painted?: Uint8Array })._painted;
 
-    // Group triangles by color hex
+    // Group valid triangles by color hex
     const colorGroups = new Map<string, number[]>();
-    for (let t = 0; t < numTri; t++) {
+    for (const t of validTris) {
       const isPainted = painted
         ? painted[t] === 1
         : (triColors[t * 3] !== 0 || triColors[t * 3 + 1] !== 0 || triColors[t * 3 + 2] !== 0);
@@ -110,8 +174,8 @@ export function exportOBJ(meshData: MeshData, customName?: string): void {
     for (const [hex, tris] of colorGroups) {
       lines.push(`usemtl ${matName(hex)}`);
       for (const t of tris) {
-        const n1 = t + 1; // normal index (1-based, one normal per triangle)
-        lines.push(`f ${fv(triVerts[t * 3], n1)} ${fv(triVerts[t * 3 + 1], n1)} ${fv(triVerts[t * 3 + 2], n1)}`);
+        const n = normalIndex.get(t)!;
+        lines.push(`f ${fv(triVerts[t * 3], n)} ${fv(triVerts[t * 3 + 1], n)} ${fv(triVerts[t * 3 + 2], n)}`);
       }
     }
 
@@ -130,7 +194,7 @@ export function exportOBJ(meshData: MeshData, customName?: string): void {
       mtlLines.push('');
     }
 
-    // Bundle OBJ + MTL in a ZIP for single-file download
+    // Bundle OBJ + MTL in a ZIP
     const enc = new TextEncoder();
     const zip = buildZip([
       { name: `${baseName}.obj`, data: enc.encode(lines.join('\n')) },
@@ -141,9 +205,9 @@ export function exportOBJ(meshData: MeshData, customName?: string): void {
     downloadBlob(blob, `${baseName}.zip`);
   } else {
     // No colors — plain OBJ with normals
-    for (let t = 0; t < numTri; t++) {
-      const n1 = t + 1;
-      lines.push(`f ${fv(triVerts[t * 3], n1)} ${fv(triVerts[t * 3 + 1], n1)} ${fv(triVerts[t * 3 + 2], n1)}`);
+    for (const t of validTris) {
+      const n = normalIndex.get(t)!;
+      lines.push(`f ${fv(triVerts[t * 3], n)} ${fv(triVerts[t * 3 + 1], n)} ${fv(triVerts[t * 3 + 2], n)}`);
     }
 
     const blob = new Blob([lines.join('\n')], { type: 'text/plain' });
