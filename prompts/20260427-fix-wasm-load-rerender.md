@@ -13,6 +13,8 @@ When I hard refresh a page I see "Loading WASM" but I don't think it refreshes a
 
 ### Key decisions
 
-Root cause was a TDZ error: `let _running = false` in `main.ts` was declared mid-function (after `await syncEditorFromURL()`). On hard refresh, `syncEditorFromURL → loadVersionIntoEditor → runCodeSync` references `_running` before its declaration line executes, throwing "Cannot access '_running' before initialization". The unhandled rejection escaped to `main().catch`, leaving the status bar stuck on "Loading WASM..." and the model never rendered.
+Two related bugs in `main.ts → syncEditorFromURL`:
 
-Fix: hoisted the `let _running = false;` declaration to the top of `main()` next to other state vars (`engineOk`, `editorReady`, etc.) so async callbacks fired during initial load can safely reference it.
+1. When `?session=<id>` references a session that doesn't exist in IndexedDB (or has no saved versions), `openSession` returns null. The original code only handled the success branch and the no-session-id branch, leaving this case to fall through with no `runCode` call and no status update — so "Loading WASM..." stayed forever and the viewport was empty. Fix: when `openSession` returns null, fall through to create a fresh session if needed and run defaults.
+
+2. `let _running = false` was declared mid-function (after `await syncEditorFromURL()`). In dev (non-minified), `syncEditorFromURL → loadVersionIntoEditor → runCodeSync` references `_running` before its declaration line executes, throwing TDZ. Fix: hoisted the declaration to the top of `main()` next to other state vars.

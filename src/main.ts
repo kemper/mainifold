@@ -1048,13 +1048,23 @@ async function main() {
         if (version) {
           await loadVersionIntoEditor(version);
           if (tab === 'gallery') refreshGallery();
+          return;
         }
+        // openSession returned null — either the session ID in the URL
+        // doesn't exist in IndexedDB (e.g. a stale bookmark, or a URL
+        // shared from another browser/device), or the session exists
+        // but has no saved versions. Fall through to create a fresh
+        // session if needed and run defaults, so the viewport renders
+        // and the status doesn't stay stuck on "Loading WASM...".
+      } else {
+        return;
       }
-    } else if (!getState().session) {
-      await createSession();
-      setStatus(statusBar, 'ready', 'Ready');
-      runCode(defaultCode);
     }
+    if (!getState().session) {
+      await createSession();
+    }
+    setStatus(statusBar, 'ready', 'Ready');
+    runCode(defaultCode);
   }
 
   async function syncRouteFromURL() {
