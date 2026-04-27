@@ -5,6 +5,8 @@ import {
   deactivate,
   isActive,
   setColor,
+  setWidth,
+  getWidth,
   onActiveChange,
 } from './annotateMode';
 import { getCount, onChange as onStrokesChange, removeLastStroke, clearStrokes } from './annotations';
@@ -19,6 +21,13 @@ const PRESET_COLORS: [number, number, number][] = [
   [0.61, 0.15, 0.69], // purple
   [0.20, 0.20, 0.20], // near-black
   [0.96, 0.96, 0.96], // near-white
+];
+
+const PRESET_WIDTHS: { label: string; value: number }[] = [
+  { label: 'XS', value: 2 },
+  { label: 'S',  value: 4 },
+  { label: 'M',  value: 7 },
+  { label: 'L',  value: 12 },
 ];
 
 let annotateBtn: HTMLButtonElement | null = null;
@@ -141,6 +150,47 @@ function createPickerPanel(): HTMLElement {
   customRow.appendChild(customLabel);
   panel.appendChild(customRow);
 
+  // Width picker
+  const widthLabel = document.createElement('div');
+  widthLabel.className = 'text-[10px] text-zinc-500 uppercase tracking-wider mb-1.5 mt-2 font-medium';
+  widthLabel.textContent = 'Width';
+  panel.appendChild(widthLabel);
+
+  const widthRow = document.createElement('div');
+  widthRow.className = 'flex items-center gap-1.5 mb-1';
+
+  const widthButtons: HTMLButtonElement[] = [];
+  for (const preset of PRESET_WIDTHS) {
+    const btn = document.createElement('button');
+    btn.className = 'flex-1 px-2 py-1 rounded text-[11px] bg-zinc-700/60 text-zinc-300 hover:bg-zinc-600/60 transition-colors flex items-center justify-center gap-1.5';
+    btn.title = `${preset.value}px`;
+
+    // Show a thickness swatch + label
+    const dot = document.createElement('span');
+    dot.className = 'rounded-full bg-zinc-300';
+    const sz = Math.max(2, Math.min(12, preset.value));
+    dot.style.width = `${sz}px`;
+    dot.style.height = `${sz}px`;
+    btn.appendChild(dot);
+
+    const lbl = document.createElement('span');
+    lbl.textContent = preset.label;
+    btn.appendChild(lbl);
+
+    btn.addEventListener('click', () => {
+      setWidth(preset.value);
+      markActiveWidth(widthButtons, btn);
+    });
+
+    widthButtons.push(btn);
+    widthRow.appendChild(btn);
+  }
+  panel.appendChild(widthRow);
+
+  // Sync initial active width button to current setting
+  const initialIdx = PRESET_WIDTHS.findIndex(w => w.value === getWidth());
+  if (initialIdx >= 0) markActiveWidth(widthButtons, widthButtons[initialIdx]);
+
   // Action row: visibility, undo, clear
   const actions = document.createElement('div');
   actions.className = 'flex items-center gap-1.5 mt-2 pt-2 border-t border-zinc-700';
@@ -180,6 +230,15 @@ function markActiveSwatch(grid: HTMLElement, activeSwatch: HTMLElement): void {
     (child as HTMLElement).classList.remove('border-white/80', 'ring-1', 'ring-white/30');
   }
   activeSwatch.classList.add('border-white/80', 'ring-1', 'ring-white/30');
+}
+
+function markActiveWidth(buttons: HTMLButtonElement[], active: HTMLButtonElement): void {
+  for (const b of buttons) {
+    b.classList.remove('bg-zinc-500/60', 'ring-1', 'ring-white/30');
+    b.classList.add('bg-zinc-700/60');
+  }
+  active.classList.remove('bg-zinc-700/60');
+  active.classList.add('bg-zinc-500/60', 'ring-1', 'ring-white/30');
 }
 
 function rgbToCSS(color: [number, number, number]): string {

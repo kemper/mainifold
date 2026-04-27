@@ -7,6 +7,7 @@ export interface AnnotationStroke {
   id: string;
   points: THREE.Vector3[]; // surface points, slightly offset along the hit normal
   color: [number, number, number]; // 0..1
+  width: number; // line width in screen-space pixels
 }
 
 let strokes: AnnotationStroke[] = [];

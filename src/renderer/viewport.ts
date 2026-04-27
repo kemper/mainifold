@@ -6,7 +6,7 @@ import { initPhantomGroup } from './phantomGeometry';
 import { initMeasureOverlay } from './measureOverlay';
 import { initOrientationGizmo, renderGizmo, updateGizmo, disposeGizmo, isGizmoAnimating } from './orientationGizmo';
 import { initDimensionLines, updateDimensionLines, disposeDimensionLines } from './dimensionLines';
-import { initAnnotationOverlay } from '../annotations/annotationOverlay';
+import { initAnnotationOverlay, setLiveResolution as setAnnotationResolution } from '../annotations/annotationOverlay';
 
 let renderer: THREE.WebGLRenderer;
 let camera: THREE.PerspectiveCamera;
@@ -108,8 +108,16 @@ export function initViewport(container: HTMLElement): {
     renderer.setSize(width, height);
     camera.aspect = width / height;
     camera.updateProjectionMatrix();
+    setAnnotationResolution(width * window.devicePixelRatio, height * window.devicePixelRatio);
   });
   observer.observe(container);
+
+  // Initialize annotation resolution to current canvas size so the first
+  // strokes drawn before any resize event fire still get correct widths.
+  setAnnotationResolution(
+    canvas.width || container.clientWidth * window.devicePixelRatio,
+    canvas.height || container.clientHeight * window.devicePixelRatio,
+  );
 
   // Animate
   const clock = new THREE.Clock();

@@ -42,7 +42,7 @@ import {
   isAnnotationsVisible as isAnnotationsVisibleOverlay,
   onVisibilityChange as onAnnotationVisibilityChange,
 } from './annotations/annotationOverlay';
-import { setColor as setAnnotateColor } from './annotations/annotateMode';
+import { setColor as setAnnotateColor, setWidth as setAnnotateWidth, getWidth as getAnnotateWidth } from './annotations/annotateMode';
 import { applyTriColors, hasRegions as hasColorRegions, onChange as onColorRegionsChange, clearRegions, serialize as serializeRegions, addRegion, getRegions, type SerializedColorRegion } from './color/regions';
 import { initEditorLock, syncLockState, setUnlockHandlers } from './color/editorLock';
 import { buildAdjacency, findCoplanarRegion, resolveSeed } from './color/adjacency';
@@ -2487,6 +2487,19 @@ async function main() {
       return { color };
     },
 
+    /** Set the active drawing line width (pixels) for new annotation strokes.
+     *  Existing strokes keep their original width. */
+    setAnnotationWidth(width: number) {
+      assertNumber(width, 'setAnnotationWidth(width)', { min: 0.5, max: 64 });
+      setAnnotateWidth(width);
+      return { width };
+    },
+
+    /** Get the active drawing line width (pixels). */
+    getAnnotationWidth() {
+      return getAnnotateWidth();
+    },
+
     /** Self-documenting help -- returns structured object and logs readable summary */
     help(method?: string): Record<string, unknown> {
       assertString(method, 'help(method)', { optional: true, allowEmpty: false });
@@ -2543,6 +2556,8 @@ async function main() {
         'setAnnotationsVisible': { signature: 'setAnnotationsVisible(bool) -- Show/hide all annotations (also affects renderView/elevation output)', docs: '/ai.md#annotations' },
         'areAnnotationsVisible': { signature: 'areAnnotationsVisible() -- Whether annotations are currently visible', docs: '/ai.md#annotations' },
         'setAnnotationColor': { signature: 'setAnnotationColor([r,g,b]) -- Set draw color for new strokes (RGB 0..1)', docs: '/ai.md#annotations' },
+        'setAnnotationWidth': { signature: 'setAnnotationWidth(px) -- Set draw line width for new strokes (0.5..64 px)', docs: '/ai.md#annotations' },
+        'getAnnotationWidth': { signature: 'getAnnotationWidth() -- Current draw line width (pixels)', docs: '/ai.md#annotations' },
       };
 
       if (method) {

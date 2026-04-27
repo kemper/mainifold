@@ -4,8 +4,14 @@
 // with the model.
 
 import * as THREE from 'three';
+import { Line2 } from 'three/addons/lines/Line2.js';
 import { addStroke, type AnnotationStroke } from './annotations';
-import { getOverlayGroup } from './annotationOverlay';
+import {
+  getOverlayGroup,
+  getLiveResolution,
+  strokeToLine2,
+  setLine2Points,
+} from './annotationOverlay';
 import {
   getMeshGroup,
   getCamera,
@@ -20,16 +26,17 @@ const MIN_POINT_DIST_FRAC = 0.002;  // skip pointer samples closer than this in 
 const MIN_POINT_DIST_FLOOR = 0.02;  // absolute floor on min distance
 
 const DEFAULT_COLOR: [number, number, number] = [0.95, 0.20, 0.45]; // hot pink
+const DEFAULT_WIDTH = 4; // pixels
 
 let active = false;
 let currentColor: [number, number, number] = [...DEFAULT_COLOR] as [number, number, number];
+let currentWidth = DEFAULT_WIDTH;
 
 let drawing = false;
 let currentPoints: THREE.Vector3[] = [];
 let priorOrbitLock = false;
 
-let previewLine: THREE.Line | null = null;
-let previewGeo: THREE.BufferGeometry | null = null;
+let previewLine: Line2 | null = null;
 
 const raycaster = new THREE.Raycaster();
 const mouseNDC = new THREE.Vector2();
@@ -48,6 +55,14 @@ export function getColor(): [number, number, number] {
 
 export function setColor(c: [number, number, number]): void {
   currentColor = [c[0], c[1], c[2]];
+}
+
+export function getWidth(): number {
+  return currentWidth;
+}
+
+export function setWidth(w: number): void {
+  currentWidth = w;
 }
 
 export function onActiveChange(fn: (active: boolean) => void): () => void {
@@ -148,13 +163,15 @@ function ensurePreview(): void {
   if (previewLine) return;
   const overlay = getOverlayGroup();
   if (!overlay) return;
-  previewGeo = new THREE.BufferGeometry();
-  const mat = new THREE.LineBasicMaterial({
-    color: new THREE.Color(currentColor[0], currentColor[1], currentColor[2]),
-    depthTest: true,
-    transparent: true,
-  });
-  previewLine = new THREE.Line(previewGeo, mat);
+  // Build a placeholder Line2 with the current color/width via the same
+  // pipeline used for committed strokes — keeps the look identical.
+  const placeholder: AnnotationStroke = {
+    id: '__preview',
+    points: currentPoints,
+    color: [...currentColor] as [number, number, number],
+    width: currentWidth,
+  };
+  previewLine = strokeToLine2(placeholder, getLiveResolution());
   previewLine.name = 'annotation-preview';
   previewLine.renderOrder = 1000;
   overlay.add(previewLine);
@@ -162,19 +179,17 @@ function ensurePreview(): void {
 
 function updatePreviewGeometry(): void {
   ensurePreview();
-  if (!previewGeo) return;
-  previewGeo.setFromPoints(currentPoints);
-  previewGeo.computeBoundingSphere();
+  if (!previewLine) return;
+  setLine2Points(previewLine, currentPoints);
 }
 
 function clearPreview(): void {
   if (!previewLine) return;
   const overlay = getOverlayGroup();
   overlay?.remove(previewLine);
-  previewGeo?.dispose();
+  previewLine.geometry.dispose();
   (previewLine.material as THREE.Material).dispose();
   previewLine = null;
-  previewGeo = null;
 }
 
 function onPointerDown(event: PointerEvent): void {
@@ -223,6 +238,7 @@ function onPointerUp(event: PointerEvent): void {
     id: makeId(),
     points: currentPoints,
     color: [...currentColor] as [number, number, number],
+    width: currentWidth,
   };
   currentPoints = [];
   clearPreview();

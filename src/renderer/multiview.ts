@@ -127,7 +127,7 @@ export function renderViewsToContainer(container: HTMLElement, meshData: MeshDat
   const viewSize = 300;
   const renderer = getOffscreenRenderer(viewSize);
 
-  const annotations = buildStrokesGroup();
+  const annotations = buildStrokesGroup(new THREE.Vector2(viewSize, viewSize));
   if (annotations) scene.add(annotations);
 
   // 2x2 grid that fills the container
@@ -203,7 +203,7 @@ export function renderCompositeCanvas(meshData: MeshData): HTMLCanvasElement {
   const camera = new THREE.PerspectiveCamera(40, 1, 0.1, 1000);
   const renderer = getOffscreenRenderer(viewSize);
 
-  const annotations = buildStrokesGroup();
+  const annotations = buildStrokesGroup(new THREE.Vector2(viewSize, viewSize));
   if (annotations) scene.add(annotations);
 
   const labelHeight = 28;
@@ -373,7 +373,7 @@ export function renderElevationsToContainer(container: HTMLElement, meshData: Me
   const renderer = getOffscreenRenderer(viewSize);
   const hasRef = _referenceImages !== null;
 
-  const annotations = buildStrokesGroup();
+  const annotations = buildStrokesGroup(new THREE.Vector2(viewSize, viewSize));
   if (annotations) scene.add(annotations);
 
   // Compact reference images row (above the elevation grid)
@@ -538,7 +538,7 @@ export function renderSingleView(meshData: MeshData, options: {
 
   const renderer = getOffscreenRenderer(viewSize);
 
-  const annotations = buildStrokesGroup();
+  const annotations = buildStrokesGroup(new THREE.Vector2(viewSize, viewSize));
   if (annotations) scene.add(annotations);
 
   renderer.render(scene, camera);

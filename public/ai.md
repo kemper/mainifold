@@ -700,7 +700,14 @@ partwright.clearAnnotations()
 
 partwright.undoAnnotation()
 // -> removes the most recent stroke, returns {removed: bool, remaining: int}
+
+partwright.setAnnotationColor([r, g, b])  // RGB 0..1
+partwright.setAnnotationWidth(6)          // pixels (0.5..64)
+partwright.getAnnotationWidth()
 ```
+
+Each stroke records its own color and width at draw time, so changing the
+active settings only affects new strokes.
 
 Annotations are intentionally separate from `paintRegion` colorization:
 - **Annotations** are floating visual marks on top of the surface -- ephemeral, not exported,
