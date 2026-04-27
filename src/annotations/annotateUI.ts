@@ -1,15 +1,25 @@
-// Annotate mode UI — toggle button, color picker, undo/clear actions, count badge.
+// Annotate mode UI — toggle button, sub-mode (pen/text) selector, color
+// picker, width/font-size picker, undo/clear actions, count badge.
 
 import {
-  activate,
-  deactivate,
-  isActive,
-  setColor,
-  setWidth,
-  getWidth,
-  onActiveChange,
+  activate as activatePen,
+  deactivate as deactivatePen,
+  isActive as isPenActive,
+  setColor as setPenColor,
+  setWidth as setPenWidth,
+  getWidth as getPenWidth,
+  onActiveChange as onPenActiveChange,
 } from './annotateMode';
-import { getCount, onChange as onStrokesChange, removeLastStroke, clearStrokes } from './annotations';
+import {
+  activate as activateText,
+  deactivate as deactivateText,
+  isActive as isTextActive,
+  setColor as setTextColor,
+  setFontSize as setTextFontSize,
+  getFontSize as getTextFontSize,
+  onActiveChange as onTextActiveChange,
+} from './textMode';
+import { getCount, onChange as onStrokesChange, removeLastStroke, clearStrokes, clearAll } from './annotations';
 import { setAnnotationsVisible, isAnnotationsVisible } from './annotationOverlay';
 
 const PRESET_COLORS: [number, number, number][] = [
@@ -30,20 +40,34 @@ const PRESET_WIDTHS: { label: string; value: number }[] = [
   { label: 'L',  value: 12 },
 ];
 
+const PRESET_FONT_SIZES: { label: string; value: number }[] = [
+  { label: 'XS', value: 16 },
+  { label: 'S',  value: 22 },
+  { label: 'M',  value: 32 },
+  { label: 'L',  value: 48 },
+];
+
 let annotateBtn: HTMLButtonElement | null = null;
 let pickerPanel: HTMLElement | null = null;
 let countBadge: HTMLElement | null = null;
 let visibilityBtn: HTMLButtonElement | null = null;
+let penTabBtn: HTMLButtonElement | null = null;
+let textTabBtn: HTMLButtonElement | null = null;
+let widthRow: HTMLElement | null = null;
+let fontRow: HTMLElement | null = null;
 
 const inactiveBtnClass = 'px-2 py-1 rounded text-xs bg-zinc-800/80 backdrop-blur text-zinc-400 hover:text-zinc-200 hover:bg-zinc-700/80 transition-colors border border-zinc-600/50';
 const activeBtnClass = 'px-2 py-1 rounded text-xs bg-pink-500/30 backdrop-blur text-pink-200 border border-pink-400/60 transition-colors';
+
+const tabInactiveClass = 'flex-1 px-2 py-1 rounded text-[11px] bg-zinc-700/40 text-zinc-400 hover:bg-zinc-600/60 transition-colors';
+const tabActiveClass = 'flex-1 px-2 py-1 rounded text-[11px] bg-pink-500/30 text-pink-200 ring-1 ring-pink-400/60 transition-colors';
 
 export function initAnnotateUI(controlsContainer: HTMLElement): void {
   annotateBtn = document.createElement('button');
   annotateBtn.id = 'annotate-toggle';
   annotateBtn.className = inactiveBtnClass;
   annotateBtn.textContent = '\u270F\uFE0F Annotate';
-  annotateBtn.title = 'Draw freehand marks on the model surface';
+  annotateBtn.title = 'Draw freehand marks or pin text labels on the model surface';
 
   countBadge = document.createElement('span');
   countBadge.className = 'hidden ml-1 px-1.5 py-0.5 rounded-full text-[10px] font-bold bg-pink-500 text-white leading-none';
@@ -62,21 +86,52 @@ export function initAnnotateUI(controlsContainer: HTMLElement): void {
   controlsContainer.appendChild(pickerPanel);
 
   onStrokesChange(updateCountBadge);
-  onActiveChange(updateButtonState);
+  onPenActiveChange(updatePanelState);
+  onTextActiveChange(updatePanelState);
   updateCountBadge();
-  updateButtonState(isActive());
+  updatePanelState();
+}
+
+function isAnyActive(): boolean {
+  return isPenActive() || isTextActive();
 }
 
 function toggleAnnotateMode(): void {
-  if (isActive()) deactivate();
-  else activate();
+  if (isAnyActive()) {
+    deactivatePen();
+    deactivateText();
+  } else {
+    activatePen(); // default sub-mode
+  }
 }
 
-function updateButtonState(active: boolean): void {
+function selectPenSubMode(): void {
+  if (isPenActive()) return;
+  activatePen(); // its activate hook deactivates text
+}
+
+function selectTextSubMode(): void {
+  if (isTextActive()) return;
+  activateText(); // its activate hook deactivates pen
+}
+
+function updatePanelState(): void {
   if (!annotateBtn) return;
-  annotateBtn.className = active ? activeBtnClass : inactiveBtnClass;
-  if (active) pickerPanel?.classList.remove('hidden');
+  const open = isAnyActive();
+  annotateBtn.className = open ? activeBtnClass : inactiveBtnClass;
+  if (open) pickerPanel?.classList.remove('hidden');
   else pickerPanel?.classList.add('hidden');
+
+  // Reflect which sub-mode is active in the tab buttons + show the relevant
+  // size row.
+  if (penTabBtn && textTabBtn) {
+    penTabBtn.className = isPenActive() ? tabActiveClass : tabInactiveClass;
+    textTabBtn.className = isTextActive() ? tabActiveClass : tabInactiveClass;
+  }
+  if (widthRow && fontRow) {
+    widthRow.classList.toggle('hidden', !isPenActive());
+    fontRow.classList.toggle('hidden', !isTextActive());
+  }
 }
 
 function updateCountBadge(): void {
@@ -94,15 +149,34 @@ function createPickerPanel(): HTMLElement {
   const panel = document.createElement('div');
   panel.id = 'annotate-picker-panel';
   panel.className = 'hidden absolute top-10 right-2 z-20 bg-zinc-800/95 backdrop-blur border border-zinc-600/60 rounded-lg p-2.5 shadow-xl';
-  panel.style.minWidth = '180px';
+  panel.style.minWidth = '200px';
 
-  // Title
+  // Sub-mode tabs
+  const tabsRow = document.createElement('div');
+  tabsRow.className = 'flex items-center gap-1.5 mb-2';
+
+  penTabBtn = document.createElement('button');
+  penTabBtn.className = tabInactiveClass;
+  penTabBtn.textContent = '\u270F\uFE0F Pen';
+  penTabBtn.title = 'Draw freehand strokes';
+  penTabBtn.addEventListener('click', selectPenSubMode);
+  tabsRow.appendChild(penTabBtn);
+
+  textTabBtn = document.createElement('button');
+  textTabBtn.className = tabInactiveClass;
+  textTabBtn.textContent = 'T Text';
+  textTabBtn.title = 'Click the model to pin a text label';
+  textTabBtn.addEventListener('click', selectTextSubMode);
+  tabsRow.appendChild(textTabBtn);
+
+  panel.appendChild(tabsRow);
+
+  // Color section
   const title = document.createElement('div');
   title.className = 'text-[10px] text-zinc-500 uppercase tracking-wider mb-1.5 font-medium';
   title.textContent = 'Color';
   panel.appendChild(title);
 
-  // Preset swatches grid
   const grid = document.createElement('div');
   grid.className = 'grid grid-cols-4 gap-1.5 mb-2';
 
@@ -111,21 +185,18 @@ function createPickerPanel(): HTMLElement {
     swatch.className = 'w-6 h-6 rounded border-2 border-transparent hover:border-white/50 transition-colors';
     swatch.style.backgroundColor = rgbToCSS(color);
     swatch.title = rgbToHex(color);
-
     swatch.addEventListener('click', () => {
-      setColor(color);
+      setPenColor(color);
+      setTextColor(color);
       markActiveSwatch(grid, swatch);
     });
-
     grid.appendChild(swatch);
   }
-  // Activate first swatch by default
   const first = grid.children[0] as HTMLElement;
   if (first) first.classList.add('border-white/80', 'ring-1', 'ring-white/30');
-
   panel.appendChild(grid);
 
-  // Custom color row
+  // Custom color
   const customRow = document.createElement('div');
   customRow.className = 'flex items-center gap-1.5 mb-2';
   const colorInput = document.createElement('input');
@@ -138,7 +209,8 @@ function createPickerPanel(): HTMLElement {
     const r = parseInt(hex.slice(1, 3), 16) / 255;
     const g = parseInt(hex.slice(3, 5), 16) / 255;
     const b = parseInt(hex.slice(5, 7), 16) / 255;
-    setColor([r, g, b]);
+    setPenColor([r, g, b]);
+    setTextColor([r, g, b]);
     for (const child of Array.from(grid.children)) {
       (child as HTMLElement).classList.remove('border-white/80', 'ring-1', 'ring-white/30');
     }
@@ -150,46 +222,71 @@ function createPickerPanel(): HTMLElement {
   customRow.appendChild(customLabel);
   panel.appendChild(customRow);
 
-  // Width picker
+  // Width row (Pen mode only)
+  widthRow = document.createElement('div');
+  widthRow.className = 'mt-2';
+
   const widthLabel = document.createElement('div');
-  widthLabel.className = 'text-[10px] text-zinc-500 uppercase tracking-wider mb-1.5 mt-2 font-medium';
+  widthLabel.className = 'text-[10px] text-zinc-500 uppercase tracking-wider mb-1.5 font-medium';
   widthLabel.textContent = 'Width';
-  panel.appendChild(widthLabel);
+  widthRow.appendChild(widthLabel);
 
-  const widthRow = document.createElement('div');
-  widthRow.className = 'flex items-center gap-1.5 mb-1';
-
-  const widthButtons: HTMLButtonElement[] = [];
+  const widthBtns = document.createElement('div');
+  widthBtns.className = 'flex items-center gap-1.5';
+  const widthButtonRefs: HTMLButtonElement[] = [];
   for (const preset of PRESET_WIDTHS) {
     const btn = document.createElement('button');
     btn.className = 'flex-1 px-2 py-1 rounded text-[11px] bg-zinc-700/60 text-zinc-300 hover:bg-zinc-600/60 transition-colors flex items-center justify-center gap-1.5';
     btn.title = `${preset.value}px`;
-
-    // Show a thickness swatch + label
     const dot = document.createElement('span');
     dot.className = 'rounded-full bg-zinc-300';
     const sz = Math.max(2, Math.min(12, preset.value));
     dot.style.width = `${sz}px`;
     dot.style.height = `${sz}px`;
     btn.appendChild(dot);
-
     const lbl = document.createElement('span');
     lbl.textContent = preset.label;
     btn.appendChild(lbl);
-
     btn.addEventListener('click', () => {
-      setWidth(preset.value);
-      markActiveWidth(widthButtons, btn);
+      setPenWidth(preset.value);
+      markActiveSizeButton(widthButtonRefs, btn);
     });
-
-    widthButtons.push(btn);
-    widthRow.appendChild(btn);
+    widthButtonRefs.push(btn);
+    widthBtns.appendChild(btn);
   }
+  widthRow.appendChild(widthBtns);
+  const initialWidthIdx = PRESET_WIDTHS.findIndex(w => w.value === getPenWidth());
+  if (initialWidthIdx >= 0) markActiveSizeButton(widthButtonRefs, widthButtonRefs[initialWidthIdx]);
   panel.appendChild(widthRow);
 
-  // Sync initial active width button to current setting
-  const initialIdx = PRESET_WIDTHS.findIndex(w => w.value === getWidth());
-  if (initialIdx >= 0) markActiveWidth(widthButtons, widthButtons[initialIdx]);
+  // Font size row (Text mode only)
+  fontRow = document.createElement('div');
+  fontRow.className = 'mt-2 hidden';
+
+  const fontLabel = document.createElement('div');
+  fontLabel.className = 'text-[10px] text-zinc-500 uppercase tracking-wider mb-1.5 font-medium';
+  fontLabel.textContent = 'Size';
+  fontRow.appendChild(fontLabel);
+
+  const fontBtns = document.createElement('div');
+  fontBtns.className = 'flex items-center gap-1.5';
+  const fontButtonRefs: HTMLButtonElement[] = [];
+  for (const preset of PRESET_FONT_SIZES) {
+    const btn = document.createElement('button');
+    btn.className = 'flex-1 px-2 py-1 rounded text-[11px] bg-zinc-700/60 text-zinc-300 hover:bg-zinc-600/60 transition-colors';
+    btn.title = `${preset.value}px`;
+    btn.textContent = preset.label;
+    btn.addEventListener('click', () => {
+      setTextFontSize(preset.value);
+      markActiveSizeButton(fontButtonRefs, btn);
+    });
+    fontButtonRefs.push(btn);
+    fontBtns.appendChild(btn);
+  }
+  fontRow.appendChild(fontBtns);
+  const initialFontIdx = PRESET_FONT_SIZES.findIndex(f => f.value === getTextFontSize());
+  if (initialFontIdx >= 0) markActiveSizeButton(fontButtonRefs, fontButtonRefs[initialFontIdx]);
+  panel.appendChild(fontRow);
 
   // Action row: visibility, undo, clear
   const actions = document.createElement('div');
@@ -208,17 +305,24 @@ function createPickerPanel(): HTMLElement {
 
   const undoBtn = document.createElement('button');
   undoBtn.className = 'px-2 py-1 rounded text-[10px] bg-zinc-700/60 text-zinc-300 hover:bg-zinc-600/60 transition-colors';
-  undoBtn.textContent = 'Undo';
-  undoBtn.title = 'Remove the last stroke';
+  undoBtn.textContent = 'Undo stroke';
+  undoBtn.title = 'Remove the most recent freehand stroke';
   undoBtn.addEventListener('click', () => { removeLastStroke(); });
   actions.appendChild(undoBtn);
 
-  const clearBtn = document.createElement('button');
-  clearBtn.className = 'px-2 py-1 rounded text-[10px] bg-red-700/60 text-red-200 hover:bg-red-600/60 transition-colors ml-auto';
-  clearBtn.textContent = 'Clear';
-  clearBtn.title = 'Remove all annotations';
-  clearBtn.addEventListener('click', () => { clearStrokes(); });
-  actions.appendChild(clearBtn);
+  const clearStrokesBtn = document.createElement('button');
+  clearStrokesBtn.className = 'px-2 py-1 rounded text-[10px] bg-zinc-700/60 text-zinc-300 hover:bg-zinc-600/60 transition-colors';
+  clearStrokesBtn.textContent = 'Clear strokes';
+  clearStrokesBtn.title = 'Remove all freehand strokes (keeps text)';
+  clearStrokesBtn.addEventListener('click', () => { clearStrokes(); });
+  actions.appendChild(clearStrokesBtn);
+
+  const clearAllBtn = document.createElement('button');
+  clearAllBtn.className = 'px-2 py-1 rounded text-[10px] bg-red-700/60 text-red-200 hover:bg-red-600/60 transition-colors ml-auto';
+  clearAllBtn.textContent = 'Clear all';
+  clearAllBtn.title = 'Remove all annotations (strokes and text)';
+  clearAllBtn.addEventListener('click', () => { clearAll(); });
+  actions.appendChild(clearAllBtn);
 
   panel.appendChild(actions);
 
@@ -232,7 +336,7 @@ function markActiveSwatch(grid: HTMLElement, activeSwatch: HTMLElement): void {
   activeSwatch.classList.add('border-white/80', 'ring-1', 'ring-white/30');
 }
 
-function markActiveWidth(buttons: HTMLButtonElement[], active: HTMLButtonElement): void {
+function markActiveSizeButton(buttons: HTMLButtonElement[], active: HTMLButtonElement): void {
   for (const b of buttons) {
     b.classList.remove('bg-zinc-500/60', 'ring-1', 'ring-white/30');
     b.classList.add('bg-zinc-700/60');
@@ -252,7 +356,9 @@ function rgbToHex(color: [number, number, number]): string {
   return `#${r}${g}${b}`;
 }
 
-/** Force-deactivate annotate mode externally (mutual exclusion with paint mode, tab switches). */
+/** Force-deactivate annotate (pen) externally — used by the paint mode UI for
+ *  mutual exclusion. Note that text mode is deactivated separately by
+ *  textMode.forceDeactivate(). */
 export function forceDeactivate(): void {
-  if (isActive()) deactivate();
+  if (isPenActive()) deactivatePen();
 }

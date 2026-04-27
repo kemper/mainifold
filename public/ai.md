@@ -672,42 +672,50 @@ const s = partwright.sliceAtZVisual(10);  // returns {svg, area, contours}
 
 ## Annotations
 
-The user can draw freehand pink/colored marks on the model surface using the **Annotate** tool
-(✏️ button in the viewport overlay). These are **not part of the model** -- they're an
-ephemeral, in-memory visual layer that survives orbiting (each stroke is raycast onto the mesh
-and stored as a 3D polyline). They appear in **every** rendered output: the live viewport,
-`renderView()` output, the AI Views tab, and the Elevations tab.
+The user can mark up the model surface using the **Annotate** tool (✏️ button in the viewport
+overlay). Two kinds of annotations:
+
+- **Freehand strokes** drawn with the pen sub-mode -- raycast onto the mesh and stored as 3D
+  polylines (color + pixel-width per stroke).
+- **Text labels** placed with the text sub-mode -- pinned to a 3D anchor on the surface and
+  rendered as a screen-facing label (so they stay readable from any angle).
+
+Both kinds are **not part of the model** -- they're an ephemeral, in-memory visual layer that
+survives orbiting and appears in **every** rendered output: the live viewport, `renderView()`
+output, the AI Views tab, and the Elevations tab.
 
 When the user has annotated, treat the marks as a directional cue tied to the geometry under
-them. Inspect them via `listAnnotations()`, infer which feature is being pointed at from the
-3D points, and confirm your interpretation before making changes.
+them. Inspect them via `listAnnotations()` / `listTextAnnotations()`, infer which feature is
+being pointed at from the 3D points/anchors, and confirm your interpretation before making
+changes.
 
 ```js
 partwright.listAnnotations()
-// -> [{id, color: [r,g,b], pointCount: 24, points: [[x,y,z], ...]}]
+// -> [{id, color: [r,g,b], width: 4, pointCount: 24, points: [[x,y,z], ...]}]
 
-partwright.getAnnotationCount()
-// -> 1
+partwright.listTextAnnotations()
+// -> [{id, text: "shorter here", color: [r,g,b], fontSizePx: 28, anchor: [x,y,z]}]
 
+partwright.addTextAnnotation({ anchor: [4, -5, 3], text: "round this corner" })
+// -> {id: "..."}
+
+partwright.getAnnotationCount()         // total: strokes + text
+partwright.undoAnnotation()             // removes the most recent annotation of either kind
+partwright.removeAnnotation("<id>")     // remove a specific one
+partwright.clearAnnotations()           // remove all
+partwright.clearAnnotationStrokes()     // remove only strokes
+partwright.clearTextAnnotations()       // remove only text labels
+
+partwright.setAnnotationsVisible(false) // hides everything (and excludes from renders)
 partwright.areAnnotationsVisible()
-// -> true
 
-partwright.setAnnotationsVisible(false)
-// -> hides marks in all renders without removing them. Useful for "before/after" comparisons.
-
-partwright.clearAnnotations()
-// -> removes all marks, returns {cleared: <prior count>}
-
-partwright.undoAnnotation()
-// -> removes the most recent stroke, returns {removed: bool, remaining: int}
-
-partwright.setAnnotationColor([r, g, b])  // RGB 0..1
-partwright.setAnnotationWidth(6)          // pixels (0.5..64)
-partwright.getAnnotationWidth()
+partwright.setAnnotationColor([r, g, b])  // applies to new strokes AND new text
+partwright.setAnnotationWidth(6)          // pixels, for strokes (0.5..64)
+partwright.setAnnotationFontSize(32)      // pixels, for text labels (4..256)
 ```
 
-Each stroke records its own color and width at draw time, so changing the
-active settings only affects new strokes.
+Each stroke and text label records its own color/width/font-size at creation, so changing the
+active settings only affects new annotations.
 
 Annotations are intentionally separate from `paintRegion` colorization:
 - **Annotations** are floating visual marks on top of the surface -- ephemeral, not exported,

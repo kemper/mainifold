@@ -10,7 +10,7 @@ import * as THREE from 'three';
 import { Line2 } from 'three/addons/lines/Line2.js';
 import { LineGeometry } from 'three/addons/lines/LineGeometry.js';
 import { LineMaterial } from 'three/addons/lines/LineMaterial.js';
-import { getStrokes, onChange, type AnnotationStroke } from './annotations';
+import { getStrokes, getTexts, onChange, type StrokeAnnotation, type TextAnnotation } from './annotations';
 
 let overlayGroup: THREE.Group | null = null;
 let visible = true;
@@ -40,7 +40,10 @@ export function getLiveResolution(): THREE.Vector2 {
 }
 
 export function setLiveResolution(width: number, height: number): void {
-  liveResolution.set(width, height);
+  // Defensive: never let resolution go to 0/0 — LineMaterial divides by it.
+  const w = Math.max(1, width);
+  const h = Math.max(1, height);
+  liveResolution.set(w, h);
   if (!overlayGroup) return;
   // Update existing Line2 materials so widths stay correct after resize.
   overlayGroup.traverse(obj => {
@@ -72,34 +75,40 @@ export function onVisibilityChange(fn: (visible: boolean) => void): () => void {
 
 function rebuildLiveOverlay(): void {
   if (!overlayGroup) return;
-  disposeGroupLines(overlayGroup);
+  disposeGroupChildren(overlayGroup);
   for (const s of getStrokes()) {
     overlayGroup.add(strokeToLine2(s, liveResolution));
+  }
+  for (const t of getTexts()) {
+    overlayGroup.add(textToSprite(t));
   }
   overlayGroup.visible = visible;
 }
 
-/** Build a fresh disposable group of Line2 objects for an offscreen scene.
- *  `resolution` is the pixel size of the target render so LineMaterial can
- *  compute screen-space widths. Returns null if annotations are hidden/empty. */
+/** Build a fresh disposable group of Line2 + Sprite objects for an offscreen
+ *  scene. `resolution` is the pixel size of the target render so LineMaterial
+ *  can compute screen-space widths. Returns null if annotations are
+ *  hidden or empty. */
 export function buildStrokesGroup(resolution: THREE.Vector2): THREE.Group | null {
   if (!visible) return null;
   const strokes = getStrokes();
-  if (strokes.length === 0) return null;
+  const texts = getTexts();
+  if (strokes.length === 0 && texts.length === 0) return null;
   const g = new THREE.Group();
-  g.name = 'annotation-strokes';
+  g.name = 'annotation-overlay-snapshot';
   for (const s of strokes) g.add(strokeToLine2(s, resolution));
+  for (const t of texts) g.add(textToSprite(t));
   return g;
 }
 
-/** Dispose all Line2 children of the group and empty it. */
+/** Dispose all Line2 + Sprite children of the group and empty it. */
 export function disposeStrokesGroup(g: THREE.Group): void {
-  disposeGroupLines(g);
+  disposeGroupChildren(g);
 }
 
 /** Build a Line2 for a stroke. Exported so annotateMode can use the same
  *  pipeline for the in-progress preview line. */
-export function strokeToLine2(s: AnnotationStroke, resolution: THREE.Vector2): Line2 {
+export function strokeToLine2(s: StrokeAnnotation, resolution: THREE.Vector2): Line2 {
   const positions = pointsToFlatPositions(s.points);
   const geo = new LineGeometry();
   geo.setPositions(positions);
@@ -117,6 +126,10 @@ export function strokeToLine2(s: AnnotationStroke, resolution: THREE.Vector2): L
   const line = new Line2(geo, mat);
   line.computeLineDistances();
   line.renderOrder = 999;
+  // While a stroke is being drawn, the bounding sphere from the initial
+  // (often degenerate) point set may not match the live geometry. Skip
+  // frustum culling so the line always renders during the drag.
+  line.frustumCulled = false;
   return line;
 }
 
@@ -148,7 +161,7 @@ function pointsToFlatPositions(points: THREE.Vector3[]): number[] {
   return out;
 }
 
-function disposeGroupLines(g: THREE.Group): void {
+function disposeGroupChildren(g: THREE.Group): void {
   while (g.children.length > 0) {
     const child = g.children[0];
     g.remove(child);
@@ -157,6 +170,84 @@ function disposeGroupLines(g: THREE.Group): void {
       const m = child.material;
       if (Array.isArray(m)) m.forEach(mm => mm.dispose());
       else m.dispose();
+    } else if (child instanceof THREE.Sprite) {
+      const mat = child.material as THREE.SpriteMaterial;
+      mat.map?.dispose();
+      mat.dispose();
     }
   }
+}
+
+/** Build a Sprite that renders the text annotation as a screen-facing label.
+ *  The sprite uses sizeAttenuation: false so its on-screen size stays roughly
+ *  constant regardless of camera distance. */
+export function textToSprite(t: TextAnnotation): THREE.Sprite {
+  const dpr = typeof window !== 'undefined' ? Math.max(1, window.devicePixelRatio || 1) : 1;
+  const fontPx = Math.round(t.fontSizePx * dpr * 1.5); // texture font; oversample
+  const padX = Math.round(fontPx * 0.4);
+  const padY = Math.round(fontPx * 0.25);
+
+  // Measure
+  const meas = document.createElement('canvas').getContext('2d')!;
+  meas.font = `bold ${fontPx}px sans-serif`;
+  const metrics = meas.measureText(t.text || ' ');
+  const textWidth = Math.ceil(metrics.width);
+
+  const cw = Math.max(2, textWidth + padX * 2);
+  const ch = Math.max(2, fontPx + padY * 2);
+
+  const canvas = document.createElement('canvas');
+  canvas.width = cw;
+  canvas.height = ch;
+  const ctx = canvas.getContext('2d')!;
+  ctx.font = `bold ${fontPx}px sans-serif`;
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+
+  // Translucent dark pill behind the text for legibility on any background.
+  const radius = Math.min(ch / 2, 24 * dpr);
+  ctx.fillStyle = 'rgba(20, 20, 30, 0.78)';
+  roundRect(ctx, 0, 0, cw, ch, radius);
+  ctx.fill();
+
+  ctx.fillStyle = `rgb(${Math.round(t.color[0] * 255)},${Math.round(t.color[1] * 255)},${Math.round(t.color[2] * 255)})`;
+  ctx.fillText(t.text, cw / 2, ch / 2);
+
+  const texture = new THREE.CanvasTexture(canvas);
+  texture.minFilter = THREE.LinearFilter;
+  texture.magFilter = THREE.LinearFilter;
+  texture.needsUpdate = true;
+
+  const material = new THREE.SpriteMaterial({
+    map: texture,
+    transparent: true,
+    depthTest: true,
+    sizeAttenuation: false,
+  });
+
+  const sprite = new THREE.Sprite(material);
+  sprite.position.copy(t.anchor);
+  // With sizeAttenuation: false, sprite.scale is in NDC × 2 units. We size by
+  // fontSizePx as a fraction of a 1080-tall reference viewport so labels read
+  // at a consistent pixel size across canvas sizes.
+  const scaleY = (t.fontSizePx * 2) / 1080;
+  const scaleX = scaleY * (cw / ch);
+  sprite.scale.set(scaleX, scaleY, 1);
+  sprite.center.set(0.5, -0.1); // anchor below the label so the surface point is visible
+  sprite.renderOrder = 1001;
+  return sprite;
+}
+
+function roundRect(ctx: CanvasRenderingContext2D, x: number, y: number, w: number, h: number, r: number): void {
+  ctx.beginPath();
+  ctx.moveTo(x + r, y);
+  ctx.lineTo(x + w - r, y);
+  ctx.quadraticCurveTo(x + w, y, x + w, y + r);
+  ctx.lineTo(x + w, y + h - r);
+  ctx.quadraticCurveTo(x + w, y + h, x + w - r, y + h);
+  ctx.lineTo(x + r, y + h);
+  ctx.quadraticCurveTo(x, y + h, x, y + h - r);
+  ctx.lineTo(x, y + r);
+  ctx.quadraticCurveTo(x, y, x + r, y);
+  ctx.closePath();
 }

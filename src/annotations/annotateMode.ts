@@ -5,10 +5,11 @@
 
 import * as THREE from 'three';
 import { Line2 } from 'three/addons/lines/Line2.js';
-import { addStroke, type AnnotationStroke } from './annotations';
+import { addStroke, type StrokeAnnotation } from './annotations';
 import {
   getOverlayGroup,
   getLiveResolution,
+  setLiveResolution,
   strokeToLine2,
   setLine2Points,
 } from './annotationOverlay';
@@ -20,6 +21,7 @@ import {
   isUserOrbitLocked,
 } from '../renderer/viewport';
 import { forceDeactivate as forceDeactivatePaint } from '../color/paintUI';
+import { forceDeactivate as forceDeactivateText } from './textMode';
 
 const NORMAL_OFFSET_FRAC = 0.005;   // offset = max(model dim) * this
 const MIN_POINT_DIST_FRAC = 0.002;  // skip pointer samples closer than this in world units
@@ -79,14 +81,19 @@ function notifyActiveChange(): void {
 
 export function activate(): void {
   if (active) return;
-  // Mutual exclusion with paint mode: only one drawing tool active at a time.
+  // Mutual exclusion with paint and text modes: only one drawing tool active.
   forceDeactivatePaint();
+  forceDeactivateText();
 
   active = true;
   priorOrbitLock = isUserOrbitLocked();
   setUserOrbitLock(true);
 
   const canvas = getRenderer().domElement;
+  // Make sure LineMaterial.resolution matches the canvas right now — it can
+  // be stale if the canvas was resized between viewport init and the first
+  // activation, or initialized before layout.
+  setLiveResolution(canvas.width, canvas.height);
   canvas.addEventListener('pointerdown', onPointerDown);
   canvas.addEventListener('pointermove', onPointerMove);
   canvas.addEventListener('pointerup', onPointerUp);
@@ -165,7 +172,8 @@ function ensurePreview(): void {
   if (!overlay) return;
   // Build a placeholder Line2 with the current color/width via the same
   // pipeline used for committed strokes — keeps the look identical.
-  const placeholder: AnnotationStroke = {
+  const placeholder: StrokeAnnotation = {
+    type: 'stroke',
     id: '__preview',
     points: currentPoints,
     color: [...currentColor] as [number, number, number],
@@ -234,7 +242,8 @@ function onPointerUp(event: PointerEvent): void {
     return;
   }
 
-  const stroke: AnnotationStroke = {
+  const stroke: StrokeAnnotation = {
+    type: 'stroke',
     id: makeId(),
     points: currentPoints,
     color: [...currentColor] as [number, number, number],
