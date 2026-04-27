@@ -62,7 +62,6 @@ function buildVertexRemap(meshData: MeshData) {
     if (idx === undefined) {
       idx = uniquePositions.length / 3;
       rootToIndex.set(root, idx);
-      // Use the root vertex's position as the canonical position
       uniquePositions.push(
         vertProperties[root * numProp],
         vertProperties[root * numProp + 1],
@@ -75,8 +74,13 @@ function buildVertexRemap(meshData: MeshData) {
   return { remap, uniquePositions };
 }
 
+/** Round a float to 6 decimal places (float32 has ~7 significant digits). */
+function f6(v: number): string {
+  return v.toFixed(6);
+}
+
 export function exportOBJ(meshData: MeshData, customName?: string): void {
-  const { vertProperties, triVerts, numTri, numProp, triColors } = meshData;
+  const { triVerts, numTri, triColors } = meshData;
   const title = getExportTitle();
 
   const { remap, uniquePositions } = buildVertexRemap(meshData);
@@ -111,40 +115,18 @@ export function exportOBJ(meshData: MeshData, customName?: string): void {
     lines.push(`mtllib ${baseName}.mtl`);
   }
 
-  // Vertices (deduplicated)
+  // Vertices (deduplicated, 6 decimal places — matches float32 precision)
   const numUniqueVerts = uniquePositions.length / 3;
   for (let i = 0; i < numUniqueVerts; i++) {
-    lines.push(`v ${uniquePositions[i * 3]} ${uniquePositions[i * 3 + 1]} ${uniquePositions[i * 3 + 2]}`);
+    lines.push(`v ${f6(uniquePositions[i * 3])} ${f6(uniquePositions[i * 3 + 1])} ${f6(uniquePositions[i * 3 + 2])}`);
   }
 
-  // Face normals (one per valid triangle, computed via cross product)
-  // normalIndex maps original triangle index → 1-based normal index in the vn list
-  const normalIndex = new Map<number, number>();
-  let vnCount = 0;
-  for (const t of validTris) {
-    const i0 = triVerts[t * 3];
-    const i1 = triVerts[t * 3 + 1];
-    const i2 = triVerts[t * 3 + 2];
-
-    const v0x = vertProperties[i0 * numProp],     v0y = vertProperties[i0 * numProp + 1], v0z = vertProperties[i0 * numProp + 2];
-    const v1x = vertProperties[i1 * numProp],     v1y = vertProperties[i1 * numProp + 1], v1z = vertProperties[i1 * numProp + 2];
-    const v2x = vertProperties[i2 * numProp],     v2y = vertProperties[i2 * numProp + 1], v2z = vertProperties[i2 * numProp + 2];
-
-    const ax = v1x - v0x, ay = v1y - v0y, az = v1z - v0z;
-    const bx = v2x - v0x, by = v2y - v0y, bz = v2z - v0z;
-    let nx = ay * bz - az * by;
-    let ny = az * bx - ax * bz;
-    let nz = ax * by - ay * bx;
-    const len = Math.sqrt(nx * nx + ny * ny + nz * nz) || 1;
-    nx /= len; ny /= len; nz /= len;
-
-    lines.push(`vn ${nx} ${ny} ${nz}`);
-    vnCount++;
-    normalIndex.set(t, vnCount); // 1-based
-  }
-
-  // Helper: format face vertex as "vertIdx//normalIdx" (both 1-based)
-  const fv = (origVert: number, nIdx: number) => `${remap[origVert] + 1}//${nIdx}`;
+  // Face format: plain "f v1 v2 v3" (1-based indices).
+  // Do NOT include vn normal references — per-face normals with f v//vn cause
+  // parsers to treat each (vertex, normal) pair as unique, destroying vertex
+  // sharing and making the mesh non-manifold. Slicers compute normals from
+  // face winding order; explicit normals are unnecessary.
+  const fv = (origVert: number) => remap[origVert] + 1;
 
   if (hasColors && triColors) {
     const painted = (triColors as Uint8Array & { _painted?: Uint8Array })._painted;
@@ -174,8 +156,7 @@ export function exportOBJ(meshData: MeshData, customName?: string): void {
     for (const [hex, tris] of colorGroups) {
       lines.push(`usemtl ${matName(hex)}`);
       for (const t of tris) {
-        const n = normalIndex.get(t)!;
-        lines.push(`f ${fv(triVerts[t * 3], n)} ${fv(triVerts[t * 3 + 1], n)} ${fv(triVerts[t * 3 + 2], n)}`);
+        lines.push(`f ${fv(triVerts[t * 3])} ${fv(triVerts[t * 3 + 1])} ${fv(triVerts[t * 3 + 2])}`);
       }
     }
 
@@ -204,10 +185,9 @@ export function exportOBJ(meshData: MeshData, customName?: string): void {
     const blob = new Blob([zip], { type: 'application/zip' });
     downloadBlob(blob, `${baseName}.zip`);
   } else {
-    // No colors — plain OBJ with normals
+    // No colors — plain OBJ
     for (const t of validTris) {
-      const n = normalIndex.get(t)!;
-      lines.push(`f ${fv(triVerts[t * 3], n)} ${fv(triVerts[t * 3 + 1], n)} ${fv(triVerts[t * 3 + 2], n)}`);
+      lines.push(`f ${fv(triVerts[t * 3])} ${fv(triVerts[t * 3 + 1])} ${fv(triVerts[t * 3 + 2])}`);
     }
 
     const blob = new Blob([lines.join('\n')], { type: 'text/plain' });

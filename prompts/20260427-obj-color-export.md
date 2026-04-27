@@ -27,4 +27,6 @@ OBJ files caused "3 non-manifold edges" warnings and slicing failures ("empty la
 
 2. **Degenerate triangles** — after vertex merging, some triangles collapse (two+ vertices map to same index). These create non-manifold edges. Fix: filter degenerate triangles before writing.
 
-3. **Missing face normals** — without `vn` entries, slicers infer inside/outside from winding order alone, which can fail on complex geometry. Fix: compute face normals via cross product (same as STL exporter) and write `f v//vn` format.
+3. **Per-face normals destroyed vertex sharing** — writing `vn` per triangle and referencing them in `f v//vn` format caused OBJ parsers to treat each (vertex, normal) pair as unique. With per-face normals, every vertex became unique per face (352 verts → 2112), making ALL edges boundary/non-manifold. Fix: don't write normals at all — slicers compute them from winding order.
+
+4. **Float precision** — vertex coordinates written with 15+ decimal places (JavaScript float64 string representation of float32 values). Fix: round to 6 decimal places matching float32 precision and Blender convention.
