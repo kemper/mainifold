@@ -111,10 +111,6 @@ export function exportOBJ(meshData: MeshData, customName?: string): void {
   const baseName = getExportFilename('obj', customName).replace(/\.obj$/, '');
   const lines: string[] = [`# ${title}`];
 
-  if (hasColors) {
-    lines.push(`mtllib ${baseName}.mtl`);
-  }
-
   // Vertices (deduplicated, 6 decimal places — matches float32 precision)
   const numUniqueVerts = uniquePositions.length / 3;
   for (let i = 0; i < numUniqueVerts; i++) {
@@ -131,8 +127,8 @@ export function exportOBJ(meshData: MeshData, customName?: string): void {
   if (hasColors && triColors) {
     const painted = (triColors as Uint8Array & { _painted?: Uint8Array })._painted;
 
-    // Group valid triangles by color hex
-    const colorGroups = new Map<string, number[]>();
+    // Collect unique colors for the MTL file
+    const colorSet = new Map<string, number[]>(); // hex -> triangle indices
     for (const t of validTris) {
       const isPainted = painted
         ? painted[t] === 1
@@ -148,21 +144,22 @@ export function exportOBJ(meshData: MeshData, customName?: string): void {
         hex = DEFAULT_COLOR;
       }
 
-      if (!colorGroups.has(hex)) colorGroups.set(hex, []);
-      colorGroups.get(hex)!.push(t);
+      if (!colorSet.has(hex)) colorSet.set(hex, []);
+      colorSet.get(hex)!.push(t);
     }
 
-    // Faces grouped by material
-    for (const [hex, tris] of colorGroups) {
-      lines.push(`usemtl ${matName(hex)}`);
-      for (const t of tris) {
-        lines.push(`f ${fv(triVerts[t * 3])} ${fv(triVerts[t * 3 + 1])} ${fv(triVerts[t * 3 + 2])}`);
-      }
+    // Write ALL faces as a single object — do NOT group by usemtl.
+    // Slicers like Bambu Studio treat each usemtl group as a separate
+    // shell/part that must be independently manifold. Since our color
+    // regions are surface patches (not closed solids), grouping by material
+    // creates non-manifold boundary edges at every color boundary.
+    for (const t of validTris) {
+      lines.push(`f ${fv(triVerts[t * 3])} ${fv(triVerts[t * 3 + 1])} ${fv(triVerts[t * 3 + 2])}`);
     }
 
-    // Generate MTL file
+    // Generate MTL file as a color reference (usable by Blender and similar tools)
     const mtlLines: string[] = [`# ${title} — Materials`];
-    for (const hex of colorGroups.keys()) {
+    for (const hex of colorSet.keys()) {
       const r = parseInt(hex.slice(1, 3), 16) / 255;
       const g = parseInt(hex.slice(3, 5), 16) / 255;
       const b = parseInt(hex.slice(5, 7), 16) / 255;
@@ -175,7 +172,7 @@ export function exportOBJ(meshData: MeshData, customName?: string): void {
       mtlLines.push('');
     }
 
-    // Bundle OBJ + MTL in a ZIP
+    // Bundle OBJ + MTL in a ZIP (MTL for reference; OBJ is slicer-clean)
     const enc = new TextEncoder();
     const zip = buildZip([
       { name: `${baseName}.obj`, data: enc.encode(lines.join('\n')) },
