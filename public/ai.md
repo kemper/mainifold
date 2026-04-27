@@ -20,6 +20,7 @@ Partwright is a browser-based parametric CAD tool with two modeling engines: **m
 - [Photo-to-model workflow](#photo-to-model-workflow) (optional tooling)
 - [Iteration workflow](#iteration-workflow)
 - [Visual verification](#visual-verification)
+- [Annotations](#annotations)
 - [Stat-based verification](#stat-based-verification)
 - [Resuming a session](#resuming-a-session)
 
@@ -668,6 +669,44 @@ const s = partwright.sliceAtZVisual(10);  // returns {svg, area, contours}
 - `?view=ai` -- 4 isometric views (alternating cube corners)
 - `?view=elevations` -- Front, Right, Back, Left, Top orthographic + 1 isometric (6 views)
 - Use Elevations for shape verification, AI Views for overall appearance.
+
+## Annotations
+
+The user can draw freehand pink/colored marks on the model surface using the **Annotate** tool
+(✏️ button in the viewport overlay). These are **not part of the model** -- they're an
+ephemeral, in-memory visual layer that survives orbiting (each stroke is raycast onto the mesh
+and stored as a 3D polyline). They appear in **every** rendered output: the live viewport,
+`renderView()` output, the AI Views tab, and the Elevations tab.
+
+When the user has annotated, treat the marks as a directional cue tied to the geometry under
+them. Inspect them via `listAnnotations()`, infer which feature is being pointed at from the
+3D points, and confirm your interpretation before making changes.
+
+```js
+partwright.listAnnotations()
+// -> [{id, color: [r,g,b], pointCount: 24, points: [[x,y,z], ...]}]
+
+partwright.getAnnotationCount()
+// -> 1
+
+partwright.areAnnotationsVisible()
+// -> true
+
+partwright.setAnnotationsVisible(false)
+// -> hides marks in all renders without removing them. Useful for "before/after" comparisons.
+
+partwright.clearAnnotations()
+// -> removes all marks, returns {cleared: <prior count>}
+
+partwright.undoAnnotation()
+// -> removes the most recent stroke, returns {removed: bool, remaining: int}
+```
+
+Annotations are intentionally separate from `paintRegion` colorization:
+- **Annotations** are floating visual marks on top of the surface -- ephemeral, not exported,
+  do not lock the editor.
+- **Color regions** (`paintRegion`) modify the model's vertex colors -- persist with the
+  version, export with the model, and lock the editor while present.
 
 ## Stat-based verification
 

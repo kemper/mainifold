@@ -6,6 +6,7 @@ import { initPhantomGroup } from './phantomGeometry';
 import { initMeasureOverlay } from './measureOverlay';
 import { initOrientationGizmo, renderGizmo, updateGizmo, disposeGizmo, isGizmoAnimating } from './orientationGizmo';
 import { initDimensionLines, updateDimensionLines, disposeDimensionLines } from './dimensionLines';
+import { initAnnotationOverlay } from '../annotations/annotationOverlay';
 
 let renderer: THREE.WebGLRenderer;
 let camera: THREE.PerspectiveCamera;
@@ -96,6 +97,9 @@ export function initViewport(container: HTMLElement): {
 
   // Bounding box dimension annotations
   initDimensionLines(scene);
+
+  // Freehand annotation overlay (drawn surface marks)
+  initAnnotationOverlay(scene);
 
   // ResizeObserver
   const observer = new ResizeObserver(entries => {

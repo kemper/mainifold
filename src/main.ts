@@ -29,6 +29,20 @@ import { initMeasureTool, activate as activateMeasure, deactivate as deactivateM
 import { maybeStartTour, resetTour, startTour } from './ui/tour';
 import { initPaintUI } from './color/paintUI';
 import { updatePaintMesh, setOnRegionPainted, isActive as isPaintActive } from './color/paintMode';
+import { initAnnotateUI } from './annotations/annotateUI';
+import {
+  getStrokes as getAnnotationStrokes,
+  getCount as getAnnotationCount,
+  clearStrokes as clearAnnotationStrokes,
+  removeLastStroke as removeLastAnnotationStroke,
+  onChange as onAnnotationStrokesChange,
+} from './annotations/annotations';
+import {
+  setAnnotationsVisible as setAnnotationsVisibleOverlay,
+  isAnnotationsVisible as isAnnotationsVisibleOverlay,
+  onVisibilityChange as onAnnotationVisibilityChange,
+} from './annotations/annotationOverlay';
+import { setColor as setAnnotateColor } from './annotations/annotateMode';
 import { applyTriColors, hasRegions as hasColorRegions, onChange as onColorRegionsChange, clearRegions, serialize as serializeRegions, addRegion, getRegions, type SerializedColorRegion } from './color/regions';
 import { initEditorLock, syncLockState, setUnlockHandlers } from './color/editorLock';
 import { buildAdjacency, findCoplanarRegion, resolveSeed } from './color/adjacency';
@@ -1115,6 +1129,7 @@ async function main() {
   // Wire up viewport overlay buttons
   initGridToggle(clipControls);
   initDimensionsToggle(clipControls);
+  initAnnotateUI(clipControls);
   initPaintUI(clipControls);
   initMeasureToggle(clipControls);
   initOrbitLockToggle(clipControls);
@@ -1189,6 +1204,18 @@ async function main() {
       updateMesh(colored, { skipAutoFrame: true });
     }
   });
+
+  // When annotations change (stroke added/removed/cleared) or are toggled,
+  // refresh the offscreen-rendered panes (multiview + elevations) so they
+  // stay in sync with the live viewport.
+  const refreshAnnotationDependentPanes = () => {
+    if (!currentMeshData) return;
+    const meshForPanes = isPaintActive() ? applyTriColors(currentMeshData) : currentMeshData;
+    updateMultiView(meshForPanes);
+    renderElevationsToContainer(elevationsContainer, meshForPanes);
+  };
+  onAnnotationStrokesChange(refreshAnnotationDependentPanes);
+  onAnnotationVisibilityChange(refreshAnnotationDependentPanes);
 
   editorReady = true;
   editorReadyResolve();
@@ -2398,6 +2425,68 @@ async function main() {
       return { cleared: true };
     },
 
+    // === Annotations API ===
+
+    /** List all freehand annotation strokes drawn on the model surface.
+     *  Each stroke includes its surface-projected polyline points and color. */
+    listAnnotations() {
+      return getAnnotationStrokes().map(s => ({
+        id: s.id,
+        color: s.color,
+        pointCount: s.points.length,
+        points: s.points.map(p => [
+          Math.round(p.x * 1000) / 1000,
+          Math.round(p.y * 1000) / 1000,
+          Math.round(p.z * 1000) / 1000,
+        ] as [number, number, number]),
+      }));
+    },
+
+    /** Number of annotation strokes currently on the model. */
+    getAnnotationCount() {
+      return getAnnotationCount();
+    },
+
+    /** Remove the most recently drawn annotation stroke. Returns {removed: bool, remaining: int}. */
+    undoAnnotation() {
+      const removed = removeLastAnnotationStroke() !== null;
+      return { removed, remaining: getAnnotationCount() };
+    },
+
+    /** Remove all annotations from the model. */
+    clearAnnotations() {
+      const previous = getAnnotationCount();
+      clearAnnotationStrokes();
+      return { cleared: previous };
+    },
+
+    /** Show or hide annotations without removing them.
+     *  When hidden, annotations are excluded from renderView/multiview/elevation output. */
+    setAnnotationsVisible(visible: boolean) {
+      assertBoolean(visible, 'setAnnotationsVisible(visible)');
+      setAnnotationsVisibleOverlay(visible);
+      return { visible };
+    },
+
+    /** Whether annotations are currently visible. */
+    areAnnotationsVisible() {
+      return isAnnotationsVisibleOverlay();
+    },
+
+    /** Set the active drawing color for new annotation strokes. RGB in 0..1. */
+    setAnnotationColor(color: [number, number, number]) {
+      if (!Array.isArray(color) || color.length !== 3) {
+        return { error: 'setAnnotationColor requires [r, g, b] in 0..1' };
+      }
+      for (const c of color) {
+        if (typeof c !== 'number' || c < 0 || c > 1 || !Number.isFinite(c)) {
+          return { error: 'color components must be finite numbers in 0..1' };
+        }
+      }
+      setAnnotateColor([color[0], color[1], color[2]]);
+      return { color };
+    },
+
     /** Self-documenting help -- returns structured object and logs readable summary */
     help(method?: string): Record<string, unknown> {
       assertString(method, 'help(method)', { optional: true, allowEmpty: false });
@@ -2446,6 +2535,14 @@ async function main() {
         'paintRegion':     { signature: 'paintRegion({point, normal, color, name?, tolerance?}) -- Paint coplanar face region', docs: '/ai.md#color-regions' },
         'listRegions':     { signature: 'listRegions() -- List all color regions', docs: '/ai.md#color-regions' },
         'clearColors':     { signature: 'clearColors() -- Remove all color regions', docs: '/ai.md#color-regions' },
+        // Annotations
+        'listAnnotations':    { signature: 'listAnnotations() -- List all freehand annotation strokes -> [{id, color, points}]', docs: '/ai.md#annotations' },
+        'getAnnotationCount': { signature: 'getAnnotationCount() -- Number of annotation strokes on the model', docs: '/ai.md#annotations' },
+        'undoAnnotation':     { signature: 'undoAnnotation() -- Remove the most recently drawn stroke -> {removed, remaining}', docs: '/ai.md#annotations' },
+        'clearAnnotations':   { signature: 'clearAnnotations() -- Remove all annotation strokes -> {cleared}', docs: '/ai.md#annotations' },
+        'setAnnotationsVisible': { signature: 'setAnnotationsVisible(bool) -- Show/hide all annotations (also affects renderView/elevation output)', docs: '/ai.md#annotations' },
+        'areAnnotationsVisible': { signature: 'areAnnotationsVisible() -- Whether annotations are currently visible', docs: '/ai.md#annotations' },
+        'setAnnotationColor': { signature: 'setAnnotationColor([r,g,b]) -- Set draw color for new strokes (RGB 0..1)', docs: '/ai.md#annotations' },
       };
 
       if (method) {

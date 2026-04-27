@@ -1,6 +1,7 @@
 import * as THREE from 'three';
 import { createWhiteMaterial, createBlackWireframeMaterial } from './materials';
 import type { MeshData } from '../geometry/types';
+import { buildStrokesGroup, disposeStrokesGroup } from '../annotations/annotationOverlay';
 
 interface ViewConfig {
   name: string;
@@ -126,6 +127,9 @@ export function renderViewsToContainer(container: HTMLElement, meshData: MeshDat
   const viewSize = 300;
   const renderer = getOffscreenRenderer(viewSize);
 
+  const annotations = buildStrokesGroup();
+  if (annotations) scene.add(annotations);
+
   // 2x2 grid that fills the container
   const grid = document.createElement('div');
   grid.className = 'grid grid-cols-2 grid-rows-2 gap-1 w-full h-full';
@@ -161,6 +165,10 @@ export function renderViewsToContainer(container: HTMLElement, meshData: MeshDat
   }
 
   container.appendChild(grid);
+  if (annotations) {
+    scene.remove(annotations);
+    disposeStrokesGroup(annotations);
+  }
   disposeScene(scene);
   geometry.dispose();
 }
@@ -194,6 +202,9 @@ export function renderCompositeCanvas(meshData: MeshData): HTMLCanvasElement {
 
   const camera = new THREE.PerspectiveCamera(40, 1, 0.1, 1000);
   const renderer = getOffscreenRenderer(viewSize);
+
+  const annotations = buildStrokesGroup();
+  if (annotations) scene.add(annotations);
 
   const labelHeight = 28;
   const cellHeight = viewSize + labelHeight;
@@ -230,6 +241,10 @@ export function renderCompositeCanvas(meshData: MeshData): HTMLCanvasElement {
     ctx.textAlign = 'start';
   });
 
+  if (annotations) {
+    scene.remove(annotations);
+    disposeStrokesGroup(annotations);
+  }
   disposeScene(scene);
   geometry.dispose();
   return compositeCanvas;
@@ -358,6 +373,9 @@ export function renderElevationsToContainer(container: HTMLElement, meshData: Me
   const renderer = getOffscreenRenderer(viewSize);
   const hasRef = _referenceImages !== null;
 
+  const annotations = buildStrokesGroup();
+  if (annotations) scene.add(annotations);
+
   // Compact reference images row (above the elevation grid)
   if (hasRef) {
     const refSection = document.createElement('div');
@@ -462,6 +480,10 @@ export function renderElevationsToContainer(container: HTMLElement, meshData: Me
 
   outerWrap.appendChild(grid);
   container.appendChild(outerWrap);
+  if (annotations) {
+    scene.remove(annotations);
+    disposeStrokesGroup(annotations);
+  }
   disposeScene(scene);
   geometry.dispose();
 }
@@ -515,6 +537,10 @@ export function renderSingleView(meshData: MeshData, options: {
   }
 
   const renderer = getOffscreenRenderer(viewSize);
+
+  const annotations = buildStrokesGroup();
+  if (annotations) scene.add(annotations);
+
   renderer.render(scene, camera);
 
   const canvas = document.createElement('canvas');
@@ -523,6 +549,10 @@ export function renderSingleView(meshData: MeshData, options: {
   const ctx = canvas.getContext('2d')!;
   ctx.drawImage(renderer.domElement, 0, 0);
 
+  if (annotations) {
+    scene.remove(annotations);
+    disposeStrokesGroup(annotations);
+  }
   disposeScene(scene);
   geometry.dispose();
   return canvas.toDataURL('image/png');
