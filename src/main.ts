@@ -826,6 +826,10 @@ async function main() {
 
   // Create toolbar
   createToolbar(editorUI, examples, {
+    onGoHome: () => {
+      updateAppHistory('/', 'push');
+      void syncRouteFromURL();
+    },
     onRun: () => runCode(),
     onExportGLB: async () => {
       try { await exportGLB(); } catch (e) { console.error('GLB export error:', e); }
