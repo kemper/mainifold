@@ -3,6 +3,7 @@
 import { listSessions, type Session } from '../storage/sessionManager';
 import { getLatestVersion, getVersionCount } from '../storage/db';
 import { partwrightMarkSvg } from './brand';
+import { getTheme, onThemeChange, toggleTheme } from './theme';
 
 export interface LandingCallbacks {
   onOpenEditor: () => void;
@@ -16,7 +17,20 @@ export async function createLandingPage(
 ): Promise<HTMLElement> {
   const page = document.createElement('div');
   page.id = 'landing-page';
-  page.className = 'flex flex-col items-center w-full h-full overflow-auto bg-zinc-900 text-zinc-100';
+  page.className = 'flex flex-col items-center w-full h-full overflow-auto bg-zinc-900 text-zinc-100 relative';
+
+  // Theme toggle (top-right)
+  const themeBtn = document.createElement('button');
+  themeBtn.className = 'absolute top-4 right-4 flex items-center justify-center w-8 h-8 rounded-full text-zinc-500 hover:text-zinc-200 hover:bg-zinc-800 transition-colors text-base';
+  const syncThemeBtn = (theme: 'light' | 'dark') => {
+    themeBtn.textContent = theme === 'dark' ? '\u2600' : '\u263D';
+    themeBtn.title = theme === 'dark' ? 'Switch to light mode' : 'Switch to dark mode';
+    themeBtn.setAttribute('aria-label', themeBtn.title);
+  };
+  syncThemeBtn(getTheme());
+  themeBtn.addEventListener('click', () => { toggleTheme(); });
+  onThemeChange(syncThemeBtn);
+  page.appendChild(themeBtn);
 
   // Hero section
   const hero = document.createElement('div');
@@ -123,7 +137,7 @@ function createSessionTile(
 
   // Thumbnail
   const thumbContainer = document.createElement('div');
-  thumbContainer.className = 'w-full aspect-square bg-zinc-850 flex items-center justify-center overflow-hidden';
+  thumbContainer.className = 'w-full aspect-square bg-zinc-800 flex items-center justify-center overflow-hidden';
 
   if (latestVersion?.thumbnail) {
     const img = document.createElement('img');

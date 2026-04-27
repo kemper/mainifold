@@ -1,5 +1,6 @@
 import { resetTour, startTour } from './tour';
 import { partwrightMarkSvg } from './brand';
+import { getTheme, onThemeChange, toggleTheme } from './theme';
 
 export interface ExampleEntry {
   code: string;
@@ -238,6 +239,20 @@ export function createToolbar(
   });
 
   toolbar.appendChild(exportWrapper);
+
+  // Theme toggle (sun/moon)
+  const themeBtn = document.createElement('button');
+  themeBtn.id = 'btn-theme';
+  themeBtn.className = 'flex items-center justify-center w-6 h-6 rounded-full text-zinc-500 hover:text-zinc-200 hover:bg-zinc-700 transition-colors text-xs ml-2';
+  const syncThemeBtn = (theme: 'light' | 'dark') => {
+    themeBtn.textContent = theme === 'dark' ? '\u2600' : '\u263D';
+    themeBtn.title = theme === 'dark' ? 'Switch to light mode' : 'Switch to dark mode';
+    themeBtn.setAttribute('aria-label', themeBtn.title);
+  };
+  syncThemeBtn(getTheme());
+  themeBtn.addEventListener('click', () => { toggleTheme(); });
+  onThemeChange(syncThemeBtn);
+  toolbar.appendChild(themeBtn);
 
   // Help button
   const helpBtn = document.createElement('button');

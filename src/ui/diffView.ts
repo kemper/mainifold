@@ -5,6 +5,7 @@ import { EditorState } from '@codemirror/state';
 import { EditorView } from '@codemirror/view';
 import { javascript } from '@codemirror/lang-javascript';
 import { oneDark } from '@codemirror/theme-one-dark';
+import { getTheme } from './theme';
 import { basicSetup } from 'codemirror';
 import { listCurrentVersions, type Version } from '../storage/sessionManager';
 
@@ -101,7 +102,7 @@ export async function refreshDiff(): Promise<void> {
 
   // --- Stats delta bar ---
   const statsContainer = document.createElement('div');
-  statsContainer.className = 'px-4 py-2 bg-zinc-850 border-b border-zinc-700 shrink-0';
+  statsContainer.className = 'px-4 py-2 bg-zinc-800 border-b border-zinc-700 shrink-0';
 
   // --- Merge view container ---
   const mergeContainer = document.createElement('div');
@@ -163,14 +164,15 @@ function renderDiff(
     '.cm-content': { fontFamily: 'monospace' },
   });
 
+  const cmTheme = getTheme() === 'dark' ? [oneDark] : [];
   mergeView = new MergeView({
     a: {
       doc: vA.code,
-      extensions: [basicSetup, javascript(), oneDark, readOnlyExt, themeExt],
+      extensions: [basicSetup, javascript(), ...cmTheme, readOnlyExt, themeExt],
     },
     b: {
       doc: vB.code,
-      extensions: [basicSetup, javascript(), oneDark, readOnlyExt, themeExt],
+      extensions: [basicSetup, javascript(), ...cmTheme, readOnlyExt, themeExt],
     },
     parent: mergeContainer,
     highlightChanges: true,

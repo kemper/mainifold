@@ -6,6 +6,7 @@ import { oneDark } from '@codemirror/theme-one-dark';
 import { basicSetup } from 'codemirror';
 import { lintGutter, setDiagnostics, type Diagnostic } from '@codemirror/lint';
 import type { SourceDiagnostic } from '../geometry/types';
+import { getTheme, onThemeChange, type Theme } from '../ui/theme';
 
 export type EditorLanguage = 'manifold-js' | 'scad';
 
@@ -14,6 +15,11 @@ let debounceTimer: number | null = null;
 let activeDiagnostics: Diagnostic[] = [];
 const languageCompartment = new Compartment();
 const readOnlyCompartment = new Compartment();
+const themeCompartment = new Compartment();
+
+function themeExt(theme: Theme): Extension {
+  return theme === 'dark' ? oneDark : [];
+}
 
 // Minimal OpenSCAD StreamLanguage — keyword/builtin/comment/string/number coloring.
 const SCAD_KEYWORDS = new Set([
@@ -123,7 +129,7 @@ export function initEditor(
       languageCompartment.of(languageExt(initialLanguage)),
       lintGutter(),
       readOnlyCompartment.of(EditorState.readOnly.of(false)),
-      oneDark,
+      themeCompartment.of(themeExt(getTheme())),
       EditorView.updateListener.of((update) => {
         if (update.docChanged) {
           if (activeDiagnostics.length > 0) {
@@ -147,6 +153,11 @@ export function initEditor(
   editorView = new EditorView({
     state,
     parent: container,
+  });
+
+  onThemeChange((theme) => {
+    if (!editorView) return;
+    editorView.dispatch({ effects: themeCompartment.reconfigure(themeExt(theme)) });
   });
 
   return editorView;
