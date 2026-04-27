@@ -169,6 +169,14 @@ export async function renameSession(id: string, newName: string): Promise<void> 
   }
 }
 
+export async function setSessionLanguage(id: string, language: 'manifold-js' | 'scad'): Promise<void> {
+  await dbUpdateSession(id, { language, updated: Date.now() });
+  if (currentState.session?.id === id) {
+    currentState.session = { ...currentState.session, language, updated: Date.now() };
+    notify();
+  }
+}
+
 // === Version operations ===
 
 export async function saveVersion(

@@ -41,6 +41,7 @@ import {
   listSessions,
   deleteSession,
   renameSession,
+  setSessionLanguage,
   saveVersion,
   navigateVersion,
   loadVersion as loadVersionFromStore,
@@ -1256,6 +1257,12 @@ async function main() {
       setStatus(statusBar, 'error', `Failed to load ${lang}: ${e instanceof Error ? e.message : String(e)}`);
       throw e;
     }
+    // Persist the language to the active session so reopening it loads in the
+    // correct mode. Without this, sessions created before a language switch
+    // keep their stale language field and reload in the wrong engine, parsing
+    // SCAD code as JS (or vice versa).
+    const sid = getState().session?.id;
+    if (sid) await setSessionLanguage(sid, lang);
     setStatus(statusBar, 'ready', 'Ready');
   }
 
