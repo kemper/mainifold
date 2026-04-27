@@ -8,7 +8,7 @@ import { initOrientationGizmo, renderGizmo, updateGizmo, disposeGizmo, isGizmoAn
 import { initDimensionLines, updateDimensionLines, disposeDimensionLines } from './dimensionLines';
 import { getTheme, onThemeChange, type Theme } from '../ui/theme';
 
-const VIEWPORT_BG = { dark: 0x1a1a2e, light: 0xf4f4f5 } as const;
+const VIEWPORT_BG = { dark: 0x1a1a2e, light: 0xededed } as const;
 const GRID_COLORS = { dark: { major: 0x444444, minor: 0x333333 }, light: { major: 0xb0b0b0, minor: 0xc8c8c8 } } as const;
 function bgFor(theme: Theme): number { return VIEWPORT_BG[theme]; }
 

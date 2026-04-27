@@ -1,32 +1,35 @@
 @import "tailwindcss";
 
-/* Light theme: invert the zinc/neutral scales so the existing Tailwind classes
-   (e.g. bg-zinc-900, text-zinc-100) flip to readable light-mode equivalents
-   without rewriting every component. The dark theme is the unmodified default. */
+/* Light theme: remap Tailwind's zinc/neutral scales so existing classes
+   (bg-zinc-900, text-zinc-100, border-zinc-700, etc.) render as readable
+   light-mode equivalents. The mapping is not a strict inversion — it's tuned
+   so body / panel / hover layers stay visually distinct without making the
+   page glaringly bright. Body is a soft off-white, panels are pure white,
+   borders and hover states are mid-gray. */
 :root.theme-light {
   --color-zinc-50: #18181b;
-  --color-zinc-100: #27272a;
-  --color-zinc-200: #3f3f46;
-  --color-zinc-300: var(--color-zinc-600);
-  --color-zinc-400: #71717a;
+  --color-zinc-100: #18181b;
+  --color-zinc-200: #27272a;
+  --color-zinc-300: #3f3f46;
+  --color-zinc-400: #52525b;
   --color-zinc-500: #71717a;
-  --color-zinc-600: #d4d4d8;
-  --color-zinc-700: #e4e4e7;
-  --color-zinc-800: #f4f4f5;
-  --color-zinc-900: #fafafa;
-  --color-zinc-950: #ffffff;
+  --color-zinc-600: #a1a1aa;
+  --color-zinc-700: #d4d4d8;
+  --color-zinc-800: #ffffff;
+  --color-zinc-900: #ededed;
+  --color-zinc-950: #f5f5f5;
 
   --color-neutral-50: #171717;
-  --color-neutral-100: #262626;
-  --color-neutral-200: #404040;
-  --color-neutral-300: #525252;
-  --color-neutral-400: #737373;
+  --color-neutral-100: #171717;
+  --color-neutral-200: #262626;
+  --color-neutral-300: #404040;
+  --color-neutral-400: #525252;
   --color-neutral-500: #737373;
-  --color-neutral-600: #d4d4d4;
-  --color-neutral-700: #e5e5e5;
-  --color-neutral-800: #f5f5f5;
-  --color-neutral-900: #fafafa;
-  --color-neutral-950: #ffffff;
+  --color-neutral-600: #a3a3a3;
+  --color-neutral-700: #d4d4d4;
+  --color-neutral-800: #ffffff;
+  --color-neutral-900: #ededed;
+  --color-neutral-950: #f5f5f5;
 }
 
 /* Three.js canvas must be sized by ResizeObserver, not Tailwind */

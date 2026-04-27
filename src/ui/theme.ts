@@ -12,9 +12,6 @@ function readStoredTheme(): Theme {
   } catch {
     // localStorage may be unavailable (private mode, etc.)
   }
-  if (typeof window !== 'undefined' && window.matchMedia?.('(prefers-color-scheme: light)').matches) {
-    return 'light';
-  }
   return 'dark';
 }
 

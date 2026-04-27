@@ -240,13 +240,17 @@ export function createToolbar(
 
   toolbar.appendChild(exportWrapper);
 
-  // Theme toggle (sun/moon)
+  // Dark mode toggle — text button, on by default, off when clicked
   const themeBtn = document.createElement('button');
   themeBtn.id = 'btn-theme';
-  themeBtn.className = 'flex items-center justify-center w-6 h-6 rounded-full text-zinc-500 hover:text-zinc-200 hover:bg-zinc-700 transition-colors text-xs ml-2';
+  themeBtn.textContent = 'Dark Mode';
+  const themeActive = 'px-2 py-0.5 rounded text-xs font-medium transition-colors bg-zinc-700 text-zinc-100 ml-2';
+  const themeInactive = 'px-2 py-0.5 rounded text-xs font-medium transition-colors text-zinc-500 hover:text-zinc-300 border border-zinc-600 ml-2';
   const syncThemeBtn = (theme: 'light' | 'dark') => {
-    themeBtn.textContent = theme === 'dark' ? '\u2600' : '\u263D';
-    themeBtn.title = theme === 'dark' ? 'Switch to light mode' : 'Switch to dark mode';
+    const on = theme === 'dark';
+    themeBtn.className = on ? themeActive : themeInactive;
+    themeBtn.title = on ? 'Dark mode on — click to switch to light' : 'Dark mode off — click to switch to dark';
+    themeBtn.setAttribute('aria-pressed', String(on));
     themeBtn.setAttribute('aria-label', themeBtn.title);
   };
   syncThemeBtn(getTheme());

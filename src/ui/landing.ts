@@ -19,12 +19,16 @@ export async function createLandingPage(
   page.id = 'landing-page';
   page.className = 'flex flex-col items-center w-full h-full overflow-auto bg-zinc-900 text-zinc-100 relative';
 
-  // Theme toggle (top-right)
+  // Dark mode toggle (top-right) — on by default, off when clicked
   const themeBtn = document.createElement('button');
-  themeBtn.className = 'absolute top-4 right-4 flex items-center justify-center w-8 h-8 rounded-full text-zinc-500 hover:text-zinc-200 hover:bg-zinc-800 transition-colors text-base';
+  themeBtn.textContent = 'Dark Mode';
+  const themeActive = 'absolute top-4 right-4 px-3 py-1 rounded text-xs font-medium transition-colors bg-zinc-700 text-zinc-100';
+  const themeInactive = 'absolute top-4 right-4 px-3 py-1 rounded text-xs font-medium transition-colors text-zinc-500 hover:text-zinc-300 border border-zinc-600';
   const syncThemeBtn = (theme: 'light' | 'dark') => {
-    themeBtn.textContent = theme === 'dark' ? '\u2600' : '\u263D';
-    themeBtn.title = theme === 'dark' ? 'Switch to light mode' : 'Switch to dark mode';
+    const on = theme === 'dark';
+    themeBtn.className = on ? themeActive : themeInactive;
+    themeBtn.title = on ? 'Dark mode on — click to switch to light' : 'Dark mode off — click to switch to dark';
+    themeBtn.setAttribute('aria-pressed', String(on));
     themeBtn.setAttribute('aria-label', themeBtn.title);
   };
   syncThemeBtn(getTheme());
