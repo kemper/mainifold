@@ -763,7 +763,7 @@ async function main() {
       if (currentMeshData) exportSTL(currentMeshData);
     },
     onExportOBJ: () => {
-      if (currentMeshData) exportOBJ(currentMeshData);
+      if (currentMeshData) exportOBJ(hasColorRegions() ? applyTriColors(currentMeshData) : currentMeshData);
     },
     onExport3MF: () => {
       if (currentMeshData) export3MF(hasColorRegions() ? applyTriColors(currentMeshData) : currentMeshData);
@@ -1351,7 +1351,7 @@ async function main() {
     /** Export current model as OBJ download. Optional filename override. */
     exportOBJ(filename?: string) {
       assertString(filename, 'exportOBJ(filename)', { optional: true });
-      if (currentMeshData) exportOBJ(currentMeshData, filename);
+      if (currentMeshData) exportOBJ(hasColorRegions() ? applyTriColors(currentMeshData) : currentMeshData, filename);
     },
 
     /** Export current model as 3MF download. Optional filename override. */
