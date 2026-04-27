@@ -79,10 +79,9 @@ export function onVisibilityChange(fn: (visible: boolean) => void): () => void {
 
 function rebuildLiveOverlay(): void {
   if (!overlayGroup) return;
-  // Preserve the session plane outline (added separately by sessionPlane.ts).
-  const planeOutline = overlayGroup.children.find(c => c.name === 'annotation-session-plane');
+  // Annotation children are tagged with userData.annotationId; everything
+  // else (the session plane fill + outline) is preserved automatically.
   disposeAnnotationChildren(overlayGroup);
-  if (planeOutline) overlayGroup.add(planeOutline);
 
   const selected = getSelectedId();
   for (const s of getStrokes()) {

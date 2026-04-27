@@ -8,11 +8,13 @@ import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { getCamera, getMeshGroup, getRenderer } from '../renderer/viewport';
 
-// Plane offset = max(modelMaxDim * MODEL_FRACTION, cameraDistance * CAM_FRACTION).
-// In practice this puts the plane just outside the model when the camera is
-// close, and proportionally further out when the user has zoomed away.
-const MODEL_FRACTION = 0.55; // just outside half-extent
-const CAM_FRACTION = 0.05;   // 5% of camera-to-target distance (zoom-aware)
+// Plane offset is measured from the model center along the camera-toward-camera
+// direction. To guarantee the plane never clips into the model from any angle,
+// we offset past the bounding *sphere* radius (the diagonal corner of the box
+// projects further than `maxDim/2`). Then we add a margin that scales with the
+// user's zoom so the plane keeps a comfortable gap as they pull the camera back.
+const SPHERE_PADDING = 1.05;  // 5% past the bounding sphere
+const CAM_MARGIN_FRAC = 0.05; // additional margin = 5% of camera-to-target distance
 
 export interface SessionCamera {
   position: [number, number, number];
@@ -31,6 +33,7 @@ export interface SessionPlane {
 
 let activeSession: SessionPlane | null = null;
 let outlineMesh: THREE.Line | null = null;
+let fillMesh: THREE.Mesh | null = null;
 let outlineParent: THREE.Object3D | null = null;
 let controlsRef: OrbitControls | null = null;
 
@@ -49,14 +52,16 @@ export function startSession(): SessionPlane | null {
   const camera = getCamera();
   const meshGroup = getMeshGroup();
 
-  // Model dimensions (handle empty viewport gracefully).
+  // Model bounding sphere — gives the worst-case "how far does the model
+  // stick out from its center" so we can clear it from any camera angle.
   const box = new THREE.Box3().setFromObject(meshGroup);
-  let modelMaxDim = 1;
+  let modelRadius = 1;
   let modelCenter = new THREE.Vector3();
   if (!box.isEmpty()) {
-    const size = box.getSize(new THREE.Vector3());
-    modelMaxDim = Math.max(size.x, size.y, size.z, 1);
-    box.getCenter(modelCenter);
+    const sphere = new THREE.Sphere();
+    box.getBoundingSphere(sphere);
+    modelRadius = Math.max(sphere.radius, 0.5);
+    modelCenter.copy(sphere.center);
   }
 
   const target = controlsRef.target.clone();
@@ -65,8 +70,10 @@ export function startSession(): SessionPlane | null {
   const distance = toCam.length();
   const normal = toCam.clone().normalize();
 
-  // Plane origin: in front of the model toward the camera.
-  const offset = Math.max(modelMaxDim * MODEL_FRACTION, distance * CAM_FRACTION);
+  // Plane origin: outside the bounding sphere along the camera direction,
+  // plus a zoom-aware margin so the plane sits comfortably in front of the
+  // model without ever clipping into it.
+  const offset = modelRadius * SPHERE_PADDING + distance * CAM_MARGIN_FRAC;
   const origin = (box.isEmpty() ? target : modelCenter).clone()
     .add(normal.clone().multiplyScalar(offset));
 
@@ -179,11 +186,38 @@ export function showPlaneOutline(parent: THREE.Object3D): void {
   const br = origin.clone().addScaledVector(right,  halfW).addScaledVector(up, -halfH);
   const bl = origin.clone().addScaledVector(right, -halfW).addScaledVector(up, -halfH);
 
+  // Translucent fill — gives a foggy "drawing surface" feel.
+  const fillGeo = new THREE.BufferGeometry();
+  const fillPositions = new Float32Array([
+    tl.x, tl.y, tl.z,
+    tr.x, tr.y, tr.z,
+    br.x, br.y, br.z,
+    tl.x, tl.y, tl.z,
+    br.x, br.y, br.z,
+    bl.x, bl.y, bl.z,
+  ]);
+  fillGeo.setAttribute('position', new THREE.BufferAttribute(fillPositions, 3));
+  fillGeo.computeVertexNormals();
+  const fillMat = new THREE.MeshBasicMaterial({
+    color: 0x88aaff,
+    transparent: true,
+    opacity: 0.06,
+    depthWrite: false,
+    depthTest: true,
+    side: THREE.DoubleSide,
+  });
+  fillMesh = new THREE.Mesh(fillGeo, fillMat);
+  fillMesh.name = 'annotation-session-plane-fill';
+  fillMesh.renderOrder = 997;
+  fillMesh.frustumCulled = false;
+  parent.add(fillMesh);
+
+  // Outline rectangle on top of the fill.
   const geo = new THREE.BufferGeometry().setFromPoints([tl, tr, br, bl, tl]);
   const mat = new THREE.LineBasicMaterial({
     color: 0x88aaff,
     transparent: true,
-    opacity: 0.35,
+    opacity: 0.4,
     depthTest: false,
   });
   outlineMesh = new THREE.Line(geo, mat);
@@ -201,6 +235,12 @@ export function hidePlaneOutline(): void {
     outlineMesh.geometry.dispose();
     (outlineMesh.material as THREE.Material).dispose();
   }
+  if (fillMesh && outlineParent) {
+    outlineParent.remove(fillMesh);
+    fillMesh.geometry.dispose();
+    (fillMesh.material as THREE.Material).dispose();
+  }
   outlineMesh = null;
+  fillMesh = null;
   outlineParent = null;
 }

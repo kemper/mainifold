@@ -30,6 +30,7 @@ import {
 } from './selectMode';
 import { getCount, onChange as onStrokesChange, removeLastStroke, clearStrokes, clearAll } from './annotations';
 import { setAnnotationsVisible, isAnnotationsVisible } from './annotationOverlay';
+import { endSession as endSessionPlane, hidePlaneOutline } from './sessionPlane';
 
 const PRESET_COLORS: [number, number, number][] = [
   [0.95, 0.20, 0.45], // hot pink (default)
@@ -115,6 +116,10 @@ function toggleAnnotateMode(): void {
     deactivatePen();
     deactivateText();
     deactivateSelect();
+    // No sub-mode active: tear down the session plane so the next activation
+    // captures a fresh camera state and shows a fresh outline.
+    hidePlaneOutline();
+    endSessionPlane();
   } else {
     activatePen();
   }
