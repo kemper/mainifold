@@ -1,20 +1,30 @@
-// Text-annotation mode — single-click to place an editable text input at a
-// surface anchor. Pressing Enter commits the text as a TextAnnotation; Escape
-// cancels.
+// Text sub-mode — single-click to anchor an editable input on the session
+// plane. Pressing Enter commits the typed text as a TextAnnotation; Escape
+// cancels. Like pen-mode, text-mode operates on the active session plane —
+// no surface raycasting against the mesh.
 
 import * as THREE from 'three';
 import { addText, type TextAnnotation } from './annotations';
 import {
-  getMeshGroup,
-  getCamera,
+  getOverlayGroup,
+} from './annotationOverlay';
+import {
+  startSession,
+  endSession,
+  showPlaneOutline,
+  hidePlaneOutline,
+  screenToActivePlane,
+  getActiveSession,
+} from './sessionPlane';
+import {
   getRenderer,
   setUserOrbitLock,
   isUserOrbitLocked,
 } from '../renderer/viewport';
 import { forceDeactivate as forceDeactivatePaint } from '../color/paintUI';
-import { forceDeactivate as forceDeactivateAnnotateStrokes } from './annotateUI';
+import { forceDeactivate as forceDeactivatePen } from './annotateMode';
+import { forceDeactivate as forceDeactivateSelect } from './selectMode';
 
-const NORMAL_OFFSET_FRAC = 0.005;
 const DEFAULT_COLOR: [number, number, number] = [0.95, 0.20, 0.45];
 const DEFAULT_FONT_SIZE = 28;
 
@@ -25,11 +35,6 @@ let currentFontSize = DEFAULT_FONT_SIZE;
 
 let activeInput: HTMLInputElement | null = null;
 let activeAnchor: THREE.Vector3 | null = null;
-
-const raycaster = new THREE.Raycaster();
-const mouseNDC = new THREE.Vector2();
-const tmpBox = new THREE.Box3();
-const tmpVec = new THREE.Vector3();
 
 const listeners: Array<(active: boolean) => void> = [];
 
@@ -68,17 +73,26 @@ function notifyActiveChange(): void {
 export function activate(): void {
   if (active) return;
   forceDeactivatePaint();
-  forceDeactivateAnnotateStrokes();
+  forceDeactivateSelect();
+
+  // Reuse existing session if there is one (pen→text switch); otherwise start.
+  if (!getActiveSession()) startSession();
 
   active = true;
   priorOrbitLock = isUserOrbitLocked();
   setUserOrbitLock(true);
+
+  const overlay = getOverlayGroup();
+  if (overlay) showPlaneOutline(overlay);
 
   const canvas = getRenderer().domElement;
   canvas.addEventListener('click', onCanvasClick);
   canvas.style.cursor = 'text';
 
   notifyActiveChange();
+
+  // Stop pen mode but keep the session alive so we share the plane.
+  forceDeactivatePen({ keepSession: true });
 }
 
 export function deactivate(): void {
@@ -94,8 +108,15 @@ export function deactivate(): void {
   notifyActiveChange();
 }
 
-export function forceDeactivate(): void {
-  if (active) deactivate();
+interface DeactivateOpts { keepSession?: boolean }
+
+export function forceDeactivate(opts: DeactivateOpts = {}): void {
+  if (!active) return;
+  deactivate();
+  if (!opts.keepSession) {
+    hidePlaneOutline();
+    endSession();
+  }
 }
 
 function cancelInProgress(): void {
@@ -109,51 +130,11 @@ function removeInput(): void {
   activeInput = null;
 }
 
-function setMouseFromEvent(event: MouseEvent, canvas: HTMLCanvasElement): boolean {
-  const rect = canvas.getBoundingClientRect();
-  const x = event.clientX - rect.left;
-  const y = event.clientY - rect.top;
-  if (x < 0 || x > rect.width || y < 0 || y > rect.height) return false;
-  mouseNDC.x = (x / rect.width) * 2 - 1;
-  mouseNDC.y = -(y / rect.height) * 2 + 1;
-  return true;
-}
-
-function modelMaxDim(): number {
-  tmpBox.setFromObject(getMeshGroup());
-  const size = tmpBox.getSize(tmpVec);
-  return Math.max(size.x, size.y, size.z, 1);
-}
-
-function raycastSurface(event: MouseEvent): { point: THREE.Vector3; normal: THREE.Vector3 } | null {
-  const canvas = getRenderer().domElement;
-  if (!setMouseFromEvent(event, canvas)) return null;
-  raycaster.setFromCamera(mouseNDC, getCamera());
-
-  const meshGroup = getMeshGroup();
-  const solid = meshGroup.children[0];
-  if (!(solid instanceof THREE.Mesh)) return null;
-
-  const hits = raycaster.intersectObject(solid);
-  if (hits.length === 0 || !hits[0].face) return null;
-
-  const hit = hits[0];
-  if (!hit.face) return null;
-  const normal = hit.face.normal.clone()
-    .transformDirection(hit.object.matrixWorld)
-    .normalize();
-  return { point: hit.point.clone(), normal };
-}
-
 function onCanvasClick(event: MouseEvent): void {
   if (event.button !== 0) return;
-  const hit = raycastSurface(event);
-  if (!hit) return;
+  const anchor = screenToActivePlane(event);
+  if (!anchor) return;
 
-  const dim = modelMaxDim();
-  const anchor = hit.point.clone().addScaledVector(hit.normal, dim * NORMAL_OFFSET_FRAC);
-
-  // If an input is already open from a prior click, commit/discard it first.
   if (activeInput) commitFromInput();
 
   activeAnchor = anchor;
@@ -162,8 +143,6 @@ function onCanvasClick(event: MouseEvent): void {
 }
 
 function showInputAt(clientX: number, clientY: number): void {
-  // Place a small floating input at the click point. The input is appended
-  // to body so it overlays everything; positioning uses page coords.
   const input = document.createElement('input');
   input.type = 'text';
   input.placeholder = 'Type label, Enter to add';
@@ -185,14 +164,12 @@ function showInputAt(clientX: number, clientY: number): void {
     e.stopPropagation();
   });
   input.addEventListener('blur', () => {
-    // Commit on blur if there's text; otherwise drop the input.
     if (input.value.trim()) commitFromInput();
     else cancelInProgress();
   });
 
   document.body.appendChild(input);
   activeInput = input;
-  // Defer focus so the click that placed the input doesn't immediately blur it.
   setTimeout(() => input.focus(), 0);
 }
 
@@ -207,6 +184,11 @@ function commitFromInput(): void {
     activeAnchor = null;
     return;
   }
+  const session = getActiveSession();
+  if (!session) {
+    activeAnchor = null;
+    return;
+  }
   const ann: TextAnnotation = {
     type: 'text',
     id: makeId(),
@@ -214,6 +196,8 @@ function commitFromInput(): void {
     text,
     color: [...currentColor] as [number, number, number],
     fontSizePx: currentFontSize,
+    camera: session.camera,
+    plane: session,
   };
   activeAnchor = null;
   addText(ann);
@@ -223,13 +207,26 @@ function makeId(): string {
   return `t${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`;
 }
 
-/** Programmatic add — used by the console API. Anchor is in world coords. */
+/** Programmatic add — used by the console API. Anchor is in world coords.
+ *  Camera/plane snapshot uses the *current* viewport state if no annotate
+ *  session is active. */
 export function addTextAnnotationAtAnchor(opts: {
   anchor: [number, number, number];
   text: string;
   color?: [number, number, number];
   fontSizePx?: number;
 }): TextAnnotation {
+  // Either reuse the active session or start a transient one for the snapshot.
+  let session = getActiveSession();
+  let endTransient = false;
+  if (!session) {
+    session = startSession();
+    endTransient = true;
+  }
+  if (!session) {
+    throw new Error('Cannot create text annotation — no viewport state');
+  }
+
   const ann: TextAnnotation = {
     type: 'text',
     id: makeId(),
@@ -237,7 +234,10 @@ export function addTextAnnotationAtAnchor(opts: {
     text: opts.text,
     color: opts.color ?? ([...currentColor] as [number, number, number]),
     fontSizePx: opts.fontSizePx ?? currentFontSize,
+    camera: session.camera,
+    plane: session,
   };
   addText(ann);
+  if (endTransient) endSession();
   return ann;
 }

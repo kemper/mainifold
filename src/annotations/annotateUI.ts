@@ -1,5 +1,5 @@
-// Annotate mode UI — toggle button, sub-mode (pen/text) selector, color
-// picker, width/font-size picker, undo/clear actions, count badge.
+// Annotate UI — toggle button, sub-mode (pen/text/select) selector, color
+// picker, width/font-size picker, restore-view, undo/clear actions, count badge.
 
 import {
   activate as activatePen,
@@ -19,6 +19,15 @@ import {
   getFontSize as getTextFontSize,
   onActiveChange as onTextActiveChange,
 } from './textMode';
+import {
+  activate as activateSelect,
+  deactivate as deactivateSelect,
+  isActive as isSelectActive,
+  getSelectedId,
+  onActiveChange as onSelectActiveChange,
+  onSelectionChange,
+  restoreView as restoreSelectionView,
+} from './selectMode';
 import { getCount, onChange as onStrokesChange, removeLastStroke, clearStrokes, clearAll } from './annotations';
 import { setAnnotationsVisible, isAnnotationsVisible } from './annotationOverlay';
 
@@ -53,8 +62,11 @@ let countBadge: HTMLElement | null = null;
 let visibilityBtn: HTMLButtonElement | null = null;
 let penTabBtn: HTMLButtonElement | null = null;
 let textTabBtn: HTMLButtonElement | null = null;
+let selectTabBtn: HTMLButtonElement | null = null;
 let widthRow: HTMLElement | null = null;
 let fontRow: HTMLElement | null = null;
+let restoreViewBtn: HTMLButtonElement | null = null;
+let selectionInfo: HTMLElement | null = null;
 
 const inactiveBtnClass = 'px-2 py-1 rounded text-xs bg-zinc-800/80 backdrop-blur text-zinc-400 hover:text-zinc-200 hover:bg-zinc-700/80 transition-colors border border-zinc-600/50';
 const activeBtnClass = 'px-2 py-1 rounded text-xs bg-pink-500/30 backdrop-blur text-pink-200 border border-pink-400/60 transition-colors';
@@ -67,7 +79,7 @@ export function initAnnotateUI(controlsContainer: HTMLElement): void {
   annotateBtn.id = 'annotate-toggle';
   annotateBtn.className = inactiveBtnClass;
   annotateBtn.textContent = '\u270F\uFE0F Annotate';
-  annotateBtn.title = 'Draw freehand marks or pin text labels on the model surface';
+  annotateBtn.title = 'Draw, type, or move marks pinned to a virtual plane in front of the model';
 
   countBadge = document.createElement('span');
   countBadge.className = 'hidden ml-1 px-1.5 py-0.5 rounded-full text-[10px] font-bold bg-pink-500 text-white leading-none';
@@ -75,7 +87,6 @@ export function initAnnotateUI(controlsContainer: HTMLElement): void {
 
   annotateBtn.addEventListener('click', toggleAnnotateMode);
 
-  // Insert before the paint button if it exists, else before measure, else append.
   const paintBtn = controlsContainer.querySelector('#paint-toggle');
   const measureBtn = controlsContainer.querySelector('#measure-toggle');
   const anchor = paintBtn ?? measureBtn;
@@ -88,31 +99,40 @@ export function initAnnotateUI(controlsContainer: HTMLElement): void {
   onStrokesChange(updateCountBadge);
   onPenActiveChange(updatePanelState);
   onTextActiveChange(updatePanelState);
+  onSelectActiveChange(updatePanelState);
+  onSelectionChange(updateSelectionInfo);
   updateCountBadge();
   updatePanelState();
+  updateSelectionInfo(null);
 }
 
 function isAnyActive(): boolean {
-  return isPenActive() || isTextActive();
+  return isPenActive() || isTextActive() || isSelectActive();
 }
 
 function toggleAnnotateMode(): void {
   if (isAnyActive()) {
     deactivatePen();
     deactivateText();
+    deactivateSelect();
   } else {
-    activatePen(); // default sub-mode
+    activatePen();
   }
 }
 
 function selectPenSubMode(): void {
   if (isPenActive()) return;
-  activatePen(); // its activate hook deactivates text
+  activatePen();
 }
 
 function selectTextSubMode(): void {
   if (isTextActive()) return;
-  activateText(); // its activate hook deactivates pen
+  activateText();
+}
+
+function selectSelectSubMode(): void {
+  if (isSelectActive()) return;
+  activateSelect();
 }
 
 function updatePanelState(): void {
@@ -122,15 +142,25 @@ function updatePanelState(): void {
   if (open) pickerPanel?.classList.remove('hidden');
   else pickerPanel?.classList.add('hidden');
 
-  // Reflect which sub-mode is active in the tab buttons + show the relevant
-  // size row.
-  if (penTabBtn && textTabBtn) {
+  if (penTabBtn && textTabBtn && selectTabBtn) {
     penTabBtn.className = isPenActive() ? tabActiveClass : tabInactiveClass;
     textTabBtn.className = isTextActive() ? tabActiveClass : tabInactiveClass;
+    selectTabBtn.className = isSelectActive() ? tabActiveClass : tabInactiveClass;
   }
-  if (widthRow && fontRow) {
-    widthRow.classList.toggle('hidden', !isPenActive());
-    fontRow.classList.toggle('hidden', !isTextActive());
+  if (widthRow) widthRow.classList.toggle('hidden', !isPenActive());
+  if (fontRow) fontRow.classList.toggle('hidden', !isTextActive());
+}
+
+function updateSelectionInfo(id: string | null): void {
+  if (!selectionInfo || !restoreViewBtn) return;
+  if (id && isSelectActive()) {
+    selectionInfo.classList.remove('hidden');
+    restoreViewBtn.disabled = false;
+    restoreViewBtn.classList.remove('opacity-40', 'cursor-not-allowed');
+  } else {
+    selectionInfo.classList.add('hidden');
+    restoreViewBtn.disabled = true;
+    restoreViewBtn.classList.add('opacity-40', 'cursor-not-allowed');
   }
 }
 
@@ -149,7 +179,7 @@ function createPickerPanel(): HTMLElement {
   const panel = document.createElement('div');
   panel.id = 'annotate-picker-panel';
   panel.className = 'hidden absolute top-10 right-2 z-20 bg-zinc-800/95 backdrop-blur border border-zinc-600/60 rounded-lg p-2.5 shadow-xl';
-  panel.style.minWidth = '200px';
+  panel.style.minWidth = '220px';
 
   // Sub-mode tabs
   const tabsRow = document.createElement('div');
@@ -158,20 +188,27 @@ function createPickerPanel(): HTMLElement {
   penTabBtn = document.createElement('button');
   penTabBtn.className = tabInactiveClass;
   penTabBtn.textContent = '\u270F\uFE0F Pen';
-  penTabBtn.title = 'Draw freehand strokes';
+  penTabBtn.title = 'Draw freehand strokes on the session plane';
   penTabBtn.addEventListener('click', selectPenSubMode);
   tabsRow.appendChild(penTabBtn);
 
   textTabBtn = document.createElement('button');
   textTabBtn.className = tabInactiveClass;
   textTabBtn.textContent = 'T Text';
-  textTabBtn.title = 'Click the model to pin a text label';
+  textTabBtn.title = 'Click the plane to pin a text label';
   textTabBtn.addEventListener('click', selectTextSubMode);
   tabsRow.appendChild(textTabBtn);
 
+  selectTabBtn = document.createElement('button');
+  selectTabBtn.className = tabInactiveClass;
+  selectTabBtn.textContent = '\u2716 Select';
+  selectTabBtn.title = 'Click an annotation to select; drag to move; Delete to remove';
+  selectTabBtn.addEventListener('click', selectSelectSubMode);
+  tabsRow.appendChild(selectTabBtn);
+
   panel.appendChild(tabsRow);
 
-  // Color section
+  // Color
   const title = document.createElement('div');
   title.className = 'text-[10px] text-zinc-500 uppercase tracking-wider mb-1.5 font-medium';
   title.textContent = 'Color';
@@ -222,15 +259,13 @@ function createPickerPanel(): HTMLElement {
   customRow.appendChild(customLabel);
   panel.appendChild(customRow);
 
-  // Width row (Pen mode only)
+  // Width row (Pen mode)
   widthRow = document.createElement('div');
   widthRow.className = 'mt-2';
-
   const widthLabel = document.createElement('div');
   widthLabel.className = 'text-[10px] text-zinc-500 uppercase tracking-wider mb-1.5 font-medium';
   widthLabel.textContent = 'Width';
   widthRow.appendChild(widthLabel);
-
   const widthBtns = document.createElement('div');
   widthBtns.className = 'flex items-center gap-1.5';
   const widthButtonRefs: HTMLButtonElement[] = [];
@@ -259,15 +294,13 @@ function createPickerPanel(): HTMLElement {
   if (initialWidthIdx >= 0) markActiveSizeButton(widthButtonRefs, widthButtonRefs[initialWidthIdx]);
   panel.appendChild(widthRow);
 
-  // Font size row (Text mode only)
+  // Font size row (Text mode)
   fontRow = document.createElement('div');
   fontRow.className = 'mt-2 hidden';
-
   const fontLabel = document.createElement('div');
   fontLabel.className = 'text-[10px] text-zinc-500 uppercase tracking-wider mb-1.5 font-medium';
   fontLabel.textContent = 'Size';
   fontRow.appendChild(fontLabel);
-
   const fontBtns = document.createElement('div');
   fontBtns.className = 'flex items-center gap-1.5';
   const fontButtonRefs: HTMLButtonElement[] = [];
@@ -288,9 +321,15 @@ function createPickerPanel(): HTMLElement {
   if (initialFontIdx >= 0) markActiveSizeButton(fontButtonRefs, fontButtonRefs[initialFontIdx]);
   panel.appendChild(fontRow);
 
-  // Action row: visibility, undo, clear
+  // Selection info row (Select mode)
+  selectionInfo = document.createElement('div');
+  selectionInfo.className = 'hidden mt-2 pt-2 border-t border-zinc-700 text-[10px] text-zinc-400';
+  selectionInfo.textContent = 'Drag to move. Delete to remove. Esc to deselect.';
+  panel.appendChild(selectionInfo);
+
+  // Action row: visibility, restore-view, undo, clear
   const actions = document.createElement('div');
-  actions.className = 'flex items-center gap-1.5 mt-2 pt-2 border-t border-zinc-700';
+  actions.className = 'flex items-center gap-1.5 mt-2 pt-2 border-t border-zinc-700 flex-wrap';
 
   visibilityBtn = document.createElement('button');
   visibilityBtn.className = 'px-2 py-1 rounded text-[10px] bg-zinc-700/60 text-zinc-300 hover:bg-zinc-600/60 transition-colors';
@@ -302,6 +341,17 @@ function createPickerPanel(): HTMLElement {
     if (visibilityBtn) visibilityBtn.textContent = next ? 'Hide' : 'Show';
   });
   actions.appendChild(visibilityBtn);
+
+  restoreViewBtn = document.createElement('button');
+  restoreViewBtn.className = 'px-2 py-1 rounded text-[10px] bg-zinc-700/60 text-zinc-300 hover:bg-zinc-600/60 transition-colors opacity-40 cursor-not-allowed';
+  restoreViewBtn.textContent = 'View from here';
+  restoreViewBtn.title = 'Snap the camera to the angle from which the selected annotation was made';
+  restoreViewBtn.disabled = true;
+  restoreViewBtn.addEventListener('click', () => {
+    const id = getSelectedId();
+    if (id) restoreSelectionView(id);
+  });
+  actions.appendChild(restoreViewBtn);
 
   const undoBtn = document.createElement('button');
   undoBtn.className = 'px-2 py-1 rounded text-[10px] bg-zinc-700/60 text-zinc-300 hover:bg-zinc-600/60 transition-colors';
@@ -318,9 +368,9 @@ function createPickerPanel(): HTMLElement {
   actions.appendChild(clearStrokesBtn);
 
   const clearAllBtn = document.createElement('button');
-  clearAllBtn.className = 'px-2 py-1 rounded text-[10px] bg-red-700/60 text-red-200 hover:bg-red-600/60 transition-colors ml-auto';
+  clearAllBtn.className = 'px-2 py-1 rounded text-[10px] bg-red-700/60 text-red-200 hover:bg-red-600/60 transition-colors';
   clearAllBtn.textContent = 'Clear all';
-  clearAllBtn.title = 'Remove all annotations (strokes and text)';
+  clearAllBtn.title = 'Remove all annotations';
   clearAllBtn.addEventListener('click', () => { clearAll(); });
   actions.appendChild(clearAllBtn);
 
@@ -357,8 +407,7 @@ function rgbToHex(color: [number, number, number]): string {
 }
 
 /** Force-deactivate annotate (pen) externally — used by the paint mode UI for
- *  mutual exclusion. Note that text mode is deactivated separately by
- *  textMode.forceDeactivate(). */
+ *  mutual exclusion. Note: text and select modes are deactivated separately. */
 export function forceDeactivate(): void {
   if (isPenActive()) deactivatePen();
 }

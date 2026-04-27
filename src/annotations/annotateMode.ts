@@ -1,7 +1,9 @@
-// Annotate mode — pointer-driven freehand surface drawing.
-// Each pointer sample is raycast against the current solid mesh; hits become
-// stroke vertices, slightly offset along the surface normal to avoid z-fighting
-// with the model.
+// Pen sub-mode — freehand drawing onto the session plane.
+//
+// Each pointer sample is unprojected onto the active session plane (a flat
+// plane frozen in front of the model at activation time). Stroke commits on
+// pointer-up; live preview is rendered as the user drags via direct
+// mutation of an in-progress Line2.
 
 import * as THREE from 'three';
 import { Line2 } from 'three/addons/lines/Line2.js';
@@ -14,21 +16,27 @@ import {
   setLine2Points,
 } from './annotationOverlay';
 import {
-  getMeshGroup,
-  getCamera,
+  startSession,
+  endSession,
+  showPlaneOutline,
+  hidePlaneOutline,
+  screenToActivePlane,
+  getActiveSession,
+} from './sessionPlane';
+import {
   getRenderer,
   setUserOrbitLock,
   isUserOrbitLocked,
 } from '../renderer/viewport';
 import { forceDeactivate as forceDeactivatePaint } from '../color/paintUI';
 import { forceDeactivate as forceDeactivateText } from './textMode';
-
-const NORMAL_OFFSET_FRAC = 0.005;   // offset = max(model dim) * this
-const MIN_POINT_DIST_FRAC = 0.002;  // skip pointer samples closer than this in world units
-const MIN_POINT_DIST_FLOOR = 0.02;  // absolute floor on min distance
+import { forceDeactivate as forceDeactivateSelect } from './selectMode';
 
 const DEFAULT_COLOR: [number, number, number] = [0.95, 0.20, 0.45]; // hot pink
 const DEFAULT_WIDTH = 4; // pixels
+// Minimum world-space distance between sampled points (in plane units). Will
+// be scaled to ~0.5% of the camera-to-plane distance per stroke.
+const MIN_SAMPLE_FRAC = 0.002;
 
 let active = false;
 let currentColor: [number, number, number] = [...DEFAULT_COLOR] as [number, number, number];
@@ -39,11 +47,6 @@ let currentPoints: THREE.Vector3[] = [];
 let priorOrbitLock = false;
 
 let previewLine: Line2 | null = null;
-
-const raycaster = new THREE.Raycaster();
-const mouseNDC = new THREE.Vector2();
-const tmpBox = new THREE.Box3();
-const tmpVec = new THREE.Vector3();
 
 const listeners: Array<(active: boolean) => void> = [];
 
@@ -79,20 +82,37 @@ function notifyActiveChange(): void {
   for (const fn of listeners) fn(active);
 }
 
+/** True if any annotate sub-mode (pen or text) is currently active. Used by
+ *  callers (UI, sessionPlane outline) to decide whether to maintain the
+ *  shared session plane. */
+function anySiblingActive(): boolean {
+  // We import sibling state lazily via the sessionPlane.getActiveSession;
+  // a non-null active session indicates pen OR text owns it.
+  return getActiveSession() !== null;
+}
+
 export function activate(): void {
   if (active) return;
-  // Mutual exclusion with paint and text modes: only one drawing tool active.
+  // Mutual exclusion with paint and select modes (text shares the session,
+  // so we only stop text when there's no plane to share — which is when the
+  // current tab switch is into a fresh activation).
   forceDeactivatePaint();
-  forceDeactivateText();
+  forceDeactivateSelect();
+
+  // If no session exists yet (first activation, or after a full deactivate),
+  // start a new one. Switching from text → pen reuses the same plane.
+  if (!anySiblingActive()) {
+    startSession();
+  }
 
   active = true;
   priorOrbitLock = isUserOrbitLocked();
   setUserOrbitLock(true);
 
+  const overlay = getOverlayGroup();
+  if (overlay) showPlaneOutline(overlay);
+
   const canvas = getRenderer().domElement;
-  // Make sure LineMaterial.resolution matches the canvas right now — it can
-  // be stale if the canvas was resized between viewport init and the first
-  // activation, or initialized before layout.
   setLiveResolution(canvas.width, canvas.height);
   canvas.addEventListener('pointerdown', onPointerDown);
   canvas.addEventListener('pointermove', onPointerMove);
@@ -101,6 +121,12 @@ export function activate(): void {
   canvas.style.cursor = 'crosshair';
 
   notifyActiveChange();
+
+  // text mode is mutually exclusive with pen — but text was already turned
+  // off via forceDeactivateText path inside textMode? It's not; we deactivate
+  // it explicitly to make sure its handlers are detached. (Calling
+  // forceDeactivateText after startSession; the session plane stays active.)
+  forceDeactivateText({ keepSession: true });
 }
 
 export function deactivate(): void {
@@ -117,6 +143,21 @@ export function deactivate(): void {
   canvas.style.cursor = '';
 
   notifyActiveChange();
+
+  // If no other annotate sub-mode is taking over the session, end it.
+  // Callers that want to keep the session (e.g. pen→text switch) call
+  // forceDeactivate({keepSession: true}).
+}
+
+interface DeactivateOpts { keepSession?: boolean }
+
+export function forceDeactivate(opts: DeactivateOpts = {}): void {
+  if (!active) return;
+  deactivate();
+  if (!opts.keepSession) {
+    hidePlaneOutline();
+    endSession();
+  }
 }
 
 function cancelInProgress(): void {
@@ -125,61 +166,23 @@ function cancelInProgress(): void {
   clearPreview();
 }
 
-function setMouseFromEvent(event: PointerEvent, canvas: HTMLCanvasElement): boolean {
-  const rect = canvas.getBoundingClientRect();
-  const x = event.clientX - rect.left;
-  const y = event.clientY - rect.top;
-  if (x < 0 || x > rect.width || y < 0 || y > rect.height) return false;
-  mouseNDC.x = (x / rect.width) * 2 - 1;
-  mouseNDC.y = -(y / rect.height) * 2 + 1;
-  return true;
-}
-
-function modelMaxDim(): number {
-  tmpBox.setFromObject(getMeshGroup());
-  const size = tmpBox.getSize(tmpVec);
-  return Math.max(size.x, size.y, size.z, 1);
-}
-
-function raycastSurface(event: PointerEvent): { point: THREE.Vector3; normal: THREE.Vector3 } | null {
-  const canvas = getRenderer().domElement;
-  if (!setMouseFromEvent(event, canvas)) return null;
-  raycaster.setFromCamera(mouseNDC, getCamera());
-
-  const meshGroup = getMeshGroup();
-  // The solid mesh is meshGroup.children[0] (matches facePicker's convention).
-  const solid = meshGroup.children[0];
-  if (!(solid instanceof THREE.Mesh)) return null;
-
-  const hits = raycaster.intersectObject(solid);
-  if (hits.length === 0 || !hits[0].face) return null;
-
-  const hit = hits[0];
-  if (!hit.face) return null;
-  const normal = hit.face.normal.clone()
-    .transformDirection(hit.object.matrixWorld)
-    .normalize();
-  return { point: hit.point.clone(), normal };
-}
-
-function offsetAlongNormal(point: THREE.Vector3, normal: THREE.Vector3, dim: number): THREE.Vector3 {
-  return point.clone().addScaledVector(normal, dim * NORMAL_OFFSET_FRAC);
-}
-
 function ensurePreview(): void {
   if (previewLine) return;
   const overlay = getOverlayGroup();
   if (!overlay) return;
-  // Build a placeholder Line2 with the current color/width via the same
-  // pipeline used for committed strokes — keeps the look identical.
+  const session = getActiveSession();
+  if (!session) return;
+
   const placeholder: StrokeAnnotation = {
     type: 'stroke',
     id: '__preview',
     points: currentPoints,
     color: [...currentColor] as [number, number, number],
     width: currentWidth,
+    camera: session.camera,
+    plane: session,
   };
-  previewLine = strokeToLine2(placeholder, getLiveResolution());
+  previewLine = strokeToLine2(placeholder, getLiveResolution(), false);
   previewLine.name = 'annotation-preview';
   previewLine.renderOrder = 1000;
   overlay.add(previewLine);
@@ -200,44 +203,52 @@ function clearPreview(): void {
   previewLine = null;
 }
 
+function minSampleDistance(): number {
+  const session = getActiveSession();
+  if (!session) return 0.02;
+  // Approximate plane-space scale by the camera-to-plane-origin distance.
+  const camPos = new THREE.Vector3(
+    session.camera.position[0], session.camera.position[1], session.camera.position[2],
+  );
+  const origin = new THREE.Vector3(session.origin[0], session.origin[1], session.origin[2]);
+  const d = camPos.distanceTo(origin);
+  return Math.max(d * MIN_SAMPLE_FRAC, 0.005);
+}
+
 function onPointerDown(event: PointerEvent): void {
   if (event.button !== 0) return;
-  const hit = raycastSurface(event);
-  if (!hit) return;
-
-  const dim = modelMaxDim();
+  const pt = screenToActivePlane(event);
+  if (!pt) return;
   drawing = true;
-  currentPoints = [offsetAlongNormal(hit.point, hit.normal, dim)];
-  try {
-    (event.target as Element).setPointerCapture?.(event.pointerId);
-  } catch { /* not all targets support capture */ }
+  currentPoints = [pt];
+  try { (event.target as Element).setPointerCapture?.(event.pointerId); } catch { /* */ }
   updatePreviewGeometry();
   event.preventDefault();
 }
 
 function onPointerMove(event: PointerEvent): void {
   if (!drawing) return;
-  const hit = raycastSurface(event);
-  if (!hit) return;
-
-  const dim = modelMaxDim();
-  const next = offsetAlongNormal(hit.point, hit.normal, dim);
+  const pt = screenToActivePlane(event);
+  if (!pt) return;
   const last = currentPoints[currentPoints.length - 1];
-  const minDist = Math.max(dim * MIN_POINT_DIST_FRAC, MIN_POINT_DIST_FLOOR);
-  if (last && last.distanceTo(next) < minDist) return;
-
-  currentPoints.push(next);
+  const minDist = minSampleDistance();
+  if (last && last.distanceTo(pt) < minDist) return;
+  currentPoints.push(pt);
   updatePreviewGeometry();
 }
 
 function onPointerUp(event: PointerEvent): void {
   if (!drawing) return;
   drawing = false;
-  try {
-    (event.target as Element).releasePointerCapture?.(event.pointerId);
-  } catch { /* ignore */ }
+  try { (event.target as Element).releasePointerCapture?.(event.pointerId); } catch { /* */ }
 
   if (currentPoints.length < 2) {
+    cancelInProgress();
+    return;
+  }
+
+  const session = getActiveSession();
+  if (!session) {
     cancelInProgress();
     return;
   }
@@ -248,6 +259,8 @@ function onPointerUp(event: PointerEvent): void {
     points: currentPoints,
     color: [...currentColor] as [number, number, number],
     width: currentWidth,
+    camera: session.camera,
+    plane: session,
   };
   currentPoints = [];
   clearPreview();
@@ -260,9 +273,4 @@ function onPointerCancel(_event: PointerEvent): void {
 
 function makeId(): string {
   return `s${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`;
-}
-
-/** Public hook for external code (e.g. paint mode UI) to forcibly drop annotate mode. */
-export function forceDeactivate(): void {
-  if (active) deactivate();
 }

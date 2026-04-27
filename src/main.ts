@@ -48,6 +48,7 @@ import {
 } from './annotations/annotationOverlay';
 import { setColor as setAnnotateColor, setWidth as setAnnotateWidth, getWidth as getAnnotateWidth } from './annotations/annotateMode';
 import { addTextAnnotationAtAnchor, setFontSize as setAnnotateFontSize, getFontSize as getAnnotateFontSize } from './annotations/textMode';
+import { restoreView as restoreAnnotationViewById } from './annotations/selectMode';
 import { applyTriColors, hasRegions as hasColorRegions, onChange as onColorRegionsChange, clearRegions, serialize as serializeRegions, addRegion, getRegions, type SerializedColorRegion } from './color/regions';
 import { initEditorLock, syncLockState, setUnlockHandlers } from './color/editorLock';
 import { buildAdjacency, findCoplanarRegion, resolveSeed } from './color/adjacency';
@@ -2445,6 +2446,7 @@ async function main() {
           Math.round(p.y * 1000) / 1000,
           Math.round(p.z * 1000) / 1000,
         ] as [number, number, number]),
+        camera: s.camera,
       }));
     },
 
@@ -2460,6 +2462,7 @@ async function main() {
           Math.round(t.anchor.y * 1000) / 1000,
           Math.round(t.anchor.z * 1000) / 1000,
         ] as [number, number, number],
+        camera: t.camera,
       }));
     },
 
@@ -2552,6 +2555,14 @@ async function main() {
     /** Get the current default font size (pixels) for new text annotations. */
     getAnnotationFontSize() {
       return getAnnotateFontSize();
+    },
+
+    /** Snap the camera to the angle the given annotation was originally
+     *  drawn from. Useful when reviewing where an annotation belongs. */
+    restoreAnnotationView(id: string) {
+      assertString(id, 'restoreAnnotationView(id)');
+      const ok = restoreAnnotationViewById(id);
+      return ok ? { restored: true } : { error: `No annotation with id ${id}` };
     },
 
     /** Show or hide annotations without removing them.
@@ -2659,6 +2670,7 @@ async function main() {
         'getAnnotationWidth': { signature: 'getAnnotationWidth() -- Current line width (pixels)', docs: '/ai.md#annotations' },
         'setAnnotationFontSize': { signature: 'setAnnotationFontSize(px) -- Set font size for new text labels (4..256 px)', docs: '/ai.md#annotations' },
         'getAnnotationFontSize': { signature: 'getAnnotationFontSize() -- Current text label font size (pixels)', docs: '/ai.md#annotations' },
+        'restoreAnnotationView': { signature: 'restoreAnnotationView(id) -- Snap the camera to the angle the annotation was made from', docs: '/ai.md#annotations' },
       };
 
       if (method) {

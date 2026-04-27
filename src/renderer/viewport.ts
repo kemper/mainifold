@@ -7,6 +7,7 @@ import { initMeasureOverlay } from './measureOverlay';
 import { initOrientationGizmo, renderGizmo, updateGizmo, disposeGizmo, isGizmoAnimating } from './orientationGizmo';
 import { initDimensionLines, updateDimensionLines, disposeDimensionLines } from './dimensionLines';
 import { initAnnotationOverlay, setLiveResolution as setAnnotationResolution } from '../annotations/annotationOverlay';
+import { configureSessionPlane } from '../annotations/sessionPlane';
 
 let renderer: THREE.WebGLRenderer;
 let camera: THREE.PerspectiveCamera;
@@ -100,6 +101,7 @@ export function initViewport(container: HTMLElement): {
 
   // Freehand annotation overlay (drawn surface marks)
   initAnnotationOverlay(scene);
+  configureSessionPlane(controls);
 
   // ResizeObserver
   const observer = new ResizeObserver(entries => {

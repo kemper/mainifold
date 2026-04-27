@@ -1,23 +1,30 @@
-// Annotation store — module-level state for surface marks (freehand strokes
-// and pinned text labels) drawn by the user to communicate intent to the AI.
+// Annotation store — module-level state for plane-anchored marks (freehand
+// strokes and pinned text labels) drawn by the user to communicate intent
+// to the AI. Each annotation captures the camera state at creation time so
+// the user can later snap back to the original viewing angle.
 
 import * as THREE from 'three';
+import type { SessionCamera, SessionPlane } from './sessionPlane';
 
 export interface StrokeAnnotation {
   type: 'stroke';
   id: string;
-  points: THREE.Vector3[]; // surface points, slightly offset along the hit normal
+  points: THREE.Vector3[]; // 3D points on the session plane
   color: [number, number, number]; // 0..1
   width: number; // line width in screen-space pixels
+  camera: SessionCamera; // camera at time of creation (for restore-view)
+  plane: SessionPlane;   // plane data (for select-mode drag)
 }
 
 export interface TextAnnotation {
   type: 'text';
   id: string;
-  anchor: THREE.Vector3; // surface anchor point (offset along hit normal)
+  anchor: THREE.Vector3; // 3D anchor on the session plane
   text: string;
-  color: [number, number, number]; // 0..1
-  fontSizePx: number; // target on-screen font size in pixels
+  color: [number, number, number];
+  fontSizePx: number;
+  camera: SessionCamera;
+  plane: SessionPlane;
 }
 
 export type Annotation = StrokeAnnotation | TextAnnotation;
@@ -35,6 +42,10 @@ export function getStrokes(): readonly StrokeAnnotation[] {
 
 export function getTexts(): readonly TextAnnotation[] {
   return annotations.filter((a): a is TextAnnotation => a.type === 'text');
+}
+
+export function getAnnotationById(id: string): Annotation | null {
+  return annotations.find(a => a.id === id) ?? null;
 }
 
 export function getCount(): number {
@@ -59,8 +70,23 @@ export function addText(text: TextAnnotation): void {
   notify();
 }
 
+export function updateStrokePoints(id: string, points: THREE.Vector3[]): boolean {
+  const a = annotations.find(x => x.id === id);
+  if (!a || a.type !== 'stroke') return false;
+  a.points = points;
+  notify();
+  return true;
+}
+
+export function updateTextAnchor(id: string, anchor: THREE.Vector3): boolean {
+  const a = annotations.find(x => x.id === id);
+  if (!a || a.type !== 'text') return false;
+  a.anchor = anchor;
+  notify();
+  return true;
+}
+
 export function removeLastStroke(): StrokeAnnotation | null {
-  // Pop the most recent stroke specifically (skips trailing texts).
   for (let i = annotations.length - 1; i >= 0; i--) {
     const a = annotations[i];
     if (a.type === 'stroke') {
