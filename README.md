@@ -11,7 +11,8 @@ Built on [manifold-3d](https://github.com/elalish/manifold) (fast WASM boolean e
 - **Session & versioning** — Save multiple design variations, then open a gallery view to compare them side-by-side. Ideal for AI workflows that generate N variations for human review.
 - **Multi-view rendering** — Interactive 3D viewport plus a 4-panel isometric grid (alternating cube corners, every face visible in 2+ views).
 - **Cross-sections** — Slice geometry at any Z height, inspect the 2D profile as SVG.
-- **Export** — GLB and STL download.
+- **Color regions** — Paint coplanar face regions with the in-app paint mode or the `paintRegion` console API; colors flow through GLB and 3MF exports for multi-material slicing.
+- **Export** — GLB, STL, OBJ, and 3MF download. GLB and 3MF carry per-region colors when present.
 
 ## Quick start
 
@@ -90,13 +91,20 @@ partwright.getGeometryData()     // Current model stats (volume, bbox, genus, ..
 partwright.getCode()             // Read editor contents
 partwright.setCode(code)         // Write to editor
 partwright.sliceAtZ(z)           // Cross-section at height z
-partwright.exportGLB()           // Download GLB
+partwright.exportGLB()           // Download GLB (carries vertex colors)
 partwright.exportSTL()           // Download STL
+partwright.exportOBJ()           // Download OBJ
+partwright.export3MF()           // Download 3MF (carries per-region materials)
 
 // Sessions — save/compare design iterations
 await partwright.createSession("Gear variations")
 await partwright.runAndSave(code, "v1 - basic")
 partwright.getGalleryUrl()       // URL for gallery view
+
+// Color regions — tag coplanar faces with a color (see /ai.md#color-regions)
+partwright.paintRegion({ point: [10,0,5], normal: [0,0,1], color: [1,0,0] })
+partwright.listRegions()
+partwright.clearColors()
 ```
 
 Geometry stats are also always available as JSON in `#geometry-data` for DOM scraping.
@@ -147,8 +155,11 @@ src/
   ui/layout.ts            Split-pane layout
   ui/toolbar.ts           Top toolbar with examples dropdown
   ui/panels.ts            View tab wiring
-  export/gltf.ts          GLB export
+  export/gltf.ts          GLB export (with vertex colors)
   export/stl.ts           STL export
+  export/obj.ts           OBJ export
+  export/threemf.ts       3MF export (per-region basematerials + pid)
+  color/                  Paint mode, coplanar flood-fill, region persistence
 ```
 
 Requires `Cross-Origin-Embedder-Policy` and `Cross-Origin-Opener-Policy` headers for SharedArrayBuffer / WASM threads (configured in `vite.config.ts`).

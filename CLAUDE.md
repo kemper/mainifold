@@ -104,6 +104,7 @@ The app uses path-based routing for top-level pages and query parameters for vie
 - `?view=ai` — AI Views tab
 - `?view=elevations` — Elevations tab
 - `?gallery` — Gallery tab
+- `?diff` — Diff tab (side-by-side code + stat comparison between two versions)
 - `?notes` — Notes tab
 - `?session=<id>` — Active session
 - `?session=<id>&v=3` — Specific version
