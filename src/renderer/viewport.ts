@@ -6,6 +6,19 @@ import { initPhantomGroup } from './phantomGeometry';
 import { initMeasureOverlay } from './measureOverlay';
 import { initOrientationGizmo, renderGizmo, updateGizmo, disposeGizmo, isGizmoAnimating } from './orientationGizmo';
 import { initDimensionLines, updateDimensionLines, disposeDimensionLines } from './dimensionLines';
+import { getTheme, onThemeChange, type Theme } from '../ui/theme';
+
+const VIEWPORT_BG = { dark: 0x1a1a2e, light: 0xededed } as const;
+const GRID_COLORS = { dark: { major: 0x444444, minor: 0x333333 }, light: { major: 0xb0b0b0, minor: 0xc8c8c8 } } as const;
+function bgFor(theme: Theme): number { return VIEWPORT_BG[theme]; }
+
+function makeGrid(theme: Theme): THREE.GridHelper {
+  const c = GRID_COLORS[theme];
+  const g = new THREE.GridHelper(40, 40, c.major, c.minor);
+  g.rotation.x = Math.PI / 2;
+  g.visible = false;
+  return g;
+}
 
 let renderer: THREE.WebGLRenderer;
 let camera: THREE.PerspectiveCamera;
@@ -44,7 +57,7 @@ export function initViewport(container: HTMLElement): {
   renderer: THREE.WebGLRenderer;
 } {
   scene = new THREE.Scene();
-  scene.background = new THREE.Color(0x1a1a2e);
+  scene.background = new THREE.Color(bgFor(getTheme()));
 
   camera = new THREE.PerspectiveCamera(50, 1, 0.1, 1000);
   camera.position.set(15, -15, 15);
@@ -77,10 +90,20 @@ export function initViewport(container: HTMLElement): {
   scene.add(dir2);
 
   // Grid on XY plane (hidden by default)
-  grid = new THREE.GridHelper(40, 40, 0x444444, 0x333333);
-  grid.rotation.x = Math.PI / 2;
-  grid.visible = false;
+  grid = makeGrid(getTheme());
   scene.add(grid);
+
+  // Re-tint scene + grid when theme flips
+  onThemeChange((theme) => {
+    (scene.background as THREE.Color).set(bgFor(theme));
+    const wasVisible = grid.visible;
+    scene.remove(grid);
+    grid.geometry.dispose();
+    (grid.material as THREE.Material).dispose();
+    grid = makeGrid(theme);
+    grid.visible = wasVisible;
+    scene.add(grid);
+  });
 
   meshGroup = new THREE.Group();
   scene.add(meshGroup);

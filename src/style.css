@@ -1,5 +1,37 @@
 @import "tailwindcss";
 
+/* Light theme: remap Tailwind's zinc/neutral scales so existing classes
+   (bg-zinc-900, text-zinc-100, border-zinc-700, etc.) render as readable
+   light-mode equivalents. The mapping is not a strict inversion — it's tuned
+   so body / panel / hover layers stay visually distinct without making the
+   page glaringly bright. Body is a soft off-white, panels are pure white,
+   borders and hover states are mid-gray. */
+:root.theme-light {
+  --color-zinc-50: #18181b;
+  --color-zinc-100: #18181b;
+  --color-zinc-200: #27272a;
+  --color-zinc-300: #3f3f46;
+  --color-zinc-400: #52525b;
+  --color-zinc-500: #71717a;
+  --color-zinc-600: #a1a1aa;
+  --color-zinc-700: #d4d4d8;
+  --color-zinc-800: #ffffff;
+  --color-zinc-900: #ededed;
+  --color-zinc-950: #f5f5f5;
+
+  --color-neutral-50: #171717;
+  --color-neutral-100: #171717;
+  --color-neutral-200: #262626;
+  --color-neutral-300: #404040;
+  --color-neutral-400: #525252;
+  --color-neutral-500: #737373;
+  --color-neutral-600: #a3a3a3;
+  --color-neutral-700: #d4d4d4;
+  --color-neutral-800: #ffffff;
+  --color-neutral-900: #ededed;
+  --color-neutral-950: #f5f5f5;
+}
+
 /* Three.js canvas must be sized by ResizeObserver, not Tailwind */
 .viewport-canvas {
   display: block;
@@ -35,8 +67,8 @@
 .tour-tooltip {
   position: fixed;
   z-index: 9999;
-  background: #27272a;
-  border: 1px solid #52525b;
+  background: var(--color-zinc-800);
+  border: 1px solid var(--color-zinc-600);
   border-radius: 12px;
   padding: 16px;
   box-shadow: 0 8px 32px rgba(0, 0, 0, 0.5);
@@ -61,7 +93,7 @@
   transform: translateX(-50%);
   border-left: 8px solid transparent;
   border-right: 8px solid transparent;
-  border-bottom: 8px solid #52525b;
+  border-bottom: 8px solid var(--color-zinc-600);
 }
 
 .tour-arrow-top {
@@ -70,7 +102,7 @@
   transform: translateX(-50%);
   border-left: 8px solid transparent;
   border-right: 8px solid transparent;
-  border-top: 8px solid #52525b;
+  border-top: 8px solid var(--color-zinc-600);
 }
 
 .tour-arrow-right {
@@ -79,7 +111,7 @@
   transform: translateY(-50%);
   border-top: 8px solid transparent;
   border-bottom: 8px solid transparent;
-  border-right: 8px solid #52525b;
+  border-right: 8px solid var(--color-zinc-600);
 }
 
 .tour-arrow-left {
@@ -88,5 +120,5 @@
   transform: translateY(-50%);
   border-top: 8px solid transparent;
   border-bottom: 8px solid transparent;
-  border-left: 8px solid #52525b;
+  border-left: 8px solid var(--color-zinc-600);
 }

@@ -29,8 +29,7 @@ export function createSessionBar(container: HTMLElement, cb: SessionBarCallbacks
 
   const bar = document.createElement('div');
   bar.id = 'session-bar';
-  bar.className = 'flex items-center gap-2 px-3 py-1 bg-zinc-850 border-b border-zinc-700 text-xs shrink-0';
-  bar.style.backgroundColor = '#1a1a2e';
+  bar.className = 'flex items-center gap-2 px-3 py-1 bg-zinc-800 border-b border-zinc-700 text-xs shrink-0';
 
   barEl = bar;
   render(getState());

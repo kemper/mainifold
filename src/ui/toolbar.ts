@@ -1,5 +1,6 @@
 import { resetTour, startTour } from './tour';
 import { partwrightMarkSvg } from './brand';
+import { getTheme, onThemeChange, toggleTheme } from './theme';
 
 export interface ExampleEntry {
   code: string;
@@ -238,6 +239,24 @@ export function createToolbar(
   });
 
   toolbar.appendChild(exportWrapper);
+
+  // Dark mode toggle — text button, on by default, off when clicked
+  const themeBtn = document.createElement('button');
+  themeBtn.id = 'btn-theme';
+  themeBtn.textContent = 'Dark Mode';
+  const themeActive = 'px-2 py-0.5 rounded text-xs font-medium transition-colors bg-zinc-700 text-zinc-100 ml-2';
+  const themeInactive = 'px-2 py-0.5 rounded text-xs font-medium transition-colors text-zinc-500 hover:text-zinc-300 border border-zinc-600 ml-2';
+  const syncThemeBtn = (theme: 'light' | 'dark') => {
+    const on = theme === 'dark';
+    themeBtn.className = on ? themeActive : themeInactive;
+    themeBtn.title = on ? 'Dark mode on — click to switch to light' : 'Dark mode off — click to switch to dark';
+    themeBtn.setAttribute('aria-pressed', String(on));
+    themeBtn.setAttribute('aria-label', themeBtn.title);
+  };
+  syncThemeBtn(getTheme());
+  themeBtn.addEventListener('click', () => { toggleTheme(); });
+  onThemeChange(syncThemeBtn);
+  toolbar.appendChild(themeBtn);
 
   // Help button
   const helpBtn = document.createElement('button');

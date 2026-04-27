@@ -27,6 +27,7 @@ import { checkContainment, type ContainmentWarning } from './geometry/containmen
 import { setUnits as _setUnits, getUnits as _getUnits, type UnitSystem } from './geometry/units';
 import { initMeasureTool, activate as activateMeasure, deactivate as deactivateMeasure, getState as getMeasureState } from './ui/measureTool';
 import { maybeStartTour, resetTour, startTour } from './ui/tour';
+import { initTheme } from './ui/theme';
 import { initPaintUI } from './color/paintUI';
 import { updatePaintMesh, setOnRegionPainted, isActive as isPaintActive } from './color/paintMode';
 import { applyTriColors, hasRegions as hasColorRegions, onChange as onColorRegionsChange, clearRegions, serialize as serializeRegions, addRegion, getRegions, type SerializedColorRegion } from './color/regions';
@@ -721,6 +722,9 @@ function showEditorUI(landingEl: HTMLElement | null, helpEl: HTMLElement | null,
 }
 
 async function main() {
+  // Apply persisted theme before any UI renders
+  initTheme();
+
   // Remove loading splash as soon as JS takes over
   document.getElementById('loading-splash')?.remove();
 
