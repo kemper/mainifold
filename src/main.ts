@@ -753,6 +753,77 @@ async function main() {
   const defaultExampleKey = Object.keys(examples).find(k => k.includes('basic_shapes')) ?? Object.keys(examples)[0];
   const defaultCode = examples[defaultExampleKey]?.code ?? '// Write your manifold code here\nconst { Manifold } = api;\nreturn Manifold.cube([5,5,5], true);';
 
+  // Import a .partwright.json session, or a raw .js / .scad file, into a new session.
+  async function handleImportFile(file: File): Promise<void> {
+    const lowerName = file.name.toLowerCase();
+
+    // Confirm before clobbering an active session
+    const cur = getState();
+    if (cur.session && cur.versionCount > 0) {
+      const ok = await showInlineConfirm(
+        editorUI,
+        `Open "${file.name}" as a new session? Your current session will be kept.`,
+      );
+      if (!ok) return;
+    }
+
+    try {
+      if (lowerName.endsWith('.json')) {
+        const text = await file.text();
+        let data: ExportedSession;
+        try {
+          data = JSON.parse(text) as ExportedSession;
+        } catch {
+          alert(`Could not parse "${file.name}" as JSON.`);
+          return;
+        }
+        if ((!data.partwright && !data.mainifold) || !data.session || !Array.isArray(data.versions)) {
+          alert(`"${file.name}" doesn't look like a Partwright session file.`);
+          return;
+        }
+        const session = await importSession(data, async (code) => {
+          await runCodeSync(code);
+          return captureThumbnail();
+        });
+        const version = await openSession(session.id);
+        if (version) await loadVersionIntoEditor(version);
+      } else if (lowerName.endsWith('.js') || lowerName.endsWith('.scad')) {
+        const code = await file.text();
+        const lang: Language = lowerName.endsWith('.scad') ? 'scad' : 'manifold-js';
+        if (lang !== getActiveLanguage()) await switchLanguage(lang);
+        const sessionName = file.name.replace(/\.(js|scad)$/i, '');
+        await createSession(sessionName, lang);
+        setValue(code);
+        await runCodeSync(code);
+      } else {
+        alert(`Unsupported file type: ${file.name}\n\nSupported: .partwright.json, .js, .scad`);
+      }
+    } catch (e) {
+      alert(`Failed to import "${file.name}": ${(e as Error).message}`);
+    }
+  }
+
+  // Document-level drag-and-drop import
+  function isImportableFile(file: File): boolean {
+    const n = file.name.toLowerCase();
+    return n.endsWith('.json') || n.endsWith('.js') || n.endsWith('.scad');
+  }
+
+  document.addEventListener('dragover', (e) => {
+    if (!e.dataTransfer || e.dataTransfer.types.indexOf('Files') === -1) return;
+    e.preventDefault();
+    e.dataTransfer.dropEffect = 'copy';
+  });
+
+  document.addEventListener('drop', async (e) => {
+    const files = e.dataTransfer?.files;
+    if (!files || files.length === 0) return;
+    const first = Array.from(files).find(isImportableFile);
+    if (!first) return;
+    e.preventDefault();
+    await handleImportFile(first);
+  });
+
   // Create toolbar
   createToolbar(editorUI, examples, {
     onRun: () => runCode(),
@@ -768,6 +839,7 @@ async function main() {
     onExport3MF: () => {
       if (currentMeshData) export3MF(hasColorRegions() ? applyTriColors(currentMeshData) : currentMeshData);
     },
+    onImportFile: handleImportFile,
     onExampleSelect: async (entry: ExampleEntry) => {
       // Auto-switch engine + editor mode if the example uses a different language.
       if (entry.language !== getActiveLanguage()) {

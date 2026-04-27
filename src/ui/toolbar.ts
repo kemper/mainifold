@@ -12,9 +12,13 @@ export interface ToolbarCallbacks {
   onExportSTL: () => void;
   onExportOBJ: () => void;
   onExport3MF: () => void;
+  onImportFile: (file: File) => void | Promise<void>;
   onExampleSelect: (entry: ExampleEntry) => void;
   onLanguageSwitch: (lang: 'manifold-js' | 'scad') => void;
 }
+
+/** File extensions accepted by the Import button and drag-and-drop. */
+export const IMPORT_ACCEPT = '.partwright.json,.json,.js,.scad';
 
 let _autoRun = true;
 let _onAutoRunChange: ((on: boolean) => void) | null = null;
@@ -161,9 +165,28 @@ export function createToolbar(
   });
   toolbar.appendChild(select);
 
+  // Import button — file picker accepting .partwright.json / .js / .scad
+  const btnImport = createButton('btn-import', '\u2191 Import');
+  btnImport.title = 'Import a .partwright.json session, or a .js / .scad file';
+  btnImport.classList.add('ml-2');
+
+  const importInput = document.createElement('input');
+  importInput.type = 'file';
+  importInput.accept = IMPORT_ACCEPT;
+  importInput.className = 'hidden';
+  importInput.addEventListener('change', async () => {
+    const file = importInput.files?.[0];
+    if (file) await callbacks.onImportFile(file);
+    importInput.value = '';
+  });
+
+  btnImport.addEventListener('click', () => importInput.click());
+  toolbar.appendChild(btnImport);
+  toolbar.appendChild(importInput);
+
   // Export dropdown
   const exportWrapper = document.createElement('div');
-  exportWrapper.className = 'relative ml-2';
+  exportWrapper.className = 'relative ml-1';
   exportWrapper.id = 'export-wrapper';
 
   const btnExport = createButton('btn-export', '\u2193 Export');
