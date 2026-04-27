@@ -1,5 +1,6 @@
 import { resetTour, startTour } from './tour';
 import { partwrightMarkSvg } from './brand';
+import { getTheme, onThemeChange, toggleTheme } from './theme';
 
 export interface ExampleEntry {
   code: string;
@@ -14,9 +15,13 @@ export interface ToolbarCallbacks {
   onExport3MF: () => void;
   onExportSessionJSON: () => void;
   onExportRawCode: () => void;
+  onImportFile: (file: File) => void | Promise<void>;
   onExampleSelect: (entry: ExampleEntry) => void;
   onLanguageSwitch: (lang: 'manifold-js' | 'scad') => void;
 }
+
+/** File extensions accepted by the Import button and drag-and-drop. */
+export const IMPORT_ACCEPT = '.partwright.json,.json,.js,.scad';
 
 let _autoRun = true;
 let _onAutoRunChange: ((on: boolean) => void) | null = null;
@@ -163,9 +168,28 @@ export function createToolbar(
   });
   toolbar.appendChild(select);
 
+  // Import button — file picker accepting .partwright.json / .js / .scad
+  const btnImport = createButton('btn-import', '\u2191 Import');
+  btnImport.title = 'Import a .partwright.json session, or a .js / .scad file';
+  btnImport.classList.add('ml-2');
+
+  const importInput = document.createElement('input');
+  importInput.type = 'file';
+  importInput.accept = IMPORT_ACCEPT;
+  importInput.className = 'hidden';
+  importInput.addEventListener('change', async () => {
+    const file = importInput.files?.[0];
+    if (file) await callbacks.onImportFile(file);
+    importInput.value = '';
+  });
+
+  btnImport.addEventListener('click', () => importInput.click());
+  toolbar.appendChild(btnImport);
+  toolbar.appendChild(importInput);
+
   // Export dropdown
   const exportWrapper = document.createElement('div');
-  exportWrapper.className = 'relative ml-2';
+  exportWrapper.className = 'relative ml-1';
   exportWrapper.id = 'export-wrapper';
 
   const btnExport = createButton('btn-export', '\u2193 Export');
@@ -259,6 +283,24 @@ export function createToolbar(
   });
 
   toolbar.appendChild(exportWrapper);
+
+  // Dark mode toggle — text button, on by default, off when clicked
+  const themeBtn = document.createElement('button');
+  themeBtn.id = 'btn-theme';
+  themeBtn.textContent = 'Dark Mode';
+  const themeActive = 'px-2 py-0.5 rounded text-xs font-medium transition-colors bg-zinc-700 text-zinc-100 ml-2';
+  const themeInactive = 'px-2 py-0.5 rounded text-xs font-medium transition-colors text-zinc-500 hover:text-zinc-300 border border-zinc-600 ml-2';
+  const syncThemeBtn = (theme: 'light' | 'dark') => {
+    const on = theme === 'dark';
+    themeBtn.className = on ? themeActive : themeInactive;
+    themeBtn.title = on ? 'Dark mode on — click to switch to light' : 'Dark mode off — click to switch to dark';
+    themeBtn.setAttribute('aria-pressed', String(on));
+    themeBtn.setAttribute('aria-label', themeBtn.title);
+  };
+  syncThemeBtn(getTheme());
+  themeBtn.addEventListener('click', () => { toggleTheme(); });
+  onThemeChange(syncThemeBtn);
+  toolbar.appendChild(themeBtn);
 
   // Help button
   const helpBtn = document.createElement('button');

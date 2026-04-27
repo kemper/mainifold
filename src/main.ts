@@ -5,7 +5,7 @@ import { initViewport, updateMesh, setClipping, setClipZ, getClipState, getCamer
 import { renderCompositeCanvas, renderElevationsToContainer, renderSingleView, renderSliceSVG, setReferenceImages as _setRefImages, clearReferenceImages as _clearRefImages, getReferenceImages as _getRefImages, type ReferenceImages } from './renderer/multiview';
 import { setPhantom, clearPhantom, hasPhantom, type PhantomOptions } from './renderer/phantomGeometry';
 import { initEditor, setValue, getValue, setLanguage as setEditorLanguage, setEditorDiagnostics, clearEditorDiagnostics, revealFirstDiagnostic } from './editor/codeEditor';
-import { createLayout } from './ui/layout';
+import { createLayout, type TabName } from './ui/layout';
 import { createToolbar, isAutoRun, setToolbarLanguage } from './ui/toolbar';
 import { createLandingPage } from './ui/landing';
 import { createHelpPage } from './ui/help';
@@ -28,6 +28,7 @@ import { checkContainment, type ContainmentWarning } from './geometry/containmen
 import { setUnits as _setUnits, getUnits as _getUnits, type UnitSystem } from './geometry/units';
 import { initMeasureTool, activate as activateMeasure, deactivate as deactivateMeasure, getState as getMeasureState } from './ui/measureTool';
 import { maybeStartTour, resetTour, startTour } from './ui/tour';
+import { initTheme } from './ui/theme';
 import { initPaintUI } from './color/paintUI';
 import { updatePaintMesh, setOnRegionPainted, isActive as isPaintActive } from './color/paintMode';
 import { applyTriColors, hasRegions as hasColorRegions, onChange as onColorRegionsChange, clearRegions, serialize as serializeRegions, addRegion, getRegions, type SerializedColorRegion } from './color/regions';
@@ -36,13 +37,13 @@ import { buildAdjacency, findCoplanarRegion, resolveSeed } from './color/adjacen
 import {
   getSessionIdFromURL,
   getVersionFromURL,
-  isGalleryMode,
   openSession,
   createSession,
   closeSession,
   listSessions,
   deleteSession,
   renameSession,
+  setSessionLanguage,
   saveVersion,
   navigateVersion,
   loadVersion as loadVersionFromStore,
@@ -67,6 +68,7 @@ import {
   type ExportedSession,
   type ReferenceImagesData,
 } from './storage/sessionManager';
+import type { Version } from './storage/db';
 
 // Load examples as raw text — JS and SCAD
 const jsExampleModules = import.meta.glob('../examples/*.js', { query: '?raw', import: 'default' });
@@ -690,6 +692,29 @@ function shouldShow404(): boolean {
   return path !== '/' && path !== '' && path !== '/help' && path !== '/editor';
 }
 
+function getTabFromURL(): TabName {
+  const params = new URLSearchParams(window.location.search);
+  if (params.has('notes')) return 'notes';
+  if (params.has('diff')) return 'diff';
+  if (params.has('gallery')) return 'gallery';
+  if (params.get('view') === 'elevations') return 'elevations';
+  if (params.get('view') === 'ai') return 'ai';
+  return 'interactive';
+}
+
+function currentURLPathAndSearch(): string {
+  return `${window.location.pathname}${window.location.search}`;
+}
+
+function updateAppHistory(url: string, mode: 'push' | 'replace'): void {
+  if (url === currentURLPathAndSearch()) return;
+  if (mode === 'push') {
+    window.history.pushState(null, '', url);
+  } else {
+    window.history.replaceState(null, '', url);
+  }
+}
+
 
 // Hide landing/help and show the editor UI
 function showEditorUI(landingEl: HTMLElement | null, helpEl: HTMLElement | null, editorUI: HTMLElement) {
@@ -699,6 +724,9 @@ function showEditorUI(landingEl: HTMLElement | null, helpEl: HTMLElement | null,
 }
 
 async function main() {
+  // Apply persisted theme before any UI renders
+  initTheme();
+
   // Remove loading splash as soon as JS takes over
   document.getElementById('loading-splash')?.remove();
 
@@ -731,6 +759,77 @@ async function main() {
   const defaultExampleKey = Object.keys(examples).find(k => k.includes('basic_shapes')) ?? Object.keys(examples)[0];
   const defaultCode = examples[defaultExampleKey]?.code ?? '// Write your manifold code here\nconst { Manifold } = api;\nreturn Manifold.cube([5,5,5], true);';
 
+  // Import a .partwright.json session, or a raw .js / .scad file, into a new session.
+  async function handleImportFile(file: File): Promise<void> {
+    const lowerName = file.name.toLowerCase();
+
+    // Confirm before clobbering an active session
+    const cur = getState();
+    if (cur.session && cur.versionCount > 0) {
+      const ok = await showInlineConfirm(
+        editorUI,
+        `Open "${file.name}" as a new session? Your current session will be kept.`,
+      );
+      if (!ok) return;
+    }
+
+    try {
+      if (lowerName.endsWith('.json')) {
+        const text = await file.text();
+        let data: ExportedSession;
+        try {
+          data = JSON.parse(text) as ExportedSession;
+        } catch {
+          alert(`Could not parse "${file.name}" as JSON.`);
+          return;
+        }
+        if ((!data.partwright && !data.mainifold) || !data.session || !Array.isArray(data.versions)) {
+          alert(`"${file.name}" doesn't look like a Partwright session file.`);
+          return;
+        }
+        const session = await importSession(data, async (code) => {
+          await runCodeSync(code);
+          return captureThumbnail();
+        });
+        const version = await openSession(session.id);
+        if (version) await loadVersionIntoEditor(version);
+      } else if (lowerName.endsWith('.js') || lowerName.endsWith('.scad')) {
+        const code = await file.text();
+        const lang: Language = lowerName.endsWith('.scad') ? 'scad' : 'manifold-js';
+        if (lang !== getActiveLanguage()) await switchLanguage(lang);
+        const sessionName = file.name.replace(/\.(js|scad)$/i, '');
+        await createSession(sessionName, lang);
+        setValue(code);
+        await runCodeSync(code);
+      } else {
+        alert(`Unsupported file type: ${file.name}\n\nSupported: .partwright.json, .js, .scad`);
+      }
+    } catch (e) {
+      alert(`Failed to import "${file.name}": ${(e as Error).message}`);
+    }
+  }
+
+  // Document-level drag-and-drop import
+  function isImportableFile(file: File): boolean {
+    const n = file.name.toLowerCase();
+    return n.endsWith('.json') || n.endsWith('.js') || n.endsWith('.scad');
+  }
+
+  document.addEventListener('dragover', (e) => {
+    if (!e.dataTransfer || e.dataTransfer.types.indexOf('Files') === -1) return;
+    e.preventDefault();
+    e.dataTransfer.dropEffect = 'copy';
+  });
+
+  document.addEventListener('drop', async (e) => {
+    const files = e.dataTransfer?.files;
+    if (!files || files.length === 0) return;
+    const first = Array.from(files).find(isImportableFile);
+    if (!first) return;
+    e.preventDefault();
+    await handleImportFile(first);
+  });
+
   // Create toolbar
   createToolbar(editorUI, examples, {
     onRun: () => runCode(),
@@ -753,6 +852,7 @@ async function main() {
     onExportRawCode: () => {
       exportRawCode(getValue(), getActiveLanguage());
     },
+    onImportFile: handleImportFile,
     onExampleSelect: async (entry: ExampleEntry) => {
       // Auto-switch engine + editor mode if the example uses a different language.
       if (entry.language !== getActiveLanguage()) {
@@ -877,52 +977,130 @@ async function main() {
   app.appendChild(editorUI);
   app.appendChild(overlayContainer);
 
+  let editorReady = false;
+  let editorReadyResolve: (() => void) = () => {};
+  const editorReadyPromise = new Promise<void>(resolve => { editorReadyResolve = resolve; });
+  let engineOk = false;
+  let helpHasAppBackTarget = false;
+  let notFoundEl: HTMLElement | null = null;
+  // Declared early so async callbacks (e.g. runCodeSync triggered during
+  // initial syncEditorFromURL) don't hit a TDZ error before this point.
+  let _running = false;
+
+  async function ensureEditorReady() {
+    if (!editorReady) await editorReadyPromise;
+  }
+
   // Helper to transition from landing/help to editor
   function transitionToEditor() {
     showEditorUI(landingEl, helpEl, editorUI);
+    if (notFoundEl) notFoundEl.classList.add('hidden');
     overlayContainer.classList.add('hidden');
     window.dispatchEvent(new Event('resize'));
   }
 
-  // Track whether user came from landing (for help back navigation)
-  let cameFromLanding = false;
+  async function loadVersionIntoEditor(version: Version) {
+    const sessionLang = getState().session?.language ?? 'manifold-js';
+    if (sessionLang !== getActiveLanguage()) {
+      await switchLanguage(sessionLang);
+    }
+    setValue(version.code);
+    await runCodeSync(version.code);
+    rehydrateColorRegions(version.geometryData);
+    const refImages = await getReferenceImagesFromSession();
+    if (refImages) {
+      _setRefImages(refImages as ReferenceImages);
+    } else {
+      _clearRefImages();
+    }
+  }
+
+  async function openEditorFromLanding() {
+    updateAppHistory('/editor', 'push');
+    transitionToEditor();
+    await ensureEditorReady();
+    if (window.location.pathname !== '/editor') return;
+    await createSession();
+    updateDocumentTitle({ page: 'editor' });
+    setStatus(statusBar, 'ready', 'Ready');
+    runCode(defaultCode);
+  }
+
+  async function openSessionFromLanding(sid: string) {
+    updateAppHistory(`/editor?session=${sid}`, 'push');
+    transitionToEditor();
+    await ensureEditorReady();
+    if (getSessionIdFromURL() !== sid) return;
+    const version = await openSession(sid);
+    if (version) {
+      await loadVersionIntoEditor(version);
+    }
+    updateDocumentTitle({ page: 'editor' });
+  }
+
+  async function ensureLandingPage() {
+    if (!landingEl) {
+      landingEl = await createLandingPage(overlayContainer, {
+        onOpenEditor: openEditorFromLanding,
+        onOpenHelp: () => showHelp(),
+        onOpenSession: openSessionFromLanding,
+      });
+    }
+    return landingEl;
+  }
+
+  async function showLandingPage() {
+    const page = await ensureLandingPage();
+    overlayContainer.classList.remove('hidden');
+    editorUI.classList.add('hidden');
+    helpEl?.classList.add('hidden');
+    notFoundEl?.classList.add('hidden');
+    page.classList.remove('hidden');
+    updateDocumentTitle({ page: 'landing' });
+  }
+
+  function showNotFoundPage() {
+    if (!notFoundEl) {
+      notFoundEl = createNotFoundPage(overlayContainer, {
+        onGoHome: () => {
+          updateAppHistory('/', 'push');
+          void syncRouteFromURL();
+        },
+      });
+    }
+    overlayContainer.classList.remove('hidden');
+    editorUI.classList.add('hidden');
+    landingEl?.classList.add('hidden');
+    helpEl?.classList.add('hidden');
+    notFoundEl.classList.remove('hidden');
+    updateDocumentTitle({ page: '404' });
+  }
 
   // Helper to show help page
-  function showHelp() {
-    cameFromLanding = landingEl != null && !landingEl.classList.contains('hidden');
+  function showHelp(options: { history?: 'push' | 'replace' | 'none' } = {}) {
+    const historyMode = options.history ?? 'push';
+    if (historyMode !== 'none') {
+      helpHasAppBackTarget = currentURLPathAndSearch() !== '/help';
+      updateAppHistory('/help', historyMode);
+    }
     if (!helpEl) {
       helpEl = createHelpPage(overlayContainer, {
         onBack: () => {
-          if (cameFromLanding && landingEl) {
-            // Go back to landing
-            helpEl?.classList.add('hidden');
-            landingEl.classList.remove('hidden');
-            window.history.replaceState(null, '', '/');
-            updateDocumentTitle({ page: 'landing' });
+          if (helpHasAppBackTarget) {
+            window.history.back();
           } else {
-            // Go back to editor — preserve session URL params
-            transitionToEditor();
-            const state = getState();
-            if (state.session) {
-              const params = new URLSearchParams();
-              params.set('session', state.session.id);
-              if (state.currentVersion) params.set('v', String(state.currentVersion.index));
-              window.history.replaceState(null, '', `/editor?${params}`);
-            } else {
-              window.history.replaceState(null, '', '/editor');
-            }
-            updateDocumentTitle({ page: 'editor' });
+            updateAppHistory('/editor', 'replace');
+            void syncEditorFromURL();
           }
         },
         onStartTour: async () => {
-          // Always go to editor (not landing), wait for it to be ready, then start tour
+          updateAppHistory('/editor', 'push');
           transitionToEditor();
           await ensureEditorReady();
           if (!getState().session) {
             await createSession();
             runCode(defaultCode);
           }
-          window.history.replaceState(null, '', '/editor');
           resetTour();
           startTour();
         },
@@ -931,10 +1109,64 @@ async function main() {
     overlayContainer.classList.remove('hidden');
     editorUI.classList.add('hidden');
     if (landingEl) landingEl.classList.add('hidden');
+    if (notFoundEl) notFoundEl.classList.add('hidden');
     helpEl.classList.remove('hidden');
-    window.history.replaceState(null, '', '/help');
     updateDocumentTitle({ page: 'help' });
   }
+
+  async function syncEditorFromURL() {
+    transitionToEditor();
+    const tab = getTabFromURL();
+    switchTab(tab, { history: 'none' });
+    updateDocumentTitle({ page: 'editor' });
+    await ensureEditorReady();
+    if (!engineOk) return;
+
+    const sessionId = getSessionIdFromURL();
+    if (sessionId) {
+      const versionIndex = getVersionFromURL();
+      const state = getState();
+      const needsSessionLoad = state.session?.id !== sessionId;
+      const needsVersionLoad = versionIndex !== null && state.currentVersion?.index !== versionIndex;
+      if (needsSessionLoad || needsVersionLoad) {
+        const version = await openSession(sessionId, versionIndex ?? undefined);
+        if (version) {
+          await loadVersionIntoEditor(version);
+          if (tab === 'gallery') refreshGallery();
+          return;
+        }
+        // openSession returned null — either the session ID in the URL
+        // doesn't exist in IndexedDB (e.g. a stale bookmark, or a URL
+        // shared from another browser/device), or the session exists
+        // but has no saved versions. Fall through to create a fresh
+        // session if needed and run defaults, so the viewport renders
+        // and the status doesn't stay stuck on "Loading WASM...".
+      } else {
+        return;
+      }
+    }
+    if (!getState().session) {
+      await createSession();
+    }
+    setStatus(statusBar, 'ready', 'Ready');
+    runCode(defaultCode);
+  }
+
+  async function syncRouteFromURL() {
+    if (shouldShowLanding()) {
+      await showLandingPage();
+    } else if (shouldShowHelp()) {
+      showHelp({ history: 'none' });
+    } else if (shouldShow404()) {
+      showNotFoundPage();
+    } else {
+      await syncEditorFromURL();
+    }
+  }
+
+  window.addEventListener('popstate', () => {
+    void syncRouteFromURL();
+  });
 
   // Expose showHelp for toolbar
   const windowRecord = window as unknown as Record<string, unknown>;
@@ -947,92 +1179,14 @@ async function main() {
   const show404 = shouldShow404();
 
   if (showLanding) {
-    // Show landing page immediately — hide editor UI
-    editorUI.classList.add('hidden');
-    overlayContainer.classList.remove('hidden');
-    updateDocumentTitle({ page: 'landing' });
-    landingEl = await createLandingPage(overlayContainer, {
-      onOpenEditor: async () => {
-        transitionToEditor();
-        await ensureEditorReady();
-        await createSession();
-        updateDocumentTitle({ page: 'editor' });
-        setStatus(statusBar, 'ready', 'Ready');
-        runCode(defaultCode);
-      },
-      onOpenHelp: showHelp,
-      onOpenSession: async (sid) => {
-        transitionToEditor();
-        await ensureEditorReady();
-        const version = await openSession(sid);
-        if (version) {
-          // Restore session language
-          const sessionLang = getState().session?.language ?? 'manifold-js';
-          if (sessionLang !== getActiveLanguage()) {
-            await switchLanguage(sessionLang);
-          }
-          setValue(version.code);
-          runCode(version.code);
-          const refImages = await getReferenceImagesFromSession();
-          if (refImages) _setRefImages(refImages as ReferenceImages);
-        }
-        updateDocumentTitle({ page: 'editor' });
-        window.history.replaceState(null, '', `/editor?session=${sid}`);
-      },
-    });
+    await showLandingPage();
   } else if (showHelpPage) {
-    // Show help page immediately
-    editorUI.classList.add('hidden');
-    overlayContainer.classList.remove('hidden');
-    updateDocumentTitle({ page: 'help' });
-    helpEl = createHelpPage(overlayContainer, {
-      onBack: async () => {
-        helpEl?.classList.add('hidden');
-        transitionToEditor();
-        await ensureEditorReady();
-        if (!getState().session) {
-          await createSession();
-          runCode(defaultCode);
-        }
-        updateDocumentTitle({ page: 'editor' });
-      },
-      onStartTour: async () => {
-        helpEl?.classList.add('hidden');
-        transitionToEditor();
-        await ensureEditorReady();
-        if (!getState().session) {
-          await createSession();
-          runCode(defaultCode);
-        }
-        window.history.replaceState(null, '', '/editor');
-        resetTour();
-        startTour();
-      },
-    });
+    showHelp({ history: 'none' });
   } else if (show404) {
-    // Show 404 page — hide editor UI entirely
-    editorUI.classList.add('hidden');
-    overlayContainer.classList.remove('hidden');
-    updateDocumentTitle({ page: '404' });
-    createNotFoundPage(overlayContainer, {
-      onGoHome: () => {
-        window.location.href = '/';
-      },
-    });
-  }
-
-  // Init engine, viewport, editor (in background if landing/help is showing)
-  let editorReady = false;
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  let editorReadyResolve: (() => void) = () => {};
-  const editorReadyPromise = new Promise<void>(resolve => { editorReadyResolve = resolve; });
-
-  async function ensureEditorReady() {
-    if (!editorReady) await editorReadyPromise;
+    showNotFoundPage();
   }
 
   // Init geometry engine — wrapped in try/catch so editor/viewport still init on failure
-  let engineOk = false;
   setStatus(statusBar, 'loading', 'Loading WASM...');
   try {
     await initEngine();
@@ -1144,40 +1298,7 @@ async function main() {
 
   // If not on landing/help/404, load session or default code now
   if (!showLanding && !showHelpPage && !show404 && engineOk) {
-    const sessionId = getSessionIdFromURL();
-    if (sessionId) {
-      const versionIndex = getVersionFromURL();
-      const version = await openSession(sessionId, versionIndex ?? undefined);
-      if (version) {
-        // Restore session language
-        const sessionLang = getState().session?.language ?? 'manifold-js';
-        if (sessionLang !== getActiveLanguage()) {
-          setActiveLanguage(sessionLang);
-          setEditorLanguage(sessionLang);
-          await ensureEngineReady(sessionLang);
-        }
-        setValue(version.code);
-        await runCodeSync(version.code);
-        // Rehydrate color regions from loaded version
-        rehydrateColorRegions(version.geometryData);
-        const refImages = await getReferenceImagesFromSession();
-        if (refImages) {
-          _setRefImages(refImages as ReferenceImages);
-        }
-        if (isGalleryMode()) {
-          switchTab('gallery');
-          refreshGallery();
-        }
-      } else {
-        await createSession();
-        setStatus(statusBar, 'ready', 'Ready');
-        runCode(defaultCode);
-      }
-    } else {
-      await createSession();
-      setStatus(statusBar, 'ready', 'Ready');
-      runCode(defaultCode);
-    }
+    await syncEditorFromURL();
   }
 
   // Update document title when session state changes (create, open, close, rename)
@@ -1233,11 +1354,18 @@ async function main() {
       setStatus(statusBar, 'error', `Failed to load ${lang}: ${e instanceof Error ? e.message : String(e)}`);
       throw e;
     }
+    // Persist the language to the active session so reopening it loads in the
+    // correct mode. Without this, sessions created before a language switch
+    // keep their stale language field and reload in the wrong engine, parsing
+    // SCAD code as JS (or vice versa).
+    const sid = getState().session?.id;
+    if (sid) await setSessionLanguage(sid, lang);
     setStatus(statusBar, 'ready', 'Ready');
   }
 
   // === Execution state ===
-  let _running = false;
+  // (`_running` is declared at the top of main() so async callbacks fired
+  // during initial load don't hit a Temporal Dead Zone error.)
 
   async function executeIsolated(code: string, lang?: Language) {
     const t0 = performance.now();
@@ -2204,14 +2332,7 @@ async function main() {
 
     /** Get current view state — active tab, camera angle, zoom */
     getViewState(): { tab: string; camera: { azimuth: number; elevation: number; distance: number; target: [number, number, number] } } {
-      const params = new URLSearchParams(window.location.search);
-      let tab = 'interactive';
-      if (params.has('gallery')) tab = 'gallery';
-      else if (params.has('diff')) tab = 'diff';
-      else if (params.has('notes')) tab = 'notes';
-      else if (params.get('view') === 'ai') tab = 'ai';
-      else if (params.get('view') === 'elevations') tab = 'elevations';
-      return { tab, camera: getCameraState() };
+      return { tab: getTabFromURL(), camera: getCameraState() };
     },
 
     /** Programmatic tab switching */
