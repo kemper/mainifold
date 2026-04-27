@@ -22,9 +22,30 @@ import {
   type SessionNote,
   type ReferenceImagesData,
 } from './db';
+import type { SerializedColorRegion } from '../color/regions';
+
+/**
+ * Current schema version for `.partwright.json` exports.
+ *
+ * Bump on schema changes:
+ *  - **Major** (1.x → 2.x) — breaking. Older clients show a warning when
+ *    opening a newer-major file.
+ *  - **Minor** (1.0 → 1.1) — additive. Older clients silently ignore new fields.
+ *
+ * History:
+ *  - `1.0` — initial schema. Color regions tunneled inside `versions[].geometryData.colorRegions`.
+ *  - `1.1` — color regions promoted to an explicit `versions[].colorRegions` field. The
+ *           legacy nested location is still written for backward compatibility with
+ *           pre-1.1 readers, and read as a fallback when the explicit field is absent.
+ */
+export const SCHEMA_VERSION = '1.1';
+
+const CURRENT_MAJOR = 1;
 
 export interface ExportedSession {
+  /** Brand + schema version. Set to {@link SCHEMA_VERSION} on export. */
   partwright?: string;
+  /** Legacy alias from the pre-rebrand era. Read as a fallback only. */
   mainifold?: string;
   session: { name: string; created: number; updated: number; referenceImages?: ReferenceImagesData | null; language?: 'manifold-js' | 'scad' };
   versions: {
@@ -34,8 +55,49 @@ export interface ExportedSession {
     geometryData: Record<string, unknown> | null;
     timestamp: number;
     notes?: string;
+    /**
+     * Per-version color regions. Promoted to an explicit field in schema 1.1;
+     * also mirrored inside `geometryData.colorRegions` for pre-1.1 readers.
+     * @since 1.1
+     */
+    colorRegions?: SerializedColorRegion[];
   }[];
   notes?: { text: string; timestamp: number }[];
+}
+
+interface SchemaVersionInfo {
+  raw: string;
+  major: number;
+  minor: number;
+}
+
+/** Parse the `partwright`/`mainifold` brand string into major/minor numbers. */
+export function parseSchemaVersion(data: ExportedSession): SchemaVersionInfo {
+  const raw = data.partwright ?? data.mainifold ?? '1.0';
+  const [majStr = '1', minStr = '0'] = raw.split('.');
+  const major = parseInt(majStr, 10);
+  const minor = parseInt(minStr, 10);
+  return {
+    raw,
+    major: Number.isFinite(major) ? major : 1,
+    minor: Number.isFinite(minor) ? minor : 0,
+  };
+}
+
+/**
+ * Returns a user-facing warning if the file's schema is from a newer major
+ * version than this client supports, otherwise null.
+ *
+ * Newer-major: warn but proceed (best-effort import — unknown fields are dropped).
+ * Older-major: silent (this client knows how to migrate).
+ * Same major / minor differences: silent.
+ */
+export function getSchemaCompatibilityWarning(data: ExportedSession): string | null {
+  const v = parseSchemaVersion(data);
+  if (v.major > CURRENT_MAJOR) {
+    return `This file was created with a newer Partwright (schema ${v.raw}). Some data may be missing or import incorrectly.`;
+  }
+  return null;
 }
 
 export type { Session, Version, SessionNote, ReferenceImagesData } from './db';
@@ -432,6 +494,14 @@ export async function clearAllSessions(): Promise<void> {
 
 // === Export / Import ===
 
+/** Pull `colorRegions` out of a version's `geometryData` blob, if present and non-empty. */
+function extractColorRegions(geometryData: Record<string, unknown> | null): SerializedColorRegion[] | undefined {
+  if (!geometryData) return undefined;
+  const cr = geometryData.colorRegions;
+  if (Array.isArray(cr) && cr.length > 0) return cr as SerializedColorRegion[];
+  return undefined;
+}
+
 export async function exportSession(sessionId?: string): Promise<ExportedSession | null> {
   const id = sessionId ?? currentState.session?.id;
   if (!id) return null;
@@ -443,16 +513,20 @@ export async function exportSession(sessionId?: string): Promise<ExportedSession
   const notes = await dbListNotes(id);
 
   return {
-    partwright: '1.0',
+    partwright: SCHEMA_VERSION,
     session: { name: session.name, created: session.created, updated: session.updated, referenceImages: session.referenceImages ?? null, ...(session.language ? { language: session.language } : {}) },
-    versions: versions.map(v => ({
-      index: v.index,
-      code: v.code,
-      label: v.label,
-      geometryData: v.geometryData,
-      timestamp: v.timestamp,
-      ...(v.notes ? { notes: v.notes } : {}),
-    })),
+    versions: versions.map(v => {
+      const colorRegions = extractColorRegions(v.geometryData);
+      return {
+        index: v.index,
+        code: v.code,
+        label: v.label,
+        geometryData: v.geometryData,
+        timestamp: v.timestamp,
+        ...(v.notes ? { notes: v.notes } : {}),
+        ...(colorRegions ? { colorRegions } : {}),
+      };
+    }),
     ...(notes.length > 0 ? { notes: notes.map(n => ({ text: n.text, timestamp: n.timestamp })) } : {}),
   };
 }
@@ -460,7 +534,11 @@ export async function exportSession(sessionId?: string): Promise<ExportedSession
 export async function importSession(
   data: ExportedSession,
   regenerateThumbnail?: (code: string) => Promise<Blob | null>,
+  onWarning?: (message: string) => void,
 ): Promise<Session> {
+  const warning = getSchemaCompatibilityWarning(data);
+  if (warning && onWarning) onWarning(warning);
+
   const session = await dbCreateSession(data.session.name, data.session.language);
 
   // Restore reference images if present in the exported data
@@ -469,11 +547,24 @@ export async function importSession(
   }
 
   for (const v of data.versions) {
+    // Normalize color regions: prefer the explicit (1.1+) field; fall back to the legacy
+    // nested location (`geometryData.colorRegions`) for pre-1.1 files. Mirror the result
+    // back into `geometryData` so existing read paths (e.g. rehydrateColorRegions, gallery
+    // badges) continue to find them in their historical location.
+    const explicitRegions = v.colorRegions;
+    const nestedRegions = extractColorRegions(v.geometryData);
+    const regions = explicitRegions ?? nestedRegions;
+
+    let geometryData = v.geometryData;
+    if (regions && (!geometryData || !Array.isArray((geometryData as Record<string, unknown>).colorRegions))) {
+      geometryData = { ...(geometryData ?? {}), colorRegions: regions };
+    }
+
     let thumbnail: Blob | null = null;
     if (regenerateThumbnail) {
       thumbnail = await regenerateThumbnail(v.code);
     }
-    await dbSaveVersion(session.id, v.code, v.geometryData, thumbnail, v.label, v.notes);
+    await dbSaveVersion(session.id, v.code, geometryData, thumbnail, v.label, v.notes, v.timestamp);
   }
 
   // Restore session notes
@@ -483,10 +574,19 @@ export async function importSession(
     }
   }
 
+  // Restore the session's original created/updated timestamps so the schema round-trips
+  // byte-equivalently. (dbCreateSession set these to Date.now(); dbSaveVersion bumped
+  // `updated` per version. Override both back to the exported values now.)
+  await dbUpdateSession(session.id, {
+    created: data.session.created,
+    updated: data.session.updated,
+  });
+
+  const refreshedSession = (await getSession(session.id)) ?? session;
   const count = await getVersionCount(session.id);
   const latest = await getLatestVersion(session.id);
-  currentState = { session, currentVersion: latest, versionCount: count };
+  currentState = { session: refreshedSession, currentVersion: latest, versionCount: count };
   updateURL();
   notify();
-  return session;
+  return refreshedSession;
 }

@@ -1909,10 +1909,15 @@ async function main() {
         return true;
       });
       if (typeof check === 'object' && check !== null && 'error' in check) return check;
-      const session = await importSession(data, async (code: string) => {
-        await runCodeSync(code);
-        return captureThumbnail();
-      });
+      let warning: string | null = null;
+      const session = await importSession(
+        data,
+        async (code: string) => {
+          await runCodeSync(code);
+          return captureThumbnail();
+        },
+        (msg) => { warning = msg; },
+      );
       const version = await openSession(session.id);
       if (version) {
         setValue(version.code);
@@ -1929,7 +1934,7 @@ async function main() {
           );
         }
       }
-      return { id: session.id, name: session.name };
+      return { id: session.id, name: session.name, ...(warning ? { warning } : {}) };
     },
 
     /** Clear all sessions and versions from IndexedDB */

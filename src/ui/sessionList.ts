@@ -69,7 +69,7 @@ export async function showSessionList(): Promise<void> {
           alert('Invalid session file.');
           return;
         }
-        const session = await importSession(data, regenerateThumbnailFn ?? undefined);
+        const session = await importSession(data, regenerateThumbnailFn ?? undefined, (msg) => alert(msg));
         const version = await openSession(session.id);
         if (version && onLoadVersion) onLoadVersion(version.code);
         closeModal();
