@@ -12,7 +12,11 @@ export interface LayoutElements {
   notesContainer: HTMLElement;
   statusBar: HTMLElement;
   clipControls: HTMLElement;
-  switchTab: (tab: TabName) => void;
+  switchTab: (tab: TabName, options?: SwitchTabOptions) => void;
+}
+
+export interface SwitchTabOptions {
+  history?: 'push' | 'replace' | 'none';
 }
 
 export function createLayout(appContainer: HTMLElement): LayoutElements {
@@ -155,7 +159,7 @@ export function createLayout(appContainer: HTMLElement): LayoutElements {
   }
 
   // Tab switching — updates URL to reflect current tab
-  function switchTab(tab: TabName) {
+  function switchTab(tab: TabName, options: SwitchTabOptions = {}) {
     applyTab(tab);
 
     const basePath = '/editor';
@@ -194,7 +198,15 @@ export function createLayout(appContainer: HTMLElement): LayoutElements {
     const newUrl = params.toString()
       ? `${basePath}?${params.toString().replace(/=(?=&|$)/g, '')}`
       : basePath;
-    window.history.replaceState(null, '', newUrl);
+    const currentUrl = `${window.location.pathname}${window.location.search}`;
+    const historyMode = options.history ?? 'push';
+    if (historyMode !== 'none' && newUrl !== currentUrl) {
+      if (historyMode === 'replace') {
+        window.history.replaceState(null, '', newUrl);
+      } else {
+        window.history.pushState(null, '', newUrl);
+      }
+    }
   }
 
   tabInteractive.addEventListener('click', () => switchTab('interactive'));
