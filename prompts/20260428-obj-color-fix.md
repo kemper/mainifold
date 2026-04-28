@@ -20,3 +20,4 @@ Fix: removed vertex colors entirely. Colors now carried exclusively via `usemtl`
 Also switched 3MF export from `<basematerials>` to `<m:colorgroup>`/`<m:color>` (Materials Extension) since Bambu Studio has zero references to basematerials in its 9200+ line 3MF parser.
 
 Installed PrusaSlicer CLI (`brew install --cask prusaslicer`) for headless manifold validation — `--info` flag uses the same algorithm as Bambu Studio and confirms `manifold = yes` for all exports.
+

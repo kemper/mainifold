@@ -20,7 +20,7 @@ export function export3MF(meshData: MeshData, customName?: string): void {
     vertices.push(`          <vertex x="${x}" y="${y}" z="${z}" />`);
   }
 
-  // Collect distinct colors for basematerials (if triColors present)
+  // Collect distinct colors for m:colorgroup (if triColors present)
   const DEFAULT_COLOR = '#4a9eff';
   const colorMap = new Map<string, number>();
   const materialColors: string[] = [];
