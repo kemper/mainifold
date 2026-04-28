@@ -28,3 +28,10 @@ mapped to existing repo labels: enhancement → Features, bug → Bug
 Fixes, documentation → Documentation, `*` → Other Changes. Also wired
 in an `ignore-for-release` exclusion label for chore PRs that should
 not appear in release notes.
+
+Retro-labeled the merged staging PRs (#28–#55, #68) so the first
+staging→main release notes group cleanly. Added a "Commit & PR
+Conventions" section to CLAUDE.md (mirrored to AGENTS.md via symlink)
+spelling out Conventional Commits prefixes and the label-to-category
+mapping so future agent-authored PRs land in the right release-note
+section automatically. Created the `ignore-for-release` label.

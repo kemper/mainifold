@@ -137,6 +137,30 @@ When referencing app routes in HTML/JS strings (links, prompts, instructions), u
 
 When two functions share identical logic (same DOM manipulation, same data transformation), extract the shared part into a single helper and have both callers use it. Copy-pasted logic drifts out of sync when one copy gets updated and the other doesn't.
 
+### Commit & PR Conventions
+
+PR titles, commit subjects, and PR labels feed the auto-generated release notes (`.github/release.yml`). Keep both consistent.
+
+**Conventional Commits prefix** on commit subjects and PR titles:
+
+- `feat:` — user-visible new capability
+- `fix:` — bug fix
+- `docs:` — docs/comments only (README, CLAUDE.md, ai.md, prompt logs)
+- `refactor:` — internal restructure with no behavior change
+- `chore:` — build, deps, tooling, CI config, label hygiene
+- `test:` — test-only changes
+
+Subject is imperative and lowercase after the prefix: `feat: add light/dark mode toggle`.
+
+**PR labels** (drive release-note grouping — apply at least one before merging):
+
+- `enhancement` — pairs with `feat:` → "Features" section
+- `bug` — pairs with `fix:` → "Bug Fixes" section
+- `documentation` — pairs with `docs:` → "Documentation" section
+- `ignore-for-release` — suppress from release notes (use for `chore:`/`refactor:` housekeeping that shouldn't appear in user-facing notes)
+
+Anything unlabeled lands in "Other Changes." That's fine for occasional internal cleanup, but features and fixes should always be labeled.
+
 ## Common Errors
 
 | Error | Cause |
