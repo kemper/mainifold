@@ -1,6 +1,13 @@
 import { resetTour, startTour } from './tour';
 import { partwrightMarkSvg } from './brand';
 import { getTheme, onThemeChange, toggleTheme } from './theme';
+import { downloadBlob } from '../export/download';
+import {
+  listExports,
+  clearExports,
+  onExportInboxChange,
+  type ExportInboxEntry,
+} from '../export/exportInbox';
 
 export interface ExampleEntry {
   code: string;
@@ -274,9 +281,81 @@ export function createToolbar(
   dropdown.appendChild(sessionOpt);
   dropdown.appendChild(codeOpt);
 
+  // Section: Recent Exports — reuse-anything-you-just-downloaded list. Hidden when empty.
+  const recentDivider = createDivider();
+  const recentHeaderRow = document.createElement('div');
+  recentHeaderRow.className = 'flex items-center justify-between px-3 pt-1 pb-0.5';
+  const recentHeader = document.createElement('div');
+  recentHeader.className = 'text-[10px] uppercase tracking-wider text-zinc-500 font-semibold';
+  recentHeader.textContent = 'Recent Exports';
+  const clearBtn = document.createElement('button');
+  clearBtn.className = 'text-[10px] text-zinc-500 hover:text-zinc-300 transition-colors';
+  clearBtn.textContent = 'Clear';
+  clearBtn.title = 'Clear recent exports list';
+  clearBtn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    clearExports();
+  });
+  recentHeaderRow.appendChild(recentHeader);
+  recentHeaderRow.appendChild(clearBtn);
+
+  const recentList = document.createElement('div');
+  recentList.id = 'export-recent-list';
+
+  function renderRecent() {
+    const entries = listExports();
+    const hasEntries = entries.length > 0;
+    recentDivider.classList.toggle('hidden', !hasEntries);
+    recentHeaderRow.classList.toggle('hidden', !hasEntries);
+    recentList.classList.toggle('hidden', !hasEntries);
+    recentList.replaceChildren(...entries.map(renderRecentItem));
+  }
+
+  function renderRecentItem(entry: ExportInboxEntry): HTMLElement {
+    const btn = document.createElement('button');
+    btn.className = 'block w-full text-left px-3 py-1 hover:bg-zinc-700 transition-colors';
+    btn.title = `Download ${entry.filename} again`;
+
+    const top = document.createElement('div');
+    top.className = 'flex items-center gap-1.5';
+
+    const sourceBadge = document.createElement('span');
+    sourceBadge.className = 'text-[9px] uppercase tracking-wide text-zinc-400 border border-zinc-600 rounded px-1 py-px shrink-0';
+    sourceBadge.textContent = entry.source;
+    top.appendChild(sourceBadge);
+
+    const nameEl = document.createElement('span');
+    nameEl.className = 'text-xs text-zinc-200 truncate';
+    nameEl.textContent = entry.filename;
+    top.appendChild(nameEl);
+
+    btn.appendChild(top);
+
+    const meta = document.createElement('div');
+    meta.className = 'text-[10px] text-zinc-500 leading-tight mt-0.5';
+    meta.textContent = `${formatSize(entry.sizeBytes)} • ${formatRelativeTime(entry.timestamp)}`;
+    btn.appendChild(meta);
+
+    btn.addEventListener('click', () => {
+      dropdown.classList.add('hidden');
+      // Re-download the existing blob; don't re-register (avoid duplicate entries).
+      downloadBlob(entry.blob, entry.filename, entry.source, { register: false });
+    });
+
+    return btn;
+  }
+
+  dropdown.appendChild(recentDivider);
+  dropdown.appendChild(recentHeaderRow);
+  dropdown.appendChild(recentList);
+  renderRecent();
+  onExportInboxChange(renderRecent);
+
   exportWrapper.appendChild(dropdown);
 
   btnExport.addEventListener('click', () => {
+    // Refresh relative timestamps each time the dropdown opens.
+    renderRecent();
     dropdown.classList.toggle('hidden');
   });
 
@@ -385,4 +464,21 @@ function createDivider(): HTMLElement {
   const el = document.createElement('div');
   el.className = 'my-1 border-t border-zinc-700';
   return el;
+}
+
+function formatSize(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+function formatRelativeTime(timestamp: number): string {
+  const seconds = Math.max(0, Math.floor((Date.now() - timestamp) / 1000));
+  if (seconds < 5) return 'just now';
+  if (seconds < 60) return `${seconds}s ago`;
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return `${minutes}m ago`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours}h ago`;
+  return `${Math.floor(hours / 24)}d ago`;
 }

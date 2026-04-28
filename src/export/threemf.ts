@@ -1,10 +1,12 @@
 import type { MeshData } from '../geometry/types';
 import { get3MFUnitString } from '../geometry/units';
 import { downloadBlob, getExportFilename, getExportTitle } from './download';
+import type { BuiltExport } from './gltf';
 import { buildZip } from './zip';
 import { cleanMeshForExport, DEFAULT_COLOR_HEX, triColorHex, hasAnyPainted } from './meshClean';
 
-export function export3MF(meshData: MeshData, customName?: string): void {
+/** Build a 3MF export blob without triggering a download. */
+export function build3MF(meshData: MeshData, customName?: string): BuiltExport {
   const { triVerts, triColors } = meshData;
 
   const { remap, uniquePositions, validTris } = cleanMeshForExport(meshData);
@@ -108,6 +110,12 @@ ${triangles.join('\n')}
     { name: '3D/3dmodel.model', data: new TextEncoder().encode(modelXml) },
   ]);
 
-  const blob = new Blob([zip], { type: 'application/vnd.ms-package.3dmanufacturing' });
-  downloadBlob(blob, getExportFilename('3mf', customName));
+  const mimeType = 'application/vnd.ms-package.3dmanufacturing';
+  const blob = new Blob([zip], { type: mimeType });
+  return { blob, filename: getExportFilename('3mf', customName), mimeType };
+}
+
+export function export3MF(meshData: MeshData, customName?: string): void {
+  const built = build3MF(meshData, customName);
+  downloadBlob(built.blob, built.filename, '3MF');
 }

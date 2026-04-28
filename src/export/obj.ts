@@ -1,5 +1,6 @@
 import type { MeshData } from '../geometry/types';
 import { downloadBlob, getExportFilename, getExportTitle } from './download';
+import type { BuiltExport } from './gltf';
 import { buildZip } from './zip';
 import { cleanMeshForExport, DEFAULT_COLOR_HEX, triColorHex, hasAnyPainted } from './meshClean';
 
@@ -8,7 +9,12 @@ function f6(v: number): string {
   return v.toFixed(6);
 }
 
-export function exportOBJ(meshData: MeshData, customName?: string): void {
+/**
+ * Build an OBJ export blob without triggering a download.
+ * If the mesh has painted color regions, the result is a ZIP bundling .obj + .mtl;
+ * otherwise it's a plain text .obj.
+ */
+export function buildOBJ(meshData: MeshData, customName?: string): BuiltExport {
   const { triVerts, triColors } = meshData;
   const title = getExportTitle();
 
@@ -67,21 +73,28 @@ export function exportOBJ(meshData: MeshData, customName?: string): void {
       { name: `${baseName}.mtl`, data: enc.encode(mtlLines.join('\n') + '\n') },
     ]);
 
-    const blob = new Blob([zip], { type: 'application/zip' });
-    downloadBlob(blob, `${baseName}.zip`);
-  } else {
-    // No colors — plain OBJ
-    for (let i = 0; i < numUniqueVerts; i++) {
-      lines.push(`v ${f6(uniquePositions[i * 3])} ${f6(uniquePositions[i * 3 + 1])} ${f6(uniquePositions[i * 3 + 2])}`);
-    }
-
-    for (const t of validTris) {
-      lines.push(`f ${fv(triVerts[t * 3])} ${fv(triVerts[t * 3 + 1])} ${fv(triVerts[t * 3 + 2])}`);
-    }
-
-    const blob = new Blob([lines.join('\n') + '\n'], { type: 'text/plain' });
-    downloadBlob(blob, getExportFilename('obj', customName));
+    const mimeType = 'application/zip';
+    const blob = new Blob([zip], { type: mimeType });
+    return { blob, filename: `${baseName}.zip`, mimeType };
   }
+
+  // No colors — plain OBJ
+  for (let i = 0; i < numUniqueVerts; i++) {
+    lines.push(`v ${f6(uniquePositions[i * 3])} ${f6(uniquePositions[i * 3 + 1])} ${f6(uniquePositions[i * 3 + 2])}`);
+  }
+
+  for (const t of validTris) {
+    lines.push(`f ${fv(triVerts[t * 3])} ${fv(triVerts[t * 3 + 1])} ${fv(triVerts[t * 3 + 2])}`);
+  }
+
+  const mimeType = 'text/plain';
+  const blob = new Blob([lines.join('\n') + '\n'], { type: mimeType });
+  return { blob, filename: getExportFilename('obj', customName), mimeType };
+}
+
+export function exportOBJ(meshData: MeshData, customName?: string): void {
+  const built = buildOBJ(meshData, customName);
+  downloadBlob(built.blob, built.filename, 'OBJ');
 }
 
 function matName(hex: string): string {

@@ -3,7 +3,14 @@ import { getPhantomGroup } from '../renderer/phantomGeometry';
 import { GLTFExporter } from 'three/addons/exporters/GLTFExporter.js';
 import { downloadBlob, getExportFilename } from './download';
 
-export async function exportGLB(customName?: string): Promise<void> {
+export interface BuiltExport {
+  blob: Blob;
+  filename: string;
+  mimeType: string;
+}
+
+/** Build the GLB blob for the current scene without triggering a download. */
+export async function buildGLB(customName?: string): Promise<BuiltExport> {
   const scene = getScene();
   const exporter = new GLTFExporter();
 
@@ -17,6 +24,12 @@ export async function exportGLB(customName?: string): Promise<void> {
   // Restore phantom visibility
   if (phantom) phantom.visible = wasVisible;
 
-  const blob = new Blob([result as ArrayBuffer], { type: 'model/gltf-binary' });
-  downloadBlob(blob, getExportFilename('glb', customName));
+  const mimeType = 'model/gltf-binary';
+  const blob = new Blob([result as ArrayBuffer], { type: mimeType });
+  return { blob, filename: getExportFilename('glb', customName), mimeType };
+}
+
+export async function exportGLB(customName?: string): Promise<void> {
+  const built = await buildGLB(customName);
+  downloadBlob(built.blob, built.filename, 'GLB');
 }
