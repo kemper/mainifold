@@ -1,11 +1,11 @@
 import './style.css';
 import { initEngine, executeCode, executeCodeAsync, validateCodeAsync, ensureEngineReady, getModule, getActiveLanguage, setActiveLanguage, type Language } from './geometry/engine';
 import { sliceAtZ, getBoundingBox } from './geometry/crossSection';
-import { initViewport, updateMesh, setClipping, setClipZ, getClipState, getCameraState, getCanvas, getMeshGroup, getCamera, setMeasureLock, setUserOrbitLock, isUserOrbitLocked, setDimensionsVisible, isDimensionsVisible } from './renderer/viewport';
+import { initViewport, updateMesh, setClipping, setClipZ, getClipState, getCameraState, getCanvas, getMeshGroup, getCamera, setMeasureLock, setUserOrbitLock, isUserOrbitLocked, onUserOrbitLockChange, setDimensionsVisible, isDimensionsVisible, setGridVisible, isGridVisible } from './renderer/viewport';
 import { renderCompositeCanvas, renderElevationsToContainer, renderSingleView, renderSliceSVG, setReferenceImages as _setRefImages, clearReferenceImages as _clearRefImages, getReferenceImages as _getRefImages, type ReferenceImages } from './renderer/multiview';
 import { setPhantom, clearPhantom, hasPhantom, type PhantomOptions } from './renderer/phantomGeometry';
-import { initEditor, setValue, getValue, setLanguage as setEditorLanguage } from './editor/codeEditor';
-import { createLayout } from './ui/layout';
+import { initEditor, setValue, getValue, setLanguage as setEditorLanguage, setEditorDiagnostics, clearEditorDiagnostics, revealFirstDiagnostic } from './editor/codeEditor';
+import { createLayout, type TabName } from './ui/layout';
 import { createToolbar, isAutoRun, setToolbarLanguage } from './ui/toolbar';
 import { createLandingPage } from './ui/landing';
 import { createHelpPage } from './ui/help';
@@ -13,29 +13,77 @@ import { createNotFoundPage } from './ui/notFound';
 import { initViewsPanel, updateMultiView } from './ui/panels';
 import { createSessionBar } from './ui/sessionBar';
 import { createGalleryView, refreshGallery } from './ui/gallery';
+import { createDiffView, refreshDiff } from './ui/diffView';
 import { createNotesView, refreshNotes } from './ui/notes';
 import { initSessionList, showSessionList } from './ui/sessionList';
-import { exportGLB } from './export/gltf';
-import { exportSTL } from './export/stl';
-import { exportOBJ } from './export/obj';
-import { export3MF } from './export/threemf';
-import type { MeshData } from './geometry/types';
+import { exportGLB, buildGLB } from './export/gltf';
+import { exportSTL, buildSTL } from './export/stl';
+import { exportOBJ, buildOBJ } from './export/obj';
+import { export3MF, build3MF } from './export/threemf';
+import { exportSessionJSON, exportRawCode, buildSessionJSON, buildRawCode } from './export/session';
+import { blobToBase64, downloadBlob } from './export/download';
+import {
+  listExports as listInboxExports,
+  getExport as getInboxExport,
+  clearExports as clearInboxExports,
+  registerExport as registerInboxExport,
+} from './export/exportInbox';
+import {
+  registerImport,
+  classifyImportSource,
+  type ImportInboxEntry,
+} from './import/importInbox';
+import { showImportPreview, summarizeSessionImport } from './ui/importPreview';
+import type { BuiltExport } from './export/gltf';
+
+/** Register a freshly-built export blob in the inbox so it shows up in Recent Exports. */
+function registerExportFromBuilt(built: BuiltExport, source: string): void {
+  registerInboxExport(built.blob, built.filename, source, built.mimeType);
+}
+import type { MeshData, SourceDiagnostic } from './geometry/types';
 import { analyzeZProfile, type ZProfile } from './geometry/profileAnalysis';
 import { probeAtXY, probeRay, measureDistance, type ProbeResult, type GeneralRayResult } from './geometry/rayCast';
 import { checkContainment, type ContainmentWarning } from './geometry/containmentCheck';
 import { setUnits as _setUnits, getUnits as _getUnits, type UnitSystem } from './geometry/units';
 import { initMeasureTool, activate as activateMeasure, deactivate as deactivateMeasure, getState as getMeasureState } from './ui/measureTool';
 import { maybeStartTour, resetTour, startTour } from './ui/tour';
+import { initTheme } from './ui/theme';
+import { initPaintUI, isPaintOpen, forceDeactivate as closePaintMenu } from './color/paintUI';
+import { updatePaintMesh, setOnRegionPainted, isActive as isPaintActive } from './color/paintMode';
+import { initAnnotateUI, isAnnotateOpen, closeMenu as closeAnnotateMenu } from './annotations/annotateUI';
+import { isActive as isSelectActive, getSelectedId as getSelectedAnnotationId } from './annotations/selectMode';
+import {
+  getStrokes as getAnnotationStrokes,
+  getTexts as getAnnotationTexts,
+  getCount as getAnnotationCount,
+  clearStrokes as clearStrokesStore,
+  clearTexts as clearTextsStore,
+  clearAll as clearAllAnnotations,
+  removeLastAnnotation,
+  removeAnnotationById,
+  onChange as onAnnotationStrokesChange,
+} from './annotations/annotations';
+import {
+  setAnnotationsVisible as setAnnotationsVisibleOverlay,
+  isAnnotationsVisible as isAnnotationsVisibleOverlay,
+  onVisibilityChange as onAnnotationVisibilityChange,
+} from './annotations/annotationOverlay';
+import { setColor as setAnnotateColor, setWidth as setAnnotateWidth, getWidth as getAnnotateWidth } from './annotations/annotateMode';
+import { addTextAnnotationAtAnchor, setFontSize as setAnnotateFontSize, getFontSize as getAnnotateFontSize } from './annotations/textMode';
+import { restoreView as restoreAnnotationViewById } from './annotations/selectMode';
+import { applyTriColors, applyTriColorsIfVisible, hasRegions as hasColorRegions, onChange as onColorRegionsChange, onVisibilityChange as onPaintVisibilityChange, clearRegions, serialize as serializeRegions, addRegion, getRegions, type SerializedColorRegion } from './color/regions';
+import { initEditorLock, syncLockState, setUnlockHandlers } from './color/editorLock';
+import { buildAdjacency, findCoplanarRegion, resolveSeed } from './color/adjacency';
 import {
   getSessionIdFromURL,
   getVersionFromURL,
-  isGalleryMode,
   openSession,
   createSession,
   closeSession,
   listSessions,
   deleteSession,
   renameSession,
+  setSessionLanguage,
   saveVersion,
   navigateVersion,
   loadVersion as loadVersionFromStore,
@@ -60,6 +108,7 @@ import {
   type ExportedSession,
   type ReferenceImagesData,
 } from './storage/sessionManager';
+import type { Version } from './storage/db';
 
 // Load examples as raw text — JS and SCAD
 const jsExampleModules = import.meta.glob('../examples/*.js', { query: '?raw', import: 'default' });
@@ -126,6 +175,57 @@ function simpleHash(str: string): string {
     h = ((h << 5) - h + str.charCodeAt(i)) | 0;
   }
   return (h >>> 0).toString(16).padStart(8, '0');
+}
+
+function firstErrorLine(error: string): string {
+  return error
+    .split('\n')
+    .map(line => line.trim())
+    .find(Boolean) ?? error;
+}
+
+function summarizeDiagnostics(error: string, diagnostics: SourceDiagnostic[] = []): string {
+  const primary = diagnostics[0];
+  if (primary?.line) {
+    const label = primary.source === 'OpenSCAD' ? 'OpenSCAD error' : 'Syntax error';
+    return `${label} on line ${primary.line}${primary.column ? `:${primary.column}` : ''}`;
+  }
+
+  const summary = firstErrorLine(error);
+  return summary.length > 80 ? `${summary.slice(0, 77)}...` : summary;
+}
+
+function renderEditorError(panel: HTMLElement, error: string, diagnostics: SourceDiagnostic[] = []): void {
+  const primary = diagnostics[0];
+  const title = document.createElement('div');
+  title.className = 'font-semibold text-red-200';
+  title.textContent = summarizeDiagnostics(error, diagnostics);
+
+  const location = document.createElement('div');
+  location.className = 'mt-1 text-red-200/80';
+  location.textContent = primary?.line
+    ? `${primary.source ?? 'Error'} at line ${primary.line}${primary.column ? `, column ${primary.column}` : ''}`
+    : primary?.source ?? 'Error';
+
+  const details = document.createElement('pre');
+  details.className = 'mt-2 max-h-32 overflow-auto whitespace-pre-wrap font-mono text-[11px] leading-4 text-red-100/90';
+  details.textContent = error;
+
+  panel.replaceChildren(title, location, details);
+
+  if (primary?.hint) {
+    const hint = document.createElement('div');
+    hint.className = 'mt-2 text-red-100';
+    hint.textContent = `Hint: ${primary.hint}`;
+    panel.appendChild(hint);
+  }
+
+  panel.classList.remove('hidden');
+}
+
+function clearEditorErrorPanel(panel: HTMLElement): void {
+  panel.classList.add('hidden');
+  panel.replaceChildren();
 }
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -354,6 +454,54 @@ function getGeometryDataObj(): Record<string, unknown> | null {
   }
 }
 
+/** Rehydrate color regions from a version's geometryData.
+ *  Rebuilds adjacency + BFS for coplanar descriptors against the current mesh. */
+function rehydrateColorRegions(geometryData: Record<string, unknown> | null): void {
+  clearRegions();
+
+  if (!geometryData || !currentMeshData) return;
+  const regions = geometryData.colorRegions as SerializedColorRegion[] | undefined;
+  if (!regions || regions.length === 0) return;
+
+  const mesh = currentMeshData;
+  const adjacency = buildAdjacency(mesh);
+
+  for (const region of regions) {
+    let triangles = new Set<number>();
+
+    if (region.descriptor.kind === 'coplanar') {
+      const { seedPoint, seedNormal, normalTolerance } = region.descriptor;
+      const seedTri = resolveSeed(seedPoint, seedNormal, mesh, adjacency, normalTolerance);
+      if (seedTri >= 0) {
+        triangles = findCoplanarRegion(seedTri, adjacency, normalTolerance);
+      }
+    } else if (region.descriptor.kind === 'triangles') {
+      triangles = new Set(region.descriptor.ids);
+    }
+
+    if (triangles.size > 0) {
+      addRegion(region.name, region.color, region.source, region.descriptor, triangles);
+    }
+  }
+
+  syncLockState();
+
+  // Re-render with colors if regions were rehydrated
+  if (hasColorRegions() && currentMeshData) {
+    const colored = applyTriColorsIfVisible(currentMeshData);
+    updateMesh(colored, { skipAutoFrame: true });
+  }
+}
+
+/** Include color regions in geometry data for saving. */
+function enrichGeometryDataWithColors(geoData: Record<string, unknown> | null): Record<string, unknown> | null {
+  if (!geoData) return geoData;
+  if (hasColorRegions()) {
+    geoData.colorRegions = serializeRegions();
+  }
+  return geoData;
+}
+
 // === Argument validation helpers ==========================================
 //
 // Runtime type/shape validation for the window.partwright API. The public API
@@ -572,7 +720,7 @@ function shouldShowLanding(): boolean {
   const params = new URLSearchParams(window.location.search);
   // Landing if at root path AND no query params that indicate a specific view
   const isRootPath = path === '/' || path === '';
-  return isRootPath && !params.has('view') && !params.has('session') && !params.has('gallery') && !params.has('notes');
+  return isRootPath && !params.has('view') && !params.has('session') && !params.has('gallery') && !params.has('diff') && !params.has('notes');
 }
 
 function shouldShowHelp(): boolean {
@@ -584,6 +732,29 @@ function shouldShow404(): boolean {
   return path !== '/' && path !== '' && path !== '/help' && path !== '/editor';
 }
 
+function getTabFromURL(): TabName {
+  const params = new URLSearchParams(window.location.search);
+  if (params.has('notes')) return 'notes';
+  if (params.has('diff')) return 'diff';
+  if (params.has('gallery')) return 'gallery';
+  if (params.get('view') === 'elevations') return 'elevations';
+  if (params.get('view') === 'ai') return 'ai';
+  return 'interactive';
+}
+
+function currentURLPathAndSearch(): string {
+  return `${window.location.pathname}${window.location.search}`;
+}
+
+function updateAppHistory(url: string, mode: 'push' | 'replace'): void {
+  if (url === currentURLPathAndSearch()) return;
+  if (mode === 'push') {
+    window.history.pushState(null, '', url);
+  } else {
+    window.history.replaceState(null, '', url);
+  }
+}
+
 
 // Hide landing/help and show the editor UI
 function showEditorUI(landingEl: HTMLElement | null, helpEl: HTMLElement | null, editorUI: HTMLElement) {
@@ -593,6 +764,9 @@ function showEditorUI(landingEl: HTMLElement | null, helpEl: HTMLElement | null,
 }
 
 async function main() {
+  // Apply persisted theme before any UI renders
+  initTheme();
+
   // Remove loading splash as soon as JS takes over
   document.getElementById('loading-splash')?.remove();
 
@@ -625,8 +799,152 @@ async function main() {
   const defaultExampleKey = Object.keys(examples).find(k => k.includes('basic_shapes')) ?? Object.keys(examples)[0];
   const defaultCode = examples[defaultExampleKey]?.code ?? '// Write your manifold code here\nconst { Manifold } = api;\nreturn Manifold.cube([5,5,5], true);';
 
+  // Shared validator for parsed session JSON. Returns null if shape is wrong.
+  function validateSessionPayload(data: unknown): ExportedSession | null {
+    if (!data || typeof data !== 'object') return null;
+    const d = data as ExportedSession;
+    if ((!d.partwright && !d.mainifold) || !d.session || !Array.isArray(d.versions)) return null;
+    return d;
+  }
+
+  // Import an already-parsed session payload. Used by both file import and the
+  // window.partwright.importSessionData() API so AI agents can bypass the file picker.
+  async function importSessionPayload(data: ExportedSession): Promise<{ sessionId: string }> {
+    const session = await importSession(data, async (code) => {
+      await runCodeSync(code);
+      return captureThumbnail();
+    });
+    const version = await openSession(session.id);
+    if (version) await loadVersionIntoEditor(version);
+    return { sessionId: session.id };
+  }
+
+  // Import a raw code payload as a new session. Shared between file drop and the AI API.
+  async function importCodePayload(code: string, language: Language, sessionName?: string): Promise<{ sessionId: string }> {
+    if (language !== getActiveLanguage()) await switchLanguage(language);
+    const session = await createSession(sessionName, language);
+    setValue(code);
+    await runCodeSync(code);
+    return { sessionId: session.id };
+  }
+
+  // Run a JSON session import end-to-end: validate, show the preview modal, import.
+  async function importJSONFromText(filename: string, text: string): Promise<boolean> {
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(text);
+    } catch {
+      alert(`Could not parse "${filename}" as JSON.`);
+      return false;
+    }
+    const data = validateSessionPayload(parsed);
+    if (!data) {
+      alert(`"${filename}" doesn't look like a Partwright session file.`);
+      return false;
+    }
+    const summary = summarizeSessionImport(data);
+    const ok = await showImportPreview(filename, summary);
+    if (!ok) return false;
+    await importSessionPayload(data);
+    return true;
+  }
+
+  // Import a .partwright.json session, or a raw .js / .scad file, into a new session.
+  // Returns whether the import committed (so callers know if the inbox should be updated).
+  async function handleImportFile(file: File, options: { skipPreActiveConfirm?: boolean } = {}): Promise<boolean> {
+    const source = classifyImportSource(file.name);
+    if (!source) {
+      alert(`Unsupported file type: ${file.name}\n\nSupported: .partwright.json, .js, .scad`);
+      return false;
+    }
+
+    // Raw code imports don't get a preview modal of their own — confirm before clobber.
+    // JSON imports skip this confirm because the preview modal already serves as confirmation.
+    if (!options.skipPreActiveConfirm && source !== 'JSON') {
+      const cur = getState();
+      if (cur.session && cur.versionCount > 0) {
+        const ok = await showInlineConfirm(
+          editorUI,
+          `Open "${file.name}" as a new session? Your current session will be kept.`,
+        );
+        if (!ok) return false;
+      }
+    }
+
+    try {
+      let committed = false;
+      if (source === 'JSON') {
+        const text = await file.text();
+        committed = await importJSONFromText(file.name, text);
+      } else if (source === 'JS' || source === 'SCAD') {
+        const code = await file.text();
+        const lang: Language = source === 'SCAD' ? 'scad' : 'manifold-js';
+        const sessionName = file.name.replace(/\.(js|scad)$/i, '');
+        await importCodePayload(code, lang, sessionName);
+        committed = true;
+      }
+      if (committed) registerImport(file, file.name, source);
+      return committed;
+    } catch (e) {
+      alert(`Failed to import "${file.name}": ${(e as Error).message}`);
+      return false;
+    }
+  }
+
+  // Re-import an entry from the Recent Imports inbox. Reuses the same flow as
+  // a fresh file import, including the JSON preview modal — it is still a
+  // session-creating action and the user may want to verify before clobbering.
+  async function handleReimportInboxEntry(entry: ImportInboxEntry): Promise<void> {
+    try {
+      if (entry.source === 'JSON') {
+        const text = await entry.blob.text();
+        await importJSONFromText(entry.filename, text);
+      } else {
+        const cur = getState();
+        if (cur.session && cur.versionCount > 0) {
+          const ok = await showInlineConfirm(
+            editorUI,
+            `Re-import "${entry.filename}" as a new session? Your current session will be kept.`,
+          );
+          if (!ok) return;
+        }
+        const code = await entry.blob.text();
+        const lang: Language = entry.source === 'SCAD' ? 'scad' : 'manifold-js';
+        const sessionName = entry.filename.replace(/\.(js|scad)$/i, '');
+        await importCodePayload(code, lang, sessionName);
+      }
+    } catch (e) {
+      alert(`Failed to re-import "${entry.filename}": ${(e as Error).message}`);
+    }
+  }
+
+  // Document-level drag-and-drop import
+  function isImportableFile(file: File): boolean {
+    const n = file.name.toLowerCase();
+    return n.endsWith('.json') || n.endsWith('.js') || n.endsWith('.scad');
+  }
+
+  document.addEventListener('dragover', (e) => {
+    if (!e.dataTransfer || e.dataTransfer.types.indexOf('Files') === -1) return;
+    e.preventDefault();
+    e.dataTransfer.dropEffect = 'copy';
+  });
+
+  document.addEventListener('drop', async (e) => {
+    const files = e.dataTransfer?.files;
+    if (!files || files.length === 0) return;
+    const first = Array.from(files).find(isImportableFile);
+    if (!first) return;
+    e.preventDefault();
+    await handleImportFile(first);
+  });
+
   // Create toolbar
   createToolbar(editorUI, examples, {
+    onGoHome: () => {
+      updateAppHistory('/', 'push');
+      void syncRouteFromURL();
+    },
     onRun: () => runCode(),
     onExportGLB: async () => {
       try { await exportGLB(); } catch (e) { console.error('GLB export error:', e); }
@@ -635,11 +953,20 @@ async function main() {
       if (currentMeshData) exportSTL(currentMeshData);
     },
     onExportOBJ: () => {
-      if (currentMeshData) exportOBJ(currentMeshData);
+      if (currentMeshData) exportOBJ(hasColorRegions() ? applyTriColors(currentMeshData) : currentMeshData);
     },
     onExport3MF: () => {
-      if (currentMeshData) export3MF(currentMeshData);
+      if (currentMeshData) export3MF(hasColorRegions() ? applyTriColors(currentMeshData) : currentMeshData);
     },
+    onExportSessionJSON: async () => {
+      const ok = await exportSessionJSON();
+      if (!ok) alert('No active session to export. Save a version first.');
+    },
+    onExportRawCode: () => {
+      exportRawCode(getValue(), getActiveLanguage());
+    },
+    onImportFile: async (file) => { await handleImportFile(file); },
+    onImportInboxEntry: handleReimportInboxEntry,
     onExampleSelect: async (entry: ExampleEntry) => {
       // Auto-switch engine + editor mode if the example uses a different language.
       if (entry.language !== getActiveLanguage()) {
@@ -674,12 +1001,16 @@ async function main() {
   createSessionBar(editorUI, {
     onSaveVersion: async () => ({
       code: getValue(),
-      geometryData: getGeometryDataObj(),
+      geometryData: enrichGeometryDataWithColors(getGeometryDataObj()),
       thumbnail: await captureThumbnail(),
     }),
-    onLoadVersion: (code: string) => {
+    onLoadVersion: async (code: string) => {
       setValue(code);
-      runCode(code);
+      await runCodeSync(code);
+      const loadedVersion = getState().currentVersion;
+      if (loadedVersion) {
+        rehydrateColorRegions(loadedVersion.geometryData);
+      }
     },
     onOpenGallery: () => {
       switchTab('gallery');
@@ -705,13 +1036,25 @@ async function main() {
   });
 
   // Create layout
-  const { editorContainer, viewportPane, viewsContainer, elevationsContainer, galleryContainer, notesContainer, statusBar, clipControls, switchTab } = createLayout(editorUI);
+  const { editorContainer, editorErrorPanel, viewportPane, viewsContainer, elevationsContainer, galleryContainer, diffContainer, notesContainer, statusBar, clipControls, switchTab } = createLayout(editorUI);
 
   // Init views panel
   initViewsPanel(viewsContainer);
 
   // Init gallery
-  createGalleryView(galleryContainer, (code: string) => {
+  createGalleryView(galleryContainer, async (code: string) => {
+    setValue(code);
+    await runCodeSync(code);
+    // Rehydrate color regions from the loaded version
+    const loadedVersion = getState().currentVersion;
+    if (loadedVersion) {
+      rehydrateColorRegions(loadedVersion.geometryData);
+    }
+    switchTab('interactive');
+  });
+
+  // Init diff view
+  createDiffView(diffContainer, (code: string) => {
     setValue(code);
     runCode(code);
     switchTab('interactive');
@@ -723,6 +1066,7 @@ async function main() {
   // Refresh gallery/notes whenever their tabs are selected
   window.addEventListener('tab-switched', ((e: CustomEvent) => {
     if (e.detail.tab === 'gallery') refreshGallery();
+    if (e.detail.tab === 'diff') refreshDiff();
     if (e.detail.tab === 'notes') refreshNotes();
   }) as EventListener);
 
@@ -747,52 +1091,137 @@ async function main() {
   app.appendChild(editorUI);
   app.appendChild(overlayContainer);
 
+  let editorReady = false;
+  let editorReadyResolve: (() => void) = () => {};
+  const editorReadyPromise = new Promise<void>(resolve => { editorReadyResolve = resolve; });
+  let engineOk = false;
+  let helpHasAppBackTarget = false;
+  let notFoundEl: HTMLElement | null = null;
+  // Declared early so async callbacks (e.g. runCodeSync triggered during
+  // initial syncEditorFromURL) don't hit a TDZ error before this point.
+  let _running = false;
+
+  async function ensureEditorReady() {
+    if (!editorReady) await editorReadyPromise;
+  }
+
   // Helper to transition from landing/help to editor
   function transitionToEditor() {
     showEditorUI(landingEl, helpEl, editorUI);
+    if (notFoundEl) notFoundEl.classList.add('hidden');
     overlayContainer.classList.add('hidden');
     window.dispatchEvent(new Event('resize'));
   }
 
-  // Track whether user came from landing (for help back navigation)
-  let cameFromLanding = false;
+  async function loadVersionIntoEditor(version: Version) {
+    const sessionLang = getState().session?.language ?? 'manifold-js';
+    if (sessionLang !== getActiveLanguage()) {
+      await switchLanguage(sessionLang);
+    }
+    setValue(version.code);
+    await runCodeSync(version.code);
+    rehydrateColorRegions(version.geometryData);
+    const refImages = await getReferenceImagesFromSession();
+    if (refImages) {
+      _setRefImages(refImages as ReferenceImages);
+    } else {
+      _clearRefImages();
+    }
+  }
+
+  async function openEditorFromLanding() {
+    updateAppHistory('/editor', 'push');
+    transitionToEditor();
+    await ensureEditorReady();
+    if (window.location.pathname !== '/editor') return;
+    await createSession();
+    updateDocumentTitle({ page: 'editor' });
+    setStatus(statusBar, 'ready', 'Ready');
+    runCode(defaultCode);
+  }
+
+  async function openSessionFromLanding(sid: string) {
+    updateAppHistory(`/editor?session=${sid}`, 'push');
+    transitionToEditor();
+    await ensureEditorReady();
+    if (getSessionIdFromURL() !== sid) return;
+    const version = await openSession(sid);
+    if (version) {
+      await loadVersionIntoEditor(version);
+    } else {
+      // openSession returned null — either the session doesn't exist
+      // (e.g. stale tile from another device's data) or it has no saved
+      // versions yet. Run defaults so the viewport renders and the
+      // status doesn't stay stuck on "Loading WASM...".
+      setStatus(statusBar, 'ready', 'Ready');
+      runCode(defaultCode);
+    }
+    updateDocumentTitle({ page: 'editor' });
+  }
+
+  async function ensureLandingPage() {
+    if (!landingEl) {
+      landingEl = await createLandingPage(overlayContainer, {
+        onOpenEditor: openEditorFromLanding,
+        onOpenHelp: () => showHelp(),
+        onOpenSession: openSessionFromLanding,
+      });
+    }
+    return landingEl;
+  }
+
+  async function showLandingPage() {
+    const page = await ensureLandingPage();
+    overlayContainer.classList.remove('hidden');
+    editorUI.classList.add('hidden');
+    helpEl?.classList.add('hidden');
+    notFoundEl?.classList.add('hidden');
+    page.classList.remove('hidden');
+    updateDocumentTitle({ page: 'landing' });
+  }
+
+  function showNotFoundPage() {
+    if (!notFoundEl) {
+      notFoundEl = createNotFoundPage(overlayContainer, {
+        onGoHome: () => {
+          updateAppHistory('/', 'push');
+          void syncRouteFromURL();
+        },
+      });
+    }
+    overlayContainer.classList.remove('hidden');
+    editorUI.classList.add('hidden');
+    landingEl?.classList.add('hidden');
+    helpEl?.classList.add('hidden');
+    notFoundEl.classList.remove('hidden');
+    updateDocumentTitle({ page: '404' });
+  }
 
   // Helper to show help page
-  function showHelp() {
-    cameFromLanding = landingEl != null && !landingEl.classList.contains('hidden');
+  function showHelp(options: { history?: 'push' | 'replace' | 'none' } = {}) {
+    const historyMode = options.history ?? 'push';
+    if (historyMode !== 'none') {
+      helpHasAppBackTarget = currentURLPathAndSearch() !== '/help';
+      updateAppHistory('/help', historyMode);
+    }
     if (!helpEl) {
       helpEl = createHelpPage(overlayContainer, {
         onBack: () => {
-          if (cameFromLanding && landingEl) {
-            // Go back to landing
-            helpEl?.classList.add('hidden');
-            landingEl.classList.remove('hidden');
-            window.history.replaceState(null, '', '/');
-            updateDocumentTitle({ page: 'landing' });
+          if (helpHasAppBackTarget) {
+            window.history.back();
           } else {
-            // Go back to editor — preserve session URL params
-            transitionToEditor();
-            const state = getState();
-            if (state.session) {
-              const params = new URLSearchParams();
-              params.set('session', state.session.id);
-              if (state.currentVersion) params.set('v', String(state.currentVersion.index));
-              window.history.replaceState(null, '', `/editor?${params}`);
-            } else {
-              window.history.replaceState(null, '', '/editor');
-            }
-            updateDocumentTitle({ page: 'editor' });
+            updateAppHistory('/editor', 'replace');
+            void syncEditorFromURL();
           }
         },
         onStartTour: async () => {
-          // Always go to editor (not landing), wait for it to be ready, then start tour
+          updateAppHistory('/editor', 'push');
           transitionToEditor();
           await ensureEditorReady();
           if (!getState().session) {
             await createSession();
             runCode(defaultCode);
           }
-          window.history.replaceState(null, '', '/editor');
           resetTour();
           startTour();
         },
@@ -801,10 +1230,64 @@ async function main() {
     overlayContainer.classList.remove('hidden');
     editorUI.classList.add('hidden');
     if (landingEl) landingEl.classList.add('hidden');
+    if (notFoundEl) notFoundEl.classList.add('hidden');
     helpEl.classList.remove('hidden');
-    window.history.replaceState(null, '', '/help');
     updateDocumentTitle({ page: 'help' });
   }
+
+  async function syncEditorFromURL() {
+    transitionToEditor();
+    const tab = getTabFromURL();
+    switchTab(tab, { history: 'none' });
+    updateDocumentTitle({ page: 'editor' });
+    await ensureEditorReady();
+    if (!engineOk) return;
+
+    const sessionId = getSessionIdFromURL();
+    if (sessionId) {
+      const versionIndex = getVersionFromURL();
+      const state = getState();
+      const needsSessionLoad = state.session?.id !== sessionId;
+      const needsVersionLoad = versionIndex !== null && state.currentVersion?.index !== versionIndex;
+      if (needsSessionLoad || needsVersionLoad) {
+        const version = await openSession(sessionId, versionIndex ?? undefined);
+        if (version) {
+          await loadVersionIntoEditor(version);
+          if (tab === 'gallery') refreshGallery();
+          return;
+        }
+        // openSession returned null — either the session ID in the URL
+        // doesn't exist in IndexedDB (e.g. a stale bookmark, or a URL
+        // shared from another browser/device), or the session exists
+        // but has no saved versions. Fall through to create a fresh
+        // session if needed and run defaults, so the viewport renders
+        // and the status doesn't stay stuck on "Loading WASM...".
+      } else {
+        return;
+      }
+    }
+    if (!getState().session) {
+      await createSession();
+    }
+    setStatus(statusBar, 'ready', 'Ready');
+    runCode(defaultCode);
+  }
+
+  async function syncRouteFromURL() {
+    if (shouldShowLanding()) {
+      await showLandingPage();
+    } else if (shouldShowHelp()) {
+      showHelp({ history: 'none' });
+    } else if (shouldShow404()) {
+      showNotFoundPage();
+    } else {
+      await syncEditorFromURL();
+    }
+  }
+
+  window.addEventListener('popstate', () => {
+    void syncRouteFromURL();
+  });
 
   // Expose showHelp for toolbar
   const windowRecord = window as unknown as Record<string, unknown>;
@@ -817,92 +1300,14 @@ async function main() {
   const show404 = shouldShow404();
 
   if (showLanding) {
-    // Show landing page immediately — hide editor UI
-    editorUI.classList.add('hidden');
-    overlayContainer.classList.remove('hidden');
-    updateDocumentTitle({ page: 'landing' });
-    landingEl = await createLandingPage(overlayContainer, {
-      onOpenEditor: async () => {
-        transitionToEditor();
-        await ensureEditorReady();
-        await createSession();
-        updateDocumentTitle({ page: 'editor' });
-        setStatus(statusBar, 'ready', 'Ready');
-        runCode(defaultCode);
-      },
-      onOpenHelp: showHelp,
-      onOpenSession: async (sid) => {
-        transitionToEditor();
-        await ensureEditorReady();
-        const version = await openSession(sid);
-        if (version) {
-          // Restore session language
-          const sessionLang = getState().session?.language ?? 'manifold-js';
-          if (sessionLang !== getActiveLanguage()) {
-            await switchLanguage(sessionLang);
-          }
-          setValue(version.code);
-          runCode(version.code);
-          const refImages = await getReferenceImagesFromSession();
-          if (refImages) _setRefImages(refImages as ReferenceImages);
-        }
-        updateDocumentTitle({ page: 'editor' });
-        window.history.replaceState(null, '', `/editor?session=${sid}`);
-      },
-    });
+    await showLandingPage();
   } else if (showHelpPage) {
-    // Show help page immediately
-    editorUI.classList.add('hidden');
-    overlayContainer.classList.remove('hidden');
-    updateDocumentTitle({ page: 'help' });
-    helpEl = createHelpPage(overlayContainer, {
-      onBack: async () => {
-        helpEl?.classList.add('hidden');
-        transitionToEditor();
-        await ensureEditorReady();
-        if (!getState().session) {
-          await createSession();
-          runCode(defaultCode);
-        }
-        updateDocumentTitle({ page: 'editor' });
-      },
-      onStartTour: async () => {
-        helpEl?.classList.add('hidden');
-        transitionToEditor();
-        await ensureEditorReady();
-        if (!getState().session) {
-          await createSession();
-          runCode(defaultCode);
-        }
-        window.history.replaceState(null, '', '/editor');
-        resetTour();
-        startTour();
-      },
-    });
+    showHelp({ history: 'none' });
   } else if (show404) {
-    // Show 404 page — hide editor UI entirely
-    editorUI.classList.add('hidden');
-    overlayContainer.classList.remove('hidden');
-    updateDocumentTitle({ page: '404' });
-    createNotFoundPage(overlayContainer, {
-      onGoHome: () => {
-        window.location.href = '/';
-      },
-    });
-  }
-
-  // Init engine, viewport, editor (in background if landing/help is showing)
-  let editorReady = false;
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  let editorReadyResolve: (() => void) = () => {};
-  const editorReadyPromise = new Promise<void>(resolve => { editorReadyResolve = resolve; });
-
-  async function ensureEditorReady() {
-    if (!editorReady) await editorReadyPromise;
+    showNotFoundPage();
   }
 
   // Init geometry engine — wrapped in try/catch so editor/viewport still init on failure
-  let engineOk = false;
   setStatus(statusBar, 'loading', 'Loading WASM...');
   try {
     await initEngine();
@@ -927,9 +1332,110 @@ async function main() {
   initClipControls(clipControls);
 
   // Wire up viewport overlay buttons
+  initGridToggle(clipControls);
   initDimensionsToggle(clipControls);
+  initAnnotateUI(clipControls);
+  initPaintUI(clipControls);
+  // Declared before initMeasureToggle is called so the assignment inside it
+  // doesn't hit a let-TDZ error (the same `let` lower in this function is
+  // hoisted to a binding, but only initialized when execution reaches it).
+  let closeMeasureIfActive: () => boolean = () => false;
   initMeasureToggle(clipControls);
   initOrbitLockToggle(clipControls);
+  initEscapeMenuClose();
+
+  // Initialize editor lock
+  initEditorLock(editorContainer);
+
+  // Set up unlock handlers
+  setUnlockHandlers(
+    // Fork: save the colored version (if needed), then create a new uncolored version
+    async (colorData) => {
+      if (getState().session && currentMeshData) {
+        const code = getValue();
+
+        // 1. Only save the colored version if it doesn't already have colorRegions persisted
+        const currentVersion = getState().currentVersion;
+        const alreadyPersisted = currentVersion?.geometryData &&
+          Array.isArray((currentVersion.geometryData as Record<string, unknown>).colorRegions);
+
+        if (!alreadyPersisted) {
+          const thumbnail = await captureThumbnail();
+          const coloredGeoData = getGeometryDataObj() ?? {};
+          coloredGeoData.colorRegions = colorData;
+          await saveVersion(code, coloredGeoData, thumbnail, 'colored', undefined, { force: true });
+        }
+
+        // 2. Re-render without colors, then save an uncolored sibling
+        updateMesh(currentMeshData, { skipAutoFrame: true });
+        updateMultiView(currentMeshData);
+        renderElevationsToContainer(elevationsContainer, currentMeshData);
+
+        const cleanGeoData = getGeometryDataObj() ?? {};
+        delete cleanGeoData.colorRegions;
+        const cleanThumb = await captureThumbnail();
+        await saveVersion(code, cleanGeoData, cleanThumb, undefined, undefined, { force: true });
+      } else {
+        // No session — just re-render without colors
+        if (currentMeshData) {
+          updateMesh(currentMeshData, { skipAutoFrame: true });
+          updateMultiView(currentMeshData);
+          renderElevationsToContainer(elevationsContainer, currentMeshData);
+        }
+      }
+    },
+    // Clear: just re-render without colors (clearRegions already called)
+    () => {
+      if (currentMeshData) {
+        updateMesh(currentMeshData, { skipAutoFrame: true });
+        updateMultiView(currentMeshData);
+        renderElevationsToContainer(elevationsContainer, currentMeshData);
+      }
+    },
+  );
+
+  // When a color region is painted, re-render the mesh with colors and sync lock
+  setOnRegionPainted(() => {
+    if (currentMeshData) {
+      const colored = applyTriColorsIfVisible(currentMeshData);
+      updateMesh(colored, { skipAutoFrame: true });
+      updateMultiView(colored);
+      renderElevationsToContainer(elevationsContainer, colored);
+    }
+    syncLockState();
+  });
+
+  // Also listen for any region change (e.g. clear) to re-render
+  onColorRegionsChange(() => {
+    syncLockState();
+    if (!isPaintActive()) return; // only auto-refresh while paint mode is on
+    if (currentMeshData) {
+      const colored = applyTriColorsIfVisible(currentMeshData);
+      updateMesh(colored, { skipAutoFrame: true });
+    }
+  });
+
+  // Toggling paint visibility re-renders the viewport, multiview, and elevations
+  // so colors disappear/reappear immediately. Exports remain colored regardless.
+  onPaintVisibilityChange(() => {
+    if (!currentMeshData) return;
+    const colored = applyTriColorsIfVisible(currentMeshData);
+    updateMesh(colored, { skipAutoFrame: true });
+    updateMultiView(colored);
+    renderElevationsToContainer(elevationsContainer, colored);
+  });
+
+  // When annotations change (stroke added/removed/cleared) or are toggled,
+  // refresh the offscreen-rendered panes (multiview + elevations) so they
+  // stay in sync with the live viewport.
+  const refreshAnnotationDependentPanes = () => {
+    if (!currentMeshData) return;
+    const meshForPanes = isPaintActive() ? applyTriColorsIfVisible(currentMeshData) : currentMeshData;
+    updateMultiView(meshForPanes);
+    renderElevationsToContainer(elevationsContainer, meshForPanes);
+  };
+  onAnnotationStrokesChange(refreshAnnotationDependentPanes);
+  onAnnotationVisibilityChange(refreshAnnotationDependentPanes);
 
   editorReady = true;
   editorReadyResolve();
@@ -941,38 +1447,7 @@ async function main() {
 
   // If not on landing/help/404, load session or default code now
   if (!showLanding && !showHelpPage && !show404 && engineOk) {
-    const sessionId = getSessionIdFromURL();
-    if (sessionId) {
-      const versionIndex = getVersionFromURL();
-      const version = await openSession(sessionId, versionIndex ?? undefined);
-      if (version) {
-        // Restore session language
-        const sessionLang = getState().session?.language ?? 'manifold-js';
-        if (sessionLang !== getActiveLanguage()) {
-          setActiveLanguage(sessionLang);
-          setEditorLanguage(sessionLang);
-          await ensureEngineReady(sessionLang);
-        }
-        setValue(version.code);
-        runCode(version.code);
-        const refImages = await getReferenceImagesFromSession();
-        if (refImages) {
-          _setRefImages(refImages as ReferenceImages);
-        }
-        if (isGalleryMode()) {
-          switchTab('gallery');
-          refreshGallery();
-        }
-      } else {
-        await createSession();
-        setStatus(statusBar, 'ready', 'Ready');
-        runCode(defaultCode);
-      }
-    } else {
-      await createSession();
-      setStatus(statusBar, 'ready', 'Ready');
-      runCode(defaultCode);
-    }
+    await syncEditorFromURL();
   }
 
   // Update document title when session state changes (create, open, close, rename)
@@ -1028,11 +1503,18 @@ async function main() {
       setStatus(statusBar, 'error', `Failed to load ${lang}: ${e instanceof Error ? e.message : String(e)}`);
       throw e;
     }
+    // Persist the language to the active session so reopening it loads in the
+    // correct mode. Without this, sessions created before a language switch
+    // keep their stale language field and reload in the wrong engine, parsing
+    // SCAD code as JS (or vice versa).
+    const sid = getState().session?.id;
+    if (sid) await setSessionLanguage(sid, lang);
     setStatus(statusBar, 'ready', 'Ready');
   }
 
   // === Execution state ===
-  let _running = false;
+  // (`_running` is declared at the top of main() so async callbacks fired
+  // during initial load don't hit a Temporal Dead Zone error.)
 
   async function executeIsolated(code: string, lang?: Language) {
     const t0 = performance.now();
@@ -1042,7 +1524,13 @@ async function main() {
     if (result.error) {
       recordError(result.error);
       return {
-        geometryData: { status: 'error' as const, error: result.error, executionTimeMs: elapsed, codeHash: simpleHash(code) },
+        geometryData: {
+          status: 'error' as const,
+          error: result.error,
+          diagnostics: result.diagnostics ?? [],
+          executionTimeMs: elapsed,
+          codeHash: simpleHash(code),
+        },
         meshData: null as MeshData | null,
         manifold: null as unknown,
       };
@@ -1117,17 +1605,200 @@ async function main() {
     /** Export current model as OBJ download. Optional filename override. */
     exportOBJ(filename?: string) {
       assertString(filename, 'exportOBJ(filename)', { optional: true });
-      if (currentMeshData) exportOBJ(currentMeshData, filename);
+      if (currentMeshData) exportOBJ(hasColorRegions() ? applyTriColors(currentMeshData) : currentMeshData, filename);
     },
 
     /** Export current model as 3MF download. Optional filename override. */
     export3MF(filename?: string) {
       assertString(filename, 'export3MF(filename)', { optional: true });
-      if (currentMeshData) export3MF(currentMeshData, filename);
+      if (currentMeshData) export3MF(hasColorRegions() ? applyTriColors(currentMeshData) : currentMeshData, filename);
+    },
+
+    // === AI-friendly export API ===
+    // These return file contents over the API instead of triggering a browser
+    // download — so AI agents (which can't observe Downloads-folder files) can
+    // inspect, save elsewhere, or pipe the bytes onward. Each export is also
+    // added to the Recent Exports inbox so the user can re-download from the UI.
+
+    /** Build a GLB and return its bytes as base64. Same blob as exportGLB(). */
+    async exportGLBData(filename?: string) {
+      assertString(filename, 'exportGLBData(filename)', { optional: true });
+      const built = await buildGLB(filename);
+      registerExportFromBuilt(built, 'GLB');
+      return {
+        filename: built.filename,
+        mimeType: built.mimeType,
+        sizeBytes: built.blob.size,
+        base64: await blobToBase64(built.blob),
+      };
+    },
+
+    /** Build an STL and return its bytes as base64. */
+    async exportSTLData(filename?: string) {
+      assertString(filename, 'exportSTLData(filename)', { optional: true });
+      if (!currentMeshData) return { error: 'No geometry loaded' };
+      const built = buildSTL(currentMeshData, filename);
+      registerExportFromBuilt(built, 'STL');
+      return {
+        filename: built.filename,
+        mimeType: built.mimeType,
+        sizeBytes: built.blob.size,
+        base64: await blobToBase64(built.blob),
+      };
+    },
+
+    /**
+     * Build an OBJ. If the mesh has painted color regions the result is a ZIP
+     * (returned as base64); otherwise it's plain text (returned as `text`).
+     * Inspect `mimeType` to tell which.
+     */
+    async exportOBJData(filename?: string) {
+      assertString(filename, 'exportOBJData(filename)', { optional: true });
+      if (!currentMeshData) return { error: 'No geometry loaded' };
+      const mesh = hasColorRegions() ? applyTriColors(currentMeshData) : currentMeshData;
+      const built = buildOBJ(mesh, filename);
+      registerExportFromBuilt(built, 'OBJ');
+      const isText = built.mimeType === 'text/plain';
+      return {
+        filename: built.filename,
+        mimeType: built.mimeType,
+        sizeBytes: built.blob.size,
+        ...(isText
+          ? { text: await built.blob.text() }
+          : { base64: await blobToBase64(built.blob) }),
+      };
+    },
+
+    /** Build a 3MF (always a ZIP) and return its bytes as base64. */
+    async export3MFData(filename?: string) {
+      assertString(filename, 'export3MFData(filename)', { optional: true });
+      if (!currentMeshData) return { error: 'No geometry loaded' };
+      const mesh = hasColorRegions() ? applyTriColors(currentMeshData) : currentMeshData;
+      const built = build3MF(mesh, filename);
+      registerExportFromBuilt(built, '3MF');
+      return {
+        filename: built.filename,
+        mimeType: built.mimeType,
+        sizeBytes: built.blob.size,
+        base64: await blobToBase64(built.blob),
+      };
+    },
+
+    /** Build a session export (.partwright.json). Returns the parsed JSON object directly. */
+    async exportSessionData(sessionId?: string) {
+      assertString(sessionId, 'exportSessionData(sessionId)', { optional: true, allowEmpty: false });
+      const built = await buildSessionJSON(sessionId);
+      if (!built) return { error: 'No active session to export' };
+      registerExportFromBuilt(built, 'Session JSON');
+      return {
+        filename: built.filename,
+        mimeType: built.mimeType,
+        sizeBytes: built.blob.size,
+        data: built.data,
+      };
+    },
+
+    /** Return the current editor source as text + metadata. */
+    exportCodeData() {
+      const code = getValue();
+      const built = buildRawCode(code, getActiveLanguage());
+      registerExportFromBuilt(built, 'Code');
+      return {
+        filename: built.filename,
+        mimeType: built.mimeType,
+        sizeBytes: built.blob.size,
+        language: built.language,
+        text: built.text,
+      };
+    },
+
+    // === AI-friendly import API ===
+    // Bypass the file picker by accepting parsed payloads inline.
+
+    /**
+     * Import a parsed `.partwright.json` payload (object or string) as a new session.
+     * Activates the new session on success.
+     */
+    async importSessionData(data: unknown) {
+      let payload: unknown = data;
+      if (typeof payload === 'string') {
+        try { payload = JSON.parse(payload); } catch { return { error: 'importSessionData(data): could not parse string as JSON' }; }
+      }
+      const validated = validateSessionPayload(payload);
+      if (!validated) return { error: 'importSessionData(data): payload missing partwright/mainifold brand, session, or versions[]' };
+      const result = await importSessionPayload(validated);
+      return { sessionId: result.sessionId };
+    },
+
+    /**
+     * Import raw source code as a new session. `language` selects 'manifold-js' or 'scad'.
+     */
+    async importCodeData(code: string, language: Language, sessionName?: string) {
+      const check = guard(() => {
+        assertString(code, 'importCodeData(code)', { allowEmpty: false });
+        assertEnum(language, ['manifold-js', 'scad'], 'importCodeData(language)');
+        assertString(sessionName, 'importCodeData(sessionName)', { optional: true, allowEmpty: false });
+      });
+      if (typeof check === 'object' && check !== null && 'error' in check) return check;
+      const result = await importCodePayload(code, language, sessionName);
+      return { sessionId: result.sessionId };
+    },
+
+    // === Recent Exports inbox ===
+    // The same list shown in the toolbar's Export → Recent Exports section.
+
+    /** List recent exports (newest first). Bytes are not included — call getRecentExport() for those. */
+    listRecentExports() {
+      return listInboxExports().map(e => ({
+        id: e.id,
+        filename: e.filename,
+        mimeType: e.mimeType,
+        source: e.source,
+        sizeBytes: e.sizeBytes,
+        timestamp: e.timestamp,
+      }));
+    },
+
+    /**
+     * Look up a recent export by id and return its bytes.
+     * Text-typed exports return `text`; everything else returns `base64`.
+     */
+    async getRecentExport(id: string) {
+      const check = guard(() => assertString(id, 'getRecentExport(id)', { allowEmpty: false }));
+      if (typeof check === 'object' && check !== null && 'error' in check) return check;
+      const entry = getInboxExport(id);
+      if (!entry) return { error: `No export with id "${id}"` };
+      const isText = entry.mimeType === 'text/plain' || entry.mimeType === 'application/json';
+      return {
+        id: entry.id,
+        filename: entry.filename,
+        mimeType: entry.mimeType,
+        source: entry.source,
+        sizeBytes: entry.sizeBytes,
+        timestamp: entry.timestamp,
+        ...(isText
+          ? { text: await entry.blob.text() }
+          : { base64: await blobToBase64(entry.blob) }),
+      };
+    },
+
+    /** Trigger a re-download of a recent export by id (no new inbox entry). */
+    downloadRecentExport(id: string) {
+      const check = guard(() => assertString(id, 'downloadRecentExport(id)', { allowEmpty: false }));
+      if (typeof check === 'object' && check !== null && 'error' in check) return check;
+      const entry = getInboxExport(id);
+      if (!entry) return { error: `No export with id "${id}"` };
+      downloadBlob(entry.blob, entry.filename, entry.source, { register: false });
+      return { ok: true };
+    },
+
+    /** Empty the Recent Exports inbox. */
+    clearRecentExports() {
+      clearInboxExports();
     },
 
     /** Validate code without rendering. Returns { valid, error? } */
-    async validate(code: string, opts?: { language?: Language }): Promise<{ valid: boolean; error?: string }> {
+    async validate(code: string, opts?: { language?: Language }): Promise<{ valid: boolean; error?: string; diagnostics?: SourceDiagnostic[] }> {
       const check = guard(() => {
         assertString(code, 'validate(code)', { allowEmpty: false });
         if (opts !== undefined) {
@@ -1139,7 +1810,7 @@ async function main() {
       });
       if (typeof check === 'object' && check !== null && 'error' in check) return { valid: false, error: check.error };
       const r = await validateCodeAsync(code, opts?.language);
-      return r.valid ? { valid: true } : { valid: false, error: r.error };
+      return r.valid ? { valid: true } : { valid: false, error: r.error, diagnostics: r.diagnostics ?? [] };
     },
 
     /** Get active engine language */
@@ -1314,7 +1985,7 @@ async function main() {
     async saveVersion(label?: string) {
       assertString(label, 'saveVersion(label)', { optional: true });
       const thumbnail = await captureThumbnail();
-      const version = await saveVersion(getValue(), getGeometryDataObj(), thumbnail, label);
+      const version = await saveVersion(getValue(), enrichGeometryDataWithColors(getGeometryDataObj()), thumbnail, label);
       return version ? { id: version.id, index: version.index, label: version.label } : null;
     },
 
@@ -1345,6 +2016,7 @@ async function main() {
       }
       setValue(version.code);
       await runCodeSync(version.code);
+      rehydrateColorRegions(version.geometryData);
       return {
         id: version.id,
         index: version.index,
@@ -1362,6 +2034,7 @@ async function main() {
       if (version) {
         setValue(version.code);
         await runCodeSync(version.code);
+        rehydrateColorRegions(version.geometryData);
       }
       return version ? { id: version.id, index: version.index, label: version.label } : null;
     },
@@ -1402,7 +2075,7 @@ async function main() {
       await runCodeSync(code);
       const newGeoData = JSON.parse(geometryDataEl.textContent || '{}');
       const thumbnail = await captureThumbnail();
-      const version = await saveVersion(code, getGeometryDataObj(), thumbnail, label, assertions?.notes);
+      const version = await saveVersion(code, enrichGeometryDataWithColors(getGeometryDataObj()), thumbnail, label, assertions?.notes);
 
       let diff = null;
       if (prevGeoData && prevGeoData.status === 'ok' && newGeoData.status === 'ok') {
@@ -1601,10 +2274,15 @@ async function main() {
         return true;
       });
       if (typeof check === 'object' && check !== null && 'error' in check) return check;
-      const session = await importSession(data, async (code: string) => {
-        await runCodeSync(code);
-        return captureThumbnail();
-      });
+      let warning: string | null = null;
+      const session = await importSession(
+        data,
+        async (code: string) => {
+          await runCodeSync(code);
+          return captureThumbnail();
+        },
+        (msg) => { warning = msg; },
+      );
       const version = await openSession(session.id);
       if (version) {
         setValue(version.code);
@@ -1621,7 +2299,7 @@ async function main() {
           );
         }
       }
-      return { id: session.id, name: session.name };
+      return { id: session.id, name: session.name, ...(warning ? { warning } : {}) };
     },
 
     /** Clear all sessions and versions from IndexedDB */
@@ -1991,18 +2669,12 @@ async function main() {
 
     /** Get current view state — active tab, camera angle, zoom */
     getViewState(): { tab: string; camera: { azimuth: number; elevation: number; distance: number; target: [number, number, number] } } {
-      const params = new URLSearchParams(window.location.search);
-      let tab = 'interactive';
-      if (params.has('gallery')) tab = 'gallery';
-      else if (params.has('notes')) tab = 'notes';
-      else if (params.get('view') === 'ai') tab = 'ai';
-      else if (params.get('view') === 'elevations') tab = 'elevations';
-      return { tab, camera: getCameraState() };
+      return { tab: getTabFromURL(), camera: getCameraState() };
     },
 
     /** Programmatic tab switching */
-    setView(tab: 'interactive' | 'ai' | 'elevations' | 'gallery' | 'notes'): void {
-      assertEnum(tab, ['interactive', 'ai', 'elevations', 'gallery', 'notes'] as const, 'setView(tab)');
+    setView(tab: 'interactive' | 'ai' | 'elevations' | 'gallery' | 'diff' | 'notes'): void {
+      assertEnum(tab, ['interactive', 'ai', 'elevations', 'gallery', 'diff', 'notes'] as const, 'setView(tab)');
       switchTab(tab);
     },
 
@@ -2109,6 +2781,239 @@ async function main() {
       return measureDistance(p1, p2);
     },
 
+    // === Color Regions API ===
+
+    /** Paint a coplanar region by specifying a point and normal on the model surface.
+     *  Returns the created region or {error}. */
+    paintRegion(opts: { point: [number, number, number]; normal: [number, number, number]; color: [number, number, number]; name?: string; tolerance?: number }) {
+      if (!currentMeshData) return { error: 'No geometry loaded' };
+      if (!opts || typeof opts !== 'object') return { error: 'paintRegion requires {point, normal, color}' };
+      const { point, normal, color, name, tolerance } = opts;
+      if (!Array.isArray(point) || point.length !== 3) return { error: 'point must be [x,y,z]' };
+      if (!Array.isArray(normal) || normal.length !== 3) return { error: 'normal must be [nx,ny,nz]' };
+      if (!Array.isArray(color) || color.length !== 3) return { error: 'color must be [r,g,b] with values 0..1' };
+
+      const normalTolerance = tolerance ?? 0.9995;
+      const adjacency = buildAdjacency(currentMeshData);
+      const seedTri = resolveSeed(point as [number, number, number], normal as [number, number, number], currentMeshData, adjacency, normalTolerance);
+      if (seedTri < 0) return { error: 'No matching face found at the given point/normal' };
+
+      const triangles = findCoplanarRegion(seedTri, adjacency, normalTolerance);
+      const regionName = name ?? `Region ${getRegions().length + 1}`;
+      const region = addRegion(
+        regionName,
+        color as [number, number, number],
+        'face-pick',
+        { kind: 'coplanar', seedPoint: point as [number, number, number], seedNormal: normal as [number, number, number], normalTolerance },
+        triangles,
+      );
+
+      // Re-render with colors
+      const colored = applyTriColorsIfVisible(currentMeshData);
+      updateMesh(colored, { skipAutoFrame: true });
+      updateMultiView(colored);
+      syncLockState();
+
+      return { id: region.id, name: region.name, triangles: triangles.size };
+    },
+
+    /** List all color regions on the current geometry */
+    listRegions() {
+      return getRegions().map(r => ({
+        id: r.id,
+        name: r.name,
+        color: r.color,
+        source: r.source,
+        triangles: r.triangles.size,
+        order: r.order,
+      }));
+    },
+
+    /** Clear all color regions */
+    clearColors() {
+      clearRegions();
+      if (currentMeshData) {
+        updateMesh(currentMeshData, { skipAutoFrame: true });
+        updateMultiView(currentMeshData);
+      }
+      syncLockState();
+      return { cleared: true };
+    },
+
+    // === Annotations API ===
+
+    /** List all freehand annotation strokes drawn on the model surface.
+     *  Each stroke includes its surface-projected polyline points and color. */
+    listAnnotations() {
+      return getAnnotationStrokes().map(s => ({
+        id: s.id,
+        color: s.color,
+        width: s.width,
+        pointCount: s.points.length,
+        points: s.points.map(p => [
+          Math.round(p.x * 1000) / 1000,
+          Math.round(p.y * 1000) / 1000,
+          Math.round(p.z * 1000) / 1000,
+        ] as [number, number, number]),
+        camera: s.camera,
+      }));
+    },
+
+    /** List all pinned text-label annotations on the model. */
+    listTextAnnotations() {
+      return getAnnotationTexts().map(t => ({
+        id: t.id,
+        text: t.text,
+        color: t.color,
+        fontSizePx: t.fontSizePx,
+        anchor: [
+          Math.round(t.anchor.x * 1000) / 1000,
+          Math.round(t.anchor.y * 1000) / 1000,
+          Math.round(t.anchor.z * 1000) / 1000,
+        ] as [number, number, number],
+        camera: t.camera,
+      }));
+    },
+
+    /** Total number of annotations (strokes + text labels). */
+    getAnnotationCount() {
+      return getAnnotationCount();
+    },
+
+    /** Remove the most recently added annotation (stroke or text). */
+    undoAnnotation() {
+      const removed = removeLastAnnotation() !== null;
+      return { removed, remaining: getAnnotationCount() };
+    },
+
+    /** Remove a specific annotation by id. */
+    removeAnnotation(id: string) {
+      assertString(id, 'removeAnnotation(id)');
+      const removed = removeAnnotationById(id);
+      return { removed: removed !== null, remaining: getAnnotationCount() };
+    },
+
+    /** Remove all annotations (strokes and text labels). */
+    clearAnnotations() {
+      const previous = getAnnotationCount();
+      clearAllAnnotations();
+      return { cleared: previous };
+    },
+
+    /** Remove all freehand strokes (keeps text labels). */
+    clearAnnotationStrokes() {
+      const before = getAnnotationStrokes().length;
+      clearStrokesStore();
+      return { cleared: before };
+    },
+
+    /** Remove all text labels (keeps freehand strokes). */
+    clearTextAnnotations() {
+      const before = getAnnotationTexts().length;
+      clearTextsStore();
+      return { cleared: before };
+    },
+
+    /** Add a text-label annotation at a 3D anchor point on the model.
+     *  `anchor` is [x, y, z] in world coords. Text is shown as a screen-facing
+     *  label and survives orbiting. Color (RGB 0..1) and fontSizePx are optional. */
+    addTextAnnotation(opts: {
+      anchor: [number, number, number];
+      text: string;
+      color?: [number, number, number];
+      fontSizePx?: number;
+    }) {
+      const o = assertObject(opts, 'addTextAnnotation(opts)');
+      if (!o) return { error: 'addTextAnnotation requires {anchor, text, color?, fontSizePx?}' };
+      assertNoUnknownKeys(o, ['anchor', 'text', 'color', 'fontSizePx'], 'addTextAnnotation(opts)');
+      assertString(o.text, 'addTextAnnotation(opts).text', { allowEmpty: false });
+      if (!Array.isArray(o.anchor) || o.anchor.length !== 3) {
+        return { error: 'addTextAnnotation(opts).anchor must be [x, y, z]' };
+      }
+      for (const c of o.anchor as number[]) {
+        if (typeof c !== 'number' || !Number.isFinite(c)) {
+          return { error: 'anchor components must be finite numbers' };
+        }
+      }
+      if (o.color !== undefined) {
+        if (!Array.isArray(o.color) || o.color.length !== 3) return { error: 'color must be [r, g, b] in 0..1' };
+        for (const c of o.color as number[]) {
+          if (typeof c !== 'number' || c < 0 || c > 1 || !Number.isFinite(c)) {
+            return { error: 'color components must be finite numbers in 0..1' };
+          }
+        }
+      }
+      if (o.fontSizePx !== undefined) assertNumber(o.fontSizePx, 'addTextAnnotation(opts).fontSizePx', { min: 4, max: 256 });
+
+      const ann = addTextAnnotationAtAnchor({
+        anchor: o.anchor as [number, number, number],
+        text: o.text as string,
+        color: o.color as [number, number, number] | undefined,
+        fontSizePx: o.fontSizePx as number | undefined,
+      });
+      return { id: ann.id };
+    },
+
+    /** Set the default font size (pixels) for new text annotations. */
+    setAnnotationFontSize(px: number) {
+      assertNumber(px, 'setAnnotationFontSize(px)', { min: 4, max: 256 });
+      setAnnotateFontSize(px);
+      return { fontSizePx: px };
+    },
+
+    /** Get the current default font size (pixels) for new text annotations. */
+    getAnnotationFontSize() {
+      return getAnnotateFontSize();
+    },
+
+    /** Snap the camera to the angle the given annotation was originally
+     *  drawn from. Useful when reviewing where an annotation belongs. */
+    restoreAnnotationView(id: string) {
+      assertString(id, 'restoreAnnotationView(id)');
+      const ok = restoreAnnotationViewById(id);
+      return ok ? { restored: true } : { error: `No annotation with id ${id}` };
+    },
+
+    /** Show or hide annotations without removing them.
+     *  When hidden, annotations are excluded from renderView/multiview/elevation output. */
+    setAnnotationsVisible(visible: boolean) {
+      assertBoolean(visible, 'setAnnotationsVisible(visible)');
+      setAnnotationsVisibleOverlay(visible);
+      return { visible };
+    },
+
+    /** Whether annotations are currently visible. */
+    areAnnotationsVisible() {
+      return isAnnotationsVisibleOverlay();
+    },
+
+    /** Set the active drawing color for new annotation strokes. RGB in 0..1. */
+    setAnnotationColor(color: [number, number, number]) {
+      if (!Array.isArray(color) || color.length !== 3) {
+        return { error: 'setAnnotationColor requires [r, g, b] in 0..1' };
+      }
+      for (const c of color) {
+        if (typeof c !== 'number' || c < 0 || c > 1 || !Number.isFinite(c)) {
+          return { error: 'color components must be finite numbers in 0..1' };
+        }
+      }
+      setAnnotateColor([color[0], color[1], color[2]]);
+      return { color };
+    },
+
+    /** Set the active drawing line width (pixels) for new annotation strokes.
+     *  Existing strokes keep their original width. */
+    setAnnotationWidth(width: number) {
+      assertNumber(width, 'setAnnotationWidth(width)', { min: 0.5, max: 64 });
+      setAnnotateWidth(width);
+      return { width };
+    },
+
+    /** Get the active drawing line width (pixels). */
+    getAnnotationWidth() {
+      return getAnnotateWidth();
+    },
+
     /** Self-documenting help -- returns structured object and logs readable summary */
     help(method?: string): Record<string, unknown> {
       assertString(method, 'help(method)', { optional: true, allowEmpty: false });
@@ -2146,13 +3051,50 @@ async function main() {
         'analyzeProfile':  { signature: 'analyzeProfile(sampleCount?) -- Z-profile feature summary', docs: '/ai.md#console-api--windowpartwright' },
         'measureAt':       { signature: 'measureAt([x,y]) -- Ray-cast probe at XY -> {hits, thickness, topZ, bottomZ}', docs: '/ai.md#console-api--windowpartwright' },
         // View
-        'setView':         { signature: 'setView(tab) -- Switch tab: "interactive", "ai", "elevations", "gallery"', docs: '/ai.md#view-tabs' },
+        'setView':         { signature: 'setView(tab) -- Switch tab: "interactive", "ai", "elevations", "gallery", "diff"', docs: '/ai.md#view-tabs' },
         'getViewState':    { signature: 'getViewState() -- Current tab and camera state', docs: '/ai.md#view-tabs' },
         // Export
         'exportGLB':       { signature: 'await exportGLB() -- Download GLB file', docs: '/ai.md#console-api--windowpartwright' },
         'exportSTL':       { signature: 'exportSTL() -- Download STL file', docs: '/ai.md#console-api--windowpartwright' },
         'exportOBJ':       { signature: 'exportOBJ() -- Download OBJ file', docs: '/ai.md#console-api--windowpartwright' },
         'export3MF':       { signature: 'export3MF() -- Download 3MF file', docs: '/ai.md#console-api--windowpartwright' },
+        // AI-friendly export — return bytes over the API instead of triggering a download
+        'exportGLBData':   { signature: 'await exportGLBData() -- Return GLB as {filename, mimeType, base64, sizeBytes}', docs: '/ai.md#ai-friendly-file-io' },
+        'exportSTLData':   { signature: 'await exportSTLData() -- Return STL as {filename, mimeType, base64, sizeBytes}', docs: '/ai.md#ai-friendly-file-io' },
+        'exportOBJData':   { signature: 'await exportOBJData() -- Return OBJ as {filename, mimeType, text? | base64, sizeBytes}', docs: '/ai.md#ai-friendly-file-io' },
+        'export3MFData':   { signature: 'await export3MFData() -- Return 3MF as {filename, mimeType, base64, sizeBytes}', docs: '/ai.md#ai-friendly-file-io' },
+        'exportSessionData': { signature: 'await exportSessionData(sessionId?) -- Return parsed session JSON {filename, mimeType, data, sizeBytes}', docs: '/ai.md#ai-friendly-file-io' },
+        'exportCodeData':  { signature: 'exportCodeData() -- Return editor source as {filename, mimeType, language, text, sizeBytes}', docs: '/ai.md#ai-friendly-file-io' },
+        // AI-friendly import — bypass the file picker
+        'importSessionData': { signature: 'await importSessionData(jsonObjectOrString) -- Import .partwright.json payload -> {sessionId} or {error}', docs: '/ai.md#ai-friendly-file-io' },
+        'importCodeData':  { signature: 'await importCodeData(code, language, sessionName?) -- Import raw source as new session', docs: '/ai.md#ai-friendly-file-io' },
+        // Recent Exports inbox (also visible in toolbar Export dropdown)
+        'listRecentExports': { signature: 'listRecentExports() -- Recent export metadata, newest first', docs: '/ai.md#ai-friendly-file-io' },
+        'getRecentExport': { signature: 'await getRecentExport(id) -- Look up bytes by id -> {filename, mimeType, text? | base64, ...}', docs: '/ai.md#ai-friendly-file-io' },
+        'downloadRecentExport': { signature: 'downloadRecentExport(id) -- Re-trigger browser download for an inbox entry', docs: '/ai.md#ai-friendly-file-io' },
+        'clearRecentExports': { signature: 'clearRecentExports() -- Empty the Recent Exports list', docs: '/ai.md#ai-friendly-file-io' },
+        // Color regions
+        'paintRegion':     { signature: 'paintRegion({point, normal, color, name?, tolerance?}) -- Paint coplanar face region', docs: '/ai.md#color-regions' },
+        'listRegions':     { signature: 'listRegions() -- List all color regions', docs: '/ai.md#color-regions' },
+        'clearColors':     { signature: 'clearColors() -- Remove all color regions', docs: '/ai.md#color-regions' },
+        // Annotations
+        'listAnnotations':    { signature: 'listAnnotations() -- List freehand strokes -> [{id, color, width, points}]', docs: '/ai.md#annotations' },
+        'listTextAnnotations':{ signature: 'listTextAnnotations() -- List pinned text labels -> [{id, text, color, fontSizePx, anchor}]', docs: '/ai.md#annotations' },
+        'addTextAnnotation':  { signature: 'addTextAnnotation({anchor, text, color?, fontSizePx?}) -- Pin a text label at a 3D point', docs: '/ai.md#annotations' },
+        'getAnnotationCount': { signature: 'getAnnotationCount() -- Total annotations (strokes + text)', docs: '/ai.md#annotations' },
+        'undoAnnotation':     { signature: 'undoAnnotation() -- Remove the most recently added annotation -> {removed, remaining}', docs: '/ai.md#annotations' },
+        'removeAnnotation':   { signature: 'removeAnnotation(id) -- Remove a specific annotation by id', docs: '/ai.md#annotations' },
+        'clearAnnotations':   { signature: 'clearAnnotations() -- Remove all annotations (strokes + text) -> {cleared}', docs: '/ai.md#annotations' },
+        'clearAnnotationStrokes': { signature: 'clearAnnotationStrokes() -- Remove only freehand strokes', docs: '/ai.md#annotations' },
+        'clearTextAnnotations':   { signature: 'clearTextAnnotations() -- Remove only text labels', docs: '/ai.md#annotations' },
+        'setAnnotationsVisible': { signature: 'setAnnotationsVisible(bool) -- Show/hide all annotations (also affects renderView output)', docs: '/ai.md#annotations' },
+        'areAnnotationsVisible': { signature: 'areAnnotationsVisible() -- Whether annotations are currently visible', docs: '/ai.md#annotations' },
+        'setAnnotationColor': { signature: 'setAnnotationColor([r,g,b]) -- Set draw color for new strokes/text (RGB 0..1)', docs: '/ai.md#annotations' },
+        'setAnnotationWidth': { signature: 'setAnnotationWidth(px) -- Set line width for new strokes (0.5..64 px)', docs: '/ai.md#annotations' },
+        'getAnnotationWidth': { signature: 'getAnnotationWidth() -- Current line width (pixels)', docs: '/ai.md#annotations' },
+        'setAnnotationFontSize': { signature: 'setAnnotationFontSize(px) -- Set font size for new text labels (4..256 px)', docs: '/ai.md#annotations' },
+        'getAnnotationFontSize': { signature: 'getAnnotationFontSize() -- Current text label font size (pixels)', docs: '/ai.md#annotations' },
+        'restoreAnnotationView': { signature: 'restoreAnnotationView(id) -- Snap the camera to the angle the annotation was made from', docs: '/ai.md#annotations' },
       };
 
       if (method) {
@@ -2211,6 +3153,8 @@ async function main() {
   function runCode(code?: string) {
     const src = code ?? getValue();
     setStatus(statusBar, 'running', 'Running...');
+    clearEditorDiagnostics();
+    clearEditorErrorPanel(editorErrorPanel);
 
     requestAnimationFrame(async () => {
       await runCodeSync(src);
@@ -2226,17 +3170,34 @@ async function main() {
 
     if (result.error) {
       recordError(result.error);
-      setStatus(statusBar, 'error', result.error);
-      geometryDataEl.textContent = JSON.stringify({ status: 'error', error: result.error, executionTimeMs: elapsed, codeHash: simpleHash(src) });
+      const diagnostics = result.diagnostics ?? [];
+      setStatus(statusBar, 'error', summarizeDiagnostics(result.error, diagnostics));
+      setEditorDiagnostics(diagnostics);
+      renderEditorError(editorErrorPanel, result.error, diagnostics);
+      revealFirstDiagnostic();
+      geometryDataEl.textContent = JSON.stringify({
+        status: 'error',
+        error: result.error,
+        diagnostics,
+        executionTimeMs: elapsed,
+        codeHash: simpleHash(src),
+      });
       return;
     }
 
     if (result.mesh) {
+      clearEditorDiagnostics();
+      clearEditorErrorPanel(editorErrorPanel);
       currentMeshData = result.mesh;
       currentManifold = result.manifold;
-      updateMesh(result.mesh);
-      updateMultiView(result.mesh);
-      renderElevationsToContainer(elevationsContainer, result.mesh);
+
+      // Apply any existing color regions to the mesh
+      const displayMesh = hasColorRegions() ? applyTriColorsIfVisible(result.mesh) : result.mesh;
+      updateMesh(displayMesh);
+      updateMultiView(displayMesh);
+      renderElevationsToContainer(elevationsContainer, displayMesh);
+      updatePaintMesh(result.mesh); // always pass uncolored mesh for adjacency
+
       updateGeometryData(elapsed, src);
       syncClipSliderBounds();
       setStatus(statusBar, 'ready', 'Ready');
@@ -2313,17 +3274,59 @@ async function main() {
     const inactiveClass = 'px-2 py-1 rounded text-xs bg-zinc-800/80 backdrop-blur text-zinc-400 hover:text-zinc-200 hover:bg-zinc-700/80 transition-colors border border-zinc-600/50';
     const activeClass = 'px-2 py-1 rounded text-xs bg-blue-500/20 backdrop-blur text-blue-400 hover:bg-blue-500/30 transition-colors border border-blue-500/30';
 
+    function close(): boolean {
+      if (!getMeasureState().active) return false;
+      deactivateMeasure();
+      setMeasureLock(false);
+      measureBtn.className = inactiveClass;
+      return true;
+    }
+
+    closeMeasureIfActive = close;
+
     measureBtn.addEventListener('click', () => {
-      const state = getMeasureState();
-      if (state.active) {
-        deactivateMeasure();
-        setMeasureLock(false);
-        measureBtn.className = inactiveClass;
+      if (getMeasureState().active) {
+        close();
       } else {
         activateMeasure();
         setMeasureLock(true);
         measureBtn.className = activeClass;
       }
+    });
+  }
+
+  function initEscapeMenuClose() {
+    document.addEventListener('keydown', (e) => {
+      if (e.key !== 'Escape') return;
+      const target = e.target as HTMLElement | null;
+      if (target && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable)) {
+        return;
+      }
+      // Let select-mode handle Escape first when an annotation is selected
+      // (it deselects). A subsequent Escape will close the menu.
+      if (isSelectActive() && getSelectedAnnotationId()) return;
+
+      let closed = false;
+      if (isAnnotateOpen()) { closeAnnotateMenu(); closed = true; }
+      if (isPaintOpen()) { closePaintMenu(); closed = true; }
+      if (closeMeasureIfActive()) closed = true;
+      if (getClipState().enabled) { setClipping(false); syncClipUI(); closed = true; }
+      if (closed) e.preventDefault();
+    });
+  }
+
+  function initGridToggle(container: HTMLElement) {
+    const gridBtn = container.querySelector('#grid-toggle') as HTMLButtonElement;
+    if (!gridBtn) return;
+
+    const inactiveClass = 'px-2 py-1 rounded text-xs bg-zinc-800/80 backdrop-blur text-zinc-400 hover:text-zinc-200 hover:bg-zinc-700/80 transition-colors border border-zinc-600/50';
+    const activeClass = 'px-2 py-1 rounded text-xs bg-blue-500/20 backdrop-blur text-blue-400 hover:bg-blue-500/30 transition-colors border border-blue-500/30';
+
+    gridBtn.addEventListener('click', () => {
+      const nowVisible = !isGridVisible();
+      setGridVisible(nowVisible);
+      gridBtn.className = nowVisible ? activeClass : inactiveClass;
+      gridBtn.title = nowVisible ? 'Hide grid plane' : 'Show grid plane';
     });
   }
 
@@ -2349,19 +3352,27 @@ async function main() {
     const inactiveClass = 'px-2 py-1 rounded text-xs bg-zinc-800/80 backdrop-blur text-zinc-400 hover:text-zinc-200 hover:bg-zinc-700/80 transition-colors border border-zinc-600/50';
     const activeClass = 'px-2 py-1 rounded text-xs bg-amber-500/20 backdrop-blur text-amber-400 hover:bg-amber-500/30 transition-colors border border-amber-500/30';
 
-    lockBtn.addEventListener('click', () => {
-      const locked = !isUserOrbitLocked();
-      setUserOrbitLock(locked);
+    function reflect(locked: boolean) {
       lockBtn.className = locked ? activeClass : inactiveClass;
       lockBtn.textContent = locked ? '\uD83D\uDD12' : '\uD83D\uDD13';
       lockBtn.title = locked ? 'Unlock camera rotation' : 'Lock camera rotation';
+    }
+
+    lockBtn.addEventListener('click', () => {
+      setUserOrbitLock(!isUserOrbitLocked());
     });
+
+    // Keep the icon in sync when the lock state changes from any source
+    // (e.g. pen/text/select activate, programmatic API).
+    onUserOrbitLockChange(reflect);
+    reflect(isUserOrbitLocked());
   }
 }
 
 function setStatus(el: HTMLElement, state: 'ready' | 'running' | 'error' | 'loading', text: string) {
   el.textContent = text;
-  el.className = 'text-xs font-mono max-w-xs truncate ';
+  el.title = text;
+  el.className = 'text-xs font-mono max-w-[60%] truncate text-right ';
   switch (state) {
     case 'ready':
       el.className += 'text-emerald-400';

@@ -44,6 +44,11 @@ After any changes that touch routing, Vite config, index.html, or initialization
 5. **AI agent bypass**: `http://localhost:5173/editor?view=ai` should skip the landing page and go straight to the editor with AI Views tab selected.
 6. **Session loading**: Click a session tile on the landing page — should load the session code in the editor, show the session name in the session bar, and update the URL to `/editor?session=<id>`.
 7. **Build**: `npm run build` should succeed with no TypeScript errors.
+8. **Paint mode**: Click the Paint button in the viewport overlay. A color picker panel should appear. Click a face on the model — it should paint the coplanar region in the selected color. The Paint button badge should show the region count.
+9. **Editor lock**: After painting a face, the editor should show a lock banner ("This version has color regions applied.") and become read-only. The run button should be disabled.
+10. **Unlock modal**: Click "Unlock to edit" — a modal should appear with two options (preserve/destructive). Clicking "Unlock editor" with the default "preserve" option should save the colored version and create a new uncolored version. The editor should unlock.
+11. **Gallery badges**: Colored versions in the gallery should show small color-swatch dots next to the version label.
+12. **Color export**: With color regions painted, export GLB — the file should carry vertex colors. Export 3MF — the file should include `<basematerials>` and per-triangle `pid` attributes.
 
 ## AI Agent Workflow & API Reference
 
@@ -99,6 +104,7 @@ The app uses path-based routing for top-level pages and query parameters for vie
 - `?view=ai` — AI Views tab
 - `?view=elevations` — Elevations tab
 - `?gallery` — Gallery tab
+- `?diff` — Diff tab (side-by-side code + stat comparison between two versions)
 - `?notes` — Notes tab
 - `?session=<id>` — Active session
 - `?session=<id>&v=3` — Specific version
@@ -136,6 +142,30 @@ When referencing app routes in HTML/JS strings (links, prompts, instructions), u
 ### Duplicated Logic
 
 When two functions share identical logic (same DOM manipulation, same data transformation), extract the shared part into a single helper and have both callers use it. Copy-pasted logic drifts out of sync when one copy gets updated and the other doesn't.
+
+### Commit & PR Conventions
+
+PR titles, commit subjects, and PR labels feed the auto-generated release notes (`.github/release.yml`). Keep both consistent.
+
+**Conventional Commits prefix** on commit subjects and PR titles:
+
+- `feat:` — user-visible new capability
+- `fix:` — bug fix
+- `docs:` — docs/comments only (README, CLAUDE.md, ai.md, prompt logs)
+- `refactor:` — internal restructure with no behavior change
+- `chore:` — build, deps, tooling, CI config, label hygiene
+- `test:` — test-only changes
+
+Subject is imperative and lowercase after the prefix: `feat: add light/dark mode toggle`.
+
+**PR labels** (drive release-note grouping — apply at least one before merging):
+
+- `enhancement` — pairs with `feat:` → "Features" section
+- `bug` — pairs with `fix:` → "Bug Fixes" section
+- `documentation` — pairs with `docs:` → "Documentation" section
+- `ignore-for-release` — suppress from release notes (use for `chore:`/`refactor:` housekeeping that shouldn't appear in user-facing notes)
+
+Anything unlabeled lands in "Other Changes." That's fine for occasional internal cleanup, but features and fixes should always be labeled.
 
 ## Common Errors
 

@@ -1,16 +1,22 @@
-export type TabName = 'interactive' | 'ai' | 'elevations' | 'gallery' | 'notes';
+export type TabName = 'interactive' | 'ai' | 'elevations' | 'gallery' | 'diff' | 'notes';
 
 export interface LayoutElements {
   editorPane: HTMLElement;
   editorContainer: HTMLElement;
+  editorErrorPanel: HTMLElement;
   viewportPane: HTMLElement;
   viewsContainer: HTMLElement;
   elevationsContainer: HTMLElement;
   galleryContainer: HTMLElement;
+  diffContainer: HTMLElement;
   notesContainer: HTMLElement;
   statusBar: HTMLElement;
   clipControls: HTMLElement;
-  switchTab: (tab: TabName) => void;
+  switchTab: (tab: TabName, options?: SwitchTabOptions) => void;
+}
+
+export interface SwitchTabOptions {
+  history?: 'push' | 'replace' | 'none';
 }
 
 export function createLayout(appContainer: HTMLElement): LayoutElements {
@@ -39,6 +45,11 @@ export function createLayout(appContainer: HTMLElement): LayoutElements {
 
   editorPane.appendChild(editorHeader);
 
+  const editorErrorPanel = document.createElement('div');
+  editorErrorPanel.id = 'editor-error-panel';
+  editorErrorPanel.className = 'hidden border-b border-red-500/30 bg-red-950/40 px-3 py-2 text-xs text-red-100';
+  editorPane.appendChild(editorErrorPanel);
+
   const editorContainer = document.createElement('div');
   editorContainer.id = 'editor-container';
   editorContainer.className = 'flex-1 min-h-0 overflow-hidden';
@@ -65,6 +76,8 @@ export function createLayout(appContainer: HTMLElement): LayoutElements {
   tabElevations.title = 'Orthographic views with optional reference image overlay';
   const tabGallery = createTab('Gallery', false);
   tabGallery.title = 'Compare saved versions side-by-side';
+  const tabDiff = createTab('Diff', false);
+  tabDiff.title = 'Compare code between two versions';
   const tabNotes = createTab('Notes', false);
   tabNotes.title = 'Session notes and design decisions log';
 
@@ -89,6 +102,7 @@ export function createLayout(appContainer: HTMLElement): LayoutElements {
   tabBar.appendChild(tabAI);
   tabBar.appendChild(tabElevations);
   tabBar.appendChild(tabGallery);
+  tabBar.appendChild(tabDiff);
   tabBar.appendChild(tabNotes);
   tabBar.appendChild(viewActions);
 
@@ -113,16 +127,20 @@ export function createLayout(appContainer: HTMLElement): LayoutElements {
   galleryContainer.id = 'gallery-container';
   galleryContainer.className = 'flex-1 min-h-0 overflow-auto bg-zinc-900 hidden p-4';
 
+  const diffContainer = document.createElement('div');
+  diffContainer.id = 'diff-container';
+  diffContainer.className = 'flex-1 min-h-0 overflow-hidden bg-zinc-900 hidden';
+
   const notesContainer = document.createElement('div');
   notesContainer.id = 'notes-container';
   notesContainer.className = 'flex-1 min-h-0 overflow-auto bg-zinc-900 hidden p-4 flex flex-col';
 
-  const allTabs = [tabInteractive, tabAI, tabElevations, tabGallery, tabNotes];
-  const allPanes = [viewportPane, viewsContainer, elevationsContainer, galleryContainer, notesContainer];
+  const allTabs = [tabInteractive, tabAI, tabElevations, tabGallery, tabDiff, tabNotes];
+  const allPanes = [viewportPane, viewsContainer, elevationsContainer, galleryContainer, diffContainer, notesContainer];
 
   // Shared tab activation logic (DOM toggling, editor visibility, events)
   function applyTab(tab: TabName) {
-    const idx = tab === 'interactive' ? 0 : tab === 'ai' ? 1 : tab === 'elevations' ? 2 : tab === 'gallery' ? 3 : 4;
+    const idx = tab === 'interactive' ? 0 : tab === 'ai' ? 1 : tab === 'elevations' ? 2 : tab === 'gallery' ? 3 : tab === 'diff' ? 4 : 5;
     for (let i = 0; i < allPanes.length; i++) {
       if (i === idx) {
         allPanes[i].classList.remove('hidden');
@@ -133,7 +151,7 @@ export function createLayout(appContainer: HTMLElement): LayoutElements {
       }
     }
     viewActions.classList.toggle('hidden', tab !== 'ai' && tab !== 'elevations');
-    const hideEditor = tab === 'ai' || tab === 'elevations';
+    const hideEditor = tab === 'ai' || tab === 'elevations' || tab === 'diff';
     editorPane.classList.toggle('hidden', hideEditor);
     splitter.classList.toggle('hidden', hideEditor);
     window.dispatchEvent(new CustomEvent('tab-switched', { detail: { tab } }));
@@ -141,7 +159,7 @@ export function createLayout(appContainer: HTMLElement): LayoutElements {
   }
 
   // Tab switching — updates URL to reflect current tab
-  function switchTab(tab: TabName) {
+  function switchTab(tab: TabName, options: SwitchTabOptions = {}) {
     applyTab(tab);
 
     const basePath = '/editor';
@@ -149,40 +167,61 @@ export function createLayout(appContainer: HTMLElement): LayoutElements {
     if (tab === 'ai') {
       params.set('view', 'ai');
       params.delete('gallery');
+      params.delete('diff');
       params.delete('notes');
     } else if (tab === 'elevations') {
       params.set('view', 'elevations');
       params.delete('gallery');
+      params.delete('diff');
       params.delete('notes');
     } else if (tab === 'gallery') {
       params.set('gallery', '');
       params.delete('view');
+      params.delete('diff');
+      params.delete('notes');
+    } else if (tab === 'diff') {
+      params.set('diff', '');
+      params.delete('view');
+      params.delete('gallery');
       params.delete('notes');
     } else if (tab === 'notes') {
       params.set('notes', '');
       params.delete('view');
       params.delete('gallery');
+      params.delete('diff');
     } else {
       params.delete('view');
       params.delete('gallery');
+      params.delete('diff');
       params.delete('notes');
     }
     const newUrl = params.toString()
       ? `${basePath}?${params.toString().replace(/=(?=&|$)/g, '')}`
       : basePath;
-    window.history.replaceState(null, '', newUrl);
+    const currentUrl = `${window.location.pathname}${window.location.search}`;
+    const historyMode = options.history ?? 'push';
+    if (historyMode !== 'none' && newUrl !== currentUrl) {
+      if (historyMode === 'replace') {
+        window.history.replaceState(null, '', newUrl);
+      } else {
+        window.history.pushState(null, '', newUrl);
+      }
+    }
   }
 
   tabInteractive.addEventListener('click', () => switchTab('interactive'));
   tabAI.addEventListener('click', () => switchTab('ai'));
   tabElevations.addEventListener('click', () => switchTab('elevations'));
   tabGallery.addEventListener('click', () => switchTab('gallery'));
+  tabDiff.addEventListener('click', () => switchTab('diff'));
   tabNotes.addEventListener('click', () => switchTab('notes'));
 
   // Restore tab from URL on initial load (without re-writing the URL)
   const initParams = new URLSearchParams(window.location.search);
   if (initParams.has('notes')) {
     applyTab('notes');
+  } else if (initParams.has('diff')) {
+    applyTab('diff');
   } else if (initParams.has('gallery')) {
     applyTab('gallery');
   } else if (initParams.get('view') === 'elevations') {
@@ -196,6 +235,7 @@ export function createLayout(appContainer: HTMLElement): LayoutElements {
   rightPane.appendChild(viewsContainer);
   rightPane.appendChild(elevationsContainer);
   rightPane.appendChild(galleryContainer);
+  rightPane.appendChild(diffContainer);
   rightPane.appendChild(notesContainer);
 
   main.appendChild(editorPane);
@@ -204,7 +244,7 @@ export function createLayout(appContainer: HTMLElement): LayoutElements {
 
   appContainer.appendChild(main);
 
-  return { editorPane, editorContainer, viewportPane, viewsContainer, elevationsContainer, galleryContainer, notesContainer, statusBar, clipControls, switchTab };
+  return { editorPane, editorContainer, editorErrorPanel, viewportPane, viewsContainer, elevationsContainer, galleryContainer, diffContainer, notesContainer, statusBar, clipControls, switchTab };
 }
 
 function createTab(label: string, active: boolean): HTMLButtonElement {
@@ -221,6 +261,14 @@ function createClipControls(): HTMLElement {
   const container = document.createElement('div');
   container.id = 'clip-controls';
   container.className = 'absolute top-2 right-2 z-10 flex items-center gap-2';
+
+  // Grid toggle (off by default)
+  const gridBtn = document.createElement('button');
+  gridBtn.id = 'grid-toggle';
+  gridBtn.className = 'px-2 py-1 rounded text-xs bg-zinc-800/80 backdrop-blur text-zinc-400 hover:text-zinc-200 hover:bg-zinc-700/80 transition-colors border border-zinc-600/50';
+  gridBtn.textContent = '\u25A6';
+  gridBtn.title = 'Show grid plane';
+  container.appendChild(gridBtn);
 
   // Dimensions toggle (on by default)
   const dimBtn = document.createElement('button');

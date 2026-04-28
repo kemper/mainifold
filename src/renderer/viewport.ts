@@ -6,6 +6,21 @@ import { initPhantomGroup } from './phantomGeometry';
 import { initMeasureOverlay } from './measureOverlay';
 import { initOrientationGizmo, renderGizmo, updateGizmo, disposeGizmo, isGizmoAnimating } from './orientationGizmo';
 import { initDimensionLines, updateDimensionLines, disposeDimensionLines } from './dimensionLines';
+import { initAnnotationOverlay, setLiveResolution as setAnnotationResolution } from '../annotations/annotationOverlay';
+import { configureSessionPlane } from '../annotations/sessionPlane';
+import { getTheme, onThemeChange, type Theme } from '../ui/theme';
+
+const VIEWPORT_BG = { dark: 0x1a1a2e, light: 0xededed } as const;
+const GRID_COLORS = { dark: { major: 0x444444, minor: 0x333333 }, light: { major: 0xb0b0b0, minor: 0xc8c8c8 } } as const;
+function bgFor(theme: Theme): number { return VIEWPORT_BG[theme]; }
+
+function makeGrid(theme: Theme): THREE.GridHelper {
+  const c = GRID_COLORS[theme];
+  const g = new THREE.GridHelper(40, 40, c.major, c.minor);
+  g.rotation.x = Math.PI / 2;
+  g.visible = false;
+  return g;
+}
 
 let renderer: THREE.WebGLRenderer;
 let camera: THREE.PerspectiveCamera;
@@ -17,6 +32,9 @@ let animationId: number;
 // Orbit lock state — orbit is disabled when any lock source is active
 let measureLock = false;
 let userLock = false;
+
+// Grid plane
+let grid: THREE.GridHelper;
 
 // Clipping plane state
 const clipPlane = new THREE.Plane(new THREE.Vector3(0, 0, -1), 0); // clips above Z
@@ -41,7 +59,7 @@ export function initViewport(container: HTMLElement): {
   renderer: THREE.WebGLRenderer;
 } {
   scene = new THREE.Scene();
-  scene.background = new THREE.Color(0x1a1a2e);
+  scene.background = new THREE.Color(bgFor(getTheme()));
 
   camera = new THREE.PerspectiveCamera(50, 1, 0.1, 1000);
   camera.position.set(15, -15, 15);
@@ -73,10 +91,21 @@ export function initViewport(container: HTMLElement): {
   dir2.position.set(-10, 10, -5);
   scene.add(dir2);
 
-  // Grid on XY plane
-  const grid = new THREE.GridHelper(40, 40, 0x444444, 0x333333);
-  grid.rotation.x = Math.PI / 2;
+  // Grid on XY plane (hidden by default)
+  grid = makeGrid(getTheme());
   scene.add(grid);
+
+  // Re-tint scene + grid when theme flips
+  onThemeChange((theme) => {
+    (scene.background as THREE.Color).set(bgFor(theme));
+    const wasVisible = grid.visible;
+    scene.remove(grid);
+    grid.geometry.dispose();
+    (grid.material as THREE.Material).dispose();
+    grid = makeGrid(theme);
+    grid.visible = wasVisible;
+    scene.add(grid);
+  });
 
   meshGroup = new THREE.Group();
   scene.add(meshGroup);
@@ -93,6 +122,10 @@ export function initViewport(container: HTMLElement): {
   // Bounding box dimension annotations
   initDimensionLines(scene);
 
+  // Freehand annotation overlay (drawn surface marks)
+  initAnnotationOverlay(scene);
+  configureSessionPlane(controls);
+
   // ResizeObserver
   const observer = new ResizeObserver(entries => {
     const { width, height } = entries[0].contentRect;
@@ -100,8 +133,16 @@ export function initViewport(container: HTMLElement): {
     renderer.setSize(width, height);
     camera.aspect = width / height;
     camera.updateProjectionMatrix();
+    setAnnotationResolution(width * window.devicePixelRatio, height * window.devicePixelRatio);
   });
   observer.observe(container);
+
+  // Initialize annotation resolution to current canvas size so the first
+  // strokes drawn before any resize event fire still get correct widths.
+  setAnnotationResolution(
+    canvas.width || container.clientWidth * window.devicePixelRatio,
+    canvas.height || container.clientHeight * window.devicePixelRatio,
+  );
 
   // Animate
   const clock = new THREE.Clock();
@@ -119,7 +160,7 @@ export function initViewport(container: HTMLElement): {
   return { scene, camera, renderer };
 }
 
-export function updateMesh(meshData: MeshData): void {
+export function updateMesh(meshData: MeshData, options?: { skipAutoFrame?: boolean }): void {
   // Clear previous
   while (meshGroup.children.length > 0) {
     const child = meshGroup.children[0];
@@ -133,8 +174,9 @@ export function updateMesh(meshData: MeshData): void {
   }
 
   const geometry = meshGLToBufferGeometry(meshData);
+  const hasColors = geometry.hasAttribute('color');
 
-  const solidMat = createDefaultMaterial();
+  const solidMat = createDefaultMaterial(hasColors);
   const wireMat = createWireframeMaterial();
 
   // Apply clipping planes to materials
@@ -157,29 +199,35 @@ export function updateMesh(meshData: MeshData): void {
     meshGroup.add(capMesh);
   }
 
-  // Auto-frame the camera
+  // Auto-frame the camera (skip when only colors changed)
   const box = new THREE.Box3().setFromObject(meshGroup);
-  const center = box.getCenter(new THREE.Vector3());
-  const size = box.getSize(new THREE.Vector3());
-  const maxDim = Math.max(size.x, size.y, size.z);
 
-  // Update model bounds for clip slider
-  modelBounds = { min: box.min.z, max: box.max.z };
+  if (!options?.skipAutoFrame) {
+    const center = box.getCenter(new THREE.Vector3());
+    const size = box.getSize(new THREE.Vector3());
+    const maxDim = Math.max(size.x, size.y, size.z);
 
-  // Update bounding box dimension annotations
-  updateDimensionLines(box);
+    // Update model bounds for clip slider
+    modelBounds = { min: box.min.z, max: box.max.z };
 
-  controls.target.copy(center);
-  camera.position.set(
-    center.x + maxDim * 1.2,
-    center.y - maxDim * 1.2,
-    center.z + maxDim * 1.2,
-  );
-  controls.update();
+    // Position grid at the bottom of the model
+    grid.position.z = box.min.z;
 
-  // Update clip plane position if clipping
-  if (clippingEnabled) {
-    updateClipPlaneVisual();
+    // Update bounding box dimension annotations
+    updateDimensionLines(box);
+
+    controls.target.copy(center);
+    camera.position.set(
+      center.x + maxDim * 1.2,
+      center.y - maxDim * 1.2,
+      center.z + maxDim * 1.2,
+    );
+    controls.update();
+
+    // Update clip plane position if clipping
+    if (clippingEnabled) {
+      updateClipPlaneVisual();
+    }
   }
 }
 
@@ -273,17 +321,64 @@ function removeClipPlaneVisual() {
 
 function meshGLToBufferGeometry(mesh: MeshData): THREE.BufferGeometry {
   const geometry = new THREE.BufferGeometry();
-  const positions = new Float32Array(mesh.numVert * 3);
 
-  for (let i = 0; i < mesh.numVert; i++) {
-    positions[i * 3] = mesh.vertProperties[i * mesh.numProp];
-    positions[i * 3 + 1] = mesh.vertProperties[i * mesh.numProp + 1];
-    positions[i * 3 + 2] = mesh.vertProperties[i * mesh.numProp + 2];
+  if (mesh.triColors) {
+    // With per-triangle colors, we must unindex (duplicate vertices per triangle)
+    // so each triangle's 3 vertices can carry that triangle's color.
+    const numTri = mesh.numTri;
+    const positions = new Float32Array(numTri * 3 * 3);
+    const colors = new Float32Array(numTri * 3 * 3);
+    const { vertProperties, triVerts, numProp, triColors } = mesh;
+
+    for (let t = 0; t < numTri; t++) {
+      const v0 = triVerts[t * 3];
+      const v1 = triVerts[t * 3 + 1];
+      const v2 = triVerts[t * 3 + 2];
+
+      // Positions
+      for (let c = 0; c < 3; c++) {
+        positions[t * 9 + c] = vertProperties[v0 * numProp + c];
+        positions[t * 9 + 3 + c] = vertProperties[v1 * numProp + c];
+        positions[t * 9 + 6 + c] = vertProperties[v2 * numProp + c];
+      }
+
+      // Colors (same for all 3 vertices of the triangle)
+      const r = triColors[t * 3] / 255;
+      const g = triColors[t * 3 + 1] / 255;
+      const b = triColors[t * 3 + 2] / 255;
+
+      // Check if this triangle is painted (has a color region)
+      const painted = (triColors as Uint8Array & { _painted?: Uint8Array })._painted;
+      const isPainted = painted ? painted[t] === 1 : (r !== 0 || g !== 0 || b !== 0);
+
+      // Unpainted triangles get the default blue (#4a9eff)
+      const cr = isPainted ? r : 0x4a / 255;
+      const cg = isPainted ? g : 0x9e / 255;
+      const cb = isPainted ? b : 0xff / 255;
+
+      for (let v = 0; v < 3; v++) {
+        colors[t * 9 + v * 3] = cr;
+        colors[t * 9 + v * 3 + 1] = cg;
+        colors[t * 9 + v * 3 + 2] = cb;
+      }
+    }
+
+    geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+    geometry.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+    geometry.computeVertexNormals();
+  } else {
+    // No colors — use indexed geometry (original path)
+    const positions = new Float32Array(mesh.numVert * 3);
+    for (let i = 0; i < mesh.numVert; i++) {
+      positions[i * 3] = mesh.vertProperties[i * mesh.numProp];
+      positions[i * 3 + 1] = mesh.vertProperties[i * mesh.numProp + 1];
+      positions[i * 3 + 2] = mesh.vertProperties[i * mesh.numProp + 2];
+    }
+    geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+    geometry.setIndex(new THREE.BufferAttribute(mesh.triVerts, 1));
+    geometry.computeVertexNormals();
   }
 
-  geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
-  geometry.setIndex(new THREE.BufferAttribute(mesh.triVerts, 1));
-  geometry.computeVertexNormals();
   return geometry;
 }
 
@@ -335,16 +430,38 @@ export function setMeasureLock(locked: boolean): void {
   syncOrbitEnabled();
 }
 
+const userOrbitLockListeners: Array<(locked: boolean) => void> = [];
+
 export function setUserOrbitLock(locked: boolean): void {
+  if (userLock === locked) return;
   userLock = locked;
   syncOrbitEnabled();
+  for (const fn of userOrbitLockListeners) fn(locked);
 }
 
 export function isUserOrbitLocked(): boolean {
   return userLock;
 }
 
+export function onUserOrbitLockChange(fn: (locked: boolean) => void): () => void {
+  userOrbitLockListeners.push(fn);
+  return () => {
+    const i = userOrbitLockListeners.indexOf(fn);
+    if (i >= 0) userOrbitLockListeners.splice(i, 1);
+  };
+}
+
 export { setDimensionsVisible, isDimensionsVisible } from './dimensionLines';
+
+// === Grid visibility API ===
+
+export function setGridVisible(visible: boolean): void {
+  grid.visible = visible;
+}
+
+export function isGridVisible(): boolean {
+  return grid.visible;
+}
 
 export function dispose(): void {
   cancelAnimationFrame(animationId);

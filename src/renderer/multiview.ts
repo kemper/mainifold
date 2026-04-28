@@ -1,6 +1,7 @@
 import * as THREE from 'three';
 import { createWhiteMaterial, createBlackWireframeMaterial } from './materials';
 import type { MeshData } from '../geometry/types';
+import { buildStrokesGroup, disposeStrokesGroup } from '../annotations/annotationOverlay';
 
 interface ViewConfig {
   name: string;
@@ -18,15 +19,56 @@ const VIEWS: ViewConfig[] = [
 
 function meshDataToGeometry(meshData: MeshData): THREE.BufferGeometry {
   const geometry = new THREE.BufferGeometry();
-  const positions = new Float32Array(meshData.numVert * 3);
-  for (let i = 0; i < meshData.numVert; i++) {
-    positions[i * 3] = meshData.vertProperties[i * meshData.numProp];
-    positions[i * 3 + 1] = meshData.vertProperties[i * meshData.numProp + 1];
-    positions[i * 3 + 2] = meshData.vertProperties[i * meshData.numProp + 2];
+
+  if (meshData.triColors) {
+    // Unindex to carry per-triangle colors as per-vertex attributes
+    const numTri = meshData.numTri;
+    const positions = new Float32Array(numTri * 3 * 3);
+    const colors = new Float32Array(numTri * 3 * 3);
+    const { vertProperties, triVerts, numProp, triColors } = meshData;
+
+    for (let t = 0; t < numTri; t++) {
+      const v0 = triVerts[t * 3];
+      const v1 = triVerts[t * 3 + 1];
+      const v2 = triVerts[t * 3 + 2];
+
+      for (let c = 0; c < 3; c++) {
+        positions[t * 9 + c] = vertProperties[v0 * numProp + c];
+        positions[t * 9 + 3 + c] = vertProperties[v1 * numProp + c];
+        positions[t * 9 + 6 + c] = vertProperties[v2 * numProp + c];
+      }
+
+      const r = triColors[t * 3] / 255;
+      const g = triColors[t * 3 + 1] / 255;
+      const b = triColors[t * 3 + 2] / 255;
+      const painted = (triColors as Uint8Array & { _painted?: Uint8Array })._painted;
+      const isPainted = painted ? painted[t] === 1 : (r !== 0 || g !== 0 || b !== 0);
+      const cr = isPainted ? r : 1;
+      const cg = isPainted ? g : 1;
+      const cb = isPainted ? b : 1;
+
+      for (let v = 0; v < 3; v++) {
+        colors[t * 9 + v * 3] = cr;
+        colors[t * 9 + v * 3 + 1] = cg;
+        colors[t * 9 + v * 3 + 2] = cb;
+      }
+    }
+
+    geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+    geometry.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+    geometry.computeVertexNormals();
+  } else {
+    const positions = new Float32Array(meshData.numVert * 3);
+    for (let i = 0; i < meshData.numVert; i++) {
+      positions[i * 3] = meshData.vertProperties[i * meshData.numProp];
+      positions[i * 3 + 1] = meshData.vertProperties[i * meshData.numProp + 1];
+      positions[i * 3 + 2] = meshData.vertProperties[i * meshData.numProp + 2];
+    }
+    geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+    geometry.setIndex(new THREE.BufferAttribute(meshData.triVerts, 1));
+    geometry.computeVertexNormals();
   }
-  geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
-  geometry.setIndex(new THREE.BufferAttribute(meshData.triVerts, 1));
-  geometry.computeVertexNormals();
+
   return geometry;
 }
 
@@ -67,7 +109,8 @@ export function renderViewsToContainer(container: HTMLElement, meshData: MeshDat
   dir2.position.set(-10, 10, -5);
   scene.add(dir2);
 
-  const solidMesh = new THREE.Mesh(geometry, createWhiteMaterial());
+  const hasColors = geometry.hasAttribute('color');
+  const solidMesh = new THREE.Mesh(geometry, createWhiteMaterial(hasColors));
   const wireMesh = new THREE.Mesh(geometry, createBlackWireframeMaterial());
   scene.add(solidMesh);
   scene.add(wireMesh);
@@ -83,6 +126,9 @@ export function renderViewsToContainer(container: HTMLElement, meshData: MeshDat
   const camera = new THREE.PerspectiveCamera(40, 1, 0.1, 1000);
   const viewSize = 300;
   const renderer = getOffscreenRenderer(viewSize);
+
+  const annotations = buildStrokesGroup(new THREE.Vector2(viewSize, viewSize));
+  if (annotations) scene.add(annotations);
 
   // 2x2 grid that fills the container
   const grid = document.createElement('div');
@@ -119,6 +165,10 @@ export function renderViewsToContainer(container: HTMLElement, meshData: MeshDat
   }
 
   container.appendChild(grid);
+  if (annotations) {
+    scene.remove(annotations);
+    disposeStrokesGroup(annotations);
+  }
   disposeScene(scene);
   geometry.dispose();
 }
@@ -126,6 +176,7 @@ export function renderViewsToContainer(container: HTMLElement, meshData: MeshDat
 export function renderCompositeCanvas(meshData: MeshData): HTMLCanvasElement {
   const geometry = meshDataToGeometry(meshData);
   const viewSize = 500;
+  const hasColors = geometry.hasAttribute('color');
 
   const scene = new THREE.Scene();
   scene.background = new THREE.Color(0xffffff);
@@ -136,7 +187,7 @@ export function renderCompositeCanvas(meshData: MeshData): HTMLCanvasElement {
   dir.position.set(10, -10, 15);
   scene.add(dir);
 
-  const solidMesh = new THREE.Mesh(geometry, createWhiteMaterial());
+  const solidMesh = new THREE.Mesh(geometry, createWhiteMaterial(hasColors));
   const wireMesh = new THREE.Mesh(geometry, createBlackWireframeMaterial());
   scene.add(solidMesh);
   scene.add(wireMesh);
@@ -151,6 +202,9 @@ export function renderCompositeCanvas(meshData: MeshData): HTMLCanvasElement {
 
   const camera = new THREE.PerspectiveCamera(40, 1, 0.1, 1000);
   const renderer = getOffscreenRenderer(viewSize);
+
+  const annotations = buildStrokesGroup(new THREE.Vector2(viewSize, viewSize));
+  if (annotations) scene.add(annotations);
 
   const labelHeight = 28;
   const cellHeight = viewSize + labelHeight;
@@ -187,6 +241,10 @@ export function renderCompositeCanvas(meshData: MeshData): HTMLCanvasElement {
     ctx.textAlign = 'start';
   });
 
+  if (annotations) {
+    scene.remove(annotations);
+    disposeStrokesGroup(annotations);
+  }
   disposeScene(scene);
   geometry.dispose();
   return compositeCanvas;
@@ -246,7 +304,8 @@ function createElevationScene(geometry: THREE.BufferGeometry, bgColor: number): 
   const dir2 = new THREE.DirectionalLight(0xffffff, 0.3);
   dir2.position.set(-10, 10, -5);
   scene.add(dir2);
-  const solidMesh = new THREE.Mesh(geometry, createWhiteMaterial());
+  const hasColors = geometry.hasAttribute('color');
+  const solidMesh = new THREE.Mesh(geometry, createWhiteMaterial(hasColors));
   const wireMesh = new THREE.Mesh(geometry, createBlackWireframeMaterial());
   scene.add(solidMesh);
   scene.add(wireMesh);
@@ -313,6 +372,9 @@ export function renderElevationsToContainer(container: HTMLElement, meshData: Me
   const viewSize = 300;
   const renderer = getOffscreenRenderer(viewSize);
   const hasRef = _referenceImages !== null;
+
+  const annotations = buildStrokesGroup(new THREE.Vector2(viewSize, viewSize));
+  if (annotations) scene.add(annotations);
 
   // Compact reference images row (above the elevation grid)
   if (hasRef) {
@@ -418,6 +480,10 @@ export function renderElevationsToContainer(container: HTMLElement, meshData: Me
 
   outerWrap.appendChild(grid);
   container.appendChild(outerWrap);
+  if (annotations) {
+    scene.remove(annotations);
+    disposeStrokesGroup(annotations);
+  }
   disposeScene(scene);
   geometry.dispose();
 }
@@ -471,6 +537,10 @@ export function renderSingleView(meshData: MeshData, options: {
   }
 
   const renderer = getOffscreenRenderer(viewSize);
+
+  const annotations = buildStrokesGroup(new THREE.Vector2(viewSize, viewSize));
+  if (annotations) scene.add(annotations);
+
   renderer.render(scene, camera);
 
   const canvas = document.createElement('canvas');
@@ -479,6 +549,10 @@ export function renderSingleView(meshData: MeshData, options: {
   const ctx = canvas.getContext('2d')!;
   ctx.drawImage(renderer.domElement, 0, 0);
 
+  if (annotations) {
+    scene.remove(annotations);
+    disposeStrokesGroup(annotations);
+  }
   disposeScene(scene);
   geometry.dispose();
   return canvas.toDataURL('image/png');

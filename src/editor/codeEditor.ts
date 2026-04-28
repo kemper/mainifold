@@ -4,12 +4,22 @@ import { javascript } from '@codemirror/lang-javascript';
 import { StreamLanguage } from '@codemirror/language';
 import { oneDark } from '@codemirror/theme-one-dark';
 import { basicSetup } from 'codemirror';
+import { lintGutter, setDiagnostics, type Diagnostic } from '@codemirror/lint';
+import type { SourceDiagnostic } from '../geometry/types';
+import { getTheme, onThemeChange, type Theme } from '../ui/theme';
 
 export type EditorLanguage = 'manifold-js' | 'scad';
 
 let editorView: EditorView | null = null;
 let debounceTimer: number | null = null;
+let activeDiagnostics: Diagnostic[] = [];
 const languageCompartment = new Compartment();
+const readOnlyCompartment = new Compartment();
+const themeCompartment = new Compartment();
+
+function themeExt(theme: Theme): Extension {
+  return theme === 'dark' ? oneDark : [];
+}
 
 // Minimal OpenSCAD StreamLanguage — keyword/builtin/comment/string/number coloring.
 const SCAD_KEYWORDS = new Set([
@@ -57,6 +67,55 @@ function languageExt(lang: EditorLanguage): Extension {
   return lang === 'scad' ? scadLanguage : javascript();
 }
 
+function clampOffset(offset: number, docLength: number): number {
+  if (!Number.isFinite(offset)) return 0;
+  return Math.max(0, Math.min(docLength, Math.trunc(offset)));
+}
+
+function offsetFromLineColumn(doc: string, line?: number, column?: number): number {
+  if (!line) return 0;
+  const targetLine = Math.max(1, Math.trunc(line));
+  let currentLine = 1;
+  let lineStart = 0;
+
+  for (let i = 0; i < doc.length && currentLine < targetLine; i++) {
+    if (doc.charCodeAt(i) === 10) {
+      currentLine++;
+      lineStart = i + 1;
+    }
+  }
+
+  if (currentLine !== targetLine) return doc.length;
+  const lineEnd = doc.indexOf('\n', lineStart);
+  const end = lineEnd === -1 ? doc.length : lineEnd;
+  const colOffset = Math.max(0, Math.trunc(column ?? 1) - 1);
+  return Math.min(lineStart + colOffset, end);
+}
+
+function toEditorDiagnostic(input: SourceDiagnostic, doc: string): Diagnostic {
+  const from = input.from !== undefined
+    ? clampOffset(input.from, doc.length)
+    : offsetFromLineColumn(doc, input.line, input.column);
+  const to = input.to !== undefined
+    ? clampOffset(input.to, doc.length)
+    : input.endLine !== undefined
+      ? offsetFromLineColumn(doc, input.endLine, input.endColumn)
+      : Math.min(doc.length, from + 1);
+  const message = input.hint ? `${input.message}\nHint: ${input.hint}` : input.message;
+
+  return {
+    from,
+    to: Math.max(from, to),
+    severity: input.severity,
+    source: input.source,
+    message,
+  };
+}
+
+function hasEditorLocation(input: SourceDiagnostic): boolean {
+  return input.from !== undefined || input.line !== undefined;
+}
+
 export function initEditor(
   container: HTMLElement,
   initialCode: string,
@@ -68,9 +127,14 @@ export function initEditor(
     extensions: [
       basicSetup,
       languageCompartment.of(languageExt(initialLanguage)),
-      oneDark,
+      lintGutter(),
+      readOnlyCompartment.of(EditorState.readOnly.of(false)),
+      themeCompartment.of(themeExt(getTheme())),
       EditorView.updateListener.of((update) => {
         if (update.docChanged) {
+          if (activeDiagnostics.length > 0) {
+            window.queueMicrotask(() => clearEditorDiagnostics());
+          }
           if (debounceTimer !== null) clearTimeout(debounceTimer);
           debounceTimer = window.setTimeout(() => {
             onChange(getValue());
@@ -81,6 +145,7 @@ export function initEditor(
         '&': { height: '100%', fontSize: '13px' },
         '.cm-scroller': { overflow: 'auto' },
         '.cm-content': { fontFamily: 'monospace' },
+        '.cm-lint-marker-error': { cursor: 'help' },
       }),
     ],
   });
@@ -88,6 +153,11 @@ export function initEditor(
   editorView = new EditorView({
     state,
     parent: container,
+  });
+
+  onThemeChange((theme) => {
+    if (!editorView) return;
+    editorView.dispatch({ effects: themeCompartment.reconfigure(themeExt(theme)) });
   });
 
   return editorView;
@@ -108,5 +178,37 @@ export function setValue(code: string): void {
   if (!editorView) return;
   editorView.dispatch({
     changes: { from: 0, to: editorView.state.doc.length, insert: code },
+  });
+}
+
+export function setEditorDiagnostics(diagnostics: SourceDiagnostic[]): void {
+  if (!editorView) return;
+  const doc = editorView.state.doc.toString();
+  activeDiagnostics = diagnostics
+    .filter(hasEditorLocation)
+    .map(d => toEditorDiagnostic(d, doc));
+  editorView.dispatch(setDiagnostics(editorView.state, activeDiagnostics));
+}
+
+export function clearEditorDiagnostics(): void {
+  if (!editorView || activeDiagnostics.length === 0) return;
+  activeDiagnostics = [];
+  editorView.dispatch(setDiagnostics(editorView.state, []));
+}
+
+export function revealFirstDiagnostic(): void {
+  if (!editorView || activeDiagnostics.length === 0) return;
+  const first = activeDiagnostics[0];
+  editorView.dispatch({
+    selection: { anchor: first.from, head: first.to },
+    effects: EditorView.scrollIntoView(first.from, { y: 'center' }),
+  });
+  editorView.focus();
+}
+
+export function setReadOnly(readOnly: boolean): void {
+  if (!editorView) return;
+  editorView.dispatch({
+    effects: readOnlyCompartment.reconfigure(EditorState.readOnly.of(readOnly)),
   });
 }

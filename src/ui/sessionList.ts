@@ -5,9 +5,9 @@ import {
   createSession,
   deleteSession,
   openSession,
-  exportSession,
   importSession,
   clearAllSessions,
+  exportSession,
   type Session,
   type ExportedSession,
 } from '../storage/sessionManager';
@@ -69,7 +69,7 @@ export async function showSessionList(): Promise<void> {
           alert('Invalid session file.');
           return;
         }
-        const session = await importSession(data, regenerateThumbnailFn ?? undefined);
+        const session = await importSession(data, regenerateThumbnailFn ?? undefined, (msg) => alert(msg));
         const version = await openSession(session.id);
         if (version && onLoadVersion) onLoadVersion(version.code);
         closeModal();
@@ -184,6 +184,13 @@ async function createSessionRow(session: Session): Promise<HTMLElement> {
     e.stopPropagation();
     const data = await exportSession(session.id);
     if (!data) return;
+    if (data.versions.length === 0) {
+      alert(
+        `"${session.name}" has no saved versions, so the export would be empty.\n\n` +
+        `Open the session, save a version (\u{1F4BE} Save), then export.`,
+      );
+      return;
+    }
     const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
     const link = document.createElement('a');
     link.href = URL.createObjectURL(blob);

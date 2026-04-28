@@ -16,10 +16,13 @@ Partwright is a browser-based parametric CAD tool with two modeling engines: **m
 - [Writing OpenSCAD code](#writing-openscad-code)
 - [Common pitfalls for boolean operations](#common-pitfalls-for-boolean-operations)
 - [Print-safe geometry](#print-safe-geometry)
+- [Color regions](#color-regions)
+- [AI-friendly file I/O](#ai-friendly-file-io)
 - [Reference images](#reference-images)
 - [Photo-to-model workflow](#photo-to-model-workflow) (optional tooling)
 - [Iteration workflow](#iteration-workflow)
 - [Visual verification](#visual-verification)
+- [Annotations](#annotations)
 - [Stat-based verification](#stat-based-verification)
 - [Resuming a session](#resuming-a-session)
 
@@ -126,10 +129,23 @@ await partwright.setActiveLanguage(lang) // Switch engine + editor mode ('manifo
 partwright.toggleClip(on?)     // Toggle 3D clipping plane -> {enabled, z, min, max}
 partwright.setClipZ(z)         // Set clip height -> {enabled, z, min, max}
 partwright.getClipState()      // -> {enabled, z, min, max}
-await partwright.exportGLB()   // Download GLB
-partwright.exportSTL()         // Download STL
-partwright.exportOBJ()         // Download OBJ
-partwright.export3MF()         // Download 3MF
+await partwright.exportGLB()   // Download GLB (browser file dialog -- prefer exportGLBData() in agent flows)
+partwright.exportSTL()         // Download STL ("                                       exportSTLData() ")
+partwright.exportOBJ()         // Download OBJ ("                                       exportOBJData() ")
+partwright.export3MF()         // Download 3MF ("                                       export3MFData() ")
+// Agent-friendly variants -- bytes return inline, no file dialog. See AI-friendly file I/O.
+await partwright.exportGLBData()        // -> {filename, mimeType, base64, sizeBytes}
+await partwright.exportSTLData()
+await partwright.exportOBJData()        // text or base64 depending on whether colors are painted
+await partwright.export3MFData()
+await partwright.exportSessionData()    // -> {filename, mimeType, data, sizeBytes} (parsed JSON)
+partwright.exportCodeData()             // -> {filename, mimeType, language, text, sizeBytes}
+await partwright.importSessionData(parsedJson)         // -> {sessionId} or {error}
+await partwright.importCodeData(code, language, name?) // -> {sessionId}
+partwright.listRecentExports()                         // Recent Exports inbox
+await partwright.getRecentExport(id)
+partwright.downloadRecentExport(id)
+partwright.clearRecentExports()
 
 // Isolated execution -- test code without changing editor/viewport state
 await partwright.runIsolated(code)       // -> {geometryData, thumbnail}
@@ -159,6 +175,11 @@ partwright.getSessionUrl()               // -> URL for this session
 await partwright.listSessions()          // -> [{id, name, updated}]
 await partwright.openSession(id)         // Open existing session
 await partwright.clearAllSessions()      // Delete all sessions & versions
+
+// Color regions -- tag coplanar face regions with a color (see #color-regions)
+partwright.paintRegion({point, normal, color, name?, tolerance?}) // -> {id, name, triangles} or {error}
+partwright.listRegions()                 // -> [{id, name, color, source, triangles, order}, ...]
+partwright.clearColors()                 // Remove all regions
 
 // Notes -- track design context, decisions, and measurements
 await partwright.addSessionNote(text)    // -> {id, text, timestamp}
@@ -379,6 +400,86 @@ if (problems.length) {
 ```
 
 Or batch it with `query({ sliceAt: [zMax - 2, zMax - 1.8, ..., zMax - 0.2] })` and check each slice's `area`. If any layer below the actual geometry end falls under threshold, redesign the top to terminate with a flat plateau instead of a near-point taper.
+
+## Color regions
+
+Color regions tag a coplanar set of triangles with an RGB color. Regions are persisted on the saved version, ride through GLB and 3MF exports, and show as swatch badges in the gallery. They do **not** modify the geometry -- the underlying mesh, volume, manifoldness, etc. are unchanged.
+
+```js
+// Paint the face that contains [10, 0, 5] with normal [0, 0, 1] (top face) bright red.
+const r = partwright.paintRegion({
+  point:  [10, 0, 5],
+  normal: [0, 0, 1],
+  color:  [1, 0, 0],         // RGB in 0..1
+  name:   "Top",             // optional, defaults to "Region N"
+  tolerance: 0.9995,         // optional cosine threshold for coplanarity (default 0.9995)
+});
+// r = { id, name, triangles } on success, or { error } if no matching face found
+
+partwright.listRegions()    // [{ id, name, color, source, triangles, order }, ...]
+partwright.clearColors()    // remove all regions
+```
+
+**How face matching works.** `paintRegion` flood-fills outward from the seed triangle, including any neighbor whose normal is within `tolerance` of the seed's. Pick `point` slightly inside the model surface and pass the outward-pointing `normal` -- the seed resolver looks for the triangle whose plane the point lies on and whose normal aligns with yours.
+
+**Editor lock.** When color regions exist, the editor is locked (the model can't be re-run, because new geometry would invalidate the saved triangle indices). To edit code, the user clicks "Unlock to edit" in the UI. Agents that need to iterate on the geometry should call `clearColors()` first, or fork a new uncolored version with `forkVersion`.
+
+**Export behavior.**
+- `exportGLB()` -- vertex colors flow through automatically.
+- `export3MF()` -- regions become `<basematerials>` entries with per-triangle `pid` attributes (compatible with PrusaSlicer / Bambu Studio multi-material slicing).
+- `exportSTL()` and `exportOBJ()` -- formats don't carry color, so colors are dropped.
+
+## AI-friendly file I/O
+
+The standard `exportGLB()` / `exportSTL()` / `exportOBJ()` / `export3MF()` methods trigger a browser download — the file goes to the user's Downloads folder, which an AI agent can't observe. Likewise, `Import` opens an OS file picker that an agent can't dismiss. Use the `*Data()` methods below instead: they return file contents over the API and skip the picker entirely.
+
+### Export — return bytes over the API
+```js
+// 3D model formats — binary blobs come back as base64
+const glb = await partwright.exportGLBData()
+// -> { filename: "model_2026-04-28.glb", mimeType: "model/gltf-binary", base64: "...", sizeBytes: 12345 }
+
+const stl = await partwright.exportSTLData()
+const tmf = await partwright.export3MFData()
+
+// OBJ is text-typed when the mesh has no painted color regions, otherwise a ZIP.
+// Inspect mimeType to tell which: "text/plain" -> use `text`, "application/zip" -> use `base64`.
+const obj = await partwright.exportOBJData()
+
+// Session JSON — returns the parsed object directly, no decoding needed
+const ses = await partwright.exportSessionData()
+// -> { filename: "...partwright.json", mimeType: "application/json", data: { partwright: "1.2", session: {...}, versions: [...] }, sizeBytes }
+
+// Editor source as text
+const src = await partwright.exportCodeData()
+// -> { filename, mimeType: "text/plain", language: "manifold-js", text, sizeBytes }
+```
+
+Each call also adds the export to the Recent Exports inbox so the user can re-download it from the toolbar's Export → Recent Exports list.
+
+### Import — supply the payload directly
+```js
+// Import a parsed .partwright.json (object or string) as a new active session
+const r = await partwright.importSessionData(parsedJson)
+// -> { sessionId } or { error }
+
+// Import raw source as a new session
+await partwright.importCodeData(code, 'manifold-js')           // optional sessionName arg
+await partwright.importCodeData(scadCode, 'scad', 'my-shape')
+```
+
+### Recent Exports inbox
+Every export — whether the human clicked Export or the agent called `*Data()` — is kept in a small in-memory ring buffer (last 10). The user sees them in the Export dropdown's "Recent Exports" section; agents can read them too.
+```js
+partwright.listRecentExports()
+// -> [{ id, filename, mimeType, source, sizeBytes, timestamp }, ...]   // newest first
+
+await partwright.getRecentExport(id)   // adds bytes (text or base64) to the metadata
+partwright.downloadRecentExport(id)    // re-trigger the browser download
+partwright.clearRecentExports()
+```
+
+This is also the easiest way to inspect what the user just exported manually: the bytes stay in memory until they're pushed out by newer exports.
 
 ## Reference images
 
@@ -668,6 +769,59 @@ const s = partwright.sliceAtZVisual(10);  // returns {svg, area, contours}
 - `?view=ai` -- 4 isometric views (alternating cube corners)
 - `?view=elevations` -- Front, Right, Back, Left, Top orthographic + 1 isometric (6 views)
 - Use Elevations for shape verification, AI Views for overall appearance.
+
+## Annotations
+
+The user can mark up the model surface using the **Annotate** tool (✏️ button in the viewport
+overlay). Two kinds of annotations:
+
+- **Freehand strokes** drawn with the pen sub-mode -- raycast onto the mesh and stored as 3D
+  polylines (color + pixel-width per stroke).
+- **Text labels** placed with the text sub-mode -- pinned to a 3D anchor on the surface and
+  rendered as a screen-facing label (so they stay readable from any angle).
+
+Both kinds are **not part of the model** -- they're an ephemeral, in-memory visual layer that
+survives orbiting and appears in **every** rendered output: the live viewport, `renderView()`
+output, the AI Views tab, and the Elevations tab.
+
+When the user has annotated, treat the marks as a directional cue tied to the geometry under
+them. Inspect them via `listAnnotations()` / `listTextAnnotations()`, infer which feature is
+being pointed at from the 3D points/anchors, and confirm your interpretation before making
+changes.
+
+```js
+partwright.listAnnotations()
+// -> [{id, color: [r,g,b], width: 4, pointCount: 24, points: [[x,y,z], ...]}]
+
+partwright.listTextAnnotations()
+// -> [{id, text: "shorter here", color: [r,g,b], fontSizePx: 28, anchor: [x,y,z]}]
+
+partwright.addTextAnnotation({ anchor: [4, -5, 3], text: "round this corner" })
+// -> {id: "..."}
+
+partwright.getAnnotationCount()         // total: strokes + text
+partwright.undoAnnotation()             // removes the most recent annotation of either kind
+partwright.removeAnnotation("<id>")     // remove a specific one
+partwright.clearAnnotations()           // remove all
+partwright.clearAnnotationStrokes()     // remove only strokes
+partwright.clearTextAnnotations()       // remove only text labels
+
+partwright.setAnnotationsVisible(false) // hides everything (and excludes from renders)
+partwright.areAnnotationsVisible()
+
+partwright.setAnnotationColor([r, g, b])  // applies to new strokes AND new text
+partwright.setAnnotationWidth(6)          // pixels, for strokes (0.5..64)
+partwright.setAnnotationFontSize(32)      // pixels, for text labels (4..256)
+```
+
+Each stroke and text label records its own color/width/font-size at creation, so changing the
+active settings only affects new annotations.
+
+Annotations are intentionally separate from `paintRegion` colorization:
+- **Annotations** are floating visual marks on top of the surface -- ephemeral, not exported,
+  do not lock the editor.
+- **Color regions** (`paintRegion`) modify the model's vertex colors -- persist with the
+  version, export with the model, and lock the editor while present.
 
 ## Stat-based verification
 

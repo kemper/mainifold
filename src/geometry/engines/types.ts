@@ -1,4 +1,4 @@
-import type { MeshData, MeshResult } from '../types';
+import type { MeshData, MeshResult, SourceDiagnostic } from '../types';
 
 export type Language = 'manifold-js' | 'scad';
 
@@ -11,6 +11,7 @@ export function isLanguage(v: unknown): v is Language {
 export interface ValidateResult {
   valid: boolean;
   error?: string;
+  diagnostics?: SourceDiagnostic[];
 }
 
 export interface Engine {
@@ -26,4 +27,4 @@ export interface Engine {
   validate(source: string): ValidateResult;
 }
 
-export type { MeshData, MeshResult };
+export type { MeshData, MeshResult, SourceDiagnostic };

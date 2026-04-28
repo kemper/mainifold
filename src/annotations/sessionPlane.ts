@@ -1,0 +1,242 @@
+// Session plane — when the user activates Annotate (pen or text sub-mode),
+// we capture the current camera and freeze a virtual drawing plane in front
+// of the model. All strokes/text from that activation are drawn on this
+// plane via screen-to-plane unprojection. Re-activating Annotate creates a
+// fresh plane based on the camera at the time of re-activation.
+
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import { getCamera, getMeshGroup, getRenderer } from '../renderer/viewport';
+
+// Plane offset is measured from the model center along the camera-toward-camera
+// direction. To guarantee the plane never clips into the model from any angle,
+// we offset past the bounding *sphere* radius (the diagonal corner of the box
+// projects further than `maxDim/2`). Then we add a margin that scales with the
+// user's zoom so the plane keeps a comfortable gap as they pull the camera back.
+const SPHERE_PADDING = 1.05;  // 5% past the bounding sphere
+const CAM_MARGIN_FRAC = 0.05; // additional margin = 5% of camera-to-target distance
+
+export interface SessionCamera {
+  position: [number, number, number];
+  target: [number, number, number];
+  up: [number, number, number];
+}
+
+export interface SessionPlane {
+  /** Unit normal pointing from plane toward the camera that created it. */
+  normal: [number, number, number];
+  /** A point on the plane (typically the projected model center). */
+  origin: [number, number, number];
+  /** Camera state captured at the time of creation. */
+  camera: SessionCamera;
+}
+
+let activeSession: SessionPlane | null = null;
+let outlineMesh: THREE.Line | null = null;
+let fillMesh: THREE.Mesh | null = null;
+let outlineParent: THREE.Object3D | null = null;
+let controlsRef: OrbitControls | null = null;
+
+/** Wire up the OrbitControls reference so we can read the user's view target.
+ *  Called once from viewport.ts. */
+export function configureSessionPlane(controls: OrbitControls): void {
+  controlsRef = controls;
+}
+
+export function getActiveSession(): SessionPlane | null {
+  return activeSession;
+}
+
+export function startSession(): SessionPlane | null {
+  if (!controlsRef) return null;
+  const camera = getCamera();
+  const meshGroup = getMeshGroup();
+
+  // Model bounding sphere — gives the worst-case "how far does the model
+  // stick out from its center" so we can clear it from any camera angle.
+  const box = new THREE.Box3().setFromObject(meshGroup);
+  let modelRadius = 1;
+  let modelCenter = new THREE.Vector3();
+  if (!box.isEmpty()) {
+    const sphere = new THREE.Sphere();
+    box.getBoundingSphere(sphere);
+    modelRadius = Math.max(sphere.radius, 0.5);
+    modelCenter.copy(sphere.center);
+  }
+
+  const target = controlsRef.target.clone();
+  const camPos = camera.position.clone();
+  const toCam = camPos.clone().sub(target);
+  const distance = toCam.length();
+  const normal = toCam.clone().normalize();
+
+  // Plane origin: outside the bounding sphere along the camera direction,
+  // plus a zoom-aware margin so the plane sits comfortably in front of the
+  // model without ever clipping into it.
+  const offset = modelRadius * SPHERE_PADDING + distance * CAM_MARGIN_FRAC;
+  const origin = (box.isEmpty() ? target : modelCenter).clone()
+    .add(normal.clone().multiplyScalar(offset));
+
+  activeSession = {
+    normal: [normal.x, normal.y, normal.z],
+    origin: [origin.x, origin.y, origin.z],
+    camera: {
+      position: [camPos.x, camPos.y, camPos.z],
+      target: [target.x, target.y, target.z],
+      up: [camera.up.x, camera.up.y, camera.up.z],
+    },
+  };
+
+  return activeSession;
+}
+
+export function endSession(): void {
+  activeSession = null;
+  hidePlaneOutline();
+}
+
+/** Unproject a pointer event's NDC coordinates to a 3D point on the active
+ *  session plane. Returns null if no session is active or the cursor is
+ *  outside the canvas. */
+export function screenToActivePlane(event: PointerEvent | MouseEvent): THREE.Vector3 | null {
+  if (!activeSession) return null;
+  return screenToPlane(event, sessionToPlane(activeSession));
+}
+
+/** Same as screenToActivePlane but for a specific plane (used by select-mode
+ *  drag against an annotation's stored plane). */
+export function screenToPlane(event: PointerEvent | MouseEvent, plane: THREE.Plane): THREE.Vector3 | null {
+  const canvas = getRenderer().domElement;
+  const rect = canvas.getBoundingClientRect();
+  const x = event.clientX - rect.left;
+  const y = event.clientY - rect.top;
+  if (x < 0 || x > rect.width || y < 0 || y > rect.height) return null;
+
+  const ndc = new THREE.Vector2(
+    (x / rect.width) * 2 - 1,
+    -(y / rect.height) * 2 + 1,
+  );
+
+  const raycaster = new THREE.Raycaster();
+  raycaster.setFromCamera(ndc, getCamera());
+
+  const hit = new THREE.Vector3();
+  if (!raycaster.ray.intersectPlane(plane, hit)) return null;
+  return hit;
+}
+
+/** Build a THREE.Plane from a stored SessionPlane snapshot. */
+export function sessionToPlane(s: SessionPlane): THREE.Plane {
+  const n = new THREE.Vector3(s.normal[0], s.normal[1], s.normal[2]);
+  const o = new THREE.Vector3(s.origin[0], s.origin[1], s.origin[2]);
+  return new THREE.Plane(n, -n.dot(o));
+}
+
+/** Restore the camera to a stored annotation's view (snap, no animation). */
+export function restoreCameraView(cam: SessionCamera): void {
+  if (!controlsRef) return;
+  const camera = getCamera();
+  camera.position.set(cam.position[0], cam.position[1], cam.position[2]);
+  camera.up.set(cam.up[0], cam.up[1], cam.up[2]);
+  controlsRef.target.set(cam.target[0], cam.target[1], cam.target[2]);
+  controlsRef.update();
+}
+
+// ===== Plane outline visualization =====
+
+/** Show a faint outline of the plane in the given parent group. Hides any
+ *  previous outline first. Uses the camera's current frustum to size the
+ *  rectangle so it covers what the user can see at the plane distance. */
+export function showPlaneOutline(parent: THREE.Object3D): void {
+  hidePlaneOutline();
+  if (!activeSession) return;
+
+  const camera = getCamera();
+  // Make sure the camera's world matrix is current — it can lag behind a
+  // recent OrbitControls.update() if we're called between render frames.
+  camera.updateMatrixWorld();
+  const origin = new THREE.Vector3(activeSession.origin[0], activeSession.origin[1], activeSession.origin[2]);
+
+  // Camera-aligned in-plane axes: since the plane normal is the
+  // camera-to-target direction, the camera's world right/up basis vectors
+  // lie in the plane and define our rectangle.
+  const right = new THREE.Vector3();
+  const up = new THREE.Vector3();
+  camera.matrixWorld.extractBasis(right, up, new THREE.Vector3());
+
+  // Size so the rectangle roughly fills the viewport at the plane's distance.
+  const distFromCam = camera.position.distanceTo(origin);
+  let halfH: number, halfW: number;
+  if ((camera as THREE.PerspectiveCamera).isPerspectiveCamera) {
+    const persp = camera as THREE.PerspectiveCamera;
+    halfH = Math.tan((persp.fov * Math.PI) / 360) * distFromCam;
+    halfW = halfH * persp.aspect;
+  } else {
+    const ortho = camera as unknown as THREE.OrthographicCamera;
+    halfH = (ortho.top - ortho.bottom) / 2;
+    halfW = (ortho.right - ortho.left) / 2;
+  }
+
+  const tl = origin.clone().addScaledVector(right, -halfW).addScaledVector(up,  halfH);
+  const tr = origin.clone().addScaledVector(right,  halfW).addScaledVector(up,  halfH);
+  const br = origin.clone().addScaledVector(right,  halfW).addScaledVector(up, -halfH);
+  const bl = origin.clone().addScaledVector(right, -halfW).addScaledVector(up, -halfH);
+
+  // Translucent fill — gives a foggy "drawing surface" feel.
+  const fillGeo = new THREE.BufferGeometry();
+  const fillPositions = new Float32Array([
+    tl.x, tl.y, tl.z,
+    tr.x, tr.y, tr.z,
+    br.x, br.y, br.z,
+    tl.x, tl.y, tl.z,
+    br.x, br.y, br.z,
+    bl.x, bl.y, bl.z,
+  ]);
+  fillGeo.setAttribute('position', new THREE.BufferAttribute(fillPositions, 3));
+  fillGeo.computeVertexNormals();
+  const fillMat = new THREE.MeshBasicMaterial({
+    color: 0x88aaff,
+    transparent: true,
+    opacity: 0.06,
+    depthWrite: false,
+    depthTest: true,
+    side: THREE.DoubleSide,
+  });
+  fillMesh = new THREE.Mesh(fillGeo, fillMat);
+  fillMesh.name = 'annotation-session-plane-fill';
+  fillMesh.renderOrder = 997;
+  fillMesh.frustumCulled = false;
+  parent.add(fillMesh);
+
+  // Outline rectangle on top of the fill.
+  const geo = new THREE.BufferGeometry().setFromPoints([tl, tr, br, bl, tl]);
+  const mat = new THREE.LineBasicMaterial({
+    color: 0x88aaff,
+    transparent: true,
+    opacity: 0.4,
+    depthTest: false,
+  });
+  outlineMesh = new THREE.Line(geo, mat);
+  outlineMesh.name = 'annotation-session-plane';
+  outlineMesh.renderOrder = 998;
+  outlineMesh.frustumCulled = false;
+
+  outlineParent = parent;
+  parent.add(outlineMesh);
+}
+
+export function hidePlaneOutline(): void {
+  if (outlineMesh && outlineParent) {
+    outlineParent.remove(outlineMesh);
+    outlineMesh.geometry.dispose();
+    (outlineMesh.material as THREE.Material).dispose();
+  }
+  if (fillMesh && outlineParent) {
+    outlineParent.remove(fillMesh);
+    fillMesh.geometry.dispose();
+    (fillMesh.material as THREE.Material).dispose();
+  }
+  outlineMesh = null;
+  fillMesh = null;
+  outlineParent = null;
+}
