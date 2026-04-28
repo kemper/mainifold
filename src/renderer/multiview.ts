@@ -2,6 +2,7 @@ import * as THREE from 'three';
 import { createWhiteMaterial, createBlackWireframeMaterial } from './materials';
 import type { MeshData } from '../geometry/types';
 import { buildStrokesGroup, disposeStrokesGroup } from '../annotations/annotationOverlay';
+import { presetIndex } from '../storage/db';
 
 interface ViewConfig {
   name: string;
@@ -252,13 +253,10 @@ export function renderCompositeCanvas(meshData: MeshData): HTMLCanvasElement {
 
 // === Attached images for elevation comparison ===
 
-export type ImageAngle = 'front' | 'right' | 'back' | 'left' | 'top' | 'perspective';
-
 export interface AttachedImage {
   id: string;
-  angle: ImageAngle;
   src: string;
-  /** Optional user-provided caption. */
+  /** Optional user-facing caption. Drives ordering via preset matching. */
   label?: string;
 }
 
@@ -276,6 +274,22 @@ export function clearImages(): void {
 
 export function getImages(): AttachedImage[] {
   return _images;
+}
+
+/** Stable sort: preset-matching labels first in preset order, others keep
+ *  their insertion order at the end. */
+export function sortImagesByPreset(images: readonly AttachedImage[]): AttachedImage[] {
+  return images
+    .map((item, idx) => ({ item, idx, p: presetIndex(item.label) }))
+    .sort((a, b) => {
+      const aHasPreset = a.p >= 0;
+      const bHasPreset = b.p >= 0;
+      if (aHasPreset && bHasPreset) return a.p - b.p;
+      if (aHasPreset) return -1;
+      if (bHasPreset) return 1;
+      return a.idx - b.idx;
+    })
+    .map(x => x.item);
 }
 
 // === Orthographic elevation views ===
@@ -378,8 +392,9 @@ export function renderElevationsToContainer(container: HTMLElement, meshData: Me
   const annotations = buildStrokesGroup(new THREE.Vector2(viewSize, viewSize));
   if (annotations) scene.add(annotations);
 
-  // Compact images row (above the elevation grid). Sorted by angle for
-  // stable ordering when multiple images share an angle they stay grouped.
+  // Compact images row (above the elevation grid). Items whose label matches
+  // a preset (Front, Right, Back, etc.) sort first in preset order; the rest
+  // keep their insertion order at the end.
   if (hasRef) {
     const refSection = document.createElement('div');
     refSection.className = 'pb-1 border-b border-zinc-700 shrink-0';
@@ -392,14 +407,12 @@ export function renderElevationsToContainer(container: HTMLElement, meshData: Me
     refLabel.textContent = 'Images:';
     refRow.appendChild(refLabel);
 
-    const angleOrder: ImageAngle[] = ['perspective', 'front', 'right', 'back', 'left', 'top'];
-    const sorted = [..._images].sort((a, b) => angleOrder.indexOf(a.angle) - angleOrder.indexOf(b.angle));
+    const sorted = sortImagesByPreset(_images);
     for (const item of sorted) {
       const refImg = document.createElement('img');
       refImg.src = item.src;
       refImg.className = 'h-16 object-contain rounded bg-zinc-950 border border-blue-500/30 cursor-pointer hover:border-blue-400 transition-colors shrink-0';
-      const angleName = item.angle.charAt(0).toUpperCase() + item.angle.slice(1);
-      refImg.title = item.label ? `${item.label} (${angleName}) — click to enlarge` : `${angleName} — click to enlarge`;
+      refImg.title = item.label ? `${item.label} — click to enlarge` : 'Click to enlarge';
       refImg.addEventListener('click', () => {
         const overlay = document.createElement('div');
         overlay.className = 'fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm';

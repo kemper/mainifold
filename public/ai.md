@@ -95,7 +95,7 @@ partwright.navigateVersion('backward')            // ValidationError: direction 
 partwright.setView('sketch')                      // ValidationError: tab must be one of: ...
 partwright.measureAt([5])                         // ValidationError: measureAt(xy) must have exactly 2 elements
 partwright.probeRay([0,0,0], [0, '1', 0])         // ValidationError: probeRay(direction)[1] must be a finite number
-partwright.setImages([{ angle: 'fron', src: '...' }])  // ValidationError: setImages(images)[0].angle must be one of: front, right, back, left, top, perspective
+partwright.setImages([{ src: '' }])  // ValidationError: setImages(images)[0].src must be a non-empty string, got ""
 partwright.setReferenceGeometry(code, { opacity: 2 })  // returns { success: false, error: "... .opacity must be <= 1 ..." }
 await partwright.runAndAssert(code, { minVolume: '1000' })  // returns { passed: false, failures: ["... .minVolume must be a finite number ..."] }
 await partwright.runAndSave(code, 'v1', { boundsRatio: { widthToDeep: [1,2] } })  // typo caught: not a recognized field
@@ -158,11 +158,11 @@ partwright.sliceAtZVisual(z)            // Cross-section SVG at height z -> {svg
 partwright.isRunning()                   // -> boolean (is code executing?)
 
 // Images -- attach photos to compare model against
-partwright.setImages([{angle, src, label?}, ...])  // replace all; angle is front|right|back|left|top|perspective; src is data URL or http(s) URL; label is optional caption
-partwright.addImage({angle, src, label?})          // append one; returns {id, angle, src, label?}
-partwright.removeImage(id)                         // remove by id; returns true if removed
+partwright.setImages([{src, label?}, ...])  // replace all; src is data URL or http(s) URL; label is an optional caption
+partwright.addImage({src, label?})          // append one; returns {id, src, label?}
+partwright.removeImage(id)                  // remove by id; returns true if removed
 partwright.clearImages()
-partwright.getImages()                             // -> [{id, angle, src, label?}, ...]
+partwright.getImages()                      // -> [{id, src, label?}, ...]
 
 // Sessions -- save/compare design iterations
 await partwright.createSession(name?)    // -> {id, url, galleryUrl}
@@ -485,26 +485,26 @@ This is also the easiest way to inspect what the user just exported manually: th
 
 ## Images
 
-Attach reference photos so the model can be compared against them. Each image has:
+Attach reference photos so the model can be compared against them. Each image has just two user-facing fields:
 
-- `angle` — one of `front` / `right` / `back` / `left` / `top` / `perspective`. Used to order the strip in the Elevations tab and group thumbnails in the Gallery. This is system metadata, not a display name.
 - `src` — a `data:` URL or `http(s)` URL.
-- `label` (optional) — a free-form caption shown under the thumbnail in the Gallery, in the lightbox, and in tooltips. If omitted, the Gallery shows no caption — the image content speaks for itself. Set this when you want a meaningful name (e.g. "South elevation, morning light", "Inspiration: Frank Lloyd Wright").
+- `label` (optional) — a free-form caption. Common values like `"Front"`, `"Right"`, `"Back"`, `"Left"`, `"Top"`, and `"Perspective"` are **presets**: the UI offers them as one-click pickers and the system uses them to order the strip in the Elevations tab. Any other string is also valid (`"south elevation, morning light"`, `"Inspiration: Frank Lloyd Wright"`). Empty / omitted means no caption.
 
-Multiple images may share an angle — nothing is overwritten. The full list shows up in the Images tab (where users can re-tag, edit the label, remove, or attach more) and in the Elevations tab beside the matching view.
+Multiple images may share a label — nothing is overwritten. The label is what appears in the Gallery thumbnail caption, in the lightbox, and in tooltips. Items whose label matches a preset (case-insensitive) sort first in preset order; the rest keep their insertion order at the end.
 
 ```js
-// Replace the full list. Each item is {angle, src, label?}; the call returns
-// the same items with a server-assigned `id` so you can remove individuals later.
+// Replace the full list. Each item is {src, label?}; the call returns the
+// same items with a server-assigned `id` so you can remove individuals later.
 const items = partwright.setImages([
-  { angle: 'front',       src: 'data:image/jpeg;base64,...', label: 'south elevation' },
-  { angle: 'right',       src: 'https://cdn.example.com/view-right.jpg' },
-  { angle: 'perspective', src: 'data:image/png;base64,...', label: 'inspiration photo' },
+  { src: 'data:image/jpeg;base64,...', label: 'Front' },                       // preset
+  { src: 'https://cdn.example.com/view-right.jpg', label: 'Right' },           // preset
+  { src: 'data:image/png;base64,...',  label: 'south elevation, morning' },    // custom
+  { src: 'data:image/png;base64,...' },                                        // no label
 ])
-// items -> [{id: 'A1bC2dE3fG', angle: 'front', src: '...', label: 'south elevation'}, ...]
+// items -> [{id: 'A1bC2dE3fG', src: '...', label: 'Front'}, ...]
 
 // Append one without disturbing existing items
-const added = partwright.addImage({ angle: 'front', src: '...', label: 'morning light' })
+const added = partwright.addImage({ src: '...', label: 'Perspective' })
 
 // Remove a specific item by id
 partwright.removeImage(added.id)
@@ -513,7 +513,7 @@ partwright.removeImage(added.id)
 partwright.clearImages()
 
 // Get the currently attached images
-partwright.getImages()  // -> [{id, angle, src, label?}, ...]
+partwright.getImages()  // -> [{id, src, label?}, ...]
 ```
 
 When images are attached, the Elevations tab shows them in a strip alongside the model views, enabling direct visual comparison.
@@ -540,8 +540,8 @@ This calls Gemini to analyze the photo and produces a JSON file with:
 If you have multiple angle photos (or Gemini-generated views), attach them:
 ```js
 partwright.setImages([
-  { angle: 'front', src: frontDataUrl },
-  { angle: 'right', src: rightDataUrl },
+  { src: frontDataUrl, label: 'Front' },
+  { src: rightDataUrl, label: 'Right' },
   // ...
 ])
 ```

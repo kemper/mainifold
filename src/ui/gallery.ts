@@ -2,7 +2,7 @@
 // plus a read-only strip of attached reference images at the top.
 
 import { listCurrentVersions, loadVersion, type Version } from '../storage/sessionManager';
-import { getImages, type AttachedImage } from '../renderer/multiview';
+import { getImages, sortImagesByPreset, type AttachedImage } from '../renderer/multiview';
 
 let galleryEl: HTMLElement | null = null;
 let onLoadCode: ((code: string) => void) | null = null;
@@ -69,8 +69,7 @@ function createImagesSection(images: AttachedImage[]): HTMLElement {
 
   section.appendChild(header);
 
-  const angleOrder = ['perspective', 'front', 'right', 'back', 'left', 'top'] as const;
-  const sorted = [...images].sort((a, b) => angleOrder.indexOf(a.angle) - angleOrder.indexOf(b.angle));
+  const sorted = sortImagesByPreset(images);
 
   const row = document.createElement('div');
   row.className = 'flex gap-2 overflow-x-auto';

@@ -10,18 +10,37 @@ export interface Session {
   language?: 'manifold-js' | 'scad';
 }
 
-export type ImageAngle = 'front' | 'right' | 'back' | 'left' | 'top' | 'perspective';
-
 export interface AttachedImage {
   id: string;
-  angle: ImageAngle;
   /** data URL or remote URL */
   src: string;
-  /** Optional user-provided caption. Shown in the Gallery and lightbox. */
+  /** User-facing caption. Shown in the Gallery, lightbox, and tooltips.
+   *  May match one of the preset labels (Front, Right, Back, Left, Top,
+   *  Perspective) — those drive ordering in the Elevations strip — or be
+   *  a free-form custom string. Empty string and undefined both mean
+   *  "no caption". */
   label?: string;
 }
 
-const IMAGE_ANGLES: readonly ImageAngle[] = ['front', 'right', 'back', 'left', 'top', 'perspective'];
+/** Suggested labels offered as quick picks in the UI. Items whose label
+ *  matches one of these (case-insensitive) sort earlier in the Elevations
+ *  strip in the order they appear here. */
+export const PRESET_LABELS = ['Front', 'Right', 'Back', 'Left', 'Top', 'Perspective'] as const;
+
+/** Returns the preset index for a label (case-insensitive), or -1 if it
+ *  doesn't match any preset. */
+export function presetIndex(label: string | undefined): number {
+  if (!label) return -1;
+  const norm = label.trim().toLowerCase();
+  for (let i = 0; i < PRESET_LABELS.length; i++) {
+    if (PRESET_LABELS[i].toLowerCase() === norm) return i;
+  }
+  return -1;
+}
+
+/** Legacy angle keys that pre-unification data was tagged with. */
+type LegacyImageAngle = 'front' | 'right' | 'back' | 'left' | 'top' | 'perspective';
+const LEGACY_ANGLES: readonly LegacyImageAngle[] = ['front', 'right', 'back', 'left', 'top', 'perspective'];
 
 export interface Version {
   id: string;
@@ -219,7 +238,7 @@ export async function createSession(name?: string, language?: 'manifold-js' | 's
 
 // Legacy on-disk shape for images: an object map keyed by angle. Sessions
 // stored before the array migration may still be in this form.
-type LegacyImagesObject = Partial<Record<ImageAngle, string>>;
+type LegacyImagesObject = Partial<Record<LegacyImageAngle, string>>;
 
 export async function getSession(id: string): Promise<Session | null> {
   const store = await tx('sessions', 'readonly');
@@ -233,10 +252,11 @@ export async function listSessions(): Promise<Session[]> {
   return sessions.map(migrateSessionImages).sort((a, b) => b.updated - a.updated);
 }
 
-// Read-time migration for two legacy shapes:
+// Read-time migration for three legacy shapes:
 //  1. Pre-rename sessions stored data under `referenceImages` instead of `images`.
-//  2. Pre-array sessions stored an object map ({front: 'url', ...}) rather than
-//     an array of {id, angle, src} items.
+//  2. Pre-array sessions stored an object map ({front: 'url', ...}) rather than an array.
+//  3. Pre-unification sessions stored items as {id, angle, src, label?}; we collapse
+//     `angle` into `label` here so callers see a single user-facing field.
 function migrateSessionImages(s: Session & { referenceImages?: LegacyImagesObject | AttachedImage[] | null }): Session {
   // Operate on an untyped view so we can hold both legacy and new shapes during migration.
   const raw = s as unknown as { images?: unknown; referenceImages?: unknown };
@@ -247,14 +267,35 @@ function migrateSessionImages(s: Session & { referenceImages?: LegacyImagesObjec
   if (raw.images && !Array.isArray(raw.images) && typeof raw.images === 'object') {
     raw.images = legacyImagesObjectToArray(raw.images as LegacyImagesObject);
   }
+  if (Array.isArray(raw.images)) {
+    raw.images = (raw.images as Array<Record<string, unknown>>).map(collapseAngleIntoLabel);
+  }
   return s;
+}
+
+/** Drop the legacy `angle` field, copying it into `label` (capitalized) when
+ *  a label isn't already present. After this, `label` is the single source of
+ *  truth for how the image is named in the UI. */
+function collapseAngleIntoLabel(item: Record<string, unknown>): AttachedImage {
+  const id = typeof item.id === 'string' ? item.id : generateId();
+  const src = typeof item.src === 'string' ? item.src : '';
+  const existingLabel = typeof item.label === 'string' ? item.label.trim() : '';
+  const angle = typeof item.angle === 'string' ? item.angle : '';
+  const out: AttachedImage = { id, src };
+  const label = existingLabel || (angle ? capitalize(angle) : '');
+  if (label) out.label = label;
+  return out;
+}
+
+function capitalize(s: string): string {
+  return s.charAt(0).toUpperCase() + s.slice(1);
 }
 
 export function legacyImagesObjectToArray(obj: LegacyImagesObject): AttachedImage[] {
   const result: AttachedImage[] = [];
-  for (const angle of IMAGE_ANGLES) {
+  for (const angle of LEGACY_ANGLES) {
     const src = obj[angle];
-    if (src) result.push({ id: generateId(), angle, src });
+    if (src) result.push({ id: generateId(), src, label: capitalize(angle) });
   }
   return result;
 }

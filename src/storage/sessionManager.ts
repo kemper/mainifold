@@ -22,8 +22,11 @@ import {
   type Version,
   type SessionNote,
   type AttachedImage,
-  type ImageAngle,
 } from './db';
+
+/** Legacy angle keys preserved only for typing the on-disk shapes we still
+ *  read for backward compatibility. */
+type LegacyImageAngle = 'front' | 'right' | 'back' | 'left' | 'top' | 'perspective';
 import type { SerializedColorRegion } from '../color/regions';
 import {
   serializeAll as serializeAnnotations,
@@ -59,7 +62,7 @@ export interface ExportedSession {
   mainifold?: string;
   /** Images may be the array form or the legacy object map ({front, right, ...}).
    * Both also exist under `referenceImages` for pre-rename exports. */
-  session: { name: string; created: number; updated: number; images?: AttachedImage[] | Partial<Record<ImageAngle, string>> | null; referenceImages?: AttachedImage[] | Partial<Record<ImageAngle, string>> | null; language?: 'manifold-js' | 'scad' };
+  session: { name: string; created: number; updated: number; images?: AttachedImage[] | Partial<Record<LegacyImageAngle, string>> | null; referenceImages?: AttachedImage[] | Partial<Record<LegacyImageAngle, string>> | null; language?: 'manifold-js' | 'scad' };
   versions: {
     index: number;
     code: string;
@@ -120,7 +123,7 @@ export function getSchemaCompatibilityWarning(data: ExportedSession): string | n
   return null;
 }
 
-export type { Session, Version, SessionNote, AttachedImage, ImageAngle } from './db';
+export type { Session, Version, SessionNote, AttachedImage } from './db';
 
 export interface SessionState {
   session: Session | null;

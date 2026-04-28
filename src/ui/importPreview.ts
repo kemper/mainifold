@@ -18,15 +18,18 @@ export interface SessionImportSummary {
 
 /** Build a SessionImportSummary from a parsed .partwright.json payload. */
 export function summarizeSessionImport(data: ExportedSession): SessionImportSummary {
-  // Read images from new field, falling back to legacy `referenceImages` key.
-  // The shape may be the new array form ({id, angle, src}) or the legacy
-  // object map ({front: 'url', ...}) from pre-array exports.
+  // Build a list of image labels for the import preview. Handle three shapes:
+  //   - current: array of {id, src, label?}
+  //   - pre-unification: array of {id, angle, src, label?} — fall back to angle
+  //   - pre-array: object map {front: 'url', ...} — use the keys
+  // Items with no label and no angle are listed as "(unlabeled)".
   const imgs = data.session.images ?? data.session.referenceImages ?? null;
   const referenceSides: string[] = [];
   if (Array.isArray(imgs)) {
     for (const item of imgs) {
-      const angle = (item as { angle?: string }).angle;
-      if (typeof angle === 'string') referenceSides.push(angle);
+      const it = item as { label?: string; angle?: string };
+      const label = (it.label ?? '').trim() || (it.angle ? it.angle : '');
+      referenceSides.push(label || '(unlabeled)');
     }
   } else if (imgs && typeof imgs === 'object') {
     for (const k of ['front', 'right', 'back', 'left', 'top', 'perspective'] as const) {
