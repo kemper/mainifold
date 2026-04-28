@@ -41,3 +41,16 @@ fires any events that should be fired properly upon then closing)?
   the global handler won't fire while a label is being typed — the
   input's own cancel flow runs unchanged.
 - Verified `npm run build` succeeds with no TypeScript errors.
+
+## Follow-up — TDZ fix
+
+After the user reported Escape didn't close the popups (and that paint
+didn't re-render until the code was edited), browser console showed
+`Cannot access 'closeMeasureIfActive' before initialization`. The `let`
+binding was declared lower in the same enclosing function than the
+`initMeasureToggle` call site, so assigning to it from inside that
+function hit the temporal dead zone. The thrown ReferenceError aborted
+the rest of the init flow, which is why `setOnRegionPainted(...)` —
+the callback that re-renders on paint — never ran. Moved the `let`
+declaration above the `initMeasureToggle()` call. Verified in Chrome:
+escape now closes annotate, paint, and measure menus.

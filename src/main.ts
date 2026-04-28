@@ -1240,6 +1240,10 @@ async function main() {
   initDimensionsToggle(clipControls);
   initAnnotateUI(clipControls);
   initPaintUI(clipControls);
+  // Declared before initMeasureToggle is called so the assignment inside it
+  // doesn't hit a let-TDZ error (the same `let` lower in this function is
+  // hoisted to a binding, but only initialized when execution reaches it).
+  let closeMeasureIfActive: () => boolean = () => false;
   initMeasureToggle(clipControls);
   initOrbitLockToggle(clipControls);
   initEscapeMenuClose();
@@ -2958,8 +2962,6 @@ async function main() {
       }
     }
   }
-
-  let closeMeasureIfActive: () => boolean = () => false;
 
   function initMeasureToggle(container: HTMLElement) {
     const measureBtn = container.querySelector('#measure-toggle') as HTMLButtonElement;
