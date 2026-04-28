@@ -29,9 +29,10 @@ import { setUnits as _setUnits, getUnits as _getUnits, type UnitSystem } from '.
 import { initMeasureTool, activate as activateMeasure, deactivate as deactivateMeasure, getState as getMeasureState } from './ui/measureTool';
 import { maybeStartTour, resetTour, startTour } from './ui/tour';
 import { initTheme } from './ui/theme';
-import { initPaintUI } from './color/paintUI';
+import { initPaintUI, isPaintOpen, forceDeactivate as closePaintMenu } from './color/paintUI';
 import { updatePaintMesh, setOnRegionPainted, isActive as isPaintActive } from './color/paintMode';
-import { initAnnotateUI } from './annotations/annotateUI';
+import { initAnnotateUI, isAnnotateOpen, closeMenu as closeAnnotateMenu } from './annotations/annotateUI';
+import { isActive as isSelectActive, getSelectedId as getSelectedAnnotationId } from './annotations/selectMode';
 import {
   getStrokes as getAnnotationStrokes,
   getTexts as getAnnotationTexts,
@@ -1241,6 +1242,7 @@ async function main() {
   initPaintUI(clipControls);
   initMeasureToggle(clipControls);
   initOrbitLockToggle(clipControls);
+  initEscapeMenuClose();
 
   // Initialize editor lock
   initEditorLock(editorContainer);
@@ -2957,6 +2959,8 @@ async function main() {
     }
   }
 
+  let closeMeasureIfActive: () => boolean = () => false;
+
   function initMeasureToggle(container: HTMLElement) {
     const measureBtn = container.querySelector('#measure-toggle') as HTMLButtonElement;
     if (!measureBtn) return;
@@ -2964,17 +2968,43 @@ async function main() {
     const inactiveClass = 'px-2 py-1 rounded text-xs bg-zinc-800/80 backdrop-blur text-zinc-400 hover:text-zinc-200 hover:bg-zinc-700/80 transition-colors border border-zinc-600/50';
     const activeClass = 'px-2 py-1 rounded text-xs bg-blue-500/20 backdrop-blur text-blue-400 hover:bg-blue-500/30 transition-colors border border-blue-500/30';
 
+    function close(): boolean {
+      if (!getMeasureState().active) return false;
+      deactivateMeasure();
+      setMeasureLock(false);
+      measureBtn.className = inactiveClass;
+      return true;
+    }
+
+    closeMeasureIfActive = close;
+
     measureBtn.addEventListener('click', () => {
-      const state = getMeasureState();
-      if (state.active) {
-        deactivateMeasure();
-        setMeasureLock(false);
-        measureBtn.className = inactiveClass;
+      if (getMeasureState().active) {
+        close();
       } else {
         activateMeasure();
         setMeasureLock(true);
         measureBtn.className = activeClass;
       }
+    });
+  }
+
+  function initEscapeMenuClose() {
+    document.addEventListener('keydown', (e) => {
+      if (e.key !== 'Escape') return;
+      const target = e.target as HTMLElement | null;
+      if (target && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable)) {
+        return;
+      }
+      // Let select-mode handle Escape first when an annotation is selected
+      // (it deselects). A subsequent Escape will close the menu.
+      if (isSelectActive() && getSelectedAnnotationId()) return;
+
+      let closed = false;
+      if (isAnnotateOpen()) { closeAnnotateMenu(); closed = true; }
+      if (isPaintOpen()) { closePaintMenu(); closed = true; }
+      if (closeMeasureIfActive()) closed = true;
+      if (closed) e.preventDefault();
     });
   }
 
