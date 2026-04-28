@@ -6,7 +6,9 @@ import type { MeshData } from '../geometry/types';
 import { pickFace } from './facePicker';
 import { buildAdjacency, findCoplanarRegion, getTriangleNormal, type AdjacencyGraph } from './adjacency';
 import { addRegion, getRegions } from './regions';
-import { getMeshGroup, getRenderer } from '../renderer/viewport';
+import { getMeshGroup, getRenderer, setUserOrbitLock, isUserOrbitLocked } from '../renderer/viewport';
+import { activate as activateSlabDrag, deactivate as deactivateSlabDrag, onMeshChanged as onSlabDragMeshChanged } from './slabDrag';
+export { setSlabAxis, getSlabAxis } from './slabDrag';
 
 export type PaintTool = 'bucket' | 'brush' | 'slab';
 
@@ -25,6 +27,10 @@ let hoveredTriangles: Set<number> | null = null;
 let brushPainting = false;
 let brushSession: Set<number> | null = null;
 
+// Orbit lock — paint mode locks model rotation by default. The lock-toggle
+// button in the toolbar reflects this; users can unlock manually to reposition.
+let priorOrbitLock = false;
+
 // Callbacks
 let onRegionPainted: (() => void) | null = null;
 let onToolChange: ((tool: PaintTool) => void) | null = null;
@@ -41,8 +47,15 @@ export function getColor(): [number, number, number] {
 
 export function setTool(tool: PaintTool): void {
   if (currentTool === tool) return;
+  const prev = currentTool;
   currentTool = tool;
   clearHighlight();
+
+  if (active) {
+    if (tool === 'slab') activateSlabDrag();
+    else if (prev === 'slab') deactivateSlabDrag();
+  }
+
   if (onToolChange) onToolChange(tool);
 }
 
@@ -79,6 +92,7 @@ export function updatePaintMesh(mesh: MeshData): void {
   currentMesh = mesh;
   if (active) {
     adjacency = buildAdjacency(mesh);
+    onSlabDragMeshChanged();
   }
   clearHighlight();
 }
@@ -91,18 +105,27 @@ export function activate(): void {
     adjacency = buildAdjacency(currentMesh);
   }
 
+  priorOrbitLock = isUserOrbitLocked();
+  setUserOrbitLock(true);
+
   const canvas = getRenderer().domElement;
   canvas.addEventListener('mousemove', onMouseMove);
   canvas.addEventListener('mousedown', onMouseDown);
   canvas.addEventListener('mouseup', onMouseUp);
   canvas.addEventListener('mouseleave', onMouseLeave);
   canvas.style.cursor = 'crosshair';
+
+  if (currentTool === 'slab') activateSlabDrag();
 }
 
 export function deactivate(): void {
   if (!active) return;
   active = false;
   adjacency = null;
+
+  if (!priorOrbitLock) setUserOrbitLock(false);
+
+  deactivateSlabDrag();
 
   const canvas = getRenderer().domElement;
   canvas.removeEventListener('mousemove', onMouseMove);

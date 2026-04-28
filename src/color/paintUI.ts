@@ -6,17 +6,15 @@ import {
   deactivate,
   isActive,
   setColor,
-  getColor,
   setTool,
   getTool,
   setBucketTolerance,
   getBucketTolerance,
-  getCurrentMesh,
-  previewTriangles,
+  setSlabAxis,
+  getSlabAxis,
   type PaintTool,
 } from './paintMode';
 import {
-  addRegion,
   getRegions,
   onChange as onRegionsChange,
   onRedoChange,
@@ -28,7 +26,6 @@ import {
   canRedoRegion,
   clearRegions,
 } from './regions';
-import { projectionRange, findSlabTriangles, AXIS_NORMALS } from './slabPaint';
 import { forceDeactivate as forceDeactivateAnnotate } from '../annotations/annotateUI';
 import { forceDeactivate as forceDeactivateAnnotateText } from '../annotations/textMode';
 import { forceDeactivate as forceDeactivateAnnotateSelect } from '../annotations/selectMode';
@@ -53,16 +50,6 @@ let redoBtn: HTMLButtonElement | null = null;
 let toolButtons: Partial<Record<PaintTool, HTMLButtonElement>> = {};
 let bucketControls: HTMLElement | null = null;
 let slabControls: HTMLElement | null = null;
-
-// Slab UI state
-type SlabAxis = 'x' | 'y' | 'z';
-let slabAxis: SlabAxis = 'z';
-let slabOffsetInput: HTMLInputElement | null = null;
-let slabThicknessInput: HTMLInputElement | null = null;
-let slabOffsetValue: HTMLElement | null = null;
-let slabThicknessValue: HTMLElement | null = null;
-let slabPreviewTeardown: (() => void) | null = null;
-let slabInputsInitialized = false;
 
 /** Initialize the paint UI inside the clip-controls overlay area. */
 export function initPaintUI(controlsContainer: HTMLElement): void {
@@ -105,8 +92,6 @@ function togglePaintMode(): void {
     deactivate();
     updateButtonState(false);
     pickerPanel?.classList.add('hidden');
-    teardownSlabPreview();
-    slabInputsInitialized = false;
   } else {
     forceDeactivateAnnotate();
     forceDeactivateAnnotateText();
@@ -289,15 +274,7 @@ function syncToolPanels(): void {
     if (btn) btn.className = toolButtonClass(t === tool);
   }
   if (bucketControls) bucketControls.classList.toggle('hidden', tool !== 'bucket');
-  if (slabControls) {
-    slabControls.classList.toggle('hidden', tool !== 'slab');
-    if (tool === 'slab') {
-      refreshSlabRange();
-      updateSlabPreview();
-    } else {
-      teardownSlabPreview();
-    }
-  }
+  if (slabControls) slabControls.classList.toggle('hidden', tool !== 'slab');
 }
 
 function createBucketControls(): HTMLElement {
@@ -324,7 +301,7 @@ function createBucketControls(): HTMLElement {
   slider.step = '1';
   slider.value = String(toleranceToSliderPct(getBucketTolerance()));
   slider.className = 'w-full accent-blue-500';
-  slider.title = 'How aggressively flood-fill spreads across near-coplanar faces';
+  slider.title = 'Maximum angle (0\u00B0\u201390\u00B0) the flood-fill is allowed to bleed across';
   slider.addEventListener('input', () => {
     const tol = sliderPctToTolerance(parseInt(slider.value, 10));
     setBucketTolerance(tol);
@@ -341,16 +318,15 @@ function createBucketControls(): HTMLElement {
 }
 
 function toleranceToSliderPct(tol: number): number {
-  // tol in [0,1]. Map (1 - tol) in [0, 0.05] to slider 0..100 with sqrt curve.
-  // tol = 1 -> 0 (strictest); tol = 0.95 -> 100 (loosest practical)
-  const inv = Math.max(0, Math.min(0.05, 1 - tol));
-  return Math.round(Math.sqrt(inv / 0.05) * 100);
+  // Slider 0..100 maps directly to angle 0°..90° (i.e. tol = cos(angle)).
+  // 0 = strict (only the exact face), 100 = paints everything within 90°.
+  const angleDeg = Math.acos(Math.max(-1, Math.min(1, tol))) * 180 / Math.PI;
+  return Math.round(Math.max(0, Math.min(90, angleDeg)) / 90 * 100);
 }
 
 function sliderPctToTolerance(pct: number): number {
-  const t = Math.max(0, Math.min(100, pct)) / 100;
-  const inv = (t * t) * 0.05;
-  return Math.max(0.95, Math.min(1, 1 - inv));
+  const angleDeg = Math.max(0, Math.min(100, pct)) / 100 * 90;
+  return Math.cos(angleDeg * Math.PI / 180);
 }
 
 function formatTolerance(tol: number): string {
@@ -373,78 +349,28 @@ function createSlabControls(): HTMLElement {
 
   const axisBtns = document.createElement('div');
   axisBtns.className = 'grid grid-cols-3 gap-1';
-  for (const axis of ['x', 'y', 'z'] as const) {
+  for (const a of ['x', 'y', 'z'] as const) {
     const btn = document.createElement('button');
-    btn.dataset.axis = axis;
-    btn.textContent = axis.toUpperCase();
-    btn.className = axisButtonClass(axis === slabAxis);
+    btn.dataset.axis = a;
+    btn.textContent = a.toUpperCase();
+    btn.className = axisButtonClass(a === getSlabAxis());
     btn.addEventListener('click', () => {
-      slabAxis = axis;
+      setSlabAxis(a);
       for (const child of Array.from(axisBtns.children)) {
         const el = child as HTMLButtonElement;
-        el.className = axisButtonClass(el.dataset.axis === slabAxis);
+        el.className = axisButtonClass(el.dataset.axis === getSlabAxis());
       }
-      // Axis change: re-seed slider to the new axis's defaults.
-      slabInputsInitialized = false;
-      refreshSlabRange();
-      updateSlabPreview();
     });
     axisBtns.appendChild(btn);
   }
   axisRow.appendChild(axisBtns);
   wrap.appendChild(axisRow);
 
-  // Offset slider
-  const offsetWrap = document.createElement('div');
-  offsetWrap.className = 'mb-2';
-  const offsetLabel = document.createElement('div');
-  offsetLabel.className = 'text-[10px] text-zinc-500 uppercase tracking-wider mb-1 font-medium flex items-center justify-between';
-  const offsetText = document.createElement('span');
-  offsetText.textContent = 'Offset';
-  slabOffsetValue = document.createElement('span');
-  slabOffsetValue.className = 'text-zinc-400 normal-case tracking-normal';
-  slabOffsetValue.textContent = '0';
-  offsetLabel.appendChild(offsetText);
-  offsetLabel.appendChild(slabOffsetValue);
-  offsetWrap.appendChild(offsetLabel);
-
-  slabOffsetInput = document.createElement('input');
-  slabOffsetInput.type = 'range';
-  slabOffsetInput.className = 'w-full accent-blue-500';
-  slabOffsetInput.title = 'Slide the slab along the chosen axis';
-  slabOffsetInput.addEventListener('input', updateSlabPreview);
-  offsetWrap.appendChild(slabOffsetInput);
-  wrap.appendChild(offsetWrap);
-
-  // Thickness slider
-  const thickWrap = document.createElement('div');
-  thickWrap.className = 'mb-2';
-  const thickLabel = document.createElement('div');
-  thickLabel.className = 'text-[10px] text-zinc-500 uppercase tracking-wider mb-1 font-medium flex items-center justify-between';
-  const thickText = document.createElement('span');
-  thickText.textContent = 'Thickness';
-  slabThicknessValue = document.createElement('span');
-  slabThicknessValue.className = 'text-zinc-400 normal-case tracking-normal';
-  slabThicknessValue.textContent = '0';
-  thickLabel.appendChild(thickText);
-  thickLabel.appendChild(slabThicknessValue);
-  thickWrap.appendChild(thickLabel);
-
-  slabThicknessInput = document.createElement('input');
-  slabThicknessInput.type = 'range';
-  slabThicknessInput.className = 'w-full accent-blue-500';
-  slabThicknessInput.title = 'Width of the slab along the chosen axis';
-  slabThicknessInput.addEventListener('input', updateSlabPreview);
-  thickWrap.appendChild(slabThicknessInput);
-  wrap.appendChild(thickWrap);
-
-  // Apply button
-  const apply = document.createElement('button');
-  apply.className = 'w-full px-2 py-1.5 rounded text-[11px] bg-blue-600 hover:bg-blue-500 text-white transition-colors font-medium';
-  apply.textContent = 'Paint slab';
-  apply.title = 'Apply the slab selection as a paint region';
-  apply.addEventListener('click', applySlab);
-  wrap.appendChild(apply);
+  // Hint text
+  const hint = document.createElement('div');
+  hint.className = 'text-[10px] text-zinc-400 leading-relaxed';
+  hint.innerHTML = 'Hover the model to preview the slab plane.<br>Click and drag to extend the slab along the chosen axis. Release to paint.';
+  wrap.appendChild(hint);
 
   return wrap;
 }
@@ -454,113 +380,6 @@ function axisButtonClass(active: boolean): string {
     return 'px-2 py-1 rounded text-[11px] bg-blue-500/30 text-blue-200 border border-blue-500/50 transition-colors';
   }
   return 'px-2 py-1 rounded text-[11px] bg-zinc-700/40 text-zinc-300 hover:bg-zinc-600/60 border border-transparent transition-colors';
-}
-
-function refreshSlabRange(): void {
-  const mesh = getCurrentMesh();
-  if (!mesh || !slabOffsetInput || !slabThicknessInput) return;
-
-  const range = projectionRange(mesh, AXIS_NORMALS[slabAxis]);
-  const span = Math.max(1e-6, range.max - range.min);
-  const step = roundStep(span / 200);
-
-  // Pad each side by ~1% so the slab can slide just past the model.
-  const pad = span * 0.01;
-
-  slabOffsetInput.min = String(range.min - pad);
-  slabOffsetInput.max = String(range.max + pad);
-  slabOffsetInput.step = String(step);
-
-  // Default offset = bottom of bounds; thickness = 20% of span (or smaller if tiny)
-  const defaultOffset = range.min;
-  const defaultThickness = Math.max(step, span * 0.2);
-
-  if (!slabInputsInitialized) {
-    slabOffsetInput.value = String(defaultOffset);
-  } else {
-    const cur = parseFloat(slabOffsetInput.value);
-    if (!Number.isFinite(cur) || cur < range.min - pad || cur > range.max + pad) {
-      slabOffsetInput.value = String(defaultOffset);
-    }
-  }
-
-  slabThicknessInput.min = String(step);
-  slabThicknessInput.max = String(span);
-  slabThicknessInput.step = String(step);
-  if (!slabInputsInitialized) {
-    slabThicknessInput.value = String(defaultThickness);
-  } else {
-    const cur = parseFloat(slabThicknessInput.value);
-    if (!Number.isFinite(cur) || cur > span) slabThicknessInput.value = String(Math.min(span, defaultThickness));
-    else if (cur < step) slabThicknessInput.value = String(step);
-  }
-
-  slabInputsInitialized = true;
-}
-
-function roundStep(s: number): number {
-  if (s <= 0) return 0.01;
-  // Round to one significant digit (e.g. 0.0345 -> 0.03)
-  const exp = Math.floor(Math.log10(s));
-  const mantissa = s / Math.pow(10, exp);
-  const rounded = Math.round(mantissa);
-  return Math.max(1e-6, rounded * Math.pow(10, exp));
-}
-
-function updateSlabPreview(): void {
-  const mesh = getCurrentMesh();
-  if (!mesh || !slabOffsetInput || !slabThicknessInput) return;
-
-  const offset = parseFloat(slabOffsetInput.value);
-  const thickness = parseFloat(slabThicknessInput.value);
-  const normal = AXIS_NORMALS[slabAxis];
-
-  if (slabOffsetValue) slabOffsetValue.textContent = formatNumber(offset);
-  if (slabThicknessValue) slabThicknessValue.textContent = formatNumber(thickness);
-
-  const triangles = findSlabTriangles(mesh, normal, offset, thickness);
-  teardownSlabPreview();
-  if (triangles.size > 0) {
-    slabPreviewTeardown = previewTriangles(triangles);
-  }
-}
-
-function teardownSlabPreview(): void {
-  if (slabPreviewTeardown) {
-    slabPreviewTeardown();
-    slabPreviewTeardown = null;
-  }
-}
-
-function applySlab(): void {
-  const mesh = getCurrentMesh();
-  if (!mesh || !slabOffsetInput || !slabThicknessInput) return;
-
-  const offset = parseFloat(slabOffsetInput.value);
-  const thickness = parseFloat(slabThicknessInput.value);
-  const normal = AXIS_NORMALS[slabAxis];
-
-  const triangles = findSlabTriangles(mesh, normal, offset, thickness);
-  if (triangles.size === 0) return;
-
-  teardownSlabPreview();
-
-  const existingCount = getRegions().length;
-  const name = `Slab ${slabAxis.toUpperCase()} ${existingCount + 1}`;
-  addRegion(
-    name,
-    [...getColor()] as [number, number, number],
-    'slab',
-    { kind: 'slab', normal, offset, thickness },
-    triangles,
-  );
-}
-
-function formatNumber(n: number): string {
-  if (!isFinite(n)) return '0';
-  const abs = Math.abs(n);
-  const digits = abs >= 100 ? 0 : abs >= 10 ? 1 : 2;
-  return n.toFixed(digits);
 }
 
 function updateVisibilityButton(): void {
@@ -637,8 +456,6 @@ export function forceDeactivate(): void {
     deactivate();
     updateButtonState(false);
     pickerPanel?.classList.add('hidden');
-    teardownSlabPreview();
-    slabInputsInitialized = false;
   }
 }
 
