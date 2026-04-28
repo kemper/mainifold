@@ -139,11 +139,24 @@ export function strokeToLine2(s: StrokeAnnotation, resolution: THREE.Vector2, se
   return line;
 }
 
-/** Update an existing Line2's geometry to a new point list. */
+/** Update an existing Line2's geometry to a new point list.
+ *
+ *  Implementation note: `LineGeometry.setPositions()` allocates a new
+ *  InstancedInterleavedBuffer and updates `instanceCount`, but does NOT
+ *  clear the private `_maxInstanceCount` field that WebGLRenderer caches
+ *  on first render. Without clearing it, every subsequent setPositions
+ *  with a larger array gets silently clamped to the original instance
+ *  count — strokes appear frozen during drag and only "snap" to full
+ *  length on the next full rebuild. This is a known three.js bug:
+ *  https://github.com/mrdoob/three.js/issues/27205
+ *  https://github.com/mrdoob/three.js/issues/21488
+ *  Deleting the private cache forces the renderer to use the up-to-date
+ *  `instanceCount` on the next draw. */
 export function setLine2Points(line: Line2, points: THREE.Vector3[]): void {
   const positions = pointsToFlatPositions(points);
   const geo = line.geometry as LineGeometry;
   geo.setPositions(positions);
+  delete (geo as unknown as { _maxInstanceCount?: number })._maxInstanceCount;
   line.computeLineDistances();
 }
 
