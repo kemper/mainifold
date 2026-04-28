@@ -285,6 +285,17 @@ export async function setSessionLanguage(id: string, language: 'manifold-js' | '
 
 // === Version operations ===
 
+/** Stable structural comparison for annotation snapshots. Both are arrays of
+ *  POJOs, so JSON-stringify is the simplest "equal value" check — order is
+ *  meaningful (annotations are appended) so we don't sort. */
+function annotationsEqual(a: unknown[] | undefined, b: unknown[] | undefined): boolean {
+  const aArr = a ?? [];
+  const bArr = b ?? [];
+  if (aArr.length !== bArr.length) return false;
+  if (aArr.length === 0) return true;
+  return JSON.stringify(aArr) === JSON.stringify(bArr);
+}
+
 export async function saveVersion(
   code: string,
   geometryData: Record<string, unknown> | null,
@@ -295,12 +306,20 @@ export async function saveVersion(
 ): Promise<Version | null> {
   if (!currentState.session) return null;
 
-  // Skip if code is identical to the current version (unless forced)
-  if (!options?.force && currentState.currentVersion && currentState.currentVersion.code === code) {
+  const annotationSnapshot = serializeAnnotations();
+
+  // Skip if both code AND annotations are identical to the current version
+  // (unless forced). Annotations live per-version, so a save that only changes
+  // them must still create a new version — comparing code alone would no-op.
+  if (
+    !options?.force &&
+    currentState.currentVersion &&
+    currentState.currentVersion.code === code &&
+    annotationsEqual(currentState.currentVersion.annotations, annotationSnapshot)
+  ) {
     return null;
   }
 
-  const annotationSnapshot = serializeAnnotations();
   const version = await dbSaveVersion(
     currentState.session.id,
     code,

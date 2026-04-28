@@ -69,3 +69,41 @@ five-step scenario (v1 unannotated, annotate→save v2, clear-annotate→save
 v3, navigate v1↔v2↔v3) and confirmed annotations swap correctly. Also
 synthesized a 1.2-shape import payload to verify back-compat — top-level
 annotations correctly land on the highest-index version.
+
+## Human (follow-up)
+
+> I'm not seeing it work the way I want. I annotated. saved. Then annotated,
+> then clicked save. I didn't see a new version get created. I think that
+> might be a bug specific to this work but I also suspect you may need to
+> refresh your work off the latest staging
+
+## Assistant (follow-up)
+
+## Key decisions
+
+**Diagnosis**: `saveVersion`'s dedup compared only `code`. With annotations
+now per-version, an "annotate then save" sequence with unchanged code hit
+the dedup path and silently no-op'd — exactly the bug the user reported.
+
+**Staging context**: rebased onto staging and found commit `bb8dd8e` had
+already extended the same dedup for color regions, but at the *call site*
+(sessionBar passes `force: true` when colorRegions differ). I considered
+the same approach for annotations but chose to put the check inside
+`saveVersion` instead, because:
+  - sessionManager already calls `serializeAnnotations()` to capture the
+    snapshot, so it has both halves of the comparison locally.
+  - There are multiple save paths (manual button, runAndSave, paint
+    flows) and putting the check in saveVersion means none of them can
+    forget. The colorRegions-at-call-site approach was forced because
+    geometryData is opaque to sessionManager; annotations aren't.
+
+**Equality check**: JSON-stringify on both arrays. Order is meaningful
+(annotations are appended), so no sort. Empty-array fast path before
+serializing. Future optimization opportunity if annotation lists ever
+grow large enough to matter, but for the typical 1-20 annotation case
+this is fine.
+
+**Tested**: same-code save with no annotation change → no-op (count
+unchanged); same-code save with new annotation → new version created;
+two saves in a row with no further changes → first creates a version,
+second no-ops.
