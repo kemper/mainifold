@@ -4,7 +4,6 @@ import { buildZip } from './zip';
 import { cleanMeshForExport } from './meshClean';
 
 const DEFAULT_COLOR_HEX = '#4a9eff';
-const DEFAULT_COLOR_RGB = [0.290196, 0.619608, 1.0] as const;
 
 /** Round a float to 6 decimal places (float32 has ~7 significant digits). */
 function f6(v: number): string {
@@ -40,43 +39,14 @@ export function exportOBJ(meshData: MeshData, customName?: string): void {
 
     lines.push(`mtllib ${baseName}.mtl`);
 
-    // Assign per-vertex colors for Bambu Studio (v x y z r g b format).
-    // Colors are per-triangle, so shared vertices pick the first triangle's color.
-    const vertColor = new Float32Array(numUniqueVerts * 3);
-    const vertColorSet = new Uint8Array(numUniqueVerts); // 0 = not yet assigned
-
-    for (const t of validTris) {
-      const isPainted = painted
-        ? painted[t] === 1
-        : (triColors[t * 3] !== 0 || triColors[t * 3 + 1] !== 0 || triColors[t * 3 + 2] !== 0);
-
-      const r = isPainted ? triColors[t * 3] / 255 : DEFAULT_COLOR_RGB[0];
-      const g = isPainted ? triColors[t * 3 + 1] / 255 : DEFAULT_COLOR_RGB[1];
-      const b = isPainted ? triColors[t * 3 + 2] / 255 : DEFAULT_COLOR_RGB[2];
-
-      for (let vi = 0; vi < 3; vi++) {
-        const idx = remap[triVerts[t * 3 + vi]];
-        if (!vertColorSet[idx]) {
-          vertColor[idx * 3] = r;
-          vertColor[idx * 3 + 1] = g;
-          vertColor[idx * 3 + 2] = b;
-          vertColorSet[idx] = 1;
-        }
-      }
-    }
-
-    // Write vertices with colors (v x y z r g b)
+    // Plain vertices (no per-vertex colors — they cause bleeding at shared
+    // vertices between different-color faces). Colors are carried via usemtl
+    // face groups + MTL file, which gives clean per-face color assignment.
     for (let i = 0; i < numUniqueVerts; i++) {
-      const x = f6(uniquePositions[i * 3]);
-      const y = f6(uniquePositions[i * 3 + 1]);
-      const z = f6(uniquePositions[i * 3 + 2]);
-      const r = f6(vertColorSet[i] ? vertColor[i * 3] : DEFAULT_COLOR_RGB[0]);
-      const g = f6(vertColorSet[i] ? vertColor[i * 3 + 1] : DEFAULT_COLOR_RGB[1]);
-      const b = f6(vertColorSet[i] ? vertColor[i * 3 + 2] : DEFAULT_COLOR_RGB[2]);
-      lines.push(`v ${x} ${y} ${z} ${r} ${g} ${b}`);
+      lines.push(`v ${f6(uniquePositions[i * 3])} ${f6(uniquePositions[i * 3 + 1])} ${f6(uniquePositions[i * 3 + 2])}`);
     }
 
-    // Group triangles by color hex for usemtl (Blender/other tools)
+    // Group triangles by color hex for usemtl
     const colorGroups = new Map<string, number[]>();
     for (const t of validTris) {
       const isPainted = painted
@@ -97,8 +67,8 @@ export function exportOBJ(meshData: MeshData, customName?: string): void {
       colorGroups.get(hex)!.push(t);
     }
 
-    // Faces grouped by usemtl (Bambu Studio does NOT split mesh by usemtl —
-    // it uses face ranges as color metadata on a unified mesh)
+    // Faces grouped by usemtl — Bambu Studio reads usemtl face ranges as
+    // per-face color metadata on a unified mesh (does NOT split into parts).
     for (const [hex, tris] of colorGroups) {
       lines.push(`usemtl ${matName(hex)}`);
       for (const t of tris) {
@@ -106,7 +76,7 @@ export function exportOBJ(meshData: MeshData, customName?: string): void {
       }
     }
 
-    // Generate MTL file
+    // Generate MTL file with Kd diffuse colors
     const mtlLines: string[] = [`# ${title} — Materials`];
     for (const hex of colorGroups.keys()) {
       const r = parseInt(hex.slice(1, 3), 16) / 255;
@@ -124,8 +94,8 @@ export function exportOBJ(meshData: MeshData, customName?: string): void {
     // Bundle OBJ + MTL in a ZIP
     const enc = new TextEncoder();
     const zip = buildZip([
-      { name: `${baseName}.obj`, data: enc.encode(lines.join('\n')) },
-      { name: `${baseName}.mtl`, data: enc.encode(mtlLines.join('\n')) },
+      { name: `${baseName}.obj`, data: enc.encode(lines.join('\n') + '\n') },
+      { name: `${baseName}.mtl`, data: enc.encode(mtlLines.join('\n') + '\n') },
     ]);
 
     const blob = new Blob([zip], { type: 'application/zip' });
@@ -140,7 +110,7 @@ export function exportOBJ(meshData: MeshData, customName?: string): void {
       lines.push(`f ${fv(triVerts[t * 3])} ${fv(triVerts[t * 3 + 1])} ${fv(triVerts[t * 3 + 2])}`);
     }
 
-    const blob = new Blob([lines.join('\n')], { type: 'text/plain' });
+    const blob = new Blob([lines.join('\n') + '\n'], { type: 'text/plain' });
     downloadBlob(blob, getExportFilename('obj', customName));
   }
 }
