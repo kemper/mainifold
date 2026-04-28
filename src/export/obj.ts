@@ -3,7 +3,8 @@ import { downloadBlob, getExportFilename, getExportTitle } from './download';
 import { buildZip } from './zip';
 import { cleanMeshForExport } from './meshClean';
 
-const DEFAULT_COLOR = '#4a9eff';
+const DEFAULT_COLOR_HEX = '#4a9eff';
+const DEFAULT_COLOR_RGB = [0.290196, 0.619608, 1.0] as const;
 
 /** Round a float to 6 decimal places (float32 has ~7 significant digits). */
 function f6(v: number): string {
@@ -31,24 +32,52 @@ export function exportOBJ(meshData: MeshData, customName?: string): void {
   const baseName = getExportFilename('obj', customName).replace(/\.obj$/, '');
   const lines: string[] = [`# ${title}`];
 
-  // Vertices (deduplicated, 6 decimal places — matches float32 precision)
   const numUniqueVerts = uniquePositions.length / 3;
-  for (let i = 0; i < numUniqueVerts; i++) {
-    lines.push(`v ${f6(uniquePositions[i * 3])} ${f6(uniquePositions[i * 3 + 1])} ${f6(uniquePositions[i * 3 + 2])}`);
-  }
-
-  // Face format: plain "f v1 v2 v3" (1-based indices).
-  // Do NOT include vn normal references — per-face normals with f v//vn cause
-  // parsers to treat each (vertex, normal) pair as unique, destroying vertex
-  // sharing and making the mesh non-manifold. Slicers compute normals from
-  // face winding order; explicit normals are unnecessary.
   const fv = (origVert: number) => remap[origVert] + 1;
 
   if (hasColors && triColors) {
     const painted = (triColors as Uint8Array & { _painted?: Uint8Array })._painted;
 
-    // Collect unique colors for the MTL file
-    const colorSet = new Map<string, number[]>(); // hex -> triangle indices
+    lines.push(`mtllib ${baseName}.mtl`);
+
+    // Assign per-vertex colors for Bambu Studio (v x y z r g b format).
+    // Colors are per-triangle, so shared vertices pick the first triangle's color.
+    const vertColor = new Float32Array(numUniqueVerts * 3);
+    const vertColorSet = new Uint8Array(numUniqueVerts); // 0 = not yet assigned
+
+    for (const t of validTris) {
+      const isPainted = painted
+        ? painted[t] === 1
+        : (triColors[t * 3] !== 0 || triColors[t * 3 + 1] !== 0 || triColors[t * 3 + 2] !== 0);
+
+      const r = isPainted ? triColors[t * 3] / 255 : DEFAULT_COLOR_RGB[0];
+      const g = isPainted ? triColors[t * 3 + 1] / 255 : DEFAULT_COLOR_RGB[1];
+      const b = isPainted ? triColors[t * 3 + 2] / 255 : DEFAULT_COLOR_RGB[2];
+
+      for (let vi = 0; vi < 3; vi++) {
+        const idx = remap[triVerts[t * 3 + vi]];
+        if (!vertColorSet[idx]) {
+          vertColor[idx * 3] = r;
+          vertColor[idx * 3 + 1] = g;
+          vertColor[idx * 3 + 2] = b;
+          vertColorSet[idx] = 1;
+        }
+      }
+    }
+
+    // Write vertices with colors (v x y z r g b)
+    for (let i = 0; i < numUniqueVerts; i++) {
+      const x = f6(uniquePositions[i * 3]);
+      const y = f6(uniquePositions[i * 3 + 1]);
+      const z = f6(uniquePositions[i * 3 + 2]);
+      const r = f6(vertColorSet[i] ? vertColor[i * 3] : DEFAULT_COLOR_RGB[0]);
+      const g = f6(vertColorSet[i] ? vertColor[i * 3 + 1] : DEFAULT_COLOR_RGB[1]);
+      const b = f6(vertColorSet[i] ? vertColor[i * 3 + 2] : DEFAULT_COLOR_RGB[2]);
+      lines.push(`v ${x} ${y} ${z} ${r} ${g} ${b}`);
+    }
+
+    // Group triangles by color hex for usemtl (Blender/other tools)
+    const colorGroups = new Map<string, number[]>();
     for (const t of validTris) {
       const isPainted = painted
         ? painted[t] === 1
@@ -61,25 +90,25 @@ export function exportOBJ(meshData: MeshData, customName?: string): void {
         const b = triColors[t * 3 + 2].toString(16).padStart(2, '0');
         hex = `#${r}${g}${b}`;
       } else {
-        hex = DEFAULT_COLOR;
+        hex = DEFAULT_COLOR_HEX;
       }
 
-      if (!colorSet.has(hex)) colorSet.set(hex, []);
-      colorSet.get(hex)!.push(t);
+      if (!colorGroups.has(hex)) colorGroups.set(hex, []);
+      colorGroups.get(hex)!.push(t);
     }
 
-    // Write ALL faces as a single object — do NOT group by usemtl.
-    // Slicers like Bambu Studio treat each usemtl group as a separate
-    // shell/part that must be independently manifold. Since our color
-    // regions are surface patches (not closed solids), grouping by material
-    // creates non-manifold boundary edges at every color boundary.
-    for (const t of validTris) {
-      lines.push(`f ${fv(triVerts[t * 3])} ${fv(triVerts[t * 3 + 1])} ${fv(triVerts[t * 3 + 2])}`);
+    // Faces grouped by usemtl (Bambu Studio does NOT split mesh by usemtl —
+    // it uses face ranges as color metadata on a unified mesh)
+    for (const [hex, tris] of colorGroups) {
+      lines.push(`usemtl ${matName(hex)}`);
+      for (const t of tris) {
+        lines.push(`f ${fv(triVerts[t * 3])} ${fv(triVerts[t * 3 + 1])} ${fv(triVerts[t * 3 + 2])}`);
+      }
     }
 
-    // Generate MTL file as a color reference (usable by Blender and similar tools)
+    // Generate MTL file
     const mtlLines: string[] = [`# ${title} — Materials`];
-    for (const hex of colorSet.keys()) {
+    for (const hex of colorGroups.keys()) {
       const r = parseInt(hex.slice(1, 3), 16) / 255;
       const g = parseInt(hex.slice(3, 5), 16) / 255;
       const b = parseInt(hex.slice(5, 7), 16) / 255;
@@ -92,7 +121,7 @@ export function exportOBJ(meshData: MeshData, customName?: string): void {
       mtlLines.push('');
     }
 
-    // Bundle OBJ + MTL in a ZIP (MTL for reference; OBJ is slicer-clean)
+    // Bundle OBJ + MTL in a ZIP
     const enc = new TextEncoder();
     const zip = buildZip([
       { name: `${baseName}.obj`, data: enc.encode(lines.join('\n')) },
@@ -103,6 +132,10 @@ export function exportOBJ(meshData: MeshData, customName?: string): void {
     downloadBlob(blob, `${baseName}.zip`);
   } else {
     // No colors — plain OBJ
+    for (let i = 0; i < numUniqueVerts; i++) {
+      lines.push(`v ${f6(uniquePositions[i * 3])} ${f6(uniquePositions[i * 3 + 1])} ${f6(uniquePositions[i * 3 + 2])}`);
+    }
+
     for (const t of validTris) {
       lines.push(`f ${fv(triVerts[t * 3])} ${fv(triVerts[t * 3 + 1])} ${fv(triVerts[t * 3 + 2])}`);
     }
@@ -113,5 +146,5 @@ export function exportOBJ(meshData: MeshData, customName?: string): void {
 }
 
 function matName(hex: string): string {
-  return hex === DEFAULT_COLOR ? 'Default' : `Color_${hex.slice(1)}`;
+  return hex === DEFAULT_COLOR_HEX ? 'Default' : `Color_${hex.slice(1)}`;
 }
