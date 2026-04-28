@@ -2,6 +2,9 @@
 
 import { activate, deactivate, isActive, setColor } from './paintMode';
 import { getRegions, onChange as onRegionsChange } from './regions';
+import { forceDeactivate as forceDeactivateAnnotate } from '../annotations/annotateUI';
+import { forceDeactivate as forceDeactivateAnnotateText } from '../annotations/textMode';
+import { forceDeactivate as forceDeactivateAnnotateSelect } from '../annotations/selectMode';
 
 const PRESET_COLORS: [number, number, number][] = [
   [0.92, 0.26, 0.21], // red
@@ -57,6 +60,10 @@ function togglePaintMode(): void {
     updateButtonState(false);
     pickerPanel?.classList.add('hidden');
   } else {
+    // Mutual exclusion with annotate (pen + text + select) modes.
+    forceDeactivateAnnotate();
+    forceDeactivateAnnotateText();
+    forceDeactivateAnnotateSelect();
     activate();
     updateButtonState(true);
     pickerPanel?.classList.remove('hidden');

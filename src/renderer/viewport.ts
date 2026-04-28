@@ -6,6 +6,8 @@ import { initPhantomGroup } from './phantomGeometry';
 import { initMeasureOverlay } from './measureOverlay';
 import { initOrientationGizmo, renderGizmo, updateGizmo, disposeGizmo, isGizmoAnimating } from './orientationGizmo';
 import { initDimensionLines, updateDimensionLines, disposeDimensionLines } from './dimensionLines';
+import { initAnnotationOverlay, setLiveResolution as setAnnotationResolution } from '../annotations/annotationOverlay';
+import { configureSessionPlane } from '../annotations/sessionPlane';
 import { getTheme, onThemeChange, type Theme } from '../ui/theme';
 
 const VIEWPORT_BG = { dark: 0x1a1a2e, light: 0xededed } as const;
@@ -120,6 +122,10 @@ export function initViewport(container: HTMLElement): {
   // Bounding box dimension annotations
   initDimensionLines(scene);
 
+  // Freehand annotation overlay (drawn surface marks)
+  initAnnotationOverlay(scene);
+  configureSessionPlane(controls);
+
   // ResizeObserver
   const observer = new ResizeObserver(entries => {
     const { width, height } = entries[0].contentRect;
@@ -127,8 +133,16 @@ export function initViewport(container: HTMLElement): {
     renderer.setSize(width, height);
     camera.aspect = width / height;
     camera.updateProjectionMatrix();
+    setAnnotationResolution(width * window.devicePixelRatio, height * window.devicePixelRatio);
   });
   observer.observe(container);
+
+  // Initialize annotation resolution to current canvas size so the first
+  // strokes drawn before any resize event fire still get correct widths.
+  setAnnotationResolution(
+    canvas.width || container.clientWidth * window.devicePixelRatio,
+    canvas.height || container.clientHeight * window.devicePixelRatio,
+  );
 
   // Animate
   const clock = new THREE.Clock();
@@ -416,13 +430,25 @@ export function setMeasureLock(locked: boolean): void {
   syncOrbitEnabled();
 }
 
+const userOrbitLockListeners: Array<(locked: boolean) => void> = [];
+
 export function setUserOrbitLock(locked: boolean): void {
+  if (userLock === locked) return;
   userLock = locked;
   syncOrbitEnabled();
+  for (const fn of userOrbitLockListeners) fn(locked);
 }
 
 export function isUserOrbitLocked(): boolean {
   return userLock;
+}
+
+export function onUserOrbitLockChange(fn: (locked: boolean) => void): () => void {
+  userOrbitLockListeners.push(fn);
+  return () => {
+    const i = userOrbitLockListeners.indexOf(fn);
+    if (i >= 0) userOrbitLockListeners.splice(i, 1);
+  };
 }
 
 export { setDimensionsVisible, isDimensionsVisible } from './dimensionLines';

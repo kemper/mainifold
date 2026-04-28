@@ -1,7 +1,7 @@
 import './style.css';
 import { initEngine, executeCode, executeCodeAsync, validateCodeAsync, ensureEngineReady, getModule, getActiveLanguage, setActiveLanguage, type Language } from './geometry/engine';
 import { sliceAtZ, getBoundingBox } from './geometry/crossSection';
-import { initViewport, updateMesh, setClipping, setClipZ, getClipState, getCameraState, getCanvas, getMeshGroup, getCamera, setMeasureLock, setUserOrbitLock, isUserOrbitLocked, setDimensionsVisible, isDimensionsVisible, setGridVisible, isGridVisible } from './renderer/viewport';
+import { initViewport, updateMesh, setClipping, setClipZ, getClipState, getCameraState, getCanvas, getMeshGroup, getCamera, setMeasureLock, setUserOrbitLock, isUserOrbitLocked, onUserOrbitLockChange, setDimensionsVisible, isDimensionsVisible, setGridVisible, isGridVisible } from './renderer/viewport';
 import { renderCompositeCanvas, renderElevationsToContainer, renderSingleView, renderSliceSVG, setReferenceImages as _setRefImages, clearReferenceImages as _clearRefImages, getReferenceImages as _getRefImages, type ReferenceImages } from './renderer/multiview';
 import { setPhantom, clearPhantom, hasPhantom, type PhantomOptions } from './renderer/phantomGeometry';
 import { initEditor, setValue, getValue, setLanguage as setEditorLanguage, setEditorDiagnostics, clearEditorDiagnostics, revealFirstDiagnostic } from './editor/codeEditor';
@@ -31,6 +31,26 @@ import { maybeStartTour, resetTour, startTour } from './ui/tour';
 import { initTheme } from './ui/theme';
 import { initPaintUI } from './color/paintUI';
 import { updatePaintMesh, setOnRegionPainted, isActive as isPaintActive } from './color/paintMode';
+import { initAnnotateUI } from './annotations/annotateUI';
+import {
+  getStrokes as getAnnotationStrokes,
+  getTexts as getAnnotationTexts,
+  getCount as getAnnotationCount,
+  clearStrokes as clearStrokesStore,
+  clearTexts as clearTextsStore,
+  clearAll as clearAllAnnotations,
+  removeLastAnnotation,
+  removeAnnotationById,
+  onChange as onAnnotationStrokesChange,
+} from './annotations/annotations';
+import {
+  setAnnotationsVisible as setAnnotationsVisibleOverlay,
+  isAnnotationsVisible as isAnnotationsVisibleOverlay,
+  onVisibilityChange as onAnnotationVisibilityChange,
+} from './annotations/annotationOverlay';
+import { setColor as setAnnotateColor, setWidth as setAnnotateWidth, getWidth as getAnnotateWidth } from './annotations/annotateMode';
+import { addTextAnnotationAtAnchor, setFontSize as setAnnotateFontSize, getFontSize as getAnnotateFontSize } from './annotations/textMode';
+import { restoreView as restoreAnnotationViewById } from './annotations/selectMode';
 import { applyTriColors, hasRegions as hasColorRegions, onChange as onColorRegionsChange, clearRegions, serialize as serializeRegions, addRegion, getRegions, type SerializedColorRegion } from './color/regions';
 import { initEditorLock, syncLockState, setUnlockHandlers } from './color/editorLock';
 import { buildAdjacency, findCoplanarRegion, resolveSeed } from './color/adjacency';
@@ -1217,6 +1237,7 @@ async function main() {
   // Wire up viewport overlay buttons
   initGridToggle(clipControls);
   initDimensionsToggle(clipControls);
+  initAnnotateUI(clipControls);
   initPaintUI(clipControls);
   initMeasureToggle(clipControls);
   initOrbitLockToggle(clipControls);
@@ -1291,6 +1312,18 @@ async function main() {
       updateMesh(colored, { skipAutoFrame: true });
     }
   });
+
+  // When annotations change (stroke added/removed/cleared) or are toggled,
+  // refresh the offscreen-rendered panes (multiview + elevations) so they
+  // stay in sync with the live viewport.
+  const refreshAnnotationDependentPanes = () => {
+    if (!currentMeshData) return;
+    const meshForPanes = isPaintActive() ? applyTriColors(currentMeshData) : currentMeshData;
+    updateMultiView(meshForPanes);
+    renderElevationsToContainer(elevationsContainer, meshForPanes);
+  };
+  onAnnotationStrokesChange(refreshAnnotationDependentPanes);
+  onAnnotationVisibilityChange(refreshAnnotationDependentPanes);
 
   editorReady = true;
   editorReadyResolve();
@@ -2512,6 +2545,180 @@ async function main() {
       return { cleared: true };
     },
 
+    // === Annotations API ===
+
+    /** List all freehand annotation strokes drawn on the model surface.
+     *  Each stroke includes its surface-projected polyline points and color. */
+    listAnnotations() {
+      return getAnnotationStrokes().map(s => ({
+        id: s.id,
+        color: s.color,
+        width: s.width,
+        pointCount: s.points.length,
+        points: s.points.map(p => [
+          Math.round(p.x * 1000) / 1000,
+          Math.round(p.y * 1000) / 1000,
+          Math.round(p.z * 1000) / 1000,
+        ] as [number, number, number]),
+        camera: s.camera,
+      }));
+    },
+
+    /** List all pinned text-label annotations on the model. */
+    listTextAnnotations() {
+      return getAnnotationTexts().map(t => ({
+        id: t.id,
+        text: t.text,
+        color: t.color,
+        fontSizePx: t.fontSizePx,
+        anchor: [
+          Math.round(t.anchor.x * 1000) / 1000,
+          Math.round(t.anchor.y * 1000) / 1000,
+          Math.round(t.anchor.z * 1000) / 1000,
+        ] as [number, number, number],
+        camera: t.camera,
+      }));
+    },
+
+    /** Total number of annotations (strokes + text labels). */
+    getAnnotationCount() {
+      return getAnnotationCount();
+    },
+
+    /** Remove the most recently added annotation (stroke or text). */
+    undoAnnotation() {
+      const removed = removeLastAnnotation() !== null;
+      return { removed, remaining: getAnnotationCount() };
+    },
+
+    /** Remove a specific annotation by id. */
+    removeAnnotation(id: string) {
+      assertString(id, 'removeAnnotation(id)');
+      const removed = removeAnnotationById(id);
+      return { removed: removed !== null, remaining: getAnnotationCount() };
+    },
+
+    /** Remove all annotations (strokes and text labels). */
+    clearAnnotations() {
+      const previous = getAnnotationCount();
+      clearAllAnnotations();
+      return { cleared: previous };
+    },
+
+    /** Remove all freehand strokes (keeps text labels). */
+    clearAnnotationStrokes() {
+      const before = getAnnotationStrokes().length;
+      clearStrokesStore();
+      return { cleared: before };
+    },
+
+    /** Remove all text labels (keeps freehand strokes). */
+    clearTextAnnotations() {
+      const before = getAnnotationTexts().length;
+      clearTextsStore();
+      return { cleared: before };
+    },
+
+    /** Add a text-label annotation at a 3D anchor point on the model.
+     *  `anchor` is [x, y, z] in world coords. Text is shown as a screen-facing
+     *  label and survives orbiting. Color (RGB 0..1) and fontSizePx are optional. */
+    addTextAnnotation(opts: {
+      anchor: [number, number, number];
+      text: string;
+      color?: [number, number, number];
+      fontSizePx?: number;
+    }) {
+      const o = assertObject(opts, 'addTextAnnotation(opts)');
+      if (!o) return { error: 'addTextAnnotation requires {anchor, text, color?, fontSizePx?}' };
+      assertNoUnknownKeys(o, ['anchor', 'text', 'color', 'fontSizePx'], 'addTextAnnotation(opts)');
+      assertString(o.text, 'addTextAnnotation(opts).text', { allowEmpty: false });
+      if (!Array.isArray(o.anchor) || o.anchor.length !== 3) {
+        return { error: 'addTextAnnotation(opts).anchor must be [x, y, z]' };
+      }
+      for (const c of o.anchor as number[]) {
+        if (typeof c !== 'number' || !Number.isFinite(c)) {
+          return { error: 'anchor components must be finite numbers' };
+        }
+      }
+      if (o.color !== undefined) {
+        if (!Array.isArray(o.color) || o.color.length !== 3) return { error: 'color must be [r, g, b] in 0..1' };
+        for (const c of o.color as number[]) {
+          if (typeof c !== 'number' || c < 0 || c > 1 || !Number.isFinite(c)) {
+            return { error: 'color components must be finite numbers in 0..1' };
+          }
+        }
+      }
+      if (o.fontSizePx !== undefined) assertNumber(o.fontSizePx, 'addTextAnnotation(opts).fontSizePx', { min: 4, max: 256 });
+
+      const ann = addTextAnnotationAtAnchor({
+        anchor: o.anchor as [number, number, number],
+        text: o.text as string,
+        color: o.color as [number, number, number] | undefined,
+        fontSizePx: o.fontSizePx as number | undefined,
+      });
+      return { id: ann.id };
+    },
+
+    /** Set the default font size (pixels) for new text annotations. */
+    setAnnotationFontSize(px: number) {
+      assertNumber(px, 'setAnnotationFontSize(px)', { min: 4, max: 256 });
+      setAnnotateFontSize(px);
+      return { fontSizePx: px };
+    },
+
+    /** Get the current default font size (pixels) for new text annotations. */
+    getAnnotationFontSize() {
+      return getAnnotateFontSize();
+    },
+
+    /** Snap the camera to the angle the given annotation was originally
+     *  drawn from. Useful when reviewing where an annotation belongs. */
+    restoreAnnotationView(id: string) {
+      assertString(id, 'restoreAnnotationView(id)');
+      const ok = restoreAnnotationViewById(id);
+      return ok ? { restored: true } : { error: `No annotation with id ${id}` };
+    },
+
+    /** Show or hide annotations without removing them.
+     *  When hidden, annotations are excluded from renderView/multiview/elevation output. */
+    setAnnotationsVisible(visible: boolean) {
+      assertBoolean(visible, 'setAnnotationsVisible(visible)');
+      setAnnotationsVisibleOverlay(visible);
+      return { visible };
+    },
+
+    /** Whether annotations are currently visible. */
+    areAnnotationsVisible() {
+      return isAnnotationsVisibleOverlay();
+    },
+
+    /** Set the active drawing color for new annotation strokes. RGB in 0..1. */
+    setAnnotationColor(color: [number, number, number]) {
+      if (!Array.isArray(color) || color.length !== 3) {
+        return { error: 'setAnnotationColor requires [r, g, b] in 0..1' };
+      }
+      for (const c of color) {
+        if (typeof c !== 'number' || c < 0 || c > 1 || !Number.isFinite(c)) {
+          return { error: 'color components must be finite numbers in 0..1' };
+        }
+      }
+      setAnnotateColor([color[0], color[1], color[2]]);
+      return { color };
+    },
+
+    /** Set the active drawing line width (pixels) for new annotation strokes.
+     *  Existing strokes keep their original width. */
+    setAnnotationWidth(width: number) {
+      assertNumber(width, 'setAnnotationWidth(width)', { min: 0.5, max: 64 });
+      setAnnotateWidth(width);
+      return { width };
+    },
+
+    /** Get the active drawing line width (pixels). */
+    getAnnotationWidth() {
+      return getAnnotateWidth();
+    },
+
     /** Self-documenting help -- returns structured object and logs readable summary */
     help(method?: string): Record<string, unknown> {
       assertString(method, 'help(method)', { optional: true, allowEmpty: false });
@@ -2560,6 +2767,24 @@ async function main() {
         'paintRegion':     { signature: 'paintRegion({point, normal, color, name?, tolerance?}) -- Paint coplanar face region', docs: '/ai.md#color-regions' },
         'listRegions':     { signature: 'listRegions() -- List all color regions', docs: '/ai.md#color-regions' },
         'clearColors':     { signature: 'clearColors() -- Remove all color regions', docs: '/ai.md#color-regions' },
+        // Annotations
+        'listAnnotations':    { signature: 'listAnnotations() -- List freehand strokes -> [{id, color, width, points}]', docs: '/ai.md#annotations' },
+        'listTextAnnotations':{ signature: 'listTextAnnotations() -- List pinned text labels -> [{id, text, color, fontSizePx, anchor}]', docs: '/ai.md#annotations' },
+        'addTextAnnotation':  { signature: 'addTextAnnotation({anchor, text, color?, fontSizePx?}) -- Pin a text label at a 3D point', docs: '/ai.md#annotations' },
+        'getAnnotationCount': { signature: 'getAnnotationCount() -- Total annotations (strokes + text)', docs: '/ai.md#annotations' },
+        'undoAnnotation':     { signature: 'undoAnnotation() -- Remove the most recently added annotation -> {removed, remaining}', docs: '/ai.md#annotations' },
+        'removeAnnotation':   { signature: 'removeAnnotation(id) -- Remove a specific annotation by id', docs: '/ai.md#annotations' },
+        'clearAnnotations':   { signature: 'clearAnnotations() -- Remove all annotations (strokes + text) -> {cleared}', docs: '/ai.md#annotations' },
+        'clearAnnotationStrokes': { signature: 'clearAnnotationStrokes() -- Remove only freehand strokes', docs: '/ai.md#annotations' },
+        'clearTextAnnotations':   { signature: 'clearTextAnnotations() -- Remove only text labels', docs: '/ai.md#annotations' },
+        'setAnnotationsVisible': { signature: 'setAnnotationsVisible(bool) -- Show/hide all annotations (also affects renderView output)', docs: '/ai.md#annotations' },
+        'areAnnotationsVisible': { signature: 'areAnnotationsVisible() -- Whether annotations are currently visible', docs: '/ai.md#annotations' },
+        'setAnnotationColor': { signature: 'setAnnotationColor([r,g,b]) -- Set draw color for new strokes/text (RGB 0..1)', docs: '/ai.md#annotations' },
+        'setAnnotationWidth': { signature: 'setAnnotationWidth(px) -- Set line width for new strokes (0.5..64 px)', docs: '/ai.md#annotations' },
+        'getAnnotationWidth': { signature: 'getAnnotationWidth() -- Current line width (pixels)', docs: '/ai.md#annotations' },
+        'setAnnotationFontSize': { signature: 'setAnnotationFontSize(px) -- Set font size for new text labels (4..256 px)', docs: '/ai.md#annotations' },
+        'getAnnotationFontSize': { signature: 'getAnnotationFontSize() -- Current text label font size (pixels)', docs: '/ai.md#annotations' },
+        'restoreAnnotationView': { signature: 'restoreAnnotationView(id) -- Snap the camera to the angle the annotation was made from', docs: '/ai.md#annotations' },
       };
 
       if (method) {
@@ -2790,13 +3015,20 @@ async function main() {
     const inactiveClass = 'px-2 py-1 rounded text-xs bg-zinc-800/80 backdrop-blur text-zinc-400 hover:text-zinc-200 hover:bg-zinc-700/80 transition-colors border border-zinc-600/50';
     const activeClass = 'px-2 py-1 rounded text-xs bg-amber-500/20 backdrop-blur text-amber-400 hover:bg-amber-500/30 transition-colors border border-amber-500/30';
 
-    lockBtn.addEventListener('click', () => {
-      const locked = !isUserOrbitLocked();
-      setUserOrbitLock(locked);
+    function reflect(locked: boolean) {
       lockBtn.className = locked ? activeClass : inactiveClass;
       lockBtn.textContent = locked ? '\uD83D\uDD12' : '\uD83D\uDD13';
       lockBtn.title = locked ? 'Unlock camera rotation' : 'Lock camera rotation';
+    }
+
+    lockBtn.addEventListener('click', () => {
+      setUserOrbitLock(!isUserOrbitLocked());
     });
+
+    // Keep the icon in sync when the lock state changes from any source
+    // (e.g. pen/text/select activate, programmatic API).
+    onUserOrbitLockChange(reflect);
+    reflect(isUserOrbitLocked());
   }
 }
 
