@@ -107,3 +107,32 @@ this is fine.
 unchanged); same-code save with new annotation → new version created;
 two saves in a row with no further changes → first creates a version,
 second no-ops.
+
+## Human (third pass)
+
+> Is there anything we need to do to make sure the agent API works
+> correctly? Does ai.md need updating?
+
+## Assistant (third pass)
+
+## Key decisions
+
+**ai.md was factually wrong** in two places after this change. Fixed:
+  - "ephemeral, in-memory visual layer" → annotations now persist per-version.
+  - "ephemeral, not exported" → they ARE exported (in schema 1.3 under
+    `versions[].annotations`).
+
+**Added a Lifecycle paragraph** so AI agents working through the public
+docs know to treat annotations like code: snapshot on `runAndSave` /
+`saveVersion`, swapped on `loadVersion` / `navigateVersion`, lost on
+nav-away if unsaved. This is the kind of behavior an agent would
+otherwise discover only by surprise.
+
+**Did NOT add to `getSessionContext()`** — it currently exposes versions
+with geometry summary + notes but not annotations. Decided this is a
+feature-add, not a fix. The user asked about correctness, not
+completeness, and `listTextAnnotations()` / `listAnnotations()` already
+let an agent inspect the active version's annotations after they call
+`loadVersion`. Leaving session-context enrichment as a follow-up if
+agents start needing per-version annotation summaries before deciding
+which version to load.
