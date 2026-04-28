@@ -29,6 +29,29 @@ export interface TextAnnotation {
 
 export type Annotation = StrokeAnnotation | TextAnnotation;
 
+/** JSON-serializable form of an annotation. THREE.Vector3 fields become
+ *  plain `{x, y, z}` objects; everything else is already POJO-friendly. */
+export type SerializedAnnotation =
+  | {
+      type: 'stroke';
+      id: string;
+      points: { x: number; y: number; z: number }[];
+      color: [number, number, number];
+      width: number;
+      camera: SessionCamera;
+      plane: SessionPlane;
+    }
+  | {
+      type: 'text';
+      id: string;
+      anchor: { x: number; y: number; z: number };
+      text: string;
+      color: [number, number, number];
+      fontSizePx: number;
+      camera: SessionCamera;
+      plane: SessionPlane;
+    };
+
 let annotations: Annotation[] = [];
 const listeners: Array<() => void> = [];
 
@@ -115,6 +138,61 @@ export function clearTexts(): void {
 export function clearAll(): void {
   if (annotations.length === 0) return;
   annotations = [];
+  notify();
+}
+
+/** Snapshot all annotations as JSON-serializable plain objects. */
+export function serializeAll(): SerializedAnnotation[] {
+  return annotations.map((a): SerializedAnnotation => {
+    if (a.type === 'stroke') {
+      return {
+        type: 'stroke',
+        id: a.id,
+        points: a.points.map(p => ({ x: p.x, y: p.y, z: p.z })),
+        color: a.color,
+        width: a.width,
+        camera: a.camera,
+        plane: a.plane,
+      };
+    }
+    return {
+      type: 'text',
+      id: a.id,
+      anchor: { x: a.anchor.x, y: a.anchor.y, z: a.anchor.z },
+      text: a.text,
+      color: a.color,
+      fontSizePx: a.fontSizePx,
+      camera: a.camera,
+      plane: a.plane,
+    };
+  });
+}
+
+/** Replace all in-memory annotations with the given serialized snapshot. */
+export function loadFromSerialized(serialized: SerializedAnnotation[]): void {
+  annotations = serialized.map((s): Annotation => {
+    if (s.type === 'stroke') {
+      return {
+        type: 'stroke',
+        id: s.id,
+        points: s.points.map(p => new THREE.Vector3(p.x, p.y, p.z)),
+        color: s.color,
+        width: s.width,
+        camera: s.camera,
+        plane: s.plane,
+      };
+    }
+    return {
+      type: 'text',
+      id: s.id,
+      anchor: new THREE.Vector3(s.anchor.x, s.anchor.y, s.anchor.z),
+      text: s.text,
+      color: s.color,
+      fontSizePx: s.fontSizePx,
+      camera: s.camera,
+      plane: s.plane,
+    };
+  });
   notify();
 }
 

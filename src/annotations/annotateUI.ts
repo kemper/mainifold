@@ -186,6 +186,12 @@ function createPickerPanel(): HTMLElement {
   panel.className = 'hidden absolute top-10 right-2 z-20 bg-zinc-800/95 backdrop-blur border border-zinc-600/60 rounded-lg p-2.5 shadow-xl';
   panel.style.minWidth = '220px';
 
+  // Info banner — explains the purpose of annotations to the user.
+  const info = document.createElement('div');
+  info.className = 'mb-2 p-2 rounded bg-pink-500/10 border border-pink-400/30 text-[10px] text-pink-200 leading-snug';
+  info.textContent = 'Annotations are saved with this session and exported in the JSON. Use them to point out specific improvements for an AI working on the model.';
+  panel.appendChild(info);
+
   // Sub-mode tabs
   const tabsRow = document.createElement('div');
   tabsRow.className = 'flex items-center gap-1.5 mb-2';
