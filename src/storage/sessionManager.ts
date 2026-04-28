@@ -23,6 +23,11 @@ import {
   type ReferenceImagesData,
 } from './db';
 import type { SerializedColorRegion } from '../color/regions';
+import {
+  serializeAll as serializeAnnotations,
+  loadFromSerialized as loadAnnotations,
+  type SerializedAnnotation,
+} from '../annotations/annotations';
 
 /**
  * Current schema version for `.partwright.json` exports.
@@ -37,8 +42,11 @@ import type { SerializedColorRegion } from '../color/regions';
  *  - `1.1` — color regions promoted to an explicit `versions[].colorRegions` field. The
  *           legacy nested location is still written for backward compatibility with
  *           pre-1.1 readers, and read as a fallback when the explicit field is absent.
+ *  - `1.2` — annotations (freehand strokes + pinned text labels) included at the top
+ *           level. Snapshots the in-memory annotation store at export time and is
+ *           restored on import. Older readers ignore the field.
  */
-export const SCHEMA_VERSION = '1.1';
+export const SCHEMA_VERSION = '1.2';
 
 const CURRENT_MAJOR = 1;
 
@@ -63,6 +71,14 @@ export interface ExportedSession {
     colorRegions?: SerializedColorRegion[];
   }[];
   notes?: { text: string; timestamp: number }[];
+  /**
+   * Freehand strokes and pinned text labels drawn on the model to communicate
+   * intent to AI agents working on it. Only included when exporting the
+   * currently active session (annotations live in transient module state and
+   * are not associated with non-active sessions).
+   * @since 1.2
+   */
+  annotations?: SerializedAnnotation[];
 }
 
 interface SchemaVersionInfo {
@@ -520,6 +536,12 @@ export async function exportSession(sessionId?: string): Promise<ExportedSession
   const versions = await dbListVersions(id);
   const notes = await dbListNotes(id);
 
+  // Annotations live in transient module state, not in the database. Only attach
+  // them when the export target is the currently active session — exporting an
+  // inactive session shouldn't pick up annotations belonging to a different model.
+  const isActive = currentState.session?.id === id;
+  const annotations = isActive ? serializeAnnotations() : [];
+
   return {
     partwright: SCHEMA_VERSION,
     session: { name: session.name, created: session.created, updated: session.updated, referenceImages: session.referenceImages ?? null, ...(session.language ? { language: session.language } : {}) },
@@ -536,6 +558,7 @@ export async function exportSession(sessionId?: string): Promise<ExportedSession
       };
     }),
     ...(notes.length > 0 ? { notes: notes.map(n => ({ text: n.text, timestamp: n.timestamp })) } : {}),
+    ...(annotations.length > 0 ? { annotations } : {}),
   };
 }
 
@@ -596,5 +619,12 @@ export async function importSession(
   currentState = { session: refreshedSession, currentVersion: latest, versionCount: count };
   updateURL();
   notify();
+
+  // Restore annotations into the in-memory store. This replaces any existing
+  // annotations — the imported session is now the active context.
+  if (data.annotations && data.annotations.length > 0) {
+    loadAnnotations(data.annotations);
+  }
+
   return refreshedSession;
 }
