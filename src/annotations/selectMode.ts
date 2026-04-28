@@ -2,8 +2,9 @@
 // translate it on its own plane (the plane captured at its creation);
 // Delete/Backspace removes it; Esc deselects.
 //
-// Unlike pen/text, select mode does NOT lock orbit — the user can rotate
-// the camera to find the annotation they want before grabbing it.
+// Like pen/text, select locks the user orbit so a click-drag on an
+// annotation doesn't compete with OrbitControls. The lock-toggle button
+// in the toolbar reflects the change via onUserOrbitLockChange.
 
 import * as THREE from 'three';
 import { Line2 } from 'three/addons/lines/Line2.js';
@@ -49,7 +50,6 @@ let dragInitialTextAnchor: THREE.Vector3 | null = null;
 let dragLiveObject: Line2 | THREE.Sprite | null = null;
 
 const raycaster = new THREE.Raycaster();
-// Default Line2 raycast threshold; bumped via per-instance setting on Line2 if needed.
 raycaster.params.Line = { threshold: 0.2 };
 
 const listeners: Array<(active: boolean) => void> = [];

@@ -82,28 +82,17 @@ function notifyActiveChange(): void {
   for (const fn of listeners) fn(active);
 }
 
-/** True if any annotate sub-mode (pen or text) is currently active. Used by
- *  callers (UI, sessionPlane outline) to decide whether to maintain the
- *  shared session plane. */
-function anySiblingActive(): boolean {
-  // We import sibling state lazily via the sessionPlane.getActiveSession;
-  // a non-null active session indicates pen OR text owns it.
-  return getActiveSession() !== null;
-}
-
 export function activate(): void {
   if (active) return;
-  // Mutual exclusion with paint and select modes (text shares the session,
-  // so we only stop text when there's no plane to share — which is when the
-  // current tab switch is into a fresh activation).
   forceDeactivatePaint();
   forceDeactivateSelect();
+  // Detach text mode's handlers but keep the session plane alive — pen and
+  // text share the plane within one Annotate activation.
+  forceDeactivateText({ keepSession: true });
 
-  // If no session exists yet (first activation, or after a full deactivate),
-  // start a new one. Switching from text → pen reuses the same plane.
-  if (!anySiblingActive()) {
-    startSession();
-  }
+  // First activation (or after a full toggle off): create a fresh session.
+  // Switching from text → pen reuses the existing plane.
+  if (!getActiveSession()) startSession();
 
   active = true;
   priorOrbitLock = isUserOrbitLocked();
@@ -121,12 +110,6 @@ export function activate(): void {
   canvas.style.cursor = 'crosshair';
 
   notifyActiveChange();
-
-  // text mode is mutually exclusive with pen — but text was already turned
-  // off via forceDeactivateText path inside textMode? It's not; we deactivate
-  // it explicitly to make sure its handlers are detached. (Calling
-  // forceDeactivateText after startSession; the session plane stays active.)
-  forceDeactivateText({ keepSession: true });
 }
 
 export function deactivate(): void {
@@ -143,10 +126,6 @@ export function deactivate(): void {
   canvas.style.cursor = '';
 
   notifyActiveChange();
-
-  // If no other annotate sub-mode is taking over the session, end it.
-  // Callers that want to keep the session (e.g. pen→text switch) call
-  // forceDeactivate({keepSession: true}).
 }
 
 interface DeactivateOpts { keepSession?: boolean }

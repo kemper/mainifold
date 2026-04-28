@@ -155,13 +155,11 @@ export function showPlaneOutline(parent: THREE.Object3D): void {
   // Make sure the camera's world matrix is current — it can lag behind a
   // recent OrbitControls.update() if we're called between render frames.
   camera.updateMatrixWorld();
-  const planeData = activeSession;
-  const origin = new THREE.Vector3(planeData.origin[0], planeData.origin[1], planeData.origin[2]);
-  const normal = new THREE.Vector3(planeData.normal[0], planeData.normal[1], planeData.normal[2]);
+  const origin = new THREE.Vector3(activeSession.origin[0], activeSession.origin[1], activeSession.origin[2]);
 
-  // Camera-aligned in-plane axes: use the camera's world right/up basis. Since
-  // the plane normal is camera-to-target direction, camera right/up are exactly
-  // the in-plane axes.
+  // Camera-aligned in-plane axes: since the plane normal is the
+  // camera-to-target direction, the camera's world right/up basis vectors
+  // lie in the plane and define our rectangle.
   const right = new THREE.Vector3();
   const up = new THREE.Vector3();
   camera.matrixWorld.extractBasis(right, up, new THREE.Vector3());
@@ -178,8 +176,6 @@ export function showPlaneOutline(parent: THREE.Object3D): void {
     halfH = (ortho.top - ortho.bottom) / 2;
     halfW = (ortho.right - ortho.left) / 2;
   }
-  // Suppress unused warning when normal already aligned to camera forward
-  void normal;
 
   const tl = origin.clone().addScaledVector(right, -halfW).addScaledVector(up,  halfH);
   const tr = origin.clone().addScaledVector(right,  halfW).addScaledVector(up,  halfH);

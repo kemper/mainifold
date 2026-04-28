@@ -32,10 +32,6 @@ export type Annotation = StrokeAnnotation | TextAnnotation;
 let annotations: Annotation[] = [];
 const listeners: Array<() => void> = [];
 
-export function getAnnotations(): readonly Annotation[] {
-  return annotations;
-}
-
 export function getStrokes(): readonly StrokeAnnotation[] {
   return annotations.filter((a): a is StrokeAnnotation => a.type === 'stroke');
 }
@@ -50,14 +46,6 @@ export function getAnnotationById(id: string): Annotation | null {
 
 export function getCount(): number {
   return annotations.length;
-}
-
-export function getStrokeCount(): number {
-  return annotations.reduce((n, a) => n + (a.type === 'stroke' ? 1 : 0), 0);
-}
-
-export function getTextCount(): number {
-  return annotations.reduce((n, a) => n + (a.type === 'text' ? 1 : 0), 0);
 }
 
 export function addStroke(stroke: StrokeAnnotation): void {
