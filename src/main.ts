@@ -16,11 +16,30 @@ import { createGalleryView, refreshGallery } from './ui/gallery';
 import { createDiffView, refreshDiff } from './ui/diffView';
 import { createNotesView, refreshNotes } from './ui/notes';
 import { initSessionList, showSessionList } from './ui/sessionList';
-import { exportGLB } from './export/gltf';
-import { exportSTL } from './export/stl';
-import { exportOBJ } from './export/obj';
-import { export3MF } from './export/threemf';
-import { exportSessionJSON, exportRawCode } from './export/session';
+import { exportGLB, buildGLB } from './export/gltf';
+import { exportSTL, buildSTL } from './export/stl';
+import { exportOBJ, buildOBJ } from './export/obj';
+import { export3MF, build3MF } from './export/threemf';
+import { exportSessionJSON, exportRawCode, buildSessionJSON, buildRawCode } from './export/session';
+import { blobToBase64, downloadBlob } from './export/download';
+import {
+  listExports as listInboxExports,
+  getExport as getInboxExport,
+  clearExports as clearInboxExports,
+  registerExport as registerInboxExport,
+} from './export/exportInbox';
+import {
+  registerImport,
+  classifyImportSource,
+  type ImportInboxEntry,
+} from './import/importInbox';
+import { showImportPreview, summarizeSessionImport } from './ui/importPreview';
+import type { BuiltExport } from './export/gltf';
+
+/** Register a freshly-built export blob in the inbox so it shows up in Recent Exports. */
+function registerExportFromBuilt(built: BuiltExport, source: string): void {
+  registerInboxExport(built.blob, built.filename, source, built.mimeType);
+}
 import type { MeshData, SourceDiagnostic } from './geometry/types';
 import { analyzeZProfile, type ZProfile } from './geometry/profileAnalysis';
 import { probeAtXY, probeRay, measureDistance, type ProbeResult, type GeneralRayResult } from './geometry/rayCast';
@@ -780,53 +799,122 @@ async function main() {
   const defaultExampleKey = Object.keys(examples).find(k => k.includes('basic_shapes')) ?? Object.keys(examples)[0];
   const defaultCode = examples[defaultExampleKey]?.code ?? '// Write your manifold code here\nconst { Manifold } = api;\nreturn Manifold.cube([5,5,5], true);';
 
-  // Import a .partwright.json session, or a raw .js / .scad file, into a new session.
-  async function handleImportFile(file: File): Promise<void> {
-    const lowerName = file.name.toLowerCase();
+  // Shared validator for parsed session JSON. Returns null if shape is wrong.
+  function validateSessionPayload(data: unknown): ExportedSession | null {
+    if (!data || typeof data !== 'object') return null;
+    const d = data as ExportedSession;
+    if ((!d.partwright && !d.mainifold) || !d.session || !Array.isArray(d.versions)) return null;
+    return d;
+  }
 
-    // Confirm before clobbering an active session
-    const cur = getState();
-    if (cur.session && cur.versionCount > 0) {
-      const ok = await showInlineConfirm(
-        editorUI,
-        `Open "${file.name}" as a new session? Your current session will be kept.`,
-      );
-      if (!ok) return;
+  // Import an already-parsed session payload. Used by both file import and the
+  // window.partwright.importSessionData() API so AI agents can bypass the file picker.
+  async function importSessionPayload(data: ExportedSession): Promise<{ sessionId: string }> {
+    const session = await importSession(data, async (code) => {
+      await runCodeSync(code);
+      return captureThumbnail();
+    });
+    const version = await openSession(session.id);
+    if (version) await loadVersionIntoEditor(version);
+    return { sessionId: session.id };
+  }
+
+  // Import a raw code payload as a new session. Shared between file drop and the AI API.
+  async function importCodePayload(code: string, language: Language, sessionName?: string): Promise<{ sessionId: string }> {
+    if (language !== getActiveLanguage()) await switchLanguage(language);
+    const session = await createSession(sessionName, language);
+    setValue(code);
+    await runCodeSync(code);
+    return { sessionId: session.id };
+  }
+
+  // Run a JSON session import end-to-end: validate, show the preview modal, import.
+  async function importJSONFromText(filename: string, text: string): Promise<boolean> {
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(text);
+    } catch {
+      alert(`Could not parse "${filename}" as JSON.`);
+      return false;
+    }
+    const data = validateSessionPayload(parsed);
+    if (!data) {
+      alert(`"${filename}" doesn't look like a Partwright session file.`);
+      return false;
+    }
+    const summary = summarizeSessionImport(data);
+    const ok = await showImportPreview(filename, summary);
+    if (!ok) return false;
+    await importSessionPayload(data);
+    return true;
+  }
+
+  // Import a .partwright.json session, or a raw .js / .scad file, into a new session.
+  // Returns whether the import committed (so callers know if the inbox should be updated).
+  async function handleImportFile(file: File, options: { skipPreActiveConfirm?: boolean } = {}): Promise<boolean> {
+    const source = classifyImportSource(file.name);
+    if (!source) {
+      alert(`Unsupported file type: ${file.name}\n\nSupported: .partwright.json, .js, .scad`);
+      return false;
+    }
+
+    // Raw code imports don't get a preview modal of their own — confirm before clobber.
+    // JSON imports skip this confirm because the preview modal already serves as confirmation.
+    if (!options.skipPreActiveConfirm && source !== 'JSON') {
+      const cur = getState();
+      if (cur.session && cur.versionCount > 0) {
+        const ok = await showInlineConfirm(
+          editorUI,
+          `Open "${file.name}" as a new session? Your current session will be kept.`,
+        );
+        if (!ok) return false;
+      }
     }
 
     try {
-      if (lowerName.endsWith('.json')) {
+      let committed = false;
+      if (source === 'JSON') {
         const text = await file.text();
-        let data: ExportedSession;
-        try {
-          data = JSON.parse(text) as ExportedSession;
-        } catch {
-          alert(`Could not parse "${file.name}" as JSON.`);
-          return;
-        }
-        if ((!data.partwright && !data.mainifold) || !data.session || !Array.isArray(data.versions)) {
-          alert(`"${file.name}" doesn't look like a Partwright session file.`);
-          return;
-        }
-        const session = await importSession(data, async (code) => {
-          await runCodeSync(code);
-          return captureThumbnail();
-        });
-        const version = await openSession(session.id);
-        if (version) await loadVersionIntoEditor(version);
-      } else if (lowerName.endsWith('.js') || lowerName.endsWith('.scad')) {
+        committed = await importJSONFromText(file.name, text);
+      } else if (source === 'JS' || source === 'SCAD') {
         const code = await file.text();
-        const lang: Language = lowerName.endsWith('.scad') ? 'scad' : 'manifold-js';
-        if (lang !== getActiveLanguage()) await switchLanguage(lang);
+        const lang: Language = source === 'SCAD' ? 'scad' : 'manifold-js';
         const sessionName = file.name.replace(/\.(js|scad)$/i, '');
-        await createSession(sessionName, lang);
-        setValue(code);
-        await runCodeSync(code);
-      } else {
-        alert(`Unsupported file type: ${file.name}\n\nSupported: .partwright.json, .js, .scad`);
+        await importCodePayload(code, lang, sessionName);
+        committed = true;
       }
+      if (committed) registerImport(file, file.name, source);
+      return committed;
     } catch (e) {
       alert(`Failed to import "${file.name}": ${(e as Error).message}`);
+      return false;
+    }
+  }
+
+  // Re-import an entry from the Recent Imports inbox. Reuses the same flow as
+  // a fresh file import, including the JSON preview modal — it is still a
+  // session-creating action and the user may want to verify before clobbering.
+  async function handleReimportInboxEntry(entry: ImportInboxEntry): Promise<void> {
+    try {
+      if (entry.source === 'JSON') {
+        const text = await entry.blob.text();
+        await importJSONFromText(entry.filename, text);
+      } else {
+        const cur = getState();
+        if (cur.session && cur.versionCount > 0) {
+          const ok = await showInlineConfirm(
+            editorUI,
+            `Re-import "${entry.filename}" as a new session? Your current session will be kept.`,
+          );
+          if (!ok) return;
+        }
+        const code = await entry.blob.text();
+        const lang: Language = entry.source === 'SCAD' ? 'scad' : 'manifold-js';
+        const sessionName = entry.filename.replace(/\.(js|scad)$/i, '');
+        await importCodePayload(code, lang, sessionName);
+      }
+    } catch (e) {
+      alert(`Failed to re-import "${entry.filename}": ${(e as Error).message}`);
     }
   }
 
@@ -877,7 +965,8 @@ async function main() {
     onExportRawCode: () => {
       exportRawCode(getValue(), getActiveLanguage());
     },
-    onImportFile: handleImportFile,
+    onImportFile: async (file) => { await handleImportFile(file); },
+    onImportInboxEntry: handleReimportInboxEntry,
     onExampleSelect: async (entry: ExampleEntry) => {
       // Auto-switch engine + editor mode if the example uses a different language.
       if (entry.language !== getActiveLanguage()) {
@@ -1523,6 +1612,189 @@ async function main() {
     export3MF(filename?: string) {
       assertString(filename, 'export3MF(filename)', { optional: true });
       if (currentMeshData) export3MF(hasColorRegions() ? applyTriColors(currentMeshData) : currentMeshData, filename);
+    },
+
+    // === AI-friendly export API ===
+    // These return file contents over the API instead of triggering a browser
+    // download — so AI agents (which can't observe Downloads-folder files) can
+    // inspect, save elsewhere, or pipe the bytes onward. Each export is also
+    // added to the Recent Exports inbox so the user can re-download from the UI.
+
+    /** Build a GLB and return its bytes as base64. Same blob as exportGLB(). */
+    async exportGLBData(filename?: string) {
+      assertString(filename, 'exportGLBData(filename)', { optional: true });
+      const built = await buildGLB(filename);
+      registerExportFromBuilt(built, 'GLB');
+      return {
+        filename: built.filename,
+        mimeType: built.mimeType,
+        sizeBytes: built.blob.size,
+        base64: await blobToBase64(built.blob),
+      };
+    },
+
+    /** Build an STL and return its bytes as base64. */
+    async exportSTLData(filename?: string) {
+      assertString(filename, 'exportSTLData(filename)', { optional: true });
+      if (!currentMeshData) return { error: 'No geometry loaded' };
+      const built = buildSTL(currentMeshData, filename);
+      registerExportFromBuilt(built, 'STL');
+      return {
+        filename: built.filename,
+        mimeType: built.mimeType,
+        sizeBytes: built.blob.size,
+        base64: await blobToBase64(built.blob),
+      };
+    },
+
+    /**
+     * Build an OBJ. If the mesh has painted color regions the result is a ZIP
+     * (returned as base64); otherwise it's plain text (returned as `text`).
+     * Inspect `mimeType` to tell which.
+     */
+    async exportOBJData(filename?: string) {
+      assertString(filename, 'exportOBJData(filename)', { optional: true });
+      if (!currentMeshData) return { error: 'No geometry loaded' };
+      const mesh = hasColorRegions() ? applyTriColors(currentMeshData) : currentMeshData;
+      const built = buildOBJ(mesh, filename);
+      registerExportFromBuilt(built, 'OBJ');
+      const isText = built.mimeType === 'text/plain';
+      return {
+        filename: built.filename,
+        mimeType: built.mimeType,
+        sizeBytes: built.blob.size,
+        ...(isText
+          ? { text: await built.blob.text() }
+          : { base64: await blobToBase64(built.blob) }),
+      };
+    },
+
+    /** Build a 3MF (always a ZIP) and return its bytes as base64. */
+    async export3MFData(filename?: string) {
+      assertString(filename, 'export3MFData(filename)', { optional: true });
+      if (!currentMeshData) return { error: 'No geometry loaded' };
+      const mesh = hasColorRegions() ? applyTriColors(currentMeshData) : currentMeshData;
+      const built = build3MF(mesh, filename);
+      registerExportFromBuilt(built, '3MF');
+      return {
+        filename: built.filename,
+        mimeType: built.mimeType,
+        sizeBytes: built.blob.size,
+        base64: await blobToBase64(built.blob),
+      };
+    },
+
+    /** Build a session export (.partwright.json). Returns the parsed JSON object directly. */
+    async exportSessionData(sessionId?: string) {
+      assertString(sessionId, 'exportSessionData(sessionId)', { optional: true, allowEmpty: false });
+      const built = await buildSessionJSON(sessionId);
+      if (!built) return { error: 'No active session to export' };
+      registerExportFromBuilt(built, 'Session JSON');
+      return {
+        filename: built.filename,
+        mimeType: built.mimeType,
+        sizeBytes: built.blob.size,
+        data: built.data,
+      };
+    },
+
+    /** Return the current editor source as text + metadata. */
+    exportCodeData() {
+      const code = getValue();
+      const built = buildRawCode(code, getActiveLanguage());
+      registerExportFromBuilt(built, 'Code');
+      return {
+        filename: built.filename,
+        mimeType: built.mimeType,
+        sizeBytes: built.blob.size,
+        language: built.language,
+        text: built.text,
+      };
+    },
+
+    // === AI-friendly import API ===
+    // Bypass the file picker by accepting parsed payloads inline.
+
+    /**
+     * Import a parsed `.partwright.json` payload (object or string) as a new session.
+     * Activates the new session on success.
+     */
+    async importSessionData(data: unknown) {
+      let payload: unknown = data;
+      if (typeof payload === 'string') {
+        try { payload = JSON.parse(payload); } catch { return { error: 'importSessionData(data): could not parse string as JSON' }; }
+      }
+      const validated = validateSessionPayload(payload);
+      if (!validated) return { error: 'importSessionData(data): payload missing partwright/mainifold brand, session, or versions[]' };
+      const result = await importSessionPayload(validated);
+      return { sessionId: result.sessionId };
+    },
+
+    /**
+     * Import raw source code as a new session. `language` selects 'manifold-js' or 'scad'.
+     */
+    async importCodeData(code: string, language: Language, sessionName?: string) {
+      const check = guard(() => {
+        assertString(code, 'importCodeData(code)', { allowEmpty: false });
+        assertEnum(language, ['manifold-js', 'scad'], 'importCodeData(language)');
+        assertString(sessionName, 'importCodeData(sessionName)', { optional: true, allowEmpty: false });
+      });
+      if (typeof check === 'object' && check !== null && 'error' in check) return check;
+      const result = await importCodePayload(code, language, sessionName);
+      return { sessionId: result.sessionId };
+    },
+
+    // === Recent Exports inbox ===
+    // The same list shown in the toolbar's Export → Recent Exports section.
+
+    /** List recent exports (newest first). Bytes are not included — call getRecentExport() for those. */
+    listRecentExports() {
+      return listInboxExports().map(e => ({
+        id: e.id,
+        filename: e.filename,
+        mimeType: e.mimeType,
+        source: e.source,
+        sizeBytes: e.sizeBytes,
+        timestamp: e.timestamp,
+      }));
+    },
+
+    /**
+     * Look up a recent export by id and return its bytes.
+     * Text-typed exports return `text`; everything else returns `base64`.
+     */
+    async getRecentExport(id: string) {
+      const check = guard(() => assertString(id, 'getRecentExport(id)', { allowEmpty: false }));
+      if (typeof check === 'object' && check !== null && 'error' in check) return check;
+      const entry = getInboxExport(id);
+      if (!entry) return { error: `No export with id "${id}"` };
+      const isText = entry.mimeType === 'text/plain' || entry.mimeType === 'application/json';
+      return {
+        id: entry.id,
+        filename: entry.filename,
+        mimeType: entry.mimeType,
+        source: entry.source,
+        sizeBytes: entry.sizeBytes,
+        timestamp: entry.timestamp,
+        ...(isText
+          ? { text: await entry.blob.text() }
+          : { base64: await blobToBase64(entry.blob) }),
+      };
+    },
+
+    /** Trigger a re-download of a recent export by id (no new inbox entry). */
+    downloadRecentExport(id: string) {
+      const check = guard(() => assertString(id, 'downloadRecentExport(id)', { allowEmpty: false }));
+      if (typeof check === 'object' && check !== null && 'error' in check) return check;
+      const entry = getInboxExport(id);
+      if (!entry) return { error: `No export with id "${id}"` };
+      downloadBlob(entry.blob, entry.filename, entry.source, { register: false });
+      return { ok: true };
+    },
+
+    /** Empty the Recent Exports inbox. */
+    clearRecentExports() {
+      clearInboxExports();
     },
 
     /** Validate code without rendering. Returns { valid, error? } */
@@ -2786,6 +3058,21 @@ async function main() {
         'exportSTL':       { signature: 'exportSTL() -- Download STL file', docs: '/ai.md#console-api--windowpartwright' },
         'exportOBJ':       { signature: 'exportOBJ() -- Download OBJ file', docs: '/ai.md#console-api--windowpartwright' },
         'export3MF':       { signature: 'export3MF() -- Download 3MF file', docs: '/ai.md#console-api--windowpartwright' },
+        // AI-friendly export — return bytes over the API instead of triggering a download
+        'exportGLBData':   { signature: 'await exportGLBData() -- Return GLB as {filename, mimeType, base64, sizeBytes}', docs: '/ai.md#ai-friendly-file-io' },
+        'exportSTLData':   { signature: 'await exportSTLData() -- Return STL as {filename, mimeType, base64, sizeBytes}', docs: '/ai.md#ai-friendly-file-io' },
+        'exportOBJData':   { signature: 'await exportOBJData() -- Return OBJ as {filename, mimeType, text? | base64, sizeBytes}', docs: '/ai.md#ai-friendly-file-io' },
+        'export3MFData':   { signature: 'await export3MFData() -- Return 3MF as {filename, mimeType, base64, sizeBytes}', docs: '/ai.md#ai-friendly-file-io' },
+        'exportSessionData': { signature: 'await exportSessionData(sessionId?) -- Return parsed session JSON {filename, mimeType, data, sizeBytes}', docs: '/ai.md#ai-friendly-file-io' },
+        'exportCodeData':  { signature: 'exportCodeData() -- Return editor source as {filename, mimeType, language, text, sizeBytes}', docs: '/ai.md#ai-friendly-file-io' },
+        // AI-friendly import — bypass the file picker
+        'importSessionData': { signature: 'await importSessionData(jsonObjectOrString) -- Import .partwright.json payload -> {sessionId} or {error}', docs: '/ai.md#ai-friendly-file-io' },
+        'importCodeData':  { signature: 'await importCodeData(code, language, sessionName?) -- Import raw source as new session', docs: '/ai.md#ai-friendly-file-io' },
+        // Recent Exports inbox (also visible in toolbar Export dropdown)
+        'listRecentExports': { signature: 'listRecentExports() -- Recent export metadata, newest first', docs: '/ai.md#ai-friendly-file-io' },
+        'getRecentExport': { signature: 'await getRecentExport(id) -- Look up bytes by id -> {filename, mimeType, text? | base64, ...}', docs: '/ai.md#ai-friendly-file-io' },
+        'downloadRecentExport': { signature: 'downloadRecentExport(id) -- Re-trigger browser download for an inbox entry', docs: '/ai.md#ai-friendly-file-io' },
+        'clearRecentExports': { signature: 'clearRecentExports() -- Empty the Recent Exports list', docs: '/ai.md#ai-friendly-file-io' },
         // Color regions
         'paintRegion':     { signature: 'paintRegion({point, normal, color, name?, tolerance?}) -- Paint coplanar face region', docs: '/ai.md#color-regions' },
         'listRegions':     { signature: 'listRegions() -- List all color regions', docs: '/ai.md#color-regions' },

@@ -17,6 +17,7 @@ Partwright is a browser-based parametric CAD tool with two modeling engines: **m
 - [Common pitfalls for boolean operations](#common-pitfalls-for-boolean-operations)
 - [Print-safe geometry](#print-safe-geometry)
 - [Color regions](#color-regions)
+- [AI-friendly file I/O](#ai-friendly-file-io)
 - [Reference images](#reference-images)
 - [Photo-to-model workflow](#photo-to-model-workflow) (optional tooling)
 - [Iteration workflow](#iteration-workflow)
@@ -128,10 +129,23 @@ await partwright.setActiveLanguage(lang) // Switch engine + editor mode ('manifo
 partwright.toggleClip(on?)     // Toggle 3D clipping plane -> {enabled, z, min, max}
 partwright.setClipZ(z)         // Set clip height -> {enabled, z, min, max}
 partwright.getClipState()      // -> {enabled, z, min, max}
-await partwright.exportGLB()   // Download GLB
-partwright.exportSTL()         // Download STL
-partwright.exportOBJ()         // Download OBJ
-partwright.export3MF()         // Download 3MF
+await partwright.exportGLB()   // Download GLB (browser file dialog -- prefer exportGLBData() in agent flows)
+partwright.exportSTL()         // Download STL ("                                       exportSTLData() ")
+partwright.exportOBJ()         // Download OBJ ("                                       exportOBJData() ")
+partwright.export3MF()         // Download 3MF ("                                       export3MFData() ")
+// Agent-friendly variants -- bytes return inline, no file dialog. See AI-friendly file I/O.
+await partwright.exportGLBData()        // -> {filename, mimeType, base64, sizeBytes}
+await partwright.exportSTLData()
+await partwright.exportOBJData()        // text or base64 depending on whether colors are painted
+await partwright.export3MFData()
+await partwright.exportSessionData()    // -> {filename, mimeType, data, sizeBytes} (parsed JSON)
+partwright.exportCodeData()             // -> {filename, mimeType, language, text, sizeBytes}
+await partwright.importSessionData(parsedJson)         // -> {sessionId} or {error}
+await partwright.importCodeData(code, language, name?) // -> {sessionId}
+partwright.listRecentExports()                         // Recent Exports inbox
+await partwright.getRecentExport(id)
+partwright.downloadRecentExport(id)
+partwright.clearRecentExports()
 
 // Isolated execution -- test code without changing editor/viewport state
 await partwright.runIsolated(code)       // -> {geometryData, thumbnail}
@@ -414,6 +428,58 @@ partwright.clearColors()    // remove all regions
 - `exportGLB()` -- vertex colors flow through automatically.
 - `export3MF()` -- regions become `<basematerials>` entries with per-triangle `pid` attributes (compatible with PrusaSlicer / Bambu Studio multi-material slicing).
 - `exportSTL()` and `exportOBJ()` -- formats don't carry color, so colors are dropped.
+
+## AI-friendly file I/O
+
+The standard `exportGLB()` / `exportSTL()` / `exportOBJ()` / `export3MF()` methods trigger a browser download — the file goes to the user's Downloads folder, which an AI agent can't observe. Likewise, `Import` opens an OS file picker that an agent can't dismiss. Use the `*Data()` methods below instead: they return file contents over the API and skip the picker entirely.
+
+### Export — return bytes over the API
+```js
+// 3D model formats — binary blobs come back as base64
+const glb = await partwright.exportGLBData()
+// -> { filename: "model_2026-04-28.glb", mimeType: "model/gltf-binary", base64: "...", sizeBytes: 12345 }
+
+const stl = await partwright.exportSTLData()
+const tmf = await partwright.export3MFData()
+
+// OBJ is text-typed when the mesh has no painted color regions, otherwise a ZIP.
+// Inspect mimeType to tell which: "text/plain" -> use `text`, "application/zip" -> use `base64`.
+const obj = await partwright.exportOBJData()
+
+// Session JSON — returns the parsed object directly, no decoding needed
+const ses = await partwright.exportSessionData()
+// -> { filename: "...partwright.json", mimeType: "application/json", data: { partwright: "1.2", session: {...}, versions: [...] }, sizeBytes }
+
+// Editor source as text
+const src = await partwright.exportCodeData()
+// -> { filename, mimeType: "text/plain", language: "manifold-js", text, sizeBytes }
+```
+
+Each call also adds the export to the Recent Exports inbox so the user can re-download it from the toolbar's Export → Recent Exports list.
+
+### Import — supply the payload directly
+```js
+// Import a parsed .partwright.json (object or string) as a new active session
+const r = await partwright.importSessionData(parsedJson)
+// -> { sessionId } or { error }
+
+// Import raw source as a new session
+await partwright.importCodeData(code, 'manifold-js')           // optional sessionName arg
+await partwright.importCodeData(scadCode, 'scad', 'my-shape')
+```
+
+### Recent Exports inbox
+Every export — whether the human clicked Export or the agent called `*Data()` — is kept in a small in-memory ring buffer (last 10). The user sees them in the Export dropdown's "Recent Exports" section; agents can read them too.
+```js
+partwright.listRecentExports()
+// -> [{ id, filename, mimeType, source, sizeBytes, timestamp }, ...]   // newest first
+
+await partwright.getRecentExport(id)   // adds bytes (text or base64) to the metadata
+partwright.downloadRecentExport(id)    // re-trigger the browser download
+partwright.clearRecentExports()
+```
+
+This is also the easiest way to inspect what the user just exported manually: the bytes stay in memory until they're pushed out by newer exports.
 
 ## Reference images
 

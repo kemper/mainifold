@@ -1,7 +1,9 @@
 import type { MeshData } from '../geometry/types';
 import { downloadBlob, getExportFilename, getExportTitle } from './download';
+import type { BuiltExport } from './gltf';
 
-export function exportSTL(meshData: MeshData, customName?: string): void {
+/** Build the binary STL blob for a mesh without triggering a download. */
+export function buildSTL(meshData: MeshData, customName?: string): BuiltExport {
   const { vertProperties, triVerts, numTri, numProp } = meshData;
 
   // Binary STL format
@@ -69,6 +71,12 @@ export function exportSTL(meshData: MeshData, customName?: string): void {
     view.setUint16(offset, 0, true); offset += 2;
   }
 
-  const blob = new Blob([buffer], { type: 'application/octet-stream' });
-  downloadBlob(blob, getExportFilename('stl', customName));
+  const mimeType = 'application/octet-stream';
+  const blob = new Blob([buffer], { type: mimeType });
+  return { blob, filename: getExportFilename('stl', customName), mimeType };
+}
+
+export function exportSTL(meshData: MeshData, customName?: string): void {
+  const built = buildSTL(meshData, customName);
+  downloadBlob(built.blob, built.filename, 'STL');
 }

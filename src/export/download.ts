@@ -2,6 +2,7 @@
 
 import { getState } from '../storage/sessionManager';
 import { getUnits } from '../geometry/units';
+import { registerExport } from './exportInbox';
 
 /**
  * Build a descriptive export filename from session context.
@@ -66,12 +67,41 @@ export function getExportTitle(): string {
   return 'Partwright Export';
 }
 
-/** Trigger a browser download for a Blob. */
-export function downloadBlob(blob: Blob, filename: string): void {
+/**
+ * Trigger a browser download for a Blob and add the entry to the export inbox.
+ * `source` is a short label shown in the Recent Exports list (e.g. "GLB", "Session JSON").
+ * Pass `register: false` to download without recording (e.g. when re-downloading
+ * an existing inbox entry — we don't want to double-register it).
+ */
+export function downloadBlob(
+  blob: Blob,
+  filename: string,
+  source?: string,
+  options?: { register?: boolean },
+): void {
+  if (options?.register !== false && source) {
+    registerExport(blob, filename, source);
+  }
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
   a.href = url;
   a.download = filename;
   a.click();
   URL.revokeObjectURL(url);
+}
+
+/** Encode an ArrayBuffer / Uint8Array as base64 without blowing the call stack. */
+export function bytesToBase64(buffer: ArrayBuffer | Uint8Array): string {
+  const bytes = buffer instanceof Uint8Array ? buffer : new Uint8Array(buffer);
+  const CHUNK = 0x8000;
+  let binary = '';
+  for (let i = 0; i < bytes.length; i += CHUNK) {
+    binary += String.fromCharCode.apply(null, Array.from(bytes.subarray(i, i + CHUNK)));
+  }
+  return btoa(binary);
+}
+
+/** Async-read a Blob as base64 (no data: prefix). */
+export async function blobToBase64(blob: Blob): Promise<string> {
+  return bytesToBase64(await blob.arrayBuffer());
 }
