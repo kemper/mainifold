@@ -9,7 +9,7 @@
 //
 // Output: saves <basename>.ref.<angle>.{png,jpg} files + <basename>.references.json
 // Load into partwright via the Images tab "Attach image…" button or console:
-//   partwright.setImages({ perspective: "data:...", front: "data:...", ... })
+//   partwright.setImages([{angle: "perspective", src: "data:..."}, {angle: "front", src: "data:..."}, ...])
 
 const { execSync } = require('child_process');
 const path = require('path');

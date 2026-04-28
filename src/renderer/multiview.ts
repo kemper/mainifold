@@ -250,30 +250,29 @@ export function renderCompositeCanvas(meshData: MeshData): HTMLCanvasElement {
   return compositeCanvas;
 }
 
-// === Images for elevation comparison ===
+// === Attached images for elevation comparison ===
 
-export interface Images {
-  front?: string;
-  right?: string;
-  back?: string;
-  left?: string;
-  top?: string;
-  perspective?: string;
+export type ImageAngle = 'front' | 'right' | 'back' | 'left' | 'top' | 'perspective';
+
+export interface AttachedImage {
+  id: string;
+  angle: ImageAngle;
+  src: string;
 }
 
-let _images: Images | null = null;
+let _images: AttachedImage[] = [];
 
-export function setImages(images: Images): void {
+export function setImages(images: AttachedImage[]): void {
   _images = images;
   window.dispatchEvent(new Event('images-changed'));
 }
 
 export function clearImages(): void {
-  _images = null;
+  _images = [];
   window.dispatchEvent(new Event('images-changed'));
 }
 
-export function getImages(): Images | null {
+export function getImages(): AttachedImage[] {
   return _images;
 }
 
@@ -284,15 +283,14 @@ interface ElevationConfig {
   // Camera direction: where the camera looks FROM (multiplied by distance)
   direction: [number, number, number];
   up: [number, number, number];
-  refKey: keyof Images; // which image to show alongside
 }
 
 const ELEVATIONS: ElevationConfig[] = [
-  { name: 'Front',  direction: [0, -1, 0],  up: [0, 0, 1], refKey: 'front' },
-  { name: 'Right',  direction: [1, 0, 0],   up: [0, 0, 1], refKey: 'right' },
-  { name: 'Back',   direction: [0, 1, 0],   up: [0, 0, 1], refKey: 'back' },
-  { name: 'Left',   direction: [-1, 0, 0],  up: [0, 0, 1], refKey: 'left' },
-  { name: 'Top',    direction: [0, 0, 1],   up: [0, 1, 0], refKey: 'top' },
+  { name: 'Front',  direction: [0, -1, 0],  up: [0, 0, 1] },
+  { name: 'Right',  direction: [1, 0, 0],   up: [0, 0, 1] },
+  { name: 'Back',   direction: [0, 1, 0],   up: [0, 0, 1] },
+  { name: 'Left',   direction: [-1, 0, 0],  up: [0, 0, 1] },
+  { name: 'Top',    direction: [0, 0, 1],   up: [0, 1, 0] },
 ];
 
 function createElevationScene(geometry: THREE.BufferGeometry, bgColor: number): THREE.Scene {
@@ -373,12 +371,13 @@ export function renderElevationsToContainer(container: HTMLElement, meshData: Me
 
   const viewSize = 300;
   const renderer = getOffscreenRenderer(viewSize);
-  const hasRef = _images !== null;
+  const hasRef = _images.length > 0;
 
   const annotations = buildStrokesGroup(new THREE.Vector2(viewSize, viewSize));
   if (annotations) scene.add(annotations);
 
-  // Compact images row (above the elevation grid)
+  // Compact images row (above the elevation grid). Sorted by angle for
+  // stable ordering when multiple images share an angle they stay grouped.
   if (hasRef) {
     const refSection = document.createElement('div');
     refSection.className = 'pb-1 border-b border-zinc-700 shrink-0';
@@ -391,21 +390,19 @@ export function renderElevationsToContainer(container: HTMLElement, meshData: Me
     refLabel.textContent = 'Images:';
     refRow.appendChild(refLabel);
 
-    const refKeys: (keyof Images)[] = ['perspective', 'front', 'right', 'back', 'left', 'top'];
-    for (const key of refKeys) {
-      const src = _images![key];
-      if (!src) continue;
-
+    const angleOrder: ImageAngle[] = ['perspective', 'front', 'right', 'back', 'left', 'top'];
+    const sorted = [..._images].sort((a, b) => angleOrder.indexOf(a.angle) - angleOrder.indexOf(b.angle));
+    for (const item of sorted) {
       const refImg = document.createElement('img');
-      refImg.src = src;
+      refImg.src = item.src;
       refImg.className = 'h-16 object-contain rounded bg-zinc-950 border border-blue-500/30 cursor-pointer hover:border-blue-400 transition-colors shrink-0';
-      refImg.title = `${key.charAt(0).toUpperCase() + key.slice(1)} — click to enlarge`;
+      refImg.title = `${item.angle.charAt(0).toUpperCase() + item.angle.slice(1)} — click to enlarge`;
       refImg.addEventListener('click', () => {
         const overlay = document.createElement('div');
         overlay.className = 'fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm';
         overlay.addEventListener('click', (e) => { if (e.target === overlay) overlay.remove(); });
         const img = document.createElement('img');
-        img.src = src;
+        img.src = item.src;
         img.className = 'max-w-[90vw] max-h-[90vh] object-contain rounded-lg shadow-2xl';
         overlay.appendChild(img);
         document.body.appendChild(overlay);

@@ -2,7 +2,8 @@ import './style.css';
 import { initEngine, executeCode, executeCodeAsync, validateCodeAsync, ensureEngineReady, getModule, getActiveLanguage, setActiveLanguage, type Language } from './geometry/engine';
 import { sliceAtZ, getBoundingBox } from './geometry/crossSection';
 import { initViewport, updateMesh, setClipping, setClipZ, getClipState, getCameraState, getCanvas, getMeshGroup, getCamera, setMeasureLock, setUserOrbitLock, isUserOrbitLocked, onUserOrbitLockChange, setDimensionsVisible, isDimensionsVisible, setGridVisible, isGridVisible } from './renderer/viewport';
-import { renderCompositeCanvas, renderElevationsToContainer, renderSingleView, renderSliceSVG, setImages as _setImages, clearImages as _clearImages, getImages as _getImages, type Images } from './renderer/multiview';
+import { renderCompositeCanvas, renderElevationsToContainer, renderSingleView, renderSliceSVG, setImages as _setImages, clearImages as _clearImages, getImages as _getImages, type AttachedImage, type ImageAngle } from './renderer/multiview';
+import { generateId } from './storage/db';
 import { setPhantom, clearPhantom, hasPhantom, type PhantomOptions } from './renderer/phantomGeometry';
 import { initEditor, setValue, getValue, setLanguage as setEditorLanguage, setEditorDiagnostics, clearEditorDiagnostics, revealFirstDiagnostic } from './editor/codeEditor';
 import { createLayout, type TabName } from './ui/layout';
@@ -107,7 +108,6 @@ import {
   recordError,
   onStateChange,
   type ExportedSession,
-  type ImagesData,
 } from './storage/sessionManager';
 import type { Version } from './storage/db';
 
@@ -1044,7 +1044,7 @@ async function main() {
   // Init images view
   createImagesView(imagesContainer, {
     onChange: async (next) => {
-      _setImages(next as Images);
+      _setImages(next);
       await persistImages(next);
       if (currentMeshData) {
         renderElevationsToContainer(
@@ -1126,7 +1126,7 @@ async function main() {
     rehydrateColorRegions(version.geometryData);
     const sessionImages = await getImagesFromSession();
     if (sessionImages) {
-      _setImages(sessionImages as Images);
+      _setImages(sessionImages);
     } else {
       _clearImages();
     }
@@ -1883,31 +1883,78 @@ async function main() {
     // === Images API ===
 
     /** Attach images for side-by-side comparison in the Images and Elevations tabs.
-     *  Keys: front, right, back, left, top, perspective. Values: data URLs or image URLs.
-     *  If a session is active, also persists to IndexedDB. */
-    setImages(images: Images): void {
-      const ANGLE_KEYS = ['front', 'right', 'back', 'left', 'top', 'perspective'] as const;
-      const obj = assertObject(images, 'setImages(images)')!;
-      assertNoUnknownKeys(obj, ANGLE_KEYS, 'setImages(images)');
-      for (const k of ANGLE_KEYS) {
-        if (obj[k] !== undefined) assertString(obj[k], `setImages(images).${k}`, { allowEmpty: false });
+     *  Each item is `{angle, src}` where angle is one of front/right/back/left/top/perspective
+     *  and src is a data URL or http(s) URL. Multiple items may share the same angle.
+     *  Replaces all currently attached images. If a session is active, also persists to IndexedDB.
+     *  Returns the canonical list with assigned ids. */
+    setImages(images: Array<{ angle: ImageAngle; src: string; id?: string }>): AttachedImage[] {
+      const arr = assertArray(images, 'setImages(images)') as Array<Record<string, unknown>>;
+      const ANGLES: readonly ImageAngle[] = ['front', 'right', 'back', 'left', 'top', 'perspective'];
+      const items: AttachedImage[] = [];
+      for (let i = 0; i < arr.length; i++) {
+        const item = assertObject(arr[i], `setImages(images)[${i}]`)!;
+        assertNoUnknownKeys(item, ['angle', 'src', 'id'] as const, `setImages(images)[${i}]`);
+        const angle = item.angle;
+        if (typeof angle !== 'string' || !ANGLES.includes(angle as ImageAngle)) {
+          throw new Error(`setImages(images)[${i}].angle must be one of: ${ANGLES.join(', ')}`);
+        }
+        assertString(item.src, `setImages(images)[${i}].src`, { allowEmpty: false });
+        if (item.id !== undefined) assertString(item.id, `setImages(images)[${i}].id`, { allowEmpty: false });
+        items.push({ id: (item.id as string | undefined) ?? generateId(), angle: angle as ImageAngle, src: item.src as string });
       }
-      _setImages(images);
-      // Persist to session if one is active
-      persistImages(images as ImagesData);
-      // Re-render elevations with new data
+      _setImages(items);
+      persistImages(items);
       if (currentMeshData) {
         renderElevationsToContainer(
           document.getElementById('elevations-container')!,
           currentMeshData,
         );
       }
+      return items;
+    },
+
+    /** Append a single image. Returns the appended item with its assigned id. */
+    addImage(image: { angle: ImageAngle; src: string }): AttachedImage {
+      const obj = assertObject(image, 'addImage(image)')!;
+      assertNoUnknownKeys(obj, ['angle', 'src'] as const, 'addImage(image)');
+      const ANGLES: readonly ImageAngle[] = ['front', 'right', 'back', 'left', 'top', 'perspective'];
+      if (typeof obj.angle !== 'string' || !ANGLES.includes(obj.angle as ImageAngle)) {
+        throw new Error(`addImage(image).angle must be one of: ${ANGLES.join(', ')}`);
+      }
+      assertString(obj.src, 'addImage(image).src', { allowEmpty: false });
+      const item: AttachedImage = { id: generateId(), angle: obj.angle as ImageAngle, src: obj.src as string };
+      const next = [..._getImages(), item];
+      _setImages(next);
+      persistImages(next);
+      if (currentMeshData) {
+        renderElevationsToContainer(
+          document.getElementById('elevations-container')!,
+          currentMeshData,
+        );
+      }
+      return item;
+    },
+
+    /** Remove an image by id. Returns true if an image was removed. */
+    removeImage(id: string): boolean {
+      assertString(id, 'removeImage(id)', { allowEmpty: false });
+      const current = _getImages();
+      const next = current.filter(img => img.id !== id);
+      if (next.length === current.length) return false;
+      _setImages(next);
+      persistImages(next);
+      if (currentMeshData) {
+        renderElevationsToContainer(
+          document.getElementById('elevations-container')!,
+          currentMeshData,
+        );
+      }
+      return true;
     },
 
     /** Clear all images */
     clearImages(): void {
       _clearImages();
-      // Clear from session if one is active
       persistImages(null);
       if (currentMeshData) {
         renderElevationsToContainer(
@@ -1917,8 +1964,8 @@ async function main() {
       }
     },
 
-    /** Get currently attached images (or null if none) */
-    getImages(): Images | null {
+    /** Get the currently attached images as an array of `{id, angle, src}`. */
+    getImages(): AttachedImage[] {
       return _getImages();
     },
 
@@ -1960,7 +2007,7 @@ async function main() {
       // Restore images from session
       const sessionImages = await getImagesFromSession();
       if (sessionImages) {
-        _setImages(sessionImages as Images);
+        _setImages(sessionImages);
         if (currentMeshData) {
           renderElevationsToContainer(
             document.getElementById('elevations-container')!,
@@ -2294,7 +2341,7 @@ async function main() {
       // Restore images from imported session
       const sessionImages = await getImagesFromSession();
       if (sessionImages) {
-        _setImages(sessionImages as Images);
+        _setImages(sessionImages);
         if (currentMeshData) {
           renderElevationsToContainer(
             document.getElementById('elevations-container')!,

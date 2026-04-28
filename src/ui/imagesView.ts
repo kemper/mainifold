@@ -1,15 +1,15 @@
 // Images panel — list, attach, relabel, and remove session images.
-// Images appear next to elevation views in the Elevations tab. Each image is
-// keyed by an angle (front/right/back/left/top/perspective) with at most one
-// per angle.
+// Images appear next to elevation views in the Elevations tab. Each image
+// is tagged with an angle (front/right/back/left/top/perspective). Multiple
+// images may share the same angle — relabeling never overwrites another item.
 
-import { getState, type ImagesData } from '../storage/sessionManager';
+import { getState, type AttachedImage, type ImageAngle } from '../storage/sessionManager';
+import { generateId } from '../storage/db';
 import { getImages } from '../renderer/multiview';
 
-export const ANGLE_KEYS = ['front', 'right', 'back', 'left', 'top', 'perspective'] as const;
-export type AngleKey = typeof ANGLE_KEYS[number];
+export const ANGLE_KEYS: readonly ImageAngle[] = ['front', 'right', 'back', 'left', 'top', 'perspective'];
 
-const ANGLE_LABELS: Record<AngleKey, string> = {
+const ANGLE_LABELS: Record<ImageAngle, string> = {
   front: 'Front',
   right: 'Right',
   back: 'Back',
@@ -19,8 +19,8 @@ const ANGLE_LABELS: Record<AngleKey, string> = {
 };
 
 export interface ImagesViewCallbacks {
-  /** Persist the new images map. The view re-renders after this resolves. */
-  onChange: (images: ImagesData) => Promise<void> | void;
+  /** Persist the new images list. The view re-renders after this resolves. */
+  onChange: (images: AttachedImage[]) => Promise<void> | void;
 }
 
 let containerEl: HTMLElement | null = null;
@@ -33,7 +33,6 @@ export function createImagesView(container: HTMLElement, callbacks: ImagesViewCa
   window.addEventListener('session-changed', () => {
     if (containerEl && !containerEl.classList.contains('hidden')) refreshImages();
   });
-  // External code (e.g. window.partwright.setImages) can request a refresh.
   window.addEventListener('images-changed', () => {
     if (containerEl && !containerEl.classList.contains('hidden')) refreshImages();
   });
@@ -54,10 +53,9 @@ export function refreshImages(): void {
 
   containerEl.appendChild(createHeader());
 
-  const images = (getImages() as ImagesData | null) ?? {};
-  const present = ANGLE_KEYS.filter(k => images[k]);
+  const images = getImages();
 
-  if (present.length === 0) {
+  if (images.length === 0) {
     const empty = document.createElement('div');
     empty.className = 'flex items-center justify-center flex-1 text-zinc-500 text-sm mt-8';
     empty.textContent = 'No images yet. Click "Attach image…" to add one.';
@@ -69,8 +67,8 @@ export function refreshImages(): void {
   grid.className = 'grid gap-3 mt-3';
   grid.style.gridTemplateColumns = 'repeat(auto-fill, minmax(220px, 1fr))';
 
-  for (const angle of present) {
-    grid.appendChild(createImageTile(angle, images[angle]!, images));
+  for (const item of images) {
+    grid.appendChild(createImageTile(item, images));
   }
 
   containerEl.appendChild(grid);
@@ -90,7 +88,7 @@ function createHeader(): HTMLElement {
 
   const desc = document.createElement('div');
   desc.className = 'text-xs text-zinc-500 leading-relaxed mt-0.5';
-  desc.textContent = 'Photos or renderings the model should match. Each is tagged with a perspective (front, right, etc.) and shown next to the matching view in the Elevations tab.';
+  desc.textContent = 'Photos or renderings the model should match. Each is tagged with a perspective (front, right, etc.) and shown next to the matching view in the Elevations tab. Multiple images may share an angle.';
   title.appendChild(desc);
 
   header.appendChild(title);
@@ -99,13 +97,13 @@ function createHeader(): HTMLElement {
   addBtn.id = 'btn-attach-image';
   addBtn.className = 'shrink-0 px-3 py-1.5 rounded text-xs font-medium bg-blue-600 hover:bg-blue-500 text-white transition-colors';
   addBtn.textContent = '+ Attach image…';
-  addBtn.addEventListener('click', () => showAttachImageModal(getCurrentImages(), persistAndRefresh));
+  addBtn.addEventListener('click', () => showAttachImageModal(getImages(), persistAndRefresh));
   header.appendChild(addBtn);
 
   return header;
 }
 
-function createImageTile(angle: AngleKey, src: string, allImages: ImagesData): HTMLElement {
+function createImageTile(item: AttachedImage, allImages: AttachedImage[]): HTMLElement {
   const tile = document.createElement('div');
   tile.className = 'bg-zinc-800 rounded-lg overflow-hidden flex flex-col';
 
@@ -115,10 +113,10 @@ function createImageTile(angle: AngleKey, src: string, allImages: ImagesData): H
   thumbContainer.title = 'Click to enlarge';
 
   const img = document.createElement('img');
-  img.src = src;
+  img.src = item.src;
   img.className = 'w-full h-full object-contain';
   thumbContainer.appendChild(img);
-  thumbContainer.addEventListener('click', () => showLightbox(src, ANGLE_LABELS[angle]));
+  thumbContainer.addEventListener('click', () => showLightbox(item.src, ANGLE_LABELS[item.angle]));
   tile.appendChild(thumbContainer);
 
   // Footer: angle dropdown + remove
@@ -138,13 +136,13 @@ function createImageTile(angle: AngleKey, src: string, allImages: ImagesData): H
     opt.textContent = ANGLE_LABELS[k];
     select.appendChild(opt);
   }
-  select.value = angle;
+  select.value = item.angle;
   select.addEventListener('change', async () => {
-    const newAngle = select.value as AngleKey;
-    if (newAngle === angle) return;
-    const next: ImagesData = { ...allImages };
-    delete next[angle];
-    next[newAngle] = src;
+    const newAngle = select.value as ImageAngle;
+    if (newAngle === item.angle) return;
+    // Mutate just this item's angle. Other items keep their angles intact,
+    // even if they share the new angle — duplicate angles are allowed.
+    const next = allImages.map(x => x.id === item.id ? { ...x, angle: newAngle } : x);
     await persistAndRefresh(next);
   });
   footer.appendChild(select);
@@ -154,8 +152,7 @@ function createImageTile(angle: AngleKey, src: string, allImages: ImagesData): H
   removeBtn.textContent = '✕';
   removeBtn.title = 'Remove this image';
   removeBtn.addEventListener('click', async () => {
-    const next: ImagesData = { ...allImages };
-    delete next[angle];
+    const next = allImages.filter(x => x.id !== item.id);
     await persistAndRefresh(next);
   });
   footer.appendChild(removeBtn);
@@ -164,11 +161,7 @@ function createImageTile(angle: AngleKey, src: string, allImages: ImagesData): H
   return tile;
 }
 
-function getCurrentImages(): ImagesData {
-  return (getImages() as ImagesData | null) ?? {};
-}
-
-async function persistAndRefresh(next: ImagesData): Promise<void> {
+async function persistAndRefresh(next: AttachedImage[]): Promise<void> {
   await cb.onChange(next);
   refreshImages();
 }
@@ -176,8 +169,8 @@ async function persistAndRefresh(next: ImagesData): Promise<void> {
 // === Attach modal (file upload + URL paste) ===
 
 export function showAttachImageModal(
-  current: ImagesData,
-  onSave: (next: ImagesData) => Promise<void> | void,
+  current: AttachedImage[],
+  onSave: (next: AttachedImage[]) => Promise<void> | void,
 ): void {
   const backdrop = document.createElement('div');
   backdrop.className = 'fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm';
@@ -191,7 +184,7 @@ export function showAttachImageModal(
 
   const explanation = document.createElement('p');
   explanation.className = 'text-sm text-zinc-400 mb-4 leading-relaxed';
-  explanation.textContent = 'Add a photo or rendering you want your model to match. Each image is tagged with an angle (front, right, back, left, top, or perspective) and appears next to the matching elevation view. Existing images for an angle are replaced.';
+  explanation.textContent = 'Add a photo or rendering you want your model to match. Each image is tagged with an angle (front, right, back, left, top, or perspective) and appears next to the matching elevation view. Multiple images may share an angle — nothing is overwritten.';
 
   // File upload section
   const fileSection = document.createElement('div');
@@ -214,15 +207,15 @@ export function showAttachImageModal(
     const files = Array.from(fileInput.files || []);
     if (!files.length) return;
 
-    const next: ImagesData = { ...current };
+    const additions: AttachedImage[] = [];
     for (const file of files) {
       const name = file.name.toLowerCase();
       const dataUrl = await readFileAsDataURL(file);
       const matched = ANGLE_KEYS.find(a => name.includes(a));
-      next[matched ?? 'perspective'] = dataUrl;
+      additions.push({ id: generateId(), angle: matched ?? 'perspective', src: dataUrl });
     }
 
-    await onSave(next);
+    await onSave([...current, ...additions]);
     fileInput.value = '';
     backdrop.remove();
   });
@@ -289,9 +282,8 @@ export function showAttachImageModal(
     urlBtn.textContent = 'Loading…';
     try {
       const dataUrl = await fetchImageAsDataURL(url);
-      const angle = angleSelect.value as AngleKey;
-      const next: ImagesData = { ...current, [angle]: dataUrl };
-      await onSave(next);
+      const angle = angleSelect.value as ImageAngle;
+      await onSave([...current, { id: generateId(), angle, src: dataUrl }]);
       backdrop.remove();
     } catch (err) {
       urlError.textContent = `Could not load image: ${(err as Error).message}. The host may block cross-origin requests — try downloading and uploading instead.`;

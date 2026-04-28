@@ -82,7 +82,7 @@ Every `window.partwright` method validates its arguments at runtime. If you pass
 
 **Conventions:**
 
-- **Methods that return a value** (e.g. `runAndSave`, `loadVersion`, `query`, `importSession`, `setReferenceGeometry`, notes/session CRUD) return `{ error: "..." }` on a validation failure. The error string names the exact parameter and expected type, e.g. `"setImages(images).front must be a string, got null. See /ai.md#argument-validation"`.
+- **Methods that return a value** (e.g. `runAndSave`, `loadVersion`, `query`, `importSession`, `setReferenceGeometry`, notes/session CRUD) return `{ error: "..." }` on a validation failure. The error string names the exact parameter and expected type, e.g. `"setImages(images)[0].src must be a non-empty string, got "". See /ai.md#argument-validation"`.
 - **Void setters** (`setCode`, `setClipZ`, `setImages`, `setView`, `setUnits`, `measureAt`, `measureBetween`, `probeRay`, `measurePoints`, `renameSession`) **throw** a `ValidationError`. Wrap calls in a try/catch if you want to handle failure rather than crash the console.
 - **No coercion.** `setClipZ("5")` throws -- strings are not auto-converted to numbers. Pass the right type.
 - **Unknown object keys are rejected.** `runAndAssert(code, { widthToDeep: [1,2] })` errors on the typo; it does not silently ignore it. Allowed keys are listed on each assertion/options interface.
@@ -95,7 +95,7 @@ partwright.navigateVersion('backward')            // ValidationError: direction 
 partwright.setView('sketch')                      // ValidationError: tab must be one of: ...
 partwright.measureAt([5])                         // ValidationError: measureAt(xy) must have exactly 2 elements
 partwright.probeRay([0,0,0], [0, '1', 0])         // ValidationError: probeRay(direction)[1] must be a finite number
-partwright.setImages({ fron: '...' })    // ValidationError: setImages(images).fron is not a recognized field
+partwright.setImages([{ angle: 'fron', src: '...' }])  // ValidationError: setImages(images)[0].angle must be one of: front, right, back, left, top, perspective
 partwright.setReferenceGeometry(code, { opacity: 2 })  // returns { success: false, error: "... .opacity must be <= 1 ..." }
 await partwright.runAndAssert(code, { minVolume: '1000' })  // returns { passed: false, failures: ["... .minVolume must be a finite number ..."] }
 await partwright.runAndSave(code, 'v1', { boundsRatio: { widthToDeep: [1,2] } })  // typo caught: not a recognized field
@@ -158,9 +158,11 @@ partwright.sliceAtZVisual(z)            // Cross-section SVG at height z -> {svg
 partwright.isRunning()                   // -> boolean (is code executing?)
 
 // Images -- attach photos to compare model against
-partwright.setImages({front?, right?, back?, left?, top?, perspective?})
+partwright.setImages([{angle, src}, ...])  // replace all; angle is front|right|back|left|top|perspective; src is data URL or http(s) URL
+partwright.addImage({angle, src})          // append one; returns {id, angle, src}
+partwright.removeImage(id)                 // remove by id; returns true if removed
 partwright.clearImages()
-partwright.getImages()
+partwright.getImages()                     // -> [{id, angle, src}, ...]
 
 // Sessions -- save/compare design iterations
 await partwright.createSession(name?)    // -> {id, url, galleryUrl}
@@ -483,27 +485,32 @@ This is also the easiest way to inspect what the user just exported manually: th
 
 ## Images
 
-Attach reference photos so the model can be compared against them. Images are tagged by angle (front, right, back, left, top, perspective) with at most one image per angle. They appear as a grid in the Images tab and side-by-side with the corresponding view in the Elevations tab. Users can also attach images interactively from the Images tab.
+Attach reference photos so the model can be compared against them. Each image is tagged with an `angle` (`front` / `right` / `back` / `left` / `top` / `perspective`) and a `src` (a `data:` URL or `http(s)` URL). Multiple images may share an angle — nothing is overwritten. The full list shows up in the Images tab (where users can re-tag, remove, or attach more interactively) and in the Elevations tab beside the matching view.
 
 ```js
-// Attach images for side-by-side comparison in the Elevations tab
-partwright.setImages({
-  front: 'data:image/jpeg;base64,...',   // or an http(s) URL
-  right: 'data:image/jpeg;base64,...',
-  back: 'data:image/jpeg;base64,...',
-  left: 'data:image/jpeg;base64,...',
-  top: 'data:image/jpeg;base64,...',     // optional
-  perspective: 'data:image/jpeg;base64,...', // optional - original photo
-})
+// Replace the full list. Each item is {angle, src}; the call returns the
+// same items with a server-assigned `id` so you can remove individuals later.
+const items = partwright.setImages([
+  { angle: 'front',       src: 'data:image/jpeg;base64,...' },
+  { angle: 'right',       src: 'https://cdn.example.com/view-right.jpg' },
+  { angle: 'perspective', src: 'data:image/png;base64,...' },
+])
+// items -> [{id: 'A1bC2dE3fG', angle: 'front', src: '...'}, ...]
+
+// Append one without disturbing existing items
+const added = partwright.addImage({ angle: 'front', src: '...' })
+
+// Remove a specific item by id
+partwright.removeImage(added.id)
 
 // Clear all attached images
 partwright.clearImages()
 
 // Get the currently attached images
-partwright.getImages()  // -> {front?, right?, ...} or null
+partwright.getImages()  // -> [{id, angle, src}, ...]
 ```
 
-When images are attached, the Elevations tab shows each model view side-by-side with the matching image, enabling direct visual comparison.
+When images are attached, the Elevations tab shows them in a strip alongside the model views, enabling direct visual comparison.
 
 ## Photo-to-model workflow
 
@@ -526,7 +533,11 @@ This calls Gemini to analyze the photo and produces a JSON file with:
 ### 2. Attach images
 If you have multiple angle photos (or Gemini-generated views), attach them:
 ```js
-partwright.setImages({ front: frontDataUrl, right: rightDataUrl, ... })
+partwright.setImages([
+  { angle: 'front', src: frontDataUrl },
+  { angle: 'right', src: rightDataUrl },
+  // ...
+])
 ```
 
 ### 3. Build major masses first

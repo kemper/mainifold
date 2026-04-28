@@ -5,19 +5,21 @@ export interface Session {
   name: string;
   created: number;
   updated: number;
-  images?: ImagesData | null;
+  images?: AttachedImage[] | null;
   /** Modeling language for this session. Missing = 'manifold-js'. */
   language?: 'manifold-js' | 'scad';
 }
 
-export interface ImagesData {
-  front?: string;
-  right?: string;
-  back?: string;
-  left?: string;
-  top?: string;
-  perspective?: string;
+export type ImageAngle = 'front' | 'right' | 'back' | 'left' | 'top' | 'perspective';
+
+export interface AttachedImage {
+  id: string;
+  angle: ImageAngle;
+  /** data URL or remote URL */
+  src: string;
 }
+
+const IMAGE_ANGLES: readonly ImageAngle[] = ['front', 'right', 'back', 'left', 'top', 'perspective'];
 
 export interface Version {
   id: string;
@@ -75,7 +77,7 @@ function openDB(): Promise<IDBDatabase> {
   return dbPromise;
 }
 
-function generateId(): string {
+export function generateId(): string {
   const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
   let id = '';
   for (let i = 0; i < 12; i++) {
@@ -213,26 +215,46 @@ export async function createSession(name?: string, language?: 'manifold-js' | 's
   return session;
 }
 
+// Legacy on-disk shape for images: an object map keyed by angle. Sessions
+// stored before the array migration may still be in this form.
+type LegacyImagesObject = Partial<Record<ImageAngle, string>>;
+
 export async function getSession(id: string): Promise<Session | null> {
   const store = await tx('sessions', 'readonly');
-  const raw = await reqToPromise(store.get(id)) as (Session & { referenceImages?: ImagesData | null }) | null;
+  const raw = await reqToPromise(store.get(id)) as (Session & { referenceImages?: LegacyImagesObject | AttachedImage[] | null }) | null;
   return raw ? migrateSessionImages(raw) : null;
 }
 
 export async function listSessions(): Promise<Session[]> {
   const store = await tx('sessions', 'readonly');
-  const sessions = await reqToPromise(store.getAll()) as (Session & { referenceImages?: ImagesData | null })[];
+  const sessions = await reqToPromise(store.getAll()) as (Session & { referenceImages?: LegacyImagesObject | AttachedImage[] | null })[];
   return sessions.map(migrateSessionImages).sort((a, b) => b.updated - a.updated);
 }
 
-// Migrate legacy `referenceImages` field to `images`. Pre-rename sessions
-// stored data under the old key; new sessions use `images`.
-function migrateSessionImages(s: Session & { referenceImages?: ImagesData | null }): Session {
-  if (s.images === undefined && s.referenceImages !== undefined) {
-    s.images = s.referenceImages;
+// Read-time migration for two legacy shapes:
+//  1. Pre-rename sessions stored data under `referenceImages` instead of `images`.
+//  2. Pre-array sessions stored an object map ({front: 'url', ...}) rather than
+//     an array of {id, angle, src} items.
+function migrateSessionImages(s: Session & { referenceImages?: LegacyImagesObject | AttachedImage[] | null }): Session {
+  // Operate on an untyped view so we can hold both legacy and new shapes during migration.
+  const raw = s as unknown as { images?: unknown; referenceImages?: unknown };
+  if (raw.images == null && raw.referenceImages != null) {
+    raw.images = raw.referenceImages;
   }
-  delete s.referenceImages;
+  delete raw.referenceImages;
+  if (raw.images && !Array.isArray(raw.images) && typeof raw.images === 'object') {
+    raw.images = legacyImagesObjectToArray(raw.images as LegacyImagesObject);
+  }
   return s;
+}
+
+export function legacyImagesObjectToArray(obj: LegacyImagesObject): AttachedImage[] {
+  const result: AttachedImage[] = [];
+  for (const angle of IMAGE_ANGLES) {
+    const src = obj[angle];
+    if (src) result.push({ id: generateId(), angle, src });
+  }
+  return result;
 }
 
 export async function updateSession(id: string, updates: Partial<Pick<Session, 'name' | 'created' | 'updated' | 'images' | 'language'>>): Promise<void> {

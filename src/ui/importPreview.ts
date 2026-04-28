@@ -19,9 +19,16 @@ export interface SessionImportSummary {
 /** Build a SessionImportSummary from a parsed .partwright.json payload. */
 export function summarizeSessionImport(data: ExportedSession): SessionImportSummary {
   // Read images from new field, falling back to legacy `referenceImages` key.
+  // The shape may be the new array form ({id, angle, src}) or the legacy
+  // object map ({front: 'url', ...}) from pre-array exports.
   const imgs = data.session.images ?? data.session.referenceImages ?? null;
   const referenceSides: string[] = [];
-  if (imgs && typeof imgs === 'object') {
+  if (Array.isArray(imgs)) {
+    for (const item of imgs) {
+      const angle = (item as { angle?: string }).angle;
+      if (typeof angle === 'string') referenceSides.push(angle);
+    }
+  } else if (imgs && typeof imgs === 'object') {
     for (const k of ['front', 'right', 'back', 'left', 'top', 'perspective'] as const) {
       if ((imgs as Record<string, unknown>)[k]) referenceSides.push(k);
     }
