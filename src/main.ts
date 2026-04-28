@@ -1058,6 +1058,13 @@ async function main() {
     const version = await openSession(sid);
     if (version) {
       await loadVersionIntoEditor(version);
+    } else {
+      // openSession returned null — either the session doesn't exist
+      // (e.g. stale tile from another device's data) or it has no saved
+      // versions yet. Run defaults so the viewport renders and the
+      // status doesn't stay stuck on "Loading WASM...".
+      setStatus(statusBar, 'ready', 'Ready');
+      runCode(defaultCode);
     }
     updateDocumentTitle({ page: 'editor' });
   }
