@@ -143,3 +143,13 @@ UX:
     Recent Imports with source badge "JS".
   - Re-clicking a Recent Imports JSON entry replays the preview;
     Clear empties the list and hides the section.
+
+## Polish: close dropdowns on Escape
+
+User noticed the Export dropdown didn't close on Escape and asked for
+parity. (The Import side appeared to close on Escape only because the
+preview modal was handling the key.) Added a document-level keydown
+listener for each dropdown in `src/ui/toolbar.ts` that hides it when
+the user presses Escape while it is open. Smoke-checked in Playwright
+that both Export and Import dropdowns close as expected and that
+pressing Escape with no dropdown open is a no-op.

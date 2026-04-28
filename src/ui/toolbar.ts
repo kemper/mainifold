@@ -307,6 +307,12 @@ export function createToolbar(
     }
   });
 
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && !importDropdown.classList.contains('hidden')) {
+      importDropdown.classList.add('hidden');
+    }
+  });
+
   toolbar.appendChild(importWrapper);
 
   // Export dropdown
@@ -472,6 +478,12 @@ export function createToolbar(
   // Close dropdown when clicking outside
   document.addEventListener('click', (e) => {
     if (!exportWrapper.contains(e.target as Node)) {
+      dropdown.classList.add('hidden');
+    }
+  });
+
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && !dropdown.classList.contains('hidden')) {
       dropdown.classList.add('hidden');
     }
   });
