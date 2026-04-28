@@ -74,6 +74,7 @@ import { restoreView as restoreAnnotationViewById } from './annotations/selectMo
 import { applyTriColors, applyTriColorsIfVisible, hasRegions as hasColorRegions, onChange as onColorRegionsChange, onVisibilityChange as onPaintVisibilityChange, clearRegions, serialize as serializeRegions, addRegion, getRegions, type SerializedColorRegion } from './color/regions';
 import { initEditorLock, syncLockState, setUnlockHandlers } from './color/editorLock';
 import { buildAdjacency, findCoplanarRegion, resolveSeed } from './color/adjacency';
+import { findSlabTriangles } from './color/slabPaint';
 import {
   getSessionIdFromURL,
   getVersionFromURL,
@@ -477,6 +478,9 @@ function rehydrateColorRegions(geometryData: Record<string, unknown> | null): vo
       }
     } else if (region.descriptor.kind === 'triangles') {
       triangles = new Set(region.descriptor.ids);
+    } else if (region.descriptor.kind === 'slab') {
+      const { normal, offset, thickness } = region.descriptor;
+      triangles = findSlabTriangles(mesh, normal, offset, thickness);
     }
 
     if (triangles.size > 0) {
@@ -2809,6 +2813,87 @@ async function main() {
       );
 
       // Re-render with colors
+      const colored = applyTriColorsIfVisible(currentMeshData);
+      updateMesh(colored, { skipAutoFrame: true });
+      updateMultiView(colored);
+      syncLockState();
+
+      return { id: region.id, name: region.name, triangles: triangles.size };
+    },
+
+    /** Paint a specific set of triangle indices as a single region.
+     *  Useful for paintbrush-style selections produced programmatically. */
+    paintFaces(opts: { triangleIds: number[]; color: [number, number, number]; name?: string }) {
+      if (!currentMeshData) return { error: 'No geometry loaded' };
+      if (!opts || typeof opts !== 'object') return { error: 'paintFaces requires {triangleIds, color}' };
+      const { triangleIds, color, name } = opts;
+      if (!Array.isArray(triangleIds) || triangleIds.length === 0) return { error: 'triangleIds must be a non-empty array of integers' };
+      if (!Array.isArray(color) || color.length !== 3) return { error: 'color must be [r,g,b] with values 0..1' };
+
+      const numTri = currentMeshData.numTri;
+      const ids: number[] = [];
+      for (const id of triangleIds) {
+        if (typeof id !== 'number' || !Number.isInteger(id) || id < 0 || id >= numTri) {
+          return { error: `triangleIds contains invalid index ${id} (expected 0..${numTri - 1})` };
+        }
+        ids.push(id);
+      }
+
+      const triangles = new Set<number>(ids);
+      const regionName = name ?? `Region ${getRegions().length + 1}`;
+      const region = addRegion(
+        regionName,
+        color as [number, number, number],
+        'paintbrush',
+        { kind: 'triangles', ids: [...triangles] },
+        triangles,
+      );
+
+      const colored = applyTriColorsIfVisible(currentMeshData);
+      updateMesh(colored, { skipAutoFrame: true });
+      updateMultiView(colored);
+      syncLockState();
+
+      return { id: region.id, name: region.name, triangles: triangles.size };
+    },
+
+    /** Paint a slab — all faces whose centroid falls inside a planar slab.
+     *  `axis` is shorthand for axis-aligned slabs ('x'/'y'/'z'). For oblique
+     *  slabs, pass `normal` directly (does not need to be normalized). */
+    paintSlab(opts: { axis?: 'x' | 'y' | 'z'; normal?: [number, number, number]; offset: number; thickness: number; color: [number, number, number]; name?: string }) {
+      if (!currentMeshData) return { error: 'No geometry loaded' };
+      if (!opts || typeof opts !== 'object') return { error: 'paintSlab requires {axis|normal, offset, thickness, color}' };
+      const { axis, normal: rawNormal, offset, thickness, color, name } = opts;
+
+      let normal: [number, number, number];
+      if (axis !== undefined) {
+        if (axis !== 'x' && axis !== 'y' && axis !== 'z') return { error: "axis must be 'x', 'y', or 'z'" };
+        normal = axis === 'x' ? [1, 0, 0] : axis === 'y' ? [0, 1, 0] : [0, 0, 1];
+      } else if (Array.isArray(rawNormal) && rawNormal.length === 3) {
+        const [nx, ny, nz] = rawNormal;
+        const len = Math.hypot(nx, ny, nz);
+        if (!Number.isFinite(len) || len === 0) return { error: 'normal must be a non-zero 3-vector' };
+        normal = [nx / len, ny / len, nz / len];
+      } else {
+        return { error: 'paintSlab requires either axis (x|y|z) or normal [nx,ny,nz]' };
+      }
+
+      if (typeof offset !== 'number' || !Number.isFinite(offset)) return { error: 'offset must be a finite number' };
+      if (typeof thickness !== 'number' || !Number.isFinite(thickness) || thickness <= 0) return { error: 'thickness must be a positive finite number' };
+      if (!Array.isArray(color) || color.length !== 3) return { error: 'color must be [r,g,b] with values 0..1' };
+
+      const triangles = findSlabTriangles(currentMeshData, normal, offset, thickness);
+      if (triangles.size === 0) return { error: 'No triangles found inside the slab' };
+
+      const regionName = name ?? `Region ${getRegions().length + 1}`;
+      const region = addRegion(
+        regionName,
+        color as [number, number, number],
+        'slab',
+        { kind: 'slab', normal, offset, thickness },
+        triangles,
+      );
+
       const colored = applyTriColorsIfVisible(currentMeshData);
       updateMesh(colored, { skipAutoFrame: true });
       updateMultiView(colored);
