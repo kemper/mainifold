@@ -18,6 +18,7 @@ export interface ToolbarCallbacks {
   onImportFile: (file: File) => void | Promise<void>;
   onExampleSelect: (entry: ExampleEntry) => void;
   onLanguageSwitch: (lang: 'manifold-js' | 'scad') => void;
+  onGoHome: () => void;
 }
 
 /** File extensions accepted by the Import button and drag-and-drop. */
@@ -60,10 +61,14 @@ export function createToolbar(
   const toolbar = document.createElement('div');
   toolbar.className = 'flex items-center gap-1 px-3 py-1.5 bg-zinc-900 border-b border-zinc-700 text-sm shrink-0';
 
-  // Logo
-  const logo = document.createElement('div');
-  logo.className = 'flex items-center gap-2 mr-4';
+  // Logo — clicking returns to the landing page
+  const logo = document.createElement('button');
+  logo.type = 'button';
+  logo.className = 'flex items-center gap-2 mr-4 bg-transparent border-0 p-0 cursor-pointer hover:opacity-80 transition-opacity';
+  logo.title = 'Back to home';
+  logo.setAttribute('aria-label', 'Partwright home');
   logo.innerHTML = `${partwrightMarkSvg(20)}<span class="text-zinc-100 font-semibold tracking-tight">Partwright</span>`;
+  logo.addEventListener('click', callbacks.onGoHome);
   toolbar.appendChild(logo);
 
   // Auto-run toggle + manual Run button
