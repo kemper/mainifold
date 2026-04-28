@@ -224,7 +224,7 @@ export async function listSessions(): Promise<Session[]> {
   return sessions.sort((a, b) => b.updated - a.updated);
 }
 
-export async function updateSession(id: string, updates: Partial<Pick<Session, 'name' | 'updated' | 'referenceImages' | 'language'>>): Promise<void> {
+export async function updateSession(id: string, updates: Partial<Pick<Session, 'name' | 'created' | 'updated' | 'referenceImages' | 'language'>>): Promise<void> {
   const store = await tx('sessions', 'readwrite');
   const session = await reqToPromise(store.get(id)) as Session | null;
   if (!session) return;
@@ -284,6 +284,8 @@ export async function saveVersion(
   thumbnail: Blob | null,
   label?: string,
   notes?: string,
+  /** Override the version timestamp (used by import to preserve the original). */
+  timestamp?: number,
 ): Promise<Version> {
   const versions = await listVersions(sessionId);
   const nextIndex = versions.length > 0 ? Math.max(...versions.map(v => v.index)) + 1 : 1;
@@ -296,15 +298,16 @@ export async function saveVersion(
     geometryData,
     thumbnail,
     label: label || `v${nextIndex}`,
-    timestamp: Date.now(),
+    timestamp: timestamp ?? Date.now(),
     ...(notes ? { notes } : {}),
   };
 
   const store = await tx('versions', 'readwrite');
   await reqToPromise(store.put(version));
 
-  // Update session timestamp
-  await updateSession(sessionId, { updated: Date.now() });
+  // Bump session.updated unless the caller is restoring an earlier timestamp
+  // (an import that wants to preserve original session.updated will restore it after).
+  await updateSession(sessionId, { updated: timestamp ?? Date.now() });
 
   return version;
 }
