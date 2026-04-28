@@ -6,6 +6,7 @@
 // the camera to find the annotation they want before grabbing it.
 
 import * as THREE from 'three';
+import { Line2 } from 'three/addons/lines/Line2.js';
 import {
   getAnnotationById,
   removeAnnotationById,
@@ -15,6 +16,7 @@ import {
 } from './annotations';
 import {
   getOverlayGroup,
+  setLine2Points,
 } from './annotationOverlay';
 import {
   endSession,
@@ -26,6 +28,8 @@ import {
 import {
   getCamera,
   getRenderer,
+  setUserOrbitLock,
+  isUserOrbitLocked,
 } from '../renderer/viewport';
 import { forceDeactivate as forceDeactivatePaint } from '../color/paintUI';
 import { forceDeactivate as forceDeactivatePen } from './annotateMode';
@@ -33,12 +37,16 @@ import { forceDeactivate as forceDeactivateText } from './textMode';
 
 let active = false;
 let selectedId: string | null = null;
+let priorOrbitLock = false;
 
 // Drag state
 let dragging = false;
 let dragInitialIntersection: THREE.Vector3 | null = null;
 let dragInitialStrokePoints: THREE.Vector3[] | null = null;
 let dragInitialTextAnchor: THREE.Vector3 | null = null;
+// Live object being dragged — mutated directly on each pointermove for
+// instant visual feedback. The store is only updated once on pointer-up.
+let dragLiveObject: Line2 | THREE.Sprite | null = null;
 
 const raycaster = new THREE.Raycaster();
 // Default Line2 raycast threshold; bumped via per-instance setting on Line2 if needed.
@@ -89,6 +97,11 @@ export function activate(): void {
   endSession();
 
   active = true;
+  // Lock orbit so a click-drag on an annotation doesn't fight OrbitControls.
+  // The lock-toggle button reflects this via onUserOrbitLockChange.
+  priorOrbitLock = isUserOrbitLocked();
+  setUserOrbitLock(true);
+
   const canvas = getRenderer().domElement;
   canvas.addEventListener('pointerdown', onPointerDown);
   canvas.addEventListener('pointermove', onPointerMove);
@@ -104,8 +117,10 @@ export function deactivate(): void {
   if (!active) return;
   active = false;
   dragging = false;
+  dragLiveObject = null;
   selectedId = null;
   notifySelectionChange();
+  if (!priorOrbitLock) setUserOrbitLock(false);
 
   const canvas = getRenderer().domElement;
   canvas.removeEventListener('pointerdown', onPointerDown);
@@ -161,6 +176,17 @@ function pickAnnotationAt(event: PointerEvent): Annotation | null {
   return null;
 }
 
+function findLiveObject(id: string): Line2 | THREE.Sprite | null {
+  const overlay = getOverlayGroup();
+  if (!overlay) return null;
+  for (const c of overlay.children) {
+    if ((c.userData as { annotationId?: string })?.annotationId === id) {
+      if (c instanceof Line2 || c instanceof THREE.Sprite) return c;
+    }
+  }
+  return null;
+}
+
 function onPointerDown(event: PointerEvent): void {
   if (event.button !== 0) return;
   const ann = pickAnnotationAt(event);
@@ -177,6 +203,10 @@ function onPointerDown(event: PointerEvent): void {
 
   dragging = true;
   dragInitialIntersection = start;
+  // Cache the live three.js object so we can mutate it in-place during the
+  // drag — much smoother than going through the store rebuild path each
+  // pointermove. We commit to the store once on pointerup.
+  dragLiveObject = findLiveObject(ann.id);
   if (ann.type === 'stroke') {
     dragInitialStrokePoints = ann.points.map(p => p.clone());
     dragInitialTextAnchor = null;
@@ -201,18 +231,46 @@ function onPointerMove(event: PointerEvent): void {
   const delta = cur.clone().sub(dragInitialIntersection);
   if (ann.type === 'stroke' && dragInitialStrokePoints) {
     const moved = dragInitialStrokePoints.map(p => p.clone().add(delta));
-    updateStrokePoints(ann.id, moved);
+    if (dragLiveObject instanceof Line2) {
+      setLine2Points(dragLiveObject, moved);
+    } else {
+      // No live object cached — fall back to store path.
+      updateStrokePoints(ann.id, moved);
+    }
   } else if (ann.type === 'text' && dragInitialTextAnchor) {
-    updateTextAnchor(ann.id, dragInitialTextAnchor.clone().add(delta));
+    const moved = dragInitialTextAnchor.clone().add(delta);
+    if (dragLiveObject instanceof THREE.Sprite) {
+      dragLiveObject.position.copy(moved);
+    } else {
+      updateTextAnchor(ann.id, moved);
+    }
   }
 }
 
 function onPointerUp(event: PointerEvent): void {
   if (!dragging) return;
   dragging = false;
+  // Commit final position to the store. This triggers a rebuild — same
+  // visual result as the live mutation, but now persisted.
+  if (selectedId && dragInitialIntersection) {
+    const ann = getAnnotationById(selectedId);
+    if (ann) {
+      const plane = sessionToPlane(ann.plane);
+      const cur = screenToPlane(event, plane);
+      if (cur) {
+        const delta = cur.clone().sub(dragInitialIntersection);
+        if (ann.type === 'stroke' && dragInitialStrokePoints) {
+          updateStrokePoints(ann.id, dragInitialStrokePoints.map(p => p.clone().add(delta)));
+        } else if (ann.type === 'text' && dragInitialTextAnchor) {
+          updateTextAnchor(ann.id, dragInitialTextAnchor.clone().add(delta));
+        }
+      }
+    }
+  }
   dragInitialIntersection = null;
   dragInitialStrokePoints = null;
   dragInitialTextAnchor = null;
+  dragLiveObject = null;
   try { (event.target as Element).releasePointerCapture?.(event.pointerId); } catch { /* */ }
 }
 

@@ -1,7 +1,7 @@
 import './style.css';
 import { initEngine, executeCode, executeCodeAsync, validateCodeAsync, ensureEngineReady, getModule, getActiveLanguage, setActiveLanguage, type Language } from './geometry/engine';
 import { sliceAtZ, getBoundingBox } from './geometry/crossSection';
-import { initViewport, updateMesh, setClipping, setClipZ, getClipState, getCameraState, getCanvas, getMeshGroup, getCamera, setMeasureLock, setUserOrbitLock, isUserOrbitLocked, setDimensionsVisible, isDimensionsVisible, setGridVisible, isGridVisible } from './renderer/viewport';
+import { initViewport, updateMesh, setClipping, setClipZ, getClipState, getCameraState, getCanvas, getMeshGroup, getCamera, setMeasureLock, setUserOrbitLock, isUserOrbitLocked, onUserOrbitLockChange, setDimensionsVisible, isDimensionsVisible, setGridVisible, isGridVisible } from './renderer/viewport';
 import { renderCompositeCanvas, renderElevationsToContainer, renderSingleView, renderSliceSVG, setReferenceImages as _setRefImages, clearReferenceImages as _clearRefImages, getReferenceImages as _getRefImages, type ReferenceImages } from './renderer/multiview';
 import { setPhantom, clearPhantom, hasPhantom, type PhantomOptions } from './renderer/phantomGeometry';
 import { initEditor, setValue, getValue, setLanguage as setEditorLanguage, setEditorDiagnostics, clearEditorDiagnostics, revealFirstDiagnostic } from './editor/codeEditor';
@@ -2901,13 +2901,20 @@ async function main() {
     const inactiveClass = 'px-2 py-1 rounded text-xs bg-zinc-800/80 backdrop-blur text-zinc-400 hover:text-zinc-200 hover:bg-zinc-700/80 transition-colors border border-zinc-600/50';
     const activeClass = 'px-2 py-1 rounded text-xs bg-amber-500/20 backdrop-blur text-amber-400 hover:bg-amber-500/30 transition-colors border border-amber-500/30';
 
-    lockBtn.addEventListener('click', () => {
-      const locked = !isUserOrbitLocked();
-      setUserOrbitLock(locked);
+    function reflect(locked: boolean) {
       lockBtn.className = locked ? activeClass : inactiveClass;
       lockBtn.textContent = locked ? '\uD83D\uDD12' : '\uD83D\uDD13';
       lockBtn.title = locked ? 'Unlock camera rotation' : 'Lock camera rotation';
+    }
+
+    lockBtn.addEventListener('click', () => {
+      setUserOrbitLock(!isUserOrbitLocked());
     });
+
+    // Keep the icon in sync when the lock state changes from any source
+    // (e.g. pen/text/select activate, programmatic API).
+    onUserOrbitLockChange(reflect);
+    reflect(isUserOrbitLocked());
   }
 }
 

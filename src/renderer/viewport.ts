@@ -407,13 +407,25 @@ export function setMeasureLock(locked: boolean): void {
   syncOrbitEnabled();
 }
 
+const userOrbitLockListeners: Array<(locked: boolean) => void> = [];
+
 export function setUserOrbitLock(locked: boolean): void {
+  if (userLock === locked) return;
   userLock = locked;
   syncOrbitEnabled();
+  for (const fn of userOrbitLockListeners) fn(locked);
 }
 
 export function isUserOrbitLocked(): boolean {
   return userLock;
+}
+
+export function onUserOrbitLockChange(fn: (locked: boolean) => void): () => void {
+  userOrbitLockListeners.push(fn);
+  return () => {
+    const i = userOrbitLockListeners.indexOf(fn);
+    if (i >= 0) userOrbitLockListeners.splice(i, 1);
+  };
 }
 
 export { setDimensionsVisible, isDimensionsVisible } from './dimensionLines';
