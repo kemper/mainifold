@@ -199,48 +199,190 @@ function btn(text: string, onClick: () => void): HTMLButtonElement {
 }
 
 const ANGLE_KEYS = ['front', 'right', 'back', 'left', 'top', 'perspective'] as const;
+type AngleKey = typeof ANGLE_KEYS[number];
 
 function createRefLoader(): HTMLElement {
   const wrapper = document.createElement('span');
   wrapper.id = 'btn-ref-upload';
   wrapper.className = 'relative';
 
-  const input = document.createElement('input');
-  input.type = 'file';
-  input.accept = 'image/*';
-  input.multiple = true;
-  input.className = 'hidden';
-  input.addEventListener('change', async () => {
-    const files = Array.from(input.files || []);
+  const button = document.createElement('button');
+  button.className = 'px-2 py-0.5 rounded text-xs bg-blue-500/10 border border-blue-500/30 text-blue-400 hover:bg-blue-500/20 hover:text-blue-300 transition-colors cursor-pointer';
+  button.textContent = '\uD83D\uDCF7 Refs';
+  button.title = 'Load reference images for side-by-side comparison in the Elevations tab.';
+  button.addEventListener('click', () => showRefUploadModal());
+
+  wrapper.appendChild(button);
+  return wrapper;
+}
+
+function showRefUploadModal(): void {
+  const backdrop = document.createElement('div');
+  backdrop.className = 'fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm';
+
+  const modal = document.createElement('div');
+  modal.className = 'bg-zinc-800 border border-zinc-600 rounded-xl shadow-2xl p-6 max-w-lg w-full mx-4';
+
+  const title = document.createElement('h2');
+  title.className = 'text-base font-semibold text-zinc-100 mb-2';
+  title.textContent = 'Load reference images';
+
+  const explanation = document.createElement('p');
+  explanation.className = 'text-sm text-zinc-400 mb-4 leading-relaxed';
+  explanation.textContent = 'Reference images are photos or renderings you want your model to match. They appear next to each elevation view in the Elevations tab so you (or an AI agent) can compare silhouettes and proportions side-by-side. Add up to one image per angle: front, right, back, left, top, or perspective.';
+
+  // File upload section
+  const fileSection = document.createElement('div');
+  fileSection.className = 'mb-4 p-3 rounded border border-zinc-700 bg-zinc-900/50';
+
+  const fileLabel = document.createElement('div');
+  fileLabel.className = 'text-xs font-semibold text-zinc-300 mb-1';
+  fileLabel.textContent = 'Upload from your computer';
+
+  const fileHint = document.createElement('div');
+  fileHint.className = 'text-xs text-zinc-500 mb-2 leading-relaxed';
+  fileHint.textContent = 'Select one or more images. Filenames containing front/right/back/left/top/perspective auto-assign by angle; anything else loads as perspective.';
+
+  const fileInput = document.createElement('input');
+  fileInput.type = 'file';
+  fileInput.accept = 'image/*';
+  fileInput.multiple = true;
+  fileInput.className = 'hidden';
+  fileInput.addEventListener('change', async () => {
+    const files = Array.from(fileInput.files || []);
     if (!files.length) return;
 
     const images: Record<string, string> = {};
-
     for (const file of files) {
       const name = file.name.toLowerCase();
       const dataUrl = await readFileAsDataURL(file);
       const matched = ANGLE_KEYS.find(a => name.includes(a));
-      if (matched) {
-        images[matched] = dataUrl;
-      } else {
-        // Default unmatched files to perspective
-        images.perspective = dataUrl;
-      }
+      images[matched ?? 'perspective'] = dataUrl;
     }
 
     callbacks.onLoadReferenceImages(images);
-    input.value = '';
+    fileInput.value = '';
+    backdrop.remove();
   });
 
-  const button = document.createElement('button');
-  button.className = 'px-2 py-0.5 rounded text-xs bg-blue-500/10 border border-blue-500/30 text-blue-400 hover:bg-blue-500/20 hover:text-blue-300 transition-colors cursor-pointer';
-  button.textContent = '\uD83D\uDCF7 Refs';
-  button.title = 'Upload reference images. Name files by angle (front.jpg, right.png, etc.) for multi-view comparison, or load a single photo as perspective.';
-  button.addEventListener('click', () => input.click());
+  const fileBtn = document.createElement('button');
+  fileBtn.className = 'px-3 py-1.5 rounded text-xs font-medium bg-blue-600 hover:bg-blue-500 text-white transition-colors';
+  fileBtn.textContent = 'Choose files…';
+  fileBtn.addEventListener('click', () => fileInput.click());
 
-  wrapper.appendChild(input);
-  wrapper.appendChild(button);
-  return wrapper;
+  fileSection.appendChild(fileLabel);
+  fileSection.appendChild(fileHint);
+  fileSection.appendChild(fileInput);
+  fileSection.appendChild(fileBtn);
+
+  // URL section
+  const urlSection = document.createElement('div');
+  urlSection.className = 'mb-4 p-3 rounded border border-zinc-700 bg-zinc-900/50';
+
+  const urlLabel = document.createElement('div');
+  urlLabel.className = 'text-xs font-semibold text-zinc-300 mb-1';
+  urlLabel.textContent = 'Paste an image URL';
+
+  const urlHint = document.createElement('div');
+  urlHint.className = 'text-xs text-zinc-500 mb-2 leading-relaxed';
+  urlHint.textContent = 'The URL must serve the image with permissive CORS headers. If the host blocks cross-origin requests, download the file and use Upload above.';
+
+  const urlRow = document.createElement('div');
+  urlRow.className = 'flex gap-2 items-stretch';
+
+  const urlInput = document.createElement('input');
+  urlInput.type = 'url';
+  urlInput.placeholder = 'https://example.com/photo.jpg';
+  urlInput.className = 'flex-1 bg-zinc-800 text-zinc-200 font-mono text-xs px-2 py-1.5 rounded border border-zinc-600 outline-none focus:border-blue-500';
+
+  const angleSelect = document.createElement('select');
+  angleSelect.className = 'bg-zinc-800 text-zinc-200 text-xs px-2 py-1.5 rounded border border-zinc-600 outline-none focus:border-blue-500';
+  for (const angle of ANGLE_KEYS) {
+    const opt = document.createElement('option');
+    opt.value = angle;
+    opt.textContent = angle.charAt(0).toUpperCase() + angle.slice(1);
+    angleSelect.appendChild(opt);
+  }
+  angleSelect.value = 'perspective';
+
+  const urlBtn = document.createElement('button');
+  urlBtn.className = 'px-3 py-1.5 rounded text-xs font-medium bg-blue-600 hover:bg-blue-500 text-white transition-colors disabled:opacity-50 disabled:cursor-not-allowed';
+  urlBtn.textContent = 'Load URL';
+
+  const urlError = document.createElement('div');
+  urlError.className = 'text-xs text-red-400 mt-2 hidden leading-relaxed';
+
+  urlInput.addEventListener('input', () => {
+    const url = urlInput.value.trim().toLowerCase();
+    const matched = ANGLE_KEYS.find(a => url.includes(a));
+    if (matched) angleSelect.value = matched;
+  });
+
+  urlBtn.addEventListener('click', async () => {
+    const url = urlInput.value.trim();
+    if (!url) return;
+    urlError.classList.add('hidden');
+    urlBtn.disabled = true;
+    const original = urlBtn.textContent;
+    urlBtn.textContent = 'Loading…';
+    try {
+      const dataUrl = await fetchImageAsDataURL(url);
+      const angle = angleSelect.value as AngleKey;
+      callbacks.onLoadReferenceImages({ [angle]: dataUrl });
+      backdrop.remove();
+    } catch (err) {
+      urlError.textContent = `Could not load image: ${(err as Error).message}. The host may block cross-origin requests — try downloading and uploading instead.`;
+      urlError.classList.remove('hidden');
+      urlBtn.disabled = false;
+      urlBtn.textContent = original;
+    }
+  });
+
+  urlInput.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' && !urlBtn.disabled) urlBtn.click();
+  });
+
+  urlRow.appendChild(urlInput);
+  urlRow.appendChild(angleSelect);
+  urlRow.appendChild(urlBtn);
+
+  urlSection.appendChild(urlLabel);
+  urlSection.appendChild(urlHint);
+  urlSection.appendChild(urlRow);
+  urlSection.appendChild(urlError);
+
+  // Footer
+  const btnRow = document.createElement('div');
+  btnRow.className = 'flex justify-end';
+
+  const cancelBtn = document.createElement('button');
+  cancelBtn.className = 'px-3 py-1.5 rounded text-xs text-zinc-400 hover:text-zinc-200 hover:bg-zinc-700 transition-colors';
+  cancelBtn.textContent = 'Cancel';
+  cancelBtn.addEventListener('click', () => backdrop.remove());
+
+  btnRow.appendChild(cancelBtn);
+
+  modal.appendChild(title);
+  modal.appendChild(explanation);
+  modal.appendChild(fileSection);
+  modal.appendChild(urlSection);
+  modal.appendChild(btnRow);
+  backdrop.appendChild(modal);
+
+  backdrop.addEventListener('click', (e) => {
+    if (e.target === backdrop) backdrop.remove();
+  });
+
+  const onKey = (e: KeyboardEvent) => {
+    if (e.key === 'Escape') {
+      backdrop.remove();
+      document.removeEventListener('keydown', onKey);
+    }
+  };
+  document.addEventListener('keydown', onKey);
+
+  document.body.appendChild(backdrop);
+  urlInput.focus();
 }
 
 function readFileAsDataURL(file: File): Promise<string> {
@@ -248,5 +390,31 @@ function readFileAsDataURL(file: File): Promise<string> {
     const reader = new FileReader();
     reader.onload = () => resolve(reader.result as string);
     reader.readAsDataURL(file);
+  });
+}
+
+async function fetchImageAsDataURL(url: string): Promise<string> {
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    throw new Error('not a valid URL');
+  }
+  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+    throw new Error('only http(s) URLs are supported');
+  }
+
+  const res = await fetch(url, { mode: 'cors' });
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  const contentType = res.headers.get('content-type') || '';
+  if (!contentType.startsWith('image/')) {
+    throw new Error(`expected an image, got ${contentType || 'unknown content-type'}`);
+  }
+  const blob = await res.blob();
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result as string);
+    reader.onerror = () => reject(new Error('failed to read blob'));
+    reader.readAsDataURL(blob);
   });
 }
