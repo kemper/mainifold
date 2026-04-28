@@ -2,12 +2,11 @@ import type { MeshData } from '../geometry/types';
 import { get3MFUnitString } from '../geometry/units';
 import { downloadBlob, getExportFilename, getExportTitle } from './download';
 import { buildZip } from './zip';
-import { cleanMeshForExport } from './meshClean';
+import { cleanMeshForExport, DEFAULT_COLOR_HEX, triColorHex, hasAnyPainted } from './meshClean';
 
 export function export3MF(meshData: MeshData, customName?: string): void {
   const { triVerts, triColors } = meshData;
 
-  // Deduplicate vertices and filter degenerate triangles (same as OBJ export)
   const { remap, uniquePositions, validTris } = cleanMeshForExport(meshData);
 
   // Build vertices XML (deduplicated, 6dp precision)
@@ -20,34 +19,25 @@ export function export3MF(meshData: MeshData, customName?: string): void {
     vertices.push(`          <vertex x="${x}" y="${y}" z="${z}" />`);
   }
 
-  // Collect distinct colors for m:colorgroup (if triColors present)
-  const DEFAULT_COLOR = '#4a9eff';
-  const colorMap = new Map<string, number>();
+  // Collect distinct colors for m:colorgroup
+  const hasColors = triColors != null && hasAnyPainted(triColors, validTris);
+  const colorMap = new Map<string, number>(); // hex -> material index
   const materialColors: string[] = [];
-  let hasColors = false;
 
-  if (triColors) {
-    colorMap.set(DEFAULT_COLOR, 0);
-    materialColors.push(DEFAULT_COLOR);
+  if (hasColors && triColors) {
+    colorMap.set(DEFAULT_COLOR_HEX, 0);
+    materialColors.push(DEFAULT_COLOR_HEX);
 
-    const painted = (triColors as Uint8Array & { _painted?: Uint8Array })._painted;
     for (const t of validTris) {
-      const isPainted = painted ? painted[t] === 1 : (triColors[t * 3] !== 0 || triColors[t * 3 + 1] !== 0 || triColors[t * 3 + 2] !== 0);
-      if (!isPainted) continue;
-
-      const r = triColors[t * 3].toString(16).padStart(2, '0');
-      const g = triColors[t * 3 + 1].toString(16).padStart(2, '0');
-      const b = triColors[t * 3 + 2].toString(16).padStart(2, '0');
-      const hex = `#${r}${g}${b}`;
-      if (!colorMap.has(hex)) {
+      const hex = triColorHex(triColors, t);
+      if (hex !== DEFAULT_COLOR_HEX && !colorMap.has(hex)) {
         colorMap.set(hex, materialColors.length);
         materialColors.push(hex);
       }
-      hasColors = true;
     }
   }
 
-  // Build triangles XML (using remapped vertex indices, filtered for degenerates)
+  // Build triangles XML (remapped vertex indices, filtered for degenerates)
   const triangles: string[] = [];
   for (const t of validTris) {
     const v1 = remap[triVerts[t * 3]];
@@ -55,24 +45,15 @@ export function export3MF(meshData: MeshData, customName?: string): void {
     const v3 = remap[triVerts[t * 3 + 2]];
 
     if (hasColors && triColors) {
-      const painted = (triColors as Uint8Array & { _painted?: Uint8Array })._painted;
-      const isPainted = painted ? painted[t] === 1 : (triColors[t * 3] !== 0 || triColors[t * 3 + 1] !== 0 || triColors[t * 3 + 2] !== 0);
-      if (isPainted) {
-        const r = triColors[t * 3].toString(16).padStart(2, '0');
-        const g = triColors[t * 3 + 1].toString(16).padStart(2, '0');
-        const b = triColors[t * 3 + 2].toString(16).padStart(2, '0');
-        const hex = `#${r}${g}${b}`;
-        const matIdx = colorMap.get(hex)!;
-        triangles.push(`          <triangle v1="${v1}" v2="${v2}" v3="${v3}" pid="2" p1="${matIdx}" />`);
-      } else {
-        triangles.push(`          <triangle v1="${v1}" v2="${v2}" v3="${v3}" pid="2" p1="0" />`);
-      }
+      const hex = triColorHex(triColors, t);
+      const matIdx = colorMap.get(hex) ?? 0;
+      triangles.push(`          <triangle v1="${v1}" v2="${v2}" v3="${v3}" pid="2" p1="${matIdx}" />`);
     } else {
       triangles.push(`          <triangle v1="${v1}" v2="${v2}" v3="${v3}" />`);
     }
   }
 
-  // Build colorgroup XML block (Bambu Studio requires m:colorgroup, not basematerials)
+  // Build m:colorgroup XML block
   let colorgroupXml = '';
   if (hasColors) {
     const colors = materialColors.map(hex =>
@@ -87,7 +68,6 @@ ${colors}
   // Escape XML special chars in title
   const title = getExportTitle().replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 
-  // Add materials namespace if colors present
   const nsAttr = hasColors ? ' xmlns:m="http://schemas.microsoft.com/3dmanufacturing/material/2015/02"' : '';
 
   const modelXml = `<?xml version="1.0" encoding="UTF-8"?>
@@ -122,7 +102,6 @@ ${triangles.join('\n')}
   <Relationship Target="/3D/3dmodel.model" Id="rel0" Type="http://schemas.microsoft.com/3dmanufacturing/2013/01/3dmodel" />
 </Relationships>`;
 
-  // Build ZIP (3MF is a ZIP archive)
   const zip = buildZip([
     { name: '[Content_Types].xml', data: new TextEncoder().encode(contentTypesXml) },
     { name: '_rels/.rels', data: new TextEncoder().encode(relsXml) },
@@ -132,4 +111,3 @@ ${triangles.join('\n')}
   const blob = new Blob([zip], { type: 'application/vnd.ms-package.3dmanufacturing' });
   downloadBlob(blob, getExportFilename('3mf', customName));
 }
-
