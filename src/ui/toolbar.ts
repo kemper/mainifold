@@ -14,12 +14,6 @@ import {
   onImportInboxChange,
   type ImportInboxEntry,
 } from '../import/importInbox';
-import { showExamplesModal } from './examplesModal';
-
-export interface ExampleEntry {
-  code: string;
-  language: 'manifold-js' | 'scad';
-}
 
 export interface ToolbarCallbacks {
   onRun: () => void;
@@ -32,7 +26,7 @@ export interface ToolbarCallbacks {
   onImportFile: (file: File) => void | Promise<void>;
   /** Re-import a blob already held in the inbox (e.g. recent-imports re-click). */
   onImportInboxEntry: (entry: ImportInboxEntry) => void | Promise<void>;
-  onExampleSelect: (entry: ExampleEntry) => void;
+  onOpenCatalog: () => void;
   onLanguageSwitch: (lang: 'manifold-js' | 'scad') => void;
   onGoHome: () => void;
 }
@@ -80,7 +74,6 @@ export function setToolbarLanguage(lang: 'manifold-js' | 'scad'): void {
 
 export function createToolbar(
   container: HTMLElement,
-  examples: Record<string, ExampleEntry>,
   callbacks: ToolbarCallbacks,
 ): HTMLElement {
   const toolbar = document.createElement('div');
@@ -168,15 +161,11 @@ export function createToolbar(
   spacer.className = 'flex-1';
   toolbar.appendChild(spacer);
 
-  // Examples — opens a modal of categorized example models with previews.
-  const btnExamples = createButton('btn-examples', '\u2630 Examples');
-  btnExamples.title = 'Browse example models (JavaScript and OpenSCAD)';
-  btnExamples.addEventListener('click', () => {
-    void showExamplesModal(examples, (_key, entry) => {
-      callbacks.onExampleSelect(entry);
-    });
-  });
-  toolbar.appendChild(btnExamples);
+  // Catalog — navigates to /catalog where premade sessions are browsed.
+  const btnCatalog = createButton('btn-catalog', '\u2630 Catalog');
+  btnCatalog.title = 'Browse the catalog of premade models';
+  btnCatalog.addEventListener('click', callbacks.onOpenCatalog);
+  toolbar.appendChild(btnCatalog);
 
   // Import dropdown — mirrors the Export dropdown. Holds a "Choose file…" entry
   // (the existing OS file picker) and a "Recent Imports" section for re-import.

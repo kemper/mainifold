@@ -112,6 +112,7 @@ import {
   recordError,
   onStateChange,
   type ExportedSession,
+  type ExportOptions,
   type ReferenceImagesData,
 } from './storage/sessionManager';
 import type { Version } from './storage/db';
@@ -963,11 +964,12 @@ async function main() {
   });
 
   // Create toolbar
-  createToolbar(editorUI, examples, {
+  createToolbar(editorUI, {
     onGoHome: () => {
       updateAppHistory('/', 'push');
       void syncRouteFromURL();
     },
+    onOpenCatalog: () => { void showCatalogPage(); },
     onRun: () => runCode(),
     onExportGLB: async () => {
       try { await exportGLB(); } catch (e) { console.error('GLB export error:', e); }
@@ -996,22 +998,6 @@ async function main() {
     },
     onImportFile: async (file) => { await handleImportFile(file); },
     onImportInboxEntry: handleReimportInboxEntry,
-    onExampleSelect: async (entry: ExampleEntry) => {
-      // Auto-switch engine + editor mode if the example uses a different language.
-      if (entry.language !== getActiveLanguage()) {
-        await switchLanguage(entry.language);
-      }
-      // Examples always load into a fresh session so they don't mutate the
-      // user's in-progress work (annotations, notes, reference images).
-      // The previous session is preserved if it has versions/notes; if it
-      // was empty, createSession() auto-deletes it via deleteIfEmpty().
-      await createSession(undefined, entry.language);
-      clearAllAnnotations();
-      _clearRefImages();
-      persistReferenceImages(null);
-      setValue(entry.code);
-      runCode(entry.code);
-    },
     onLanguageSwitch: async (lang: 'manifold-js' | 'scad') => {
       if (lang === getActiveLanguage()) return;
       // If current session has work, ask before switching
@@ -2385,9 +2371,16 @@ async function main() {
     },
 
     /** Export a session as JSON (defaults to current session) */
-    async exportSession(sessionId?: string) {
+    async exportSession(sessionId?: string, options?: ExportOptions) {
       assertString(sessionId, 'exportSession(sessionId)', { optional: true });
-      return exportSession(sessionId);
+      if (options !== undefined) {
+        const o = assertObject(options, 'exportSession(options)')!;
+        assertNoUnknownKeys(o, ['includeThumbnails', 'includeAnnotations', 'includeNotes', 'includeColorRegions'], 'exportSession(options)');
+        for (const k of ['includeThumbnails', 'includeAnnotations', 'includeNotes', 'includeColorRegions'] as const) {
+          assertBoolean(o[k], `exportSession(options).${k}`, { optional: true });
+        }
+      }
+      return exportSession(sessionId, options);
     },
 
     /** Import a session from JSON data, regenerating thumbnails */
