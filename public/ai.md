@@ -158,11 +158,11 @@ partwright.sliceAtZVisual(z)            // Cross-section SVG at height z -> {svg
 partwright.isRunning()                   // -> boolean (is code executing?)
 
 // Images -- attach photos to compare model against
-partwright.setImages([{angle, src}, ...])  // replace all; angle is front|right|back|left|top|perspective; src is data URL or http(s) URL
-partwright.addImage({angle, src})          // append one; returns {id, angle, src}
-partwright.removeImage(id)                 // remove by id; returns true if removed
+partwright.setImages([{angle, src, label?}, ...])  // replace all; angle is front|right|back|left|top|perspective; src is data URL or http(s) URL; label is optional caption
+partwright.addImage({angle, src, label?})          // append one; returns {id, angle, src, label?}
+partwright.removeImage(id)                         // remove by id; returns true if removed
 partwright.clearImages()
-partwright.getImages()                     // -> [{id, angle, src}, ...]
+partwright.getImages()                             // -> [{id, angle, src, label?}, ...]
 
 // Sessions -- save/compare design iterations
 await partwright.createSession(name?)    // -> {id, url, galleryUrl}
@@ -485,20 +485,26 @@ This is also the easiest way to inspect what the user just exported manually: th
 
 ## Images
 
-Attach reference photos so the model can be compared against them. Each image is tagged with an `angle` (`front` / `right` / `back` / `left` / `top` / `perspective`) and a `src` (a `data:` URL or `http(s)` URL). Multiple images may share an angle — nothing is overwritten. The full list shows up in the Images tab (where users can re-tag, remove, or attach more interactively) and in the Elevations tab beside the matching view.
+Attach reference photos so the model can be compared against them. Each image has:
+
+- `angle` — one of `front` / `right` / `back` / `left` / `top` / `perspective`. Used to order the strip in the Elevations tab and group thumbnails in the Gallery. This is system metadata, not a display name.
+- `src` — a `data:` URL or `http(s)` URL.
+- `label` (optional) — a free-form caption shown under the thumbnail in the Gallery, in the lightbox, and in tooltips. If omitted, the Gallery shows no caption — the image content speaks for itself. Set this when you want a meaningful name (e.g. "South elevation, morning light", "Inspiration: Frank Lloyd Wright").
+
+Multiple images may share an angle — nothing is overwritten. The full list shows up in the Images tab (where users can re-tag, edit the label, remove, or attach more) and in the Elevations tab beside the matching view.
 
 ```js
-// Replace the full list. Each item is {angle, src}; the call returns the
-// same items with a server-assigned `id` so you can remove individuals later.
+// Replace the full list. Each item is {angle, src, label?}; the call returns
+// the same items with a server-assigned `id` so you can remove individuals later.
 const items = partwright.setImages([
-  { angle: 'front',       src: 'data:image/jpeg;base64,...' },
+  { angle: 'front',       src: 'data:image/jpeg;base64,...', label: 'south elevation' },
   { angle: 'right',       src: 'https://cdn.example.com/view-right.jpg' },
-  { angle: 'perspective', src: 'data:image/png;base64,...' },
+  { angle: 'perspective', src: 'data:image/png;base64,...', label: 'inspiration photo' },
 ])
-// items -> [{id: 'A1bC2dE3fG', angle: 'front', src: '...'}, ...]
+// items -> [{id: 'A1bC2dE3fG', angle: 'front', src: '...', label: 'south elevation'}, ...]
 
 // Append one without disturbing existing items
-const added = partwright.addImage({ angle: 'front', src: '...' })
+const added = partwright.addImage({ angle: 'front', src: '...', label: 'morning light' })
 
 // Remove a specific item by id
 partwright.removeImage(added.id)
@@ -507,7 +513,7 @@ partwright.removeImage(added.id)
 partwright.clearImages()
 
 // Get the currently attached images
-partwright.getImages()  // -> [{id, angle, src}, ...]
+partwright.getImages()  // -> [{id, angle, src, label?}, ...]
 ```
 
 When images are attached, the Elevations tab shows them in a strip alongside the model views, enabling direct visual comparison.

@@ -79,18 +79,24 @@ function createImagesSection(images: AttachedImage[]): HTMLElement {
     const thumb = document.createElement('div');
     thumb.className = 'flex flex-col items-center shrink-0';
 
+    const caption = (item.label ?? '').trim();
     const imgEl = document.createElement('img');
     imgEl.src = item.src;
     imgEl.className = 'w-24 h-24 object-contain rounded bg-zinc-800 border border-blue-500/30 cursor-pointer hover:border-blue-400 transition-colors';
-    const label = item.angle.charAt(0).toUpperCase() + item.angle.slice(1);
-    imgEl.title = `Click to enlarge: ${label}`;
-    imgEl.addEventListener('click', () => showLightbox(item.src, label));
+    imgEl.title = caption ? `Click to enlarge: ${caption}` : 'Click to enlarge';
+    imgEl.addEventListener('click', () => showLightbox(item.src, caption));
     thumb.appendChild(imgEl);
 
-    const labelEl = document.createElement('div');
-    labelEl.className = 'text-xs text-zinc-500 font-mono mt-0.5';
-    labelEl.textContent = label;
-    thumb.appendChild(labelEl);
+    // Caption only shows the user-provided label. Angle is system metadata
+    // surfaced in the Images tab, not used as a fallback caption here — the
+    // image content speaks for itself.
+    if (caption) {
+      const labelEl = document.createElement('div');
+      labelEl.className = 'text-xs text-zinc-300 font-mono mt-0.5 max-w-24 truncate';
+      labelEl.title = caption;
+      labelEl.textContent = caption;
+      thumb.appendChild(labelEl);
+    }
 
     row.appendChild(thumb);
   }
@@ -114,10 +120,12 @@ function showLightbox(src: string, label: string): void {
   img.className = 'max-w-full max-h-[85vh] object-contain rounded-lg shadow-2xl';
   container.appendChild(img);
 
-  const caption = document.createElement('div');
-  caption.className = 'text-sm text-zinc-300 font-mono mt-2';
-  caption.textContent = label;
-  container.appendChild(caption);
+  if (label) {
+    const caption = document.createElement('div');
+    caption.className = 'text-sm text-zinc-300 font-mono mt-2';
+    caption.textContent = label;
+    container.appendChild(caption);
+  }
 
   const closeBtn = document.createElement('button');
   closeBtn.className = 'absolute -top-3 -right-3 w-8 h-8 rounded-full bg-zinc-700 text-zinc-300 hover:bg-zinc-600 flex items-center justify-center text-lg';

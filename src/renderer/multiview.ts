@@ -258,6 +258,8 @@ export interface AttachedImage {
   id: string;
   angle: ImageAngle;
   src: string;
+  /** Optional user-provided caption. */
+  label?: string;
 }
 
 let _images: AttachedImage[] = [];
@@ -396,7 +398,8 @@ export function renderElevationsToContainer(container: HTMLElement, meshData: Me
       const refImg = document.createElement('img');
       refImg.src = item.src;
       refImg.className = 'h-16 object-contain rounded bg-zinc-950 border border-blue-500/30 cursor-pointer hover:border-blue-400 transition-colors shrink-0';
-      refImg.title = `${item.angle.charAt(0).toUpperCase() + item.angle.slice(1)} — click to enlarge`;
+      const angleName = item.angle.charAt(0).toUpperCase() + item.angle.slice(1);
+      refImg.title = item.label ? `${item.label} (${angleName}) — click to enlarge` : `${angleName} — click to enlarge`;
       refImg.addEventListener('click', () => {
         const overlay = document.createElement('div');
         overlay.className = 'fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm';

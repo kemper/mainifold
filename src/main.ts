@@ -1883,24 +1883,33 @@ async function main() {
     // === Images API ===
 
     /** Attach images for side-by-side comparison in the Images and Elevations tabs.
-     *  Each item is `{angle, src}` where angle is one of front/right/back/left/top/perspective
-     *  and src is a data URL or http(s) URL. Multiple items may share the same angle.
-     *  Replaces all currently attached images. If a session is active, also persists to IndexedDB.
-     *  Returns the canonical list with assigned ids. */
-    setImages(images: Array<{ angle: ImageAngle; src: string; id?: string }>): AttachedImage[] {
+     *  Each item is `{angle, src, label?}` where angle is one of front/right/back/left/top/perspective,
+     *  src is a data URL or http(s) URL, and label is an optional caption shown in the Gallery
+     *  and lightbox. Multiple items may share the same angle. Replaces all currently attached
+     *  images. If a session is active, also persists to IndexedDB. Returns the canonical list
+     *  with assigned ids. */
+    setImages(images: Array<{ angle: ImageAngle; src: string; id?: string; label?: string }>): AttachedImage[] {
       const arr = assertArray(images, 'setImages(images)') as Array<Record<string, unknown>>;
       const ANGLES: readonly ImageAngle[] = ['front', 'right', 'back', 'left', 'top', 'perspective'];
       const items: AttachedImage[] = [];
       for (let i = 0; i < arr.length; i++) {
         const item = assertObject(arr[i], `setImages(images)[${i}]`)!;
-        assertNoUnknownKeys(item, ['angle', 'src', 'id'] as const, `setImages(images)[${i}]`);
+        assertNoUnknownKeys(item, ['angle', 'src', 'id', 'label'] as const, `setImages(images)[${i}]`);
         const angle = item.angle;
         if (typeof angle !== 'string' || !ANGLES.includes(angle as ImageAngle)) {
           throw new Error(`setImages(images)[${i}].angle must be one of: ${ANGLES.join(', ')}`);
         }
         assertString(item.src, `setImages(images)[${i}].src`, { allowEmpty: false });
         if (item.id !== undefined) assertString(item.id, `setImages(images)[${i}].id`, { allowEmpty: false });
-        items.push({ id: (item.id as string | undefined) ?? generateId(), angle: angle as ImageAngle, src: item.src as string });
+        if (item.label !== undefined) assertString(item.label, `setImages(images)[${i}].label`, { optional: true, allowEmpty: true });
+        const built: AttachedImage = {
+          id: (item.id as string | undefined) ?? generateId(),
+          angle: angle as ImageAngle,
+          src: item.src as string,
+        };
+        const lbl = (item.label as string | undefined)?.trim();
+        if (lbl) built.label = lbl;
+        items.push(built);
       }
       _setImages(items);
       persistImages(items);
@@ -1914,15 +1923,18 @@ async function main() {
     },
 
     /** Append a single image. Returns the appended item with its assigned id. */
-    addImage(image: { angle: ImageAngle; src: string }): AttachedImage {
+    addImage(image: { angle: ImageAngle; src: string; label?: string }): AttachedImage {
       const obj = assertObject(image, 'addImage(image)')!;
-      assertNoUnknownKeys(obj, ['angle', 'src'] as const, 'addImage(image)');
+      assertNoUnknownKeys(obj, ['angle', 'src', 'label'] as const, 'addImage(image)');
       const ANGLES: readonly ImageAngle[] = ['front', 'right', 'back', 'left', 'top', 'perspective'];
       if (typeof obj.angle !== 'string' || !ANGLES.includes(obj.angle as ImageAngle)) {
         throw new Error(`addImage(image).angle must be one of: ${ANGLES.join(', ')}`);
       }
       assertString(obj.src, 'addImage(image).src', { allowEmpty: false });
+      if (obj.label !== undefined) assertString(obj.label, 'addImage(image).label', { optional: true, allowEmpty: true });
       const item: AttachedImage = { id: generateId(), angle: obj.angle as ImageAngle, src: obj.src as string };
+      const lbl = (obj.label as string | undefined)?.trim();
+      if (lbl) item.label = lbl;
       const next = [..._getImages(), item];
       _setImages(next);
       persistImages(next);

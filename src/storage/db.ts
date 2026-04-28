@@ -17,6 +17,8 @@ export interface AttachedImage {
   angle: ImageAngle;
   /** data URL or remote URL */
   src: string;
+  /** Optional user-provided caption. Shown in the Gallery and lightbox. */
+  label?: string;
 }
 
 const IMAGE_ANGLES: readonly ImageAngle[] = ['front', 'right', 'back', 'left', 'top', 'perspective'];

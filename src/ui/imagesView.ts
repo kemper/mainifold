@@ -116,17 +116,49 @@ function createImageTile(item: AttachedImage, allImages: AttachedImage[]): HTMLE
   img.src = item.src;
   img.className = 'w-full h-full object-contain';
   thumbContainer.appendChild(img);
-  thumbContainer.addEventListener('click', () => showLightbox(item.src, ANGLE_LABELS[item.angle]));
+  thumbContainer.addEventListener('click', () => showLightbox(item.src, item.label || ''));
   tile.appendChild(thumbContainer);
 
-  // Footer: angle dropdown + remove
-  const footer = document.createElement('div');
-  footer.className = 'px-3 py-2 flex items-center gap-2';
+  // Body: stacked label input on top, angle row below
+  const body = document.createElement('div');
+  body.className = 'px-3 py-2 flex flex-col gap-1.5';
+
+  // Label input — commits on blur or Enter
+  const labelInput = document.createElement('input');
+  labelInput.type = 'text';
+  labelInput.placeholder = 'Add a label…';
+  labelInput.value = item.label ?? '';
+  labelInput.className = 'w-full bg-zinc-900 text-zinc-200 text-xs px-2 py-1 rounded border border-zinc-700 outline-none focus:border-blue-500 placeholder-zinc-600';
+  const commitLabel = async () => {
+    const next = labelInput.value.trim();
+    const current = item.label ?? '';
+    if (next === current) return;
+    const nextList = allImages.map(x => {
+      if (x.id !== item.id) return x;
+      const updated: AttachedImage = { id: x.id, angle: x.angle, src: x.src };
+      if (next) updated.label = next;
+      return updated;
+    });
+    await persistAndRefresh(nextList);
+  };
+  labelInput.addEventListener('blur', commitLabel);
+  labelInput.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') labelInput.blur();
+    if (e.key === 'Escape') {
+      labelInput.value = item.label ?? '';
+      labelInput.blur();
+    }
+  });
+  body.appendChild(labelInput);
+
+  // Angle row: dropdown + remove
+  const angleRow = document.createElement('div');
+  angleRow.className = 'flex items-center gap-2';
 
   const labelText = document.createElement('label');
   labelText.className = 'text-[10px] uppercase tracking-wide text-zinc-500 shrink-0';
   labelText.textContent = 'Angle';
-  footer.appendChild(labelText);
+  angleRow.appendChild(labelText);
 
   const select = document.createElement('select');
   select.className = 'flex-1 bg-zinc-900 text-zinc-200 text-xs px-2 py-1 rounded border border-zinc-700 outline-none focus:border-blue-500';
@@ -145,7 +177,7 @@ function createImageTile(item: AttachedImage, allImages: AttachedImage[]): HTMLE
     const next = allImages.map(x => x.id === item.id ? { ...x, angle: newAngle } : x);
     await persistAndRefresh(next);
   });
-  footer.appendChild(select);
+  angleRow.appendChild(select);
 
   const removeBtn = document.createElement('button');
   removeBtn.className = 'shrink-0 text-xs text-zinc-500 hover:text-red-400 transition-colors px-1';
@@ -155,9 +187,10 @@ function createImageTile(item: AttachedImage, allImages: AttachedImage[]): HTMLE
     const next = allImages.filter(x => x.id !== item.id);
     await persistAndRefresh(next);
   });
-  footer.appendChild(removeBtn);
+  angleRow.appendChild(removeBtn);
 
-  tile.appendChild(footer);
+  body.appendChild(angleRow);
+  tile.appendChild(body);
   return tile;
 }
 
@@ -355,10 +388,12 @@ function showLightbox(src: string, label: string): void {
   img.className = 'max-w-full max-h-[85vh] object-contain rounded-lg shadow-2xl';
   container.appendChild(img);
 
-  const caption = document.createElement('div');
-  caption.className = 'text-sm text-zinc-300 font-mono mt-2';
-  caption.textContent = label;
-  container.appendChild(caption);
+  if (label) {
+    const caption = document.createElement('div');
+    caption.className = 'text-sm text-zinc-300 font-mono mt-2';
+    caption.textContent = label;
+    container.appendChild(caption);
+  }
 
   const closeBtn = document.createElement('button');
   closeBtn.className = 'absolute -top-3 -right-3 w-8 h-8 rounded-full bg-zinc-700 text-zinc-300 hover:bg-zinc-600 flex items-center justify-center text-lg';
