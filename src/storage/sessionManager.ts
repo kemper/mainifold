@@ -133,14 +133,28 @@ let currentState: SessionState = {
 };
 
 const listeners: StateChangeListener[] = [];
+const notesListeners: (() => void)[] = [];
 
 function notify() {
   for (const fn of listeners) fn(currentState);
   window.dispatchEvent(new CustomEvent('session-changed', { detail: currentState }));
 }
 
+function notifyNotes() {
+  for (const fn of notesListeners) fn();
+}
+
 export function onStateChange(fn: StateChangeListener): void {
   listeners.push(fn);
+}
+
+/** Subscribe to session-note mutations (add / update / delete). */
+export function onNotesChange(fn: () => void): () => void {
+  notesListeners.push(fn);
+  return () => {
+    const i = notesListeners.indexOf(fn);
+    if (i >= 0) notesListeners.splice(i, 1);
+  };
 }
 
 export function getState(): SessionState {
@@ -382,7 +396,9 @@ export async function getReferenceImagesFromSession(): Promise<ReferenceImagesDa
 
 export async function addSessionNote(text: string): Promise<SessionNote | null> {
   if (!currentState.session) return null;
-  return dbAddNote(currentState.session.id, text);
+  const note = await dbAddNote(currentState.session.id, text);
+  notifyNotes();
+  return note;
 }
 
 export async function listSessionNotes(): Promise<SessionNote[]> {
@@ -392,10 +408,12 @@ export async function listSessionNotes(): Promise<SessionNote[]> {
 
 export async function deleteSessionNote(noteId: string): Promise<void> {
   await dbDeleteNote(noteId);
+  notifyNotes();
 }
 
 export async function updateSessionNote(noteId: string, text: string): Promise<void> {
   await dbUpdateNote(noteId, text);
+  notifyNotes();
 }
 
 // === Recent error tracking (for agentHints) ===
