@@ -129,6 +129,18 @@ await partwright.setActiveLanguage(lang) // Switch engine + editor mode ('manifo
 partwright.toggleClip(on?)     // Toggle 3D clipping plane -> {enabled, z, min, max}
 partwright.setClipZ(z)         // Set clip height -> {enabled, z, min, max}
 partwright.getClipState()      // -> {enabled, z, min, max}
+
+// Viewport controls
+partwright.setGridVisible(on?)       // Show/hide grid plane (omit to toggle) -> boolean
+partwright.isGridVisible()           // Whether grid plane is visible
+partwright.setDimensionsVisible(on?) // Show/hide bounding box dimensions (omit to toggle) -> boolean
+partwright.areDimensionsVisible()    // Whether dimensions overlay is visible
+partwright.setOrbitLock(on?)         // Lock/unlock camera rotation (omit to toggle) -> boolean
+partwright.isOrbitLocked()           // Whether camera orbit is locked
+partwright.setTheme('dark'|'light')  // Set color theme
+partwright.getTheme()                // -> 'dark' or 'light'
+partwright.setAutoRun(enabled)       // Enable/disable auto-render on code edit
+partwright.isAutoRunEnabled()        // Whether auto-run is active
 await partwright.exportGLB()   // Download GLB (browser file dialog -- prefer exportGLBData() in agent flows)
 partwright.exportSTL()         // Download STL ("                                       exportSTLData() ")
 partwright.exportOBJ()         // Download OBJ ("                                       exportOBJData() ")

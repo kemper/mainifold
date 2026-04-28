@@ -6,7 +6,7 @@ import { renderCompositeCanvas, renderElevationsToContainer, renderSingleView, r
 import { setPhantom, clearPhantom, hasPhantom, type PhantomOptions } from './renderer/phantomGeometry';
 import { initEditor, setValue, getValue, setLanguage as setEditorLanguage, setEditorDiagnostics, clearEditorDiagnostics, revealFirstDiagnostic } from './editor/codeEditor';
 import { createLayout, type TabName } from './ui/layout';
-import { createToolbar, isAutoRun, setToolbarLanguage } from './ui/toolbar';
+import { createToolbar, isAutoRun, setAutoRun, setToolbarLanguage } from './ui/toolbar';
 import { createLandingPage } from './ui/landing';
 import { createHelpPage } from './ui/help';
 import { createNotFoundPage } from './ui/notFound';
@@ -47,7 +47,8 @@ import { checkContainment, type ContainmentWarning } from './geometry/containmen
 import { setUnits as _setUnits, getUnits as _getUnits, type UnitSystem } from './geometry/units';
 import { initMeasureTool, activate as activateMeasure, deactivate as deactivateMeasure, getState as getMeasureState } from './ui/measureTool';
 import { maybeStartTour, resetTour, startTour } from './ui/tour';
-import { initTheme } from './ui/theme';
+import { initTheme, getTheme, setTheme } from './ui/theme';
+import type { Theme } from './ui/theme';
 import { initPaintUI, isPaintOpen, forceDeactivate as closePaintMenu } from './color/paintUI';
 import { updatePaintMesh, setOnRegionPainted, isActive as isPaintActive } from './color/paintMode';
 import { initAnnotateUI, isAnnotateOpen, closeMenu as closeAnnotateMenu } from './annotations/annotateUI';
@@ -1848,6 +1849,73 @@ async function main() {
       return getClipState();
     },
 
+    // === Viewport controls API ===
+
+    /** Show or hide the grid plane. Pass a boolean to set, omit to toggle. */
+    setGridVisible(visible?: boolean): boolean {
+      assertBoolean(visible, 'setGridVisible(visible)', { optional: true });
+      const on = visible ?? !isGridVisible();
+      setGridVisible(on);
+      return isGridVisible();
+    },
+
+    /** Whether the grid plane is currently visible */
+    isGridVisible(): boolean {
+      return isGridVisible();
+    },
+
+    /** Show or hide the bounding box dimension overlays. Pass a boolean to set, omit to toggle. */
+    setDimensionsVisible(visible?: boolean): boolean {
+      assertBoolean(visible, 'setDimensionsVisible(visible)', { optional: true });
+      const on = visible ?? !isDimensionsVisible();
+      setDimensionsVisible(on);
+      return isDimensionsVisible();
+    },
+
+    /** Whether bounding box dimensions are currently visible */
+    areDimensionsVisible(): boolean {
+      return isDimensionsVisible();
+    },
+
+    /** Lock or unlock camera orbit rotation. Pass a boolean to set, omit to toggle. */
+    setOrbitLock(locked?: boolean): boolean {
+      assertBoolean(locked, 'setOrbitLock(locked)', { optional: true });
+      const on = locked ?? !isUserOrbitLocked();
+      setUserOrbitLock(on);
+      return isUserOrbitLocked();
+    },
+
+    /** Whether camera orbit is currently locked */
+    isOrbitLocked(): boolean {
+      return isUserOrbitLocked();
+    },
+
+    // === Theme API ===
+
+    /** Set the color theme. */
+    setTheme(theme: Theme): void {
+      assertEnum(theme, ['dark', 'light'], 'setTheme(theme)');
+      setTheme(theme);
+    },
+
+    /** Get the current color theme */
+    getTheme(): Theme {
+      return getTheme();
+    },
+
+    // === Auto-run API ===
+
+    /** Enable or disable auto-run (re-render on edit). */
+    setAutoRun(enabled: boolean): void {
+      assertBoolean(enabled, 'setAutoRun(enabled)');
+      setAutoRun(enabled);
+    },
+
+    /** Whether auto-run is currently enabled */
+    isAutoRunEnabled(): boolean {
+      return isAutoRun();
+    },
+
     // === View rendering API ===
 
     /** Render a single view from any camera angle. Returns a data URL (PNG).
@@ -3050,6 +3118,17 @@ async function main() {
         'renderView':      { signature: 'renderView({elevation?, azimuth?, ortho?, size?}) -- Render from any angle -> data URL', docs: '/ai.md#visual-verification' },
         'analyzeProfile':  { signature: 'analyzeProfile(sampleCount?) -- Z-profile feature summary', docs: '/ai.md#console-api--windowpartwright' },
         'measureAt':       { signature: 'measureAt([x,y]) -- Ray-cast probe at XY -> {hits, thickness, topZ, bottomZ}', docs: '/ai.md#console-api--windowpartwright' },
+        // Viewport controls
+        'setGridVisible':       { signature: 'setGridVisible(on?) -- Show/hide grid plane (omit to toggle) -> boolean', docs: '/ai.md#viewport-controls' },
+        'isGridVisible':        { signature: 'isGridVisible() -- Whether grid plane is visible', docs: '/ai.md#viewport-controls' },
+        'setDimensionsVisible': { signature: 'setDimensionsVisible(on?) -- Show/hide bounding box dimensions (omit to toggle) -> boolean', docs: '/ai.md#viewport-controls' },
+        'areDimensionsVisible': { signature: 'areDimensionsVisible() -- Whether dimensions overlay is visible', docs: '/ai.md#viewport-controls' },
+        'setOrbitLock':         { signature: 'setOrbitLock(on?) -- Lock/unlock camera rotation (omit to toggle) -> boolean', docs: '/ai.md#viewport-controls' },
+        'isOrbitLocked':        { signature: 'isOrbitLocked() -- Whether camera orbit is locked', docs: '/ai.md#viewport-controls' },
+        'setTheme':             { signature: 'setTheme("dark"|"light") -- Set color theme', docs: '/ai.md#viewport-controls' },
+        'getTheme':             { signature: 'getTheme() -- Current color theme', docs: '/ai.md#viewport-controls' },
+        'setAutoRun':           { signature: 'setAutoRun(enabled) -- Enable/disable auto-render on edit', docs: '/ai.md#viewport-controls' },
+        'isAutoRunEnabled':     { signature: 'isAutoRunEnabled() -- Whether auto-run is active', docs: '/ai.md#viewport-controls' },
         // View
         'setView':         { signature: 'setView(tab) -- Switch tab: "interactive", "ai", "elevations", "gallery", "diff"', docs: '/ai.md#view-tabs' },
         'getViewState':    { signature: 'getViewState() -- Current tab and camera state', docs: '/ai.md#view-tabs' },
