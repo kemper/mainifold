@@ -29,6 +29,10 @@ export interface Version {
   label: string;
   timestamp: number;
   notes?: string;
+  /** Snapshot of annotations (freehand strokes + pinned text labels) at the time
+   *  this version was saved. Shape matches `SerializedAnnotation[]` from the
+   *  annotations module — kept as `unknown[]` here to preserve db-layer isolation. */
+  annotations?: unknown[];
 }
 
 export interface SessionNote {
@@ -286,6 +290,8 @@ export async function saveVersion(
   notes?: string,
   /** Override the version timestamp (used by import to preserve the original). */
   timestamp?: number,
+  /** Snapshot of annotations at save time (opaque to the db layer). */
+  annotations?: unknown[],
 ): Promise<Version> {
   const versions = await listVersions(sessionId);
   const nextIndex = versions.length > 0 ? Math.max(...versions.map(v => v.index)) + 1 : 1;
@@ -300,6 +306,7 @@ export async function saveVersion(
     label: label || `v${nextIndex}`,
     timestamp: timestamp ?? Date.now(),
     ...(notes ? { notes } : {}),
+    ...(annotations && annotations.length > 0 ? { annotations } : {}),
   };
 
   const store = await tx('versions', 'readwrite');

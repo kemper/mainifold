@@ -49,6 +49,7 @@ After any changes that touch routing, Vite config, index.html, or initialization
 10. **Unlock modal**: Click "Unlock to edit" — a modal should appear with two options (preserve/destructive). Clicking "Unlock editor" with the default "preserve" option should save the colored version and create a new uncolored version. The editor should unlock.
 11. **Gallery badges**: Colored versions in the gallery should show small color-swatch dots next to the version label.
 12. **Color export**: With color regions painted, export GLB — the file should carry vertex colors. Export 3MF — the file should include `<basematerials>` and per-triangle `pid` attributes.
+13. **Annotations are per-version**: Annotate v1, save v2 (annotations persist into v2). Clear annotations, draw a different one, save v3. Navigating v1↔v2↔v3 should swap annotations to match each version (v1 empty, v2 first set, v3 second set). Importing a schema-1.2 file (top-level `annotations`) should attach those annotations to the latest version on import.
 
 ## AI Agent Workflow & API Reference
 

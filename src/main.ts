@@ -60,9 +60,11 @@ import {
   clearStrokes as clearStrokesStore,
   clearTexts as clearTextsStore,
   clearAll as clearAllAnnotations,
+  loadFromSerialized as loadAnnotations,
   removeLastAnnotation,
   removeAnnotationById,
   onChange as onAnnotationStrokesChange,
+  type SerializedAnnotation,
 } from './annotations/annotations';
 import {
   setAnnotationsVisible as setAnnotationsVisibleOverlay,
@@ -454,6 +456,14 @@ function getGeometryDataObj(): Record<string, unknown> | null {
   } catch {
     return null;
   }
+}
+
+/** Swap the in-memory annotation store to the version's snapshot.
+ *  Treats absence as "empty", so navigating to a version without annotations
+ *  clears any that were on screen for the previously-active version. */
+function applyVersionAnnotations(version: Version | null | undefined): void {
+  const snapshot = (version?.annotations ?? []) as SerializedAnnotation[];
+  loadAnnotations(snapshot);
 }
 
 /** Rehydrate color regions from a version's geometryData.
@@ -1016,6 +1026,7 @@ async function main() {
       if (loadedVersion) {
         rehydrateColorRegions(loadedVersion.geometryData);
       }
+      applyVersionAnnotations(loadedVersion);
     },
     onOpenGallery: () => {
       switchTab('gallery');
@@ -1050,11 +1061,12 @@ async function main() {
   createGalleryView(galleryContainer, async (code: string) => {
     setValue(code);
     await runCodeSync(code);
-    // Rehydrate color regions from the loaded version
+    // Rehydrate color regions and annotations from the loaded version
     const loadedVersion = getState().currentVersion;
     if (loadedVersion) {
       rehydrateColorRegions(loadedVersion.geometryData);
     }
+    applyVersionAnnotations(loadedVersion);
     switchTab('interactive');
   });
 
@@ -1126,6 +1138,7 @@ async function main() {
     setValue(version.code);
     await runCodeSync(version.code);
     rehydrateColorRegions(version.geometryData);
+    applyVersionAnnotations(version);
     const refImages = await getReferenceImagesFromSession();
     if (refImages) {
       _setRefImages(refImages as ReferenceImages);
@@ -2089,6 +2102,7 @@ async function main() {
       setValue(version.code);
       await runCodeSync(version.code);
       rehydrateColorRegions(version.geometryData);
+      applyVersionAnnotations(version);
       return {
         id: version.id,
         index: version.index,
@@ -2107,6 +2121,7 @@ async function main() {
         setValue(version.code);
         await runCodeSync(version.code);
         rehydrateColorRegions(version.geometryData);
+        applyVersionAnnotations(version);
       }
       return version ? { id: version.id, index: version.index, label: version.label } : null;
     },
