@@ -51,7 +51,7 @@ import {
 import { setColor as setAnnotateColor, setWidth as setAnnotateWidth, getWidth as getAnnotateWidth } from './annotations/annotateMode';
 import { addTextAnnotationAtAnchor, setFontSize as setAnnotateFontSize, getFontSize as getAnnotateFontSize } from './annotations/textMode';
 import { restoreView as restoreAnnotationViewById } from './annotations/selectMode';
-import { applyTriColors, hasRegions as hasColorRegions, onChange as onColorRegionsChange, clearRegions, serialize as serializeRegions, addRegion, getRegions, type SerializedColorRegion } from './color/regions';
+import { applyTriColors, applyTriColorsIfVisible, hasRegions as hasColorRegions, onChange as onColorRegionsChange, onVisibilityChange as onPaintVisibilityChange, clearRegions, serialize as serializeRegions, addRegion, getRegions, type SerializedColorRegion } from './color/regions';
 import { initEditorLock, syncLockState, setUnlockHandlers } from './color/editorLock';
 import { buildAdjacency, findCoplanarRegion, resolveSeed } from './color/adjacency';
 import {
@@ -468,7 +468,7 @@ function rehydrateColorRegions(geometryData: Record<string, unknown> | null): vo
 
   // Re-render with colors if regions were rehydrated
   if (hasColorRegions() && currentMeshData) {
-    const colored = applyTriColors(currentMeshData);
+    const colored = applyTriColorsIfVisible(currentMeshData);
     updateMesh(colored, { skipAutoFrame: true });
   }
 }
@@ -1295,7 +1295,7 @@ async function main() {
   // When a color region is painted, re-render the mesh with colors and sync lock
   setOnRegionPainted(() => {
     if (currentMeshData) {
-      const colored = applyTriColors(currentMeshData);
+      const colored = applyTriColorsIfVisible(currentMeshData);
       updateMesh(colored, { skipAutoFrame: true });
       updateMultiView(colored);
       renderElevationsToContainer(elevationsContainer, colored);
@@ -1308,9 +1308,19 @@ async function main() {
     syncLockState();
     if (!isPaintActive()) return; // only auto-refresh while paint mode is on
     if (currentMeshData) {
-      const colored = applyTriColors(currentMeshData);
+      const colored = applyTriColorsIfVisible(currentMeshData);
       updateMesh(colored, { skipAutoFrame: true });
     }
+  });
+
+  // Toggling paint visibility re-renders the viewport, multiview, and elevations
+  // so colors disappear/reappear immediately. Exports remain colored regardless.
+  onPaintVisibilityChange(() => {
+    if (!currentMeshData) return;
+    const colored = applyTriColorsIfVisible(currentMeshData);
+    updateMesh(colored, { skipAutoFrame: true });
+    updateMultiView(colored);
+    renderElevationsToContainer(elevationsContainer, colored);
   });
 
   // When annotations change (stroke added/removed/cleared) or are toggled,
@@ -1318,7 +1328,7 @@ async function main() {
   // stay in sync with the live viewport.
   const refreshAnnotationDependentPanes = () => {
     if (!currentMeshData) return;
-    const meshForPanes = isPaintActive() ? applyTriColors(currentMeshData) : currentMeshData;
+    const meshForPanes = isPaintActive() ? applyTriColorsIfVisible(currentMeshData) : currentMeshData;
     updateMultiView(meshForPanes);
     renderElevationsToContainer(elevationsContainer, meshForPanes);
   };
@@ -2514,7 +2524,7 @@ async function main() {
       );
 
       // Re-render with colors
-      const colored = applyTriColors(currentMeshData);
+      const colored = applyTriColorsIfVisible(currentMeshData);
       updateMesh(colored, { skipAutoFrame: true });
       updateMultiView(colored);
       syncLockState();
@@ -2882,7 +2892,7 @@ async function main() {
       currentManifold = result.manifold;
 
       // Apply any existing color regions to the mesh
-      const displayMesh = hasColorRegions() ? applyTriColors(result.mesh) : result.mesh;
+      const displayMesh = hasColorRegions() ? applyTriColorsIfVisible(result.mesh) : result.mesh;
       updateMesh(displayMesh);
       updateMultiView(displayMesh);
       renderElevationsToContainer(elevationsContainer, displayMesh);
