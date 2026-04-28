@@ -450,3 +450,20 @@ function rgbToHex(color: [number, number, number]): string {
 export function forceDeactivate(): void {
   if (isPenActive()) deactivatePen();
 }
+
+/** Returns true if any annotate sub-mode (pen/text/select) is active. */
+export function isAnnotateOpen(): boolean {
+  return isAnyActive();
+}
+
+/** Close the annotate menu and tear down the session plane.
+ *  Mirrors the close branch of the toolbar toggle so the same teardown
+ *  events fire (mode-active callbacks, panel hide, plane outline cleanup). */
+export function closeMenu(): void {
+  if (!isAnyActive()) return;
+  deactivatePen();
+  deactivateText();
+  deactivateSelect();
+  hidePlaneOutline();
+  endSessionPlane();
+}

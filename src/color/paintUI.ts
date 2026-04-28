@@ -301,3 +301,8 @@ export function forceDeactivate(): void {
     pickerPanel?.classList.add('hidden');
   }
 }
+
+/** True if the paint menu is open (paint mode is active). */
+export function isPaintOpen(): boolean {
+  return isActive();
+}
