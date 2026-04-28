@@ -20,6 +20,7 @@ import { exportGLB } from './export/gltf';
 import { exportSTL } from './export/stl';
 import { exportOBJ } from './export/obj';
 import { export3MF } from './export/threemf';
+import { exportSessionJSON, exportRawCode } from './export/session';
 import type { MeshData, SourceDiagnostic } from './geometry/types';
 import { analyzeZProfile, type ZProfile } from './geometry/profileAnalysis';
 import { probeAtXY, probeRay, measureDistance, type ProbeResult, type GeneralRayResult } from './geometry/rayCast';
@@ -843,6 +844,13 @@ async function main() {
     },
     onExport3MF: () => {
       if (currentMeshData) export3MF(hasColorRegions() ? applyTriColors(currentMeshData) : currentMeshData);
+    },
+    onExportSessionJSON: async () => {
+      const ok = await exportSessionJSON();
+      if (!ok) alert('No active session to export. Save a version first.');
+    },
+    onExportRawCode: () => {
+      exportRawCode(getValue(), getActiveLanguage());
     },
     onImportFile: handleImportFile,
     onExampleSelect: async (entry: ExampleEntry) => {

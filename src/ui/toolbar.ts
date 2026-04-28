@@ -13,6 +13,8 @@ export interface ToolbarCallbacks {
   onExportSTL: () => void;
   onExportOBJ: () => void;
   onExport3MF: () => void;
+  onExportSessionJSON: () => void;
+  onExportRawCode: () => void;
   onImportFile: (file: File) => void | Promise<void>;
   onExampleSelect: (entry: ExampleEntry) => void;
   onLanguageSwitch: (lang: 'manifold-js' | 'scad') => void;
@@ -195,36 +197,78 @@ export function createToolbar(
 
   const dropdown = document.createElement('div');
   dropdown.id = 'export-dropdown';
-  dropdown.className = 'absolute right-0 top-full mt-1 bg-zinc-800 border border-zinc-600 rounded shadow-lg py-1 hidden z-20 min-w-32';
+  dropdown.className = 'absolute right-0 top-full mt-1 bg-zinc-800 border border-zinc-600 rounded shadow-lg py-1 hidden z-20 w-72 max-h-[80vh] overflow-y-auto';
 
-  const glbOpt = createDropdownItem('GLB (recommended)');
-  glbOpt.addEventListener('click', () => {
-    dropdown.classList.add('hidden');
-    callbacks.onExportGLB();
-  });
+  // Section: 3D model formats — ordered by Bambu Studio compatibility
+  dropdown.appendChild(createSectionHeader('3D model'));
 
-  const stlOpt = createDropdownItem('STL');
-  stlOpt.addEventListener('click', () => {
-    dropdown.classList.add('hidden');
-    callbacks.onExportSTL();
-  });
-
-  const objOpt = createDropdownItem('OBJ');
+  const objOpt = createDescribedItem(
+    'OBJ',
+    'Geometry + color. Best for Bambu Studio multi-color prints.',
+    'recommended',
+  );
   objOpt.addEventListener('click', () => {
     dropdown.classList.add('hidden');
     callbacks.onExportOBJ();
   });
 
-  const threemfOpt = createDropdownItem('3MF');
+  const threemfOpt = createDescribedItem(
+    '3MF',
+    'Generic 3D format. Geometry only — color regions are not preserved on Bambu import.',
+  );
   threemfOpt.addEventListener('click', () => {
     dropdown.classList.add('hidden');
     callbacks.onExport3MF();
   });
 
-  dropdown.appendChild(glbOpt);
-  dropdown.appendChild(stlOpt);
+  const stlOpt = createDescribedItem(
+    'STL',
+    'Geometry only, no color. Universal slicer support.',
+  );
+  stlOpt.addEventListener('click', () => {
+    dropdown.classList.add('hidden');
+    callbacks.onExportSTL();
+  });
+
+  const glbOpt = createDescribedItem(
+    'GLB',
+    'Web/preview format with materials. Does not import into Bambu Studio.',
+  );
+  glbOpt.addEventListener('click', () => {
+    dropdown.classList.add('hidden');
+    callbacks.onExportGLB();
+  });
+
   dropdown.appendChild(objOpt);
   dropdown.appendChild(threemfOpt);
+  dropdown.appendChild(stlOpt);
+  dropdown.appendChild(glbOpt);
+
+  // Section: project / source — for sharing between users or working with the code directly
+  dropdown.appendChild(createDivider());
+  dropdown.appendChild(createSectionHeader('Project'));
+
+  const sessionOpt = createDescribedItem(
+    'Session (.partwright.json)',
+    'All versions, notes, and reference images. Another Partwright user can import this.',
+  );
+  sessionOpt.addEventListener('click', () => {
+    dropdown.classList.add('hidden');
+    callbacks.onExportSessionJSON();
+  });
+
+  const codeOpt = createDescribedItem(
+    'Code (raw)',
+    'Just the editor source as plain .js or .scad text.',
+  );
+  codeOpt.addEventListener('click', () => {
+    dropdown.classList.add('hidden');
+    callbacks.onExportRawCode();
+  });
+
+  dropdown.appendChild(sessionOpt);
+  dropdown.appendChild(codeOpt);
+
   exportWrapper.appendChild(dropdown);
 
   btnExport.addEventListener('click', () => {
@@ -296,9 +340,44 @@ function createButton(id: string, text: string): HTMLButtonElement {
   return btn;
 }
 
-function createDropdownItem(text: string): HTMLButtonElement {
+function createDescribedItem(label: string, description: string, badge?: string): HTMLButtonElement {
   const btn = document.createElement('button');
-  btn.className = 'block w-full text-left px-3 py-1.5 text-xs text-zinc-300 hover:bg-zinc-700';
-  btn.textContent = text;
+  btn.className = 'block w-full text-left px-3 py-1.5 hover:bg-zinc-700 transition-colors';
+
+  const top = document.createElement('div');
+  top.className = 'flex items-center gap-1.5';
+
+  const labelEl = document.createElement('span');
+  labelEl.className = 'text-xs text-zinc-200 font-medium';
+  labelEl.textContent = label;
+  top.appendChild(labelEl);
+
+  if (badge) {
+    const badgeEl = document.createElement('span');
+    badgeEl.className = 'text-[9px] uppercase tracking-wide text-emerald-400 border border-emerald-400/30 rounded px-1 py-px';
+    badgeEl.textContent = badge;
+    top.appendChild(badgeEl);
+  }
+
+  btn.appendChild(top);
+
+  const descEl = document.createElement('div');
+  descEl.className = 'text-[10px] text-zinc-500 leading-tight mt-0.5';
+  descEl.textContent = description;
+  btn.appendChild(descEl);
+
   return btn;
+}
+
+function createSectionHeader(text: string): HTMLElement {
+  const el = document.createElement('div');
+  el.className = 'px-3 pt-1 pb-0.5 text-[10px] uppercase tracking-wider text-zinc-500 font-semibold';
+  el.textContent = text;
+  return el;
+}
+
+function createDivider(): HTMLElement {
+  const el = document.createElement('div');
+  el.className = 'my-1 border-t border-zinc-700';
+  return el;
 }

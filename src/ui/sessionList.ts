@@ -5,9 +5,9 @@ import {
   createSession,
   deleteSession,
   openSession,
-  exportSession,
   importSession,
   clearAllSessions,
+  exportSession,
   type Session,
   type ExportedSession,
 } from '../storage/sessionManager';
