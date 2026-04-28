@@ -3006,6 +3006,7 @@ async function main() {
       if (isAnnotateOpen()) { closeAnnotateMenu(); closed = true; }
       if (isPaintOpen()) { closePaintMenu(); closed = true; }
       if (closeMeasureIfActive()) closed = true;
+      if (getClipState().enabled) { setClipping(false); syncClipUI(); closed = true; }
       if (closed) e.preventDefault();
     });
   }

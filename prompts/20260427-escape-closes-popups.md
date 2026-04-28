@@ -42,6 +42,14 @@ fires any events that should be fired properly upon then closing)?
   input's own cancel flow runs unchanged.
 - Verified `npm run build` succeeds with no TypeScript errors.
 
+## Follow-up — extend to cross-section
+
+User asked for Escape to also close the cross-section view. Added a
+`getClipState().enabled` check to the global handler that calls
+`setClipping(false)` + `syncClipUI()` so the toggle button reverts and
+the slider group hides — same teardown that the toolbar click does.
+Verified in Chrome.
+
 ## Follow-up — TDZ fix
 
 After the user reported Escape didn't close the popups (and that paint
