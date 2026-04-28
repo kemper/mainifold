@@ -1,0 +1,18 @@
+{
+  "entries": [
+    {
+      "id": "basic-shapes",
+      "name": "Basic Shapes",
+      "description": "A cube with a cylindrical hole — boolean subtraction primer.",
+      "file": "basic_shapes.partwright.json",
+      "language": "manifold-js"
+    },
+    {
+      "id": "openscad-basic",
+      "name": "OpenSCAD: Basic",
+      "description": "Same boolean demo, written in OpenSCAD syntax.",
+      "file": "openscad_basic.partwright.json",
+      "language": "scad"
+    }
+  ]
+}

@@ -9,6 +9,8 @@ import { createLayout, type TabName } from './ui/layout';
 import { createToolbar, isAutoRun, setAutoRun, setToolbarLanguage } from './ui/toolbar';
 import { createLandingPage } from './ui/landing';
 import { createHelpPage } from './ui/help';
+import { showExportOptionsDialog } from './ui/exportOptionsDialog';
+import { createCatalogPage, type CatalogManifestEntry } from './ui/catalog';
 import { createNotFoundPage } from './ui/notFound';
 import { initViewsPanel, updateMultiView } from './ui/panels';
 import { createSessionBar } from './ui/sessionBar';
@@ -137,11 +139,13 @@ let geometryDataEl: HTMLElement;
 const BASE_TITLE = 'Partwright';
 let _expectedTitle = 'Partwright — AI-Driven Parametric CAD in Your Browser';
 
-function updateDocumentTitle(context?: { page?: 'landing' | 'editor' | 'help' | '404'; sessionName?: string | null }) {
+function updateDocumentTitle(context?: { page?: 'landing' | 'editor' | 'help' | '404' | 'catalog'; sessionName?: string | null }) {
   if (context?.page === 'landing' || context?.page === undefined && shouldShowLanding()) {
     _expectedTitle = `${BASE_TITLE} — AI-Driven Parametric CAD in Your Browser`;
   } else if (context?.page === 'help') {
     _expectedTitle = `Help — ${BASE_TITLE}`;
+  } else if (context?.page === 'catalog') {
+    _expectedTitle = `Catalog — ${BASE_TITLE}`;
   } else if (context?.page === '404') {
     _expectedTitle = `Not Found — ${BASE_TITLE}`;
   } else {
@@ -742,9 +746,13 @@ function shouldShowHelp(): boolean {
   return window.location.pathname === '/help';
 }
 
+function shouldShowCatalog(): boolean {
+  return window.location.pathname === '/catalog';
+}
+
 function shouldShow404(): boolean {
   const path = window.location.pathname;
-  return path !== '/' && path !== '' && path !== '/help' && path !== '/editor';
+  return path !== '/' && path !== '' && path !== '/help' && path !== '/editor' && path !== '/catalog';
 }
 
 function getTabFromURL(): TabName {
@@ -974,7 +982,13 @@ async function main() {
       if (currentMeshData) export3MF(hasColorRegions() ? applyTriColors(currentMeshData) : currentMeshData);
     },
     onExportSessionJSON: async () => {
-      const ok = await exportSessionJSON();
+      if (!getState().session) {
+        alert('No active session to export. Save a version first.');
+        return;
+      }
+      const opts = await showExportOptionsDialog();
+      if (!opts) return;
+      const ok = await exportSessionJSON(undefined, opts);
       if (!ok) alert('No active session to export. Save a version first.');
     },
     onExportRawCode: () => {
@@ -1134,6 +1148,7 @@ async function main() {
   function transitionToEditor() {
     showEditorUI(landingEl, helpEl, editorUI);
     if (notFoundEl) notFoundEl.classList.add('hidden');
+    if (catalogEl) catalogEl.classList.add('hidden');
     overlayContainer.classList.add('hidden');
     window.dispatchEvent(new Event('resize'));
   }
@@ -1190,6 +1205,7 @@ async function main() {
       landingEl = await createLandingPage(overlayContainer, {
         onOpenEditor: openEditorFromLanding,
         onOpenHelp: () => showHelp(),
+        onOpenCatalog: () => { void showCatalogPage(); },
         onOpenSession: openSessionFromLanding,
       });
     }
@@ -1202,6 +1218,7 @@ async function main() {
     editorUI.classList.add('hidden');
     helpEl?.classList.add('hidden');
     notFoundEl?.classList.add('hidden');
+    catalogEl?.classList.add('hidden');
     page.classList.remove('hidden');
     updateDocumentTitle({ page: 'landing' });
   }
@@ -1219,6 +1236,7 @@ async function main() {
     editorUI.classList.add('hidden');
     landingEl?.classList.add('hidden');
     helpEl?.classList.add('hidden');
+    catalogEl?.classList.add('hidden');
     notFoundEl.classList.remove('hidden');
     updateDocumentTitle({ page: '404' });
   }
@@ -1257,8 +1275,40 @@ async function main() {
     editorUI.classList.add('hidden');
     if (landingEl) landingEl.classList.add('hidden');
     if (notFoundEl) notFoundEl.classList.add('hidden');
+    if (catalogEl) catalogEl.classList.add('hidden');
     helpEl.classList.remove('hidden');
     updateDocumentTitle({ page: 'help' });
+  }
+
+  let catalogEl: HTMLElement | null = null;
+  async function showCatalogPage(options: { history?: 'push' | 'replace' | 'none' } = {}) {
+    const historyMode = options.history ?? 'push';
+    if (historyMode !== 'none') updateAppHistory('/catalog', historyMode);
+    if (!catalogEl) {
+      catalogEl = await createCatalogPage(overlayContainer, {
+        onBack: () => {
+          updateAppHistory('/', 'push');
+          void syncRouteFromURL();
+        },
+        onLoadEntry: handleCatalogEntryLoad,
+      });
+    }
+    overlayContainer.classList.remove('hidden');
+    editorUI.classList.add('hidden');
+    if (landingEl) landingEl.classList.add('hidden');
+    if (helpEl) helpEl.classList.add('hidden');
+    if (notFoundEl) notFoundEl.classList.add('hidden');
+    catalogEl.classList.remove('hidden');
+    updateDocumentTitle({ page: 'catalog' });
+  }
+
+  // Import a catalog entry as a fresh session and navigate to the editor.
+  async function handleCatalogEntryLoad(_entry: CatalogManifestEntry, payload: ExportedSession) {
+    transitionToEditor();
+    await ensureEditorReady();
+    const { sessionId } = await importSessionPayload(payload);
+    updateAppHistory(`/editor?session=${sessionId}`, 'push');
+    updateDocumentTitle({ page: 'editor' });
   }
 
   async function syncEditorFromURL() {
@@ -1304,6 +1354,8 @@ async function main() {
       await showLandingPage();
     } else if (shouldShowHelp()) {
       showHelp({ history: 'none' });
+    } else if (shouldShowCatalog()) {
+      await showCatalogPage({ history: 'none' });
     } else if (shouldShow404()) {
       showNotFoundPage();
     } else {
@@ -1323,12 +1375,15 @@ async function main() {
   // Check which page to show before loading heavy resources
   const showLanding = shouldShowLanding();
   const showHelpPage = shouldShowHelp();
+  const showCatalog = shouldShowCatalog();
   const show404 = shouldShow404();
 
   if (showLanding) {
     await showLandingPage();
   } else if (showHelpPage) {
     showHelp({ history: 'none' });
+  } else if (showCatalog) {
+    await showCatalogPage({ history: 'none' });
   } else if (show404) {
     showNotFoundPage();
   }
@@ -1467,12 +1522,12 @@ async function main() {
   editorReadyResolve();
 
   // Start guided tour on first visit (after editor fully renders)
-  if (!showLanding && !showHelpPage && !show404) {
+  if (!showLanding && !showHelpPage && !showCatalog && !show404) {
     maybeStartTour();
   }
 
-  // If not on landing/help/404, load session or default code now
-  if (!showLanding && !showHelpPage && !show404 && engineOk) {
+  // If not on landing/help/catalog/404, load session or default code now
+  if (!showLanding && !showHelpPage && !showCatalog && !show404 && engineOk) {
     await syncEditorFromURL();
   }
 

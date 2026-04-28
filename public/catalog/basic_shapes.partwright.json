@@ -1,0 +1,19 @@
+{
+  "partwright": "1.3",
+  "session": {
+    "name": "Basic Shapes",
+    "created": 1745798400000,
+    "updated": 1745798400000,
+    "referenceImages": null,
+    "language": "manifold-js"
+  },
+  "versions": [
+    {
+      "index": 0,
+      "code": "// Basic shapes demo\n// The 'api' object exposes the full manifold-3d API\nconst { Manifold } = api;\n\nconst box = Manifold.cube([10, 10, 10], true);\nconst hole = Manifold.cylinder(6, 4, 4, 32);\nconst result = box.subtract(hole);\n\n// Always return the final Manifold object\nreturn result;\n",
+      "label": "v0",
+      "geometryData": null,
+      "timestamp": 1745798400000
+    }
+  ]
+}

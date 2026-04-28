@@ -1,0 +1,19 @@
+{
+  "partwright": "1.3",
+  "session": {
+    "name": "OpenSCAD: Basic",
+    "created": 1745798400000,
+    "updated": 1745798400000,
+    "referenceImages": null,
+    "language": "scad"
+  },
+  "versions": [
+    {
+      "index": 0,
+      "code": "// OpenSCAD: basic boolean demo\n// A cube with a cylindrical hole — same as basic_shapes.js, in SCAD.\n\ndifference() {\n  cube([10, 10, 10], center=true);\n  cylinder(h=12, r=4, center=true, $fn=32);\n}\n",
+      "label": "v0",
+      "geometryData": null,
+      "timestamp": 1745798400000
+    }
+  ]
+}
