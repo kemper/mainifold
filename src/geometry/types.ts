@@ -5,6 +5,8 @@ export interface MeshData {
   numTri: number;
   numProp: number;
   triColors?: Uint8Array; // numTri * 3 (RGB per triangle), optional
+  mergeFromVert?: Uint32Array; // vertex merge pairs from manifold-3d (for export dedup)
+  mergeToVert?: Uint32Array;
 }
 
 export type DiagnosticSeverity = 'error' | 'warning' | 'info' | 'hint';

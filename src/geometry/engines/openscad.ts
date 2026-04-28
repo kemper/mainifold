@@ -177,7 +177,20 @@ export async function runScadAsync(source: string): Promise<MeshResult> {
       // Non-manifold SCAD output — still render raw mesh.
       return { mesh, manifold: null, error: null };
     }
-    return { mesh, manifold, error: null };
+
+    // Get canonical mesh with merge vectors for clean export topology.
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const canonical = (manifold as any).getMesh();
+    const exportMesh = {
+      vertProperties: canonical.vertProperties as Float32Array,
+      triVerts: canonical.triVerts as Uint32Array,
+      numVert: canonical.numVert as number,
+      numTri: canonical.numTri as number,
+      numProp: canonical.numProp as number,
+      mergeFromVert: canonical.mergeFromVert as Uint32Array | undefined,
+      mergeToVert: canonical.mergeToVert as Uint32Array | undefined,
+    };
+    return { mesh: exportMesh, manifold, error: null };
   } catch (e: unknown) {
     let msg: string;
     if (typeof e === 'number' && instance?.formatException) {
