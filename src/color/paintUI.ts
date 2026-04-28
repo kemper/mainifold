@@ -301,7 +301,7 @@ function createBucketControls(): HTMLElement {
   slider.step = '1';
   slider.value = String(toleranceToSliderPct(getBucketTolerance()));
   slider.className = 'w-full accent-blue-500';
-  slider.title = 'Maximum angle (0\u00B0\u201390\u00B0) the flood-fill is allowed to bleed across';
+  slider.title = 'Maximum bend angle (0\u00B0\u2013180\u00B0) between adjacent faces the flood-fill is allowed to cross';
   slider.addEventListener('input', () => {
     const tol = sliderPctToTolerance(parseInt(slider.value, 10));
     setBucketTolerance(tol);
@@ -311,21 +311,22 @@ function createBucketControls(): HTMLElement {
 
   const help = document.createElement('div');
   help.className = 'text-[10px] text-zinc-500 mt-1';
-  help.textContent = 'Strict \u2190\u2014\u2014\u2192 Loose (more curved bleed)';
+  help.textContent = 'Coplanar only \u2190\u2014\u2014\u2192 Whole connected mesh';
   wrap.appendChild(help);
 
   return wrap;
 }
 
 function toleranceToSliderPct(tol: number): number {
-  // Slider 0..100 maps directly to angle 0°..90° (i.e. tol = cos(angle)).
-  // 0 = strict (only the exact face), 100 = paints everything within 90°.
+  // Slider 0..100 maps to angle 0°..180° (i.e. tol = cos(angle)).
+  // 0 = strict (only exactly-coplanar adjacent faces);
+  // 100 = no limit (paints the whole connected component).
   const angleDeg = Math.acos(Math.max(-1, Math.min(1, tol))) * 180 / Math.PI;
-  return Math.round(Math.max(0, Math.min(90, angleDeg)) / 90 * 100);
+  return Math.round(Math.max(0, Math.min(180, angleDeg)) / 180 * 100);
 }
 
 function sliderPctToTolerance(pct: number): number {
-  const angleDeg = Math.max(0, Math.min(100, pct)) / 100 * 90;
+  const angleDeg = Math.max(0, Math.min(100, pct)) / 100 * 180;
   return Math.cos(angleDeg * Math.PI / 180);
 }
 

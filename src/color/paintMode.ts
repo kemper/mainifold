@@ -64,7 +64,7 @@ export function getTool(): PaintTool {
 }
 
 export function setBucketTolerance(tol: number): void {
-  bucketTolerance = Math.max(0, Math.min(1, tol));
+  bucketTolerance = Math.max(-1, Math.min(1, tol));
 }
 
 export function getBucketTolerance(): number {

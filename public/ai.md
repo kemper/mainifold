@@ -457,7 +457,7 @@ partwright.paintSlab({
 });
 ```
 
-**Bucket tolerance.** `paintRegion`'s `tolerance` is a cosine threshold (default `0.9995`, ≈ 1.8°). Loosen it to make flood-fill spill across slightly curved surfaces (e.g. a chamfered edge), tighten it to keep flood-fill confined to a single perfectly flat face. The Paint UI exposes the same control as a slider labeled in degrees.
+**Bucket tolerance.** `paintRegion`'s `tolerance` is a cosine threshold for the bend angle between adjacent faces (default `0.9995`, ≈ 1.8°). The flood-fill crosses an edge only when the bend at that edge is below the angle threshold — checked between the *parent* face and each *neighbor*, not against the seed. This means flood-fill follows curved surfaces: a 32-sided cylinder bends ~11° per face, so any tolerance ≥ cos(11°) ≈ `0.98` covers the whole cylinder. Set tolerance to `-1` (180°) to paint the entire connected mesh. The Paint UI exposes the same control as a slider labeled in degrees (0°–180°).
 
 **Editor lock.** When color regions exist, the editor is locked (the model can't be re-run, because new geometry would invalidate the saved triangle indices). To edit code, the user clicks "Unlock to edit" in the UI. Agents that need to iterate on the geometry should call `clearColors()` first, or fork a new uncolored version with `forkVersion`.
 
