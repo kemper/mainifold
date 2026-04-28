@@ -377,7 +377,7 @@ export function createToolbar(
 
   const sessionOpt = createDescribedItem(
     'Session (.partwright.json)',
-    'All versions, notes, and reference images. Another Partwright user can import this.',
+    'All versions, notes, and attached images. Another Partwright user can import this.',
   );
   sessionOpt.addEventListener('click', () => {
     dropdown.classList.add('hidden');

@@ -2,7 +2,7 @@ import './style.css';
 import { initEngine, executeCode, executeCodeAsync, validateCodeAsync, ensureEngineReady, getModule, getActiveLanguage, setActiveLanguage, type Language } from './geometry/engine';
 import { sliceAtZ, getBoundingBox } from './geometry/crossSection';
 import { initViewport, updateMesh, setClipping, setClipZ, getClipState, getCameraState, getCanvas, getMeshGroup, getCamera, setMeasureLock, setUserOrbitLock, isUserOrbitLocked, onUserOrbitLockChange, setDimensionsVisible, isDimensionsVisible, setGridVisible, isGridVisible } from './renderer/viewport';
-import { renderCompositeCanvas, renderElevationsToContainer, renderSingleView, renderSliceSVG, setReferenceImages as _setRefImages, clearReferenceImages as _clearRefImages, getReferenceImages as _getRefImages, type ReferenceImages } from './renderer/multiview';
+import { renderCompositeCanvas, renderElevationsToContainer, renderSingleView, renderSliceSVG, setImages as _setImages, clearImages as _clearImages, getImages as _getImages, type Images } from './renderer/multiview';
 import { setPhantom, clearPhantom, hasPhantom, type PhantomOptions } from './renderer/phantomGeometry';
 import { initEditor, setValue, getValue, setLanguage as setEditorLanguage, setEditorDiagnostics, clearEditorDiagnostics, revealFirstDiagnostic } from './editor/codeEditor';
 import { createLayout, type TabName } from './ui/layout';
@@ -13,6 +13,7 @@ import { createNotFoundPage } from './ui/notFound';
 import { initViewsPanel, updateMultiView } from './ui/panels';
 import { createSessionBar } from './ui/sessionBar';
 import { createGalleryView, refreshGallery } from './ui/gallery';
+import { createImagesView, refreshImages } from './ui/imagesView';
 import { createDiffView, refreshDiff } from './ui/diffView';
 import { createNotesView, refreshNotes } from './ui/notes';
 import { initSessionList, showSessionList } from './ui/sessionList';
@@ -95,8 +96,8 @@ import {
   exportSession,
   importSession,
   clearAllSessions,
-  saveReferenceImages as persistReferenceImages,
-  getReferenceImagesFromSession,
+  saveImages as persistImages,
+  getImagesFromSession,
   addSessionNote,
   listSessionNotes,
   deleteIfEmpty,
@@ -106,7 +107,7 @@ import {
   recordError,
   onStateChange,
   type ExportedSession,
-  type ReferenceImagesData,
+  type ImagesData,
 } from './storage/sessionManager';
 import type { Version } from './storage/db';
 
@@ -720,7 +721,7 @@ function shouldShowLanding(): boolean {
   const params = new URLSearchParams(window.location.search);
   // Landing if at root path AND no query params that indicate a specific view
   const isRootPath = path === '/' || path === '';
-  return isRootPath && !params.has('view') && !params.has('session') && !params.has('gallery') && !params.has('diff') && !params.has('notes');
+  return isRootPath && !params.has('view') && !params.has('session') && !params.has('gallery') && !params.has('images') && !params.has('diff') && !params.has('notes');
 }
 
 function shouldShowHelp(): boolean {
@@ -736,6 +737,7 @@ function getTabFromURL(): TabName {
   const params = new URLSearchParams(window.location.search);
   if (params.has('notes')) return 'notes';
   if (params.has('diff')) return 'diff';
+  if (params.has('images')) return 'images';
   if (params.has('gallery')) return 'gallery';
   if (params.get('view') === 'elevations') return 'elevations';
   if (params.get('view') === 'ai') return 'ai';
@@ -1012,31 +1014,17 @@ async function main() {
         rehydrateColorRegions(loadedVersion.geometryData);
       }
     },
-    onOpenGallery: () => {
-      switchTab('gallery');
-      refreshGallery();
-    },
     onOpenSessionList: () => showSessionList(),
-    onLoadReferenceImages: (images: Record<string, string>) => {
-      _setRefImages(images as ReferenceImages);
-      persistReferenceImages(images as ReferenceImagesData);
-      if (currentMeshData) {
-        renderElevationsToContainer(
-          document.getElementById('elevations-container')!,
-          currentMeshData,
-        );
-      }
-    },
     onNewSession: () => {
       const freshCode = '// New session\nconst { Manifold } = api;\nreturn Manifold.cube([10, 10, 10], true);';
       setValue(freshCode);
       runCode(freshCode);
-      _clearRefImages();
+      _clearImages();
     },
   });
 
   // Create layout
-  const { editorContainer, editorErrorPanel, viewportPane, viewsContainer, elevationsContainer, galleryContainer, diffContainer, notesContainer, statusBar, clipControls, switchTab } = createLayout(editorUI);
+  const { editorContainer, editorErrorPanel, viewportPane, viewsContainer, elevationsContainer, galleryContainer, imagesContainer, diffContainer, notesContainer, statusBar, clipControls, switchTab } = createLayout(editorUI);
 
   // Init views panel
   initViewsPanel(viewsContainer);
@@ -1053,6 +1041,20 @@ async function main() {
     switchTab('interactive');
   });
 
+  // Init images view
+  createImagesView(imagesContainer, {
+    onChange: async (next) => {
+      _setImages(next as Images);
+      await persistImages(next);
+      if (currentMeshData) {
+        renderElevationsToContainer(
+          document.getElementById('elevations-container')!,
+          currentMeshData,
+        );
+      }
+    },
+  });
+
   // Init diff view
   createDiffView(diffContainer, (code: string) => {
     setValue(code);
@@ -1063,9 +1065,10 @@ async function main() {
   // Init notes panel
   createNotesView(notesContainer);
 
-  // Refresh gallery/notes whenever their tabs are selected
+  // Refresh tabs when they're selected
   window.addEventListener('tab-switched', ((e: CustomEvent) => {
     if (e.detail.tab === 'gallery') refreshGallery();
+    if (e.detail.tab === 'images') refreshImages();
     if (e.detail.tab === 'diff') refreshDiff();
     if (e.detail.tab === 'notes') refreshNotes();
   }) as EventListener);
@@ -1121,11 +1124,11 @@ async function main() {
     setValue(version.code);
     await runCodeSync(version.code);
     rehydrateColorRegions(version.geometryData);
-    const refImages = await getReferenceImagesFromSession();
-    if (refImages) {
-      _setRefImages(refImages as ReferenceImages);
+    const sessionImages = await getImagesFromSession();
+    if (sessionImages) {
+      _setImages(sessionImages as Images);
     } else {
-      _clearRefImages();
+      _clearImages();
     }
   }
 
@@ -1877,22 +1880,22 @@ async function main() {
       return { svg, area: s.area, contours: s.polygons.length };
     },
 
-    // === Reference image API ===
+    // === Images API ===
 
-    /** Load reference images for side-by-side comparison in Elevations tab.
+    /** Attach images for side-by-side comparison in the Images and Elevations tabs.
      *  Keys: front, right, back, left, top, perspective. Values: data URLs or image URLs.
      *  If a session is active, also persists to IndexedDB. */
-    setReferenceImages(images: ReferenceImages): void {
-      const REF_KEYS = ['front', 'right', 'back', 'left', 'top', 'perspective'] as const;
-      const obj = assertObject(images, 'setReferenceImages(images)')!;
-      assertNoUnknownKeys(obj, REF_KEYS, 'setReferenceImages(images)');
-      for (const k of REF_KEYS) {
-        if (obj[k] !== undefined) assertString(obj[k], `setReferenceImages(images).${k}`, { allowEmpty: false });
+    setImages(images: Images): void {
+      const ANGLE_KEYS = ['front', 'right', 'back', 'left', 'top', 'perspective'] as const;
+      const obj = assertObject(images, 'setImages(images)')!;
+      assertNoUnknownKeys(obj, ANGLE_KEYS, 'setImages(images)');
+      for (const k of ANGLE_KEYS) {
+        if (obj[k] !== undefined) assertString(obj[k], `setImages(images).${k}`, { allowEmpty: false });
       }
-      _setRefImages(images);
+      _setImages(images);
       // Persist to session if one is active
-      persistReferenceImages(images as ReferenceImagesData);
-      // Re-render elevations with reference images if we have mesh data
+      persistImages(images as ImagesData);
+      // Re-render elevations with new data
       if (currentMeshData) {
         renderElevationsToContainer(
           document.getElementById('elevations-container')!,
@@ -1901,11 +1904,11 @@ async function main() {
       }
     },
 
-    /** Clear all reference images */
-    clearReferenceImages(): void {
-      _clearRefImages();
+    /** Clear all images */
+    clearImages(): void {
+      _clearImages();
       // Clear from session if one is active
-      persistReferenceImages(null);
+      persistImages(null);
       if (currentMeshData) {
         renderElevationsToContainer(
           document.getElementById('elevations-container')!,
@@ -1914,9 +1917,9 @@ async function main() {
       }
     },
 
-    /** Get currently loaded reference images (or null if none) */
-    getReferenceImages(): ReferenceImages | null {
-      return _getRefImages();
+    /** Get currently attached images (or null if none) */
+    getImages(): Images | null {
+      return _getImages();
     },
 
     // === Session API ===
@@ -1940,7 +1943,7 @@ async function main() {
       return sessions.map(s => ({ id: s.id, name: s.name, updated: s.updated }));
     },
 
-    /** Open an existing session (loads latest version, restores reference images, restores language) */
+    /** Open an existing session (loads latest version, restores attached images, restores language) */
     async openSession(id: string) {
       const check = guard(() => assertString(id, 'openSession(id)', { allowEmpty: false }));
       if (typeof check === 'object' && check !== null && 'error' in check) return check;
@@ -1954,10 +1957,10 @@ async function main() {
         setValue(version.code);
         await runCodeSync(version.code);
       }
-      // Restore reference images from session
-      const refImages = await getReferenceImagesFromSession();
-      if (refImages) {
-        _setRefImages(refImages as ReferenceImages);
+      // Restore images from session
+      const sessionImages = await getImagesFromSession();
+      if (sessionImages) {
+        _setImages(sessionImages as Images);
         if (currentMeshData) {
           renderElevationsToContainer(
             document.getElementById('elevations-container')!,
@@ -1965,7 +1968,7 @@ async function main() {
           );
         }
       } else {
-        _clearRefImages();
+        _clearImages();
       }
       return version ? { id: version.id, index: version.index, label: version.label } : null;
     },
@@ -2288,10 +2291,10 @@ async function main() {
         setValue(version.code);
         await runCodeSync(version.code);
       }
-      // Restore reference images from imported session
-      const refImages = await getReferenceImagesFromSession();
-      if (refImages) {
-        _setRefImages(refImages as ReferenceImages);
+      // Restore images from imported session
+      const sessionImages = await getImagesFromSession();
+      if (sessionImages) {
+        _setImages(sessionImages as Images);
         if (currentMeshData) {
           renderElevationsToContainer(
             document.getElementById('elevations-container')!,

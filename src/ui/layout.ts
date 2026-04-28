@@ -1,4 +1,4 @@
-export type TabName = 'interactive' | 'ai' | 'elevations' | 'gallery' | 'diff' | 'notes';
+export type TabName = 'interactive' | 'ai' | 'elevations' | 'gallery' | 'images' | 'diff' | 'notes';
 
 export interface LayoutElements {
   editorPane: HTMLElement;
@@ -8,6 +8,7 @@ export interface LayoutElements {
   viewsContainer: HTMLElement;
   elevationsContainer: HTMLElement;
   galleryContainer: HTMLElement;
+  imagesContainer: HTMLElement;
   diffContainer: HTMLElement;
   notesContainer: HTMLElement;
   statusBar: HTMLElement;
@@ -76,6 +77,8 @@ export function createLayout(appContainer: HTMLElement): LayoutElements {
   tabElevations.title = 'Orthographic views with optional reference image overlay';
   const tabGallery = createTab('Gallery', false);
   tabGallery.title = 'Compare saved versions side-by-side';
+  const tabImages = createTab('Images', false);
+  tabImages.title = 'Reference images attached to this session';
   const tabDiff = createTab('Diff', false);
   tabDiff.title = 'Compare code between two versions';
   const tabNotes = createTab('Notes', false);
@@ -102,6 +105,7 @@ export function createLayout(appContainer: HTMLElement): LayoutElements {
   tabBar.appendChild(tabAI);
   tabBar.appendChild(tabElevations);
   tabBar.appendChild(tabGallery);
+  tabBar.appendChild(tabImages);
   tabBar.appendChild(tabDiff);
   tabBar.appendChild(tabNotes);
   tabBar.appendChild(viewActions);
@@ -127,6 +131,10 @@ export function createLayout(appContainer: HTMLElement): LayoutElements {
   galleryContainer.id = 'gallery-container';
   galleryContainer.className = 'flex-1 min-h-0 overflow-auto bg-zinc-900 hidden p-4';
 
+  const imagesContainer = document.createElement('div');
+  imagesContainer.id = 'images-container';
+  imagesContainer.className = 'flex-1 min-h-0 overflow-auto bg-zinc-900 hidden p-4 flex flex-col';
+
   const diffContainer = document.createElement('div');
   diffContainer.id = 'diff-container';
   diffContainer.className = 'flex-1 min-h-0 overflow-hidden bg-zinc-900 hidden';
@@ -135,12 +143,12 @@ export function createLayout(appContainer: HTMLElement): LayoutElements {
   notesContainer.id = 'notes-container';
   notesContainer.className = 'flex-1 min-h-0 overflow-auto bg-zinc-900 hidden p-4 flex flex-col';
 
-  const allTabs = [tabInteractive, tabAI, tabElevations, tabGallery, tabDiff, tabNotes];
-  const allPanes = [viewportPane, viewsContainer, elevationsContainer, galleryContainer, diffContainer, notesContainer];
+  const allTabs = [tabInteractive, tabAI, tabElevations, tabGallery, tabImages, tabDiff, tabNotes];
+  const allPanes = [viewportPane, viewsContainer, elevationsContainer, galleryContainer, imagesContainer, diffContainer, notesContainer];
 
   // Shared tab activation logic (DOM toggling, editor visibility, events)
   function applyTab(tab: TabName) {
-    const idx = tab === 'interactive' ? 0 : tab === 'ai' ? 1 : tab === 'elevations' ? 2 : tab === 'gallery' ? 3 : tab === 'diff' ? 4 : 5;
+    const idx = tab === 'interactive' ? 0 : tab === 'ai' ? 1 : tab === 'elevations' ? 2 : tab === 'gallery' ? 3 : tab === 'images' ? 4 : tab === 'diff' ? 5 : 6;
     for (let i = 0; i < allPanes.length; i++) {
       if (i === idx) {
         allPanes[i].classList.remove('hidden');
@@ -167,31 +175,43 @@ export function createLayout(appContainer: HTMLElement): LayoutElements {
     if (tab === 'ai') {
       params.set('view', 'ai');
       params.delete('gallery');
+      params.delete('images');
       params.delete('diff');
       params.delete('notes');
     } else if (tab === 'elevations') {
       params.set('view', 'elevations');
       params.delete('gallery');
+      params.delete('images');
       params.delete('diff');
       params.delete('notes');
     } else if (tab === 'gallery') {
       params.set('gallery', '');
       params.delete('view');
+      params.delete('images');
+      params.delete('diff');
+      params.delete('notes');
+    } else if (tab === 'images') {
+      params.set('images', '');
+      params.delete('view');
+      params.delete('gallery');
       params.delete('diff');
       params.delete('notes');
     } else if (tab === 'diff') {
       params.set('diff', '');
       params.delete('view');
       params.delete('gallery');
+      params.delete('images');
       params.delete('notes');
     } else if (tab === 'notes') {
       params.set('notes', '');
       params.delete('view');
       params.delete('gallery');
+      params.delete('images');
       params.delete('diff');
     } else {
       params.delete('view');
       params.delete('gallery');
+      params.delete('images');
       params.delete('diff');
       params.delete('notes');
     }
@@ -213,6 +233,7 @@ export function createLayout(appContainer: HTMLElement): LayoutElements {
   tabAI.addEventListener('click', () => switchTab('ai'));
   tabElevations.addEventListener('click', () => switchTab('elevations'));
   tabGallery.addEventListener('click', () => switchTab('gallery'));
+  tabImages.addEventListener('click', () => switchTab('images'));
   tabDiff.addEventListener('click', () => switchTab('diff'));
   tabNotes.addEventListener('click', () => switchTab('notes'));
 
@@ -222,6 +243,8 @@ export function createLayout(appContainer: HTMLElement): LayoutElements {
     applyTab('notes');
   } else if (initParams.has('diff')) {
     applyTab('diff');
+  } else if (initParams.has('images')) {
+    applyTab('images');
   } else if (initParams.has('gallery')) {
     applyTab('gallery');
   } else if (initParams.get('view') === 'elevations') {
@@ -235,6 +258,7 @@ export function createLayout(appContainer: HTMLElement): LayoutElements {
   rightPane.appendChild(viewsContainer);
   rightPane.appendChild(elevationsContainer);
   rightPane.appendChild(galleryContainer);
+  rightPane.appendChild(imagesContainer);
   rightPane.appendChild(diffContainer);
   rightPane.appendChild(notesContainer);
 
@@ -244,7 +268,7 @@ export function createLayout(appContainer: HTMLElement): LayoutElements {
 
   appContainer.appendChild(main);
 
-  return { editorPane, editorContainer, editorErrorPanel, viewportPane, viewsContainer, elevationsContainer, galleryContainer, diffContainer, notesContainer, statusBar, clipControls, switchTab };
+  return { editorPane, editorContainer, editorErrorPanel, viewportPane, viewsContainer, elevationsContainer, galleryContainer, imagesContainer, diffContainer, notesContainer, statusBar, clipControls, switchTab };
 }
 
 function createTab(label: string, active: boolean): HTMLButtonElement {

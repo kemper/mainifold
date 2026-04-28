@@ -46,10 +46,10 @@ const STEPS: TourStep[] = [
     placement: 'bottom',
   },
   {
-    target: '#btn-ref-upload',
+    target: '[data-tab="Images"]',
     title: 'Reference Images',
     description:
-      'Upload reference photos for AI to match. Name files by angle (front.jpg, right.png) for multi-view comparison in the Elevations tab.',
+      'Attach photos or renderings the model should match. Each image is tagged with an angle (front, right, etc.) and shown next to the matching elevation view for visual comparison.',
     placement: 'bottom',
   },
   {
@@ -86,7 +86,7 @@ export function maybeStartTour(): void {
   if (localStorage.getItem(STORAGE_KEY)) return;
 
   const params = new URLSearchParams(window.location.search);
-  if (params.has('view') || params.has('session') || params.has('gallery') || params.has('notes')) return;
+  if (params.has('view') || params.has('session') || params.has('gallery') || params.has('images') || params.has('notes')) return;
 
   setTimeout(() => startTour(), 800);
 }

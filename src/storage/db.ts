@@ -5,12 +5,12 @@ export interface Session {
   name: string;
   created: number;
   updated: number;
-  referenceImages?: ReferenceImagesData | null;
+  images?: ImagesData | null;
   /** Modeling language for this session. Missing = 'manifold-js'. */
   language?: 'manifold-js' | 'scad';
 }
 
-export interface ReferenceImagesData {
+export interface ImagesData {
   front?: string;
   right?: string;
   back?: string;
@@ -215,20 +215,33 @@ export async function createSession(name?: string, language?: 'manifold-js' | 's
 
 export async function getSession(id: string): Promise<Session | null> {
   const store = await tx('sessions', 'readonly');
-  return reqToPromise(store.get(id)) as Promise<Session | null>;
+  const raw = await reqToPromise(store.get(id)) as (Session & { referenceImages?: ImagesData | null }) | null;
+  return raw ? migrateSessionImages(raw) : null;
 }
 
 export async function listSessions(): Promise<Session[]> {
   const store = await tx('sessions', 'readonly');
-  const sessions = await reqToPromise(store.getAll()) as Session[];
-  return sessions.sort((a, b) => b.updated - a.updated);
+  const sessions = await reqToPromise(store.getAll()) as (Session & { referenceImages?: ImagesData | null })[];
+  return sessions.map(migrateSessionImages).sort((a, b) => b.updated - a.updated);
 }
 
-export async function updateSession(id: string, updates: Partial<Pick<Session, 'name' | 'created' | 'updated' | 'referenceImages' | 'language'>>): Promise<void> {
+// Migrate legacy `referenceImages` field to `images`. Pre-rename sessions
+// stored data under the old key; new sessions use `images`.
+function migrateSessionImages(s: Session & { referenceImages?: ImagesData | null }): Session {
+  if (s.images === undefined && s.referenceImages !== undefined) {
+    s.images = s.referenceImages;
+  }
+  delete s.referenceImages;
+  return s;
+}
+
+export async function updateSession(id: string, updates: Partial<Pick<Session, 'name' | 'created' | 'updated' | 'images' | 'language'>>): Promise<void> {
   const store = await tx('sessions', 'readwrite');
   const session = await reqToPromise(store.get(id)) as Session | null;
   if (!session) return;
   Object.assign(session, updates);
+  // Strip legacy field if present so it doesn't shadow the new one on re-read
+  delete (session as { referenceImages?: unknown }).referenceImages;
   await reqToPromise(store.put(session));
 }
 

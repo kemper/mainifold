@@ -18,11 +18,12 @@ export interface SessionImportSummary {
 
 /** Build a SessionImportSummary from a parsed .partwright.json payload. */
 export function summarizeSessionImport(data: ExportedSession): SessionImportSummary {
-  const refs = data.session.referenceImages ?? null;
+  // Read images from new field, falling back to legacy `referenceImages` key.
+  const imgs = data.session.images ?? data.session.referenceImages ?? null;
   const referenceSides: string[] = [];
-  if (refs && typeof refs === 'object') {
+  if (imgs && typeof imgs === 'object') {
     for (const k of ['front', 'right', 'back', 'left', 'top', 'perspective'] as const) {
-      if ((refs as Record<string, unknown>)[k]) referenceSides.push(k);
+      if ((imgs as Record<string, unknown>)[k]) referenceSides.push(k);
     }
   }
   return {

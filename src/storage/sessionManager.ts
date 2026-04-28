@@ -20,7 +20,7 @@ import {
   type Session,
   type Version,
   type SessionNote,
-  type ReferenceImagesData,
+  type ImagesData,
 } from './db';
 import type { SerializedColorRegion } from '../color/regions';
 import {
@@ -55,7 +55,7 @@ export interface ExportedSession {
   partwright?: string;
   /** Legacy alias from the pre-rebrand era. Read as a fallback only. */
   mainifold?: string;
-  session: { name: string; created: number; updated: number; referenceImages?: ReferenceImagesData | null; language?: 'manifold-js' | 'scad' };
+  session: { name: string; created: number; updated: number; images?: ImagesData | null; /** Legacy alias for `images`. Read as a fallback. */ referenceImages?: ImagesData | null; language?: 'manifold-js' | 'scad' };
   versions: {
     index: number;
     code: string;
@@ -116,7 +116,7 @@ export function getSchemaCompatibilityWarning(data: ExportedSession): string | n
   return null;
 }
 
-export type { Session, Version, SessionNote, ReferenceImagesData } from './db';
+export type { Session, Version, SessionNote, ImagesData } from './db';
 
 export interface SessionState {
   session: Session | null;
@@ -355,27 +355,27 @@ export function getGalleryUrl(): string {
   return `${base}?session=${currentState.session.id}&gallery`;
 }
 
-// === Reference images ===
+// === Images ===
 
-export async function saveReferenceImages(images: ReferenceImagesData | null): Promise<void> {
+export async function saveImages(images: ImagesData | null): Promise<void> {
   if (!currentState.session) return;
   await dbUpdateSession(currentState.session.id, {
-    referenceImages: images,
+    images,
     updated: Date.now(),
   });
   // Update local state so getState() reflects the change
   currentState = {
     ...currentState,
-    session: { ...currentState.session, referenceImages: images },
+    session: { ...currentState.session, images },
   };
   notify();
 }
 
-export async function getReferenceImagesFromSession(): Promise<ReferenceImagesData | null> {
+export async function getImagesFromSession(): Promise<ImagesData | null> {
   if (!currentState.session) return null;
   // Refresh from DB in case it was updated externally
   const session = await getSession(currentState.session.id);
-  return session?.referenceImages ?? null;
+  return session?.images ?? null;
 }
 
 // === Notes ===
@@ -544,7 +544,7 @@ export async function exportSession(sessionId?: string): Promise<ExportedSession
 
   return {
     partwright: SCHEMA_VERSION,
-    session: { name: session.name, created: session.created, updated: session.updated, referenceImages: session.referenceImages ?? null, ...(session.language ? { language: session.language } : {}) },
+    session: { name: session.name, created: session.created, updated: session.updated, images: session.images ?? null, ...(session.language ? { language: session.language } : {}) },
     versions: versions.map(v => {
       const colorRegions = extractColorRegions(v.geometryData);
       return {
@@ -572,9 +572,11 @@ export async function importSession(
 
   const session = await dbCreateSession(data.session.name, data.session.language);
 
-  // Restore reference images if present in the exported data
-  if (data.session.referenceImages) {
-    await dbUpdateSession(session.id, { referenceImages: data.session.referenceImages });
+  // Restore images if present in the exported data (falling back to the
+  // legacy `referenceImages` key from pre-rename exports)
+  const importedImages = data.session.images ?? data.session.referenceImages ?? null;
+  if (importedImages) {
+    await dbUpdateSession(session.id, { images: importedImages });
   }
 
   for (const v of data.versions) {

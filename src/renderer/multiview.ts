@@ -250,9 +250,9 @@ export function renderCompositeCanvas(meshData: MeshData): HTMLCanvasElement {
   return compositeCanvas;
 }
 
-// === Reference images for comparison ===
+// === Images for elevation comparison ===
 
-export interface ReferenceImages {
+export interface Images {
   front?: string;
   right?: string;
   back?: string;
@@ -261,18 +261,20 @@ export interface ReferenceImages {
   perspective?: string;
 }
 
-let _referenceImages: ReferenceImages | null = null;
+let _images: Images | null = null;
 
-export function setReferenceImages(images: ReferenceImages): void {
-  _referenceImages = images;
+export function setImages(images: Images): void {
+  _images = images;
+  window.dispatchEvent(new Event('images-changed'));
 }
 
-export function clearReferenceImages(): void {
-  _referenceImages = null;
+export function clearImages(): void {
+  _images = null;
+  window.dispatchEvent(new Event('images-changed'));
 }
 
-export function getReferenceImages(): ReferenceImages | null {
-  return _referenceImages;
+export function getImages(): Images | null {
+  return _images;
 }
 
 // === Orthographic elevation views ===
@@ -282,7 +284,7 @@ interface ElevationConfig {
   // Camera direction: where the camera looks FROM (multiplied by distance)
   direction: [number, number, number];
   up: [number, number, number];
-  refKey: keyof ReferenceImages; // which reference image to show alongside
+  refKey: keyof Images; // which image to show alongside
 }
 
 const ELEVATIONS: ElevationConfig[] = [
@@ -371,12 +373,12 @@ export function renderElevationsToContainer(container: HTMLElement, meshData: Me
 
   const viewSize = 300;
   const renderer = getOffscreenRenderer(viewSize);
-  const hasRef = _referenceImages !== null;
+  const hasRef = _images !== null;
 
   const annotations = buildStrokesGroup(new THREE.Vector2(viewSize, viewSize));
   if (annotations) scene.add(annotations);
 
-  // Compact reference images row (above the elevation grid)
+  // Compact images row (above the elevation grid)
   if (hasRef) {
     const refSection = document.createElement('div');
     refSection.className = 'pb-1 border-b border-zinc-700 shrink-0';
@@ -386,12 +388,12 @@ export function renderElevationsToContainer(container: HTMLElement, meshData: Me
 
     const refLabel = document.createElement('span');
     refLabel.className = 'text-xs text-zinc-500 font-mono shrink-0 px-1';
-    refLabel.textContent = 'Refs:';
+    refLabel.textContent = 'Images:';
     refRow.appendChild(refLabel);
 
-    const refKeys: (keyof ReferenceImages)[] = ['perspective', 'front', 'right', 'back', 'left', 'top'];
+    const refKeys: (keyof Images)[] = ['perspective', 'front', 'right', 'back', 'left', 'top'];
     for (const key of refKeys) {
-      const src = _referenceImages![key];
+      const src = _images![key];
       if (!src) continue;
 
       const refImg = document.createElement('img');
