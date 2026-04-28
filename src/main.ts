@@ -20,6 +20,7 @@ import { exportGLB } from './export/gltf';
 import { exportSTL } from './export/stl';
 import { exportOBJ } from './export/obj';
 import { export3MF } from './export/threemf';
+import { exportSessionJSON, exportRawCode } from './export/session';
 import type { MeshData, SourceDiagnostic } from './geometry/types';
 import { analyzeZProfile, type ZProfile } from './geometry/profileAnalysis';
 import { probeAtXY, probeRay, measureDistance, type ProbeResult, type GeneralRayResult } from './geometry/rayCast';
@@ -27,6 +28,7 @@ import { checkContainment, type ContainmentWarning } from './geometry/containmen
 import { setUnits as _setUnits, getUnits as _getUnits, type UnitSystem } from './geometry/units';
 import { initMeasureTool, activate as activateMeasure, deactivate as deactivateMeasure, getState as getMeasureState } from './ui/measureTool';
 import { maybeStartTour, resetTour, startTour } from './ui/tour';
+import { initTheme } from './ui/theme';
 import { initPaintUI } from './color/paintUI';
 import { updatePaintMesh, setOnRegionPainted, isActive as isPaintActive } from './color/paintMode';
 import { initAnnotateUI } from './annotations/annotateUI';
@@ -61,6 +63,7 @@ import {
   listSessions,
   deleteSession,
   renameSession,
+  setSessionLanguage,
   saveVersion,
   navigateVersion,
   loadVersion as loadVersionFromStore,
@@ -741,6 +744,9 @@ function showEditorUI(landingEl: HTMLElement | null, helpEl: HTMLElement | null,
 }
 
 async function main() {
+  // Apply persisted theme before any UI renders
+  initTheme();
+
   // Remove loading splash as soon as JS takes over
   document.getElementById('loading-splash')?.remove();
 
@@ -773,8 +779,83 @@ async function main() {
   const defaultExampleKey = Object.keys(examples).find(k => k.includes('basic_shapes')) ?? Object.keys(examples)[0];
   const defaultCode = examples[defaultExampleKey]?.code ?? '// Write your manifold code here\nconst { Manifold } = api;\nreturn Manifold.cube([5,5,5], true);';
 
+  // Import a .partwright.json session, or a raw .js / .scad file, into a new session.
+  async function handleImportFile(file: File): Promise<void> {
+    const lowerName = file.name.toLowerCase();
+
+    // Confirm before clobbering an active session
+    const cur = getState();
+    if (cur.session && cur.versionCount > 0) {
+      const ok = await showInlineConfirm(
+        editorUI,
+        `Open "${file.name}" as a new session? Your current session will be kept.`,
+      );
+      if (!ok) return;
+    }
+
+    try {
+      if (lowerName.endsWith('.json')) {
+        const text = await file.text();
+        let data: ExportedSession;
+        try {
+          data = JSON.parse(text) as ExportedSession;
+        } catch {
+          alert(`Could not parse "${file.name}" as JSON.`);
+          return;
+        }
+        if ((!data.partwright && !data.mainifold) || !data.session || !Array.isArray(data.versions)) {
+          alert(`"${file.name}" doesn't look like a Partwright session file.`);
+          return;
+        }
+        const session = await importSession(data, async (code) => {
+          await runCodeSync(code);
+          return captureThumbnail();
+        });
+        const version = await openSession(session.id);
+        if (version) await loadVersionIntoEditor(version);
+      } else if (lowerName.endsWith('.js') || lowerName.endsWith('.scad')) {
+        const code = await file.text();
+        const lang: Language = lowerName.endsWith('.scad') ? 'scad' : 'manifold-js';
+        if (lang !== getActiveLanguage()) await switchLanguage(lang);
+        const sessionName = file.name.replace(/\.(js|scad)$/i, '');
+        await createSession(sessionName, lang);
+        setValue(code);
+        await runCodeSync(code);
+      } else {
+        alert(`Unsupported file type: ${file.name}\n\nSupported: .partwright.json, .js, .scad`);
+      }
+    } catch (e) {
+      alert(`Failed to import "${file.name}": ${(e as Error).message}`);
+    }
+  }
+
+  // Document-level drag-and-drop import
+  function isImportableFile(file: File): boolean {
+    const n = file.name.toLowerCase();
+    return n.endsWith('.json') || n.endsWith('.js') || n.endsWith('.scad');
+  }
+
+  document.addEventListener('dragover', (e) => {
+    if (!e.dataTransfer || e.dataTransfer.types.indexOf('Files') === -1) return;
+    e.preventDefault();
+    e.dataTransfer.dropEffect = 'copy';
+  });
+
+  document.addEventListener('drop', async (e) => {
+    const files = e.dataTransfer?.files;
+    if (!files || files.length === 0) return;
+    const first = Array.from(files).find(isImportableFile);
+    if (!first) return;
+    e.preventDefault();
+    await handleImportFile(first);
+  });
+
   // Create toolbar
   createToolbar(editorUI, examples, {
+    onGoHome: () => {
+      updateAppHistory('/', 'push');
+      void syncRouteFromURL();
+    },
     onRun: () => runCode(),
     onExportGLB: async () => {
       try { await exportGLB(); } catch (e) { console.error('GLB export error:', e); }
@@ -788,6 +869,14 @@ async function main() {
     onExport3MF: () => {
       if (currentMeshData) export3MF(hasColorRegions() ? applyTriColors(currentMeshData) : currentMeshData);
     },
+    onExportSessionJSON: async () => {
+      const ok = await exportSessionJSON();
+      if (!ok) alert('No active session to export. Save a version first.');
+    },
+    onExportRawCode: () => {
+      exportRawCode(getValue(), getActiveLanguage());
+    },
+    onImportFile: handleImportFile,
     onExampleSelect: async (entry: ExampleEntry) => {
       // Auto-switch engine + editor mode if the example uses a different language.
       if (entry.language !== getActiveLanguage()) {
@@ -918,6 +1007,9 @@ async function main() {
   let engineOk = false;
   let helpHasAppBackTarget = false;
   let notFoundEl: HTMLElement | null = null;
+  // Declared early so async callbacks (e.g. runCodeSync triggered during
+  // initial syncEditorFromURL) don't hit a TDZ error before this point.
+  let _running = false;
 
   async function ensureEditorReady() {
     if (!editorReady) await editorReadyPromise;
@@ -1065,13 +1157,23 @@ async function main() {
         if (version) {
           await loadVersionIntoEditor(version);
           if (tab === 'gallery') refreshGallery();
+          return;
         }
+        // openSession returned null — either the session ID in the URL
+        // doesn't exist in IndexedDB (e.g. a stale bookmark, or a URL
+        // shared from another browser/device), or the session exists
+        // but has no saved versions. Fall through to create a fresh
+        // session if needed and run defaults, so the viewport renders
+        // and the status doesn't stay stuck on "Loading WASM...".
+      } else {
+        return;
       }
-    } else if (!getState().session) {
-      await createSession();
-      setStatus(statusBar, 'ready', 'Ready');
-      runCode(defaultCode);
     }
+    if (!getState().session) {
+      await createSession();
+    }
+    setStatus(statusBar, 'ready', 'Ready');
+    runCode(defaultCode);
   }
 
   async function syncRouteFromURL() {
@@ -1289,11 +1391,18 @@ async function main() {
       setStatus(statusBar, 'error', `Failed to load ${lang}: ${e instanceof Error ? e.message : String(e)}`);
       throw e;
     }
+    // Persist the language to the active session so reopening it loads in the
+    // correct mode. Without this, sessions created before a language switch
+    // keep their stale language field and reload in the wrong engine, parsing
+    // SCAD code as JS (or vice versa).
+    const sid = getState().session?.id;
+    if (sid) await setSessionLanguage(sid, lang);
     setStatus(statusBar, 'ready', 'Ready');
   }
 
   // === Execution state ===
-  let _running = false;
+  // (`_running` is declared at the top of main() so async callbacks fired
+  // during initial load don't hit a Temporal Dead Zone error.)
 
   async function executeIsolated(code: string, lang?: Language) {
     const t0 = performance.now();
@@ -1870,10 +1979,15 @@ async function main() {
         return true;
       });
       if (typeof check === 'object' && check !== null && 'error' in check) return check;
-      const session = await importSession(data, async (code: string) => {
-        await runCodeSync(code);
-        return captureThumbnail();
-      });
+      let warning: string | null = null;
+      const session = await importSession(
+        data,
+        async (code: string) => {
+          await runCodeSync(code);
+          return captureThumbnail();
+        },
+        (msg) => { warning = msg; },
+      );
       const version = await openSession(session.id);
       if (version) {
         setValue(version.code);
@@ -1890,7 +2004,7 @@ async function main() {
           );
         }
       }
-      return { id: session.id, name: session.name };
+      return { id: session.id, name: session.name, ...(warning ? { warning } : {}) };
     },
 
     /** Clear all sessions and versions from IndexedDB */

@@ -3,6 +3,7 @@
 import { listSessions, type Session } from '../storage/sessionManager';
 import { getLatestVersion, getVersionCount } from '../storage/db';
 import { partwrightMarkSvg } from './brand';
+import { getTheme, onThemeChange, toggleTheme } from './theme';
 
 export interface LandingCallbacks {
   onOpenEditor: () => void;
@@ -16,7 +17,24 @@ export async function createLandingPage(
 ): Promise<HTMLElement> {
   const page = document.createElement('div');
   page.id = 'landing-page';
-  page.className = 'flex flex-col items-center w-full h-full overflow-auto bg-zinc-900 text-zinc-100';
+  page.className = 'flex flex-col items-center w-full h-full overflow-auto bg-zinc-900 text-zinc-100 relative';
+
+  // Dark mode toggle (top-right) — on by default, off when clicked
+  const themeBtn = document.createElement('button');
+  themeBtn.textContent = 'Dark Mode';
+  const themeActive = 'absolute top-4 right-4 px-3 py-1 rounded text-xs font-medium transition-colors bg-zinc-700 text-zinc-100';
+  const themeInactive = 'absolute top-4 right-4 px-3 py-1 rounded text-xs font-medium transition-colors text-zinc-500 hover:text-zinc-300 border border-zinc-600';
+  const syncThemeBtn = (theme: 'light' | 'dark') => {
+    const on = theme === 'dark';
+    themeBtn.className = on ? themeActive : themeInactive;
+    themeBtn.title = on ? 'Dark mode on — click to switch to light' : 'Dark mode off — click to switch to dark';
+    themeBtn.setAttribute('aria-pressed', String(on));
+    themeBtn.setAttribute('aria-label', themeBtn.title);
+  };
+  syncThemeBtn(getTheme());
+  themeBtn.addEventListener('click', () => { toggleTheme(); });
+  onThemeChange(syncThemeBtn);
+  page.appendChild(themeBtn);
 
   // Hero section
   const hero = document.createElement('div');
@@ -123,7 +141,7 @@ function createSessionTile(
 
   // Thumbnail
   const thumbContainer = document.createElement('div');
-  thumbContainer.className = 'w-full aspect-square bg-zinc-850 flex items-center justify-center overflow-hidden';
+  thumbContainer.className = 'w-full aspect-square bg-zinc-800 flex items-center justify-center overflow-hidden';
 
   if (latestVersion?.thumbnail) {
     const img = document.createElement('img');
