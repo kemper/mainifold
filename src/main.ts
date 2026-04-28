@@ -28,6 +28,12 @@ import {
   clearExports as clearInboxExports,
   registerExport as registerInboxExport,
 } from './export/exportInbox';
+import {
+  registerImport,
+  classifyImportSource,
+  type ImportInboxEntry,
+} from './import/importInbox';
+import { showImportPreview, summarizeSessionImport } from './ui/importPreview';
 import type { BuiltExport } from './export/gltf';
 
 /** Register a freshly-built export blob in the inbox so it shows up in Recent Exports. */
@@ -822,46 +828,93 @@ async function main() {
     return { sessionId: session.id };
   }
 
-  // Import a .partwright.json session, or a raw .js / .scad file, into a new session.
-  async function handleImportFile(file: File): Promise<void> {
-    const lowerName = file.name.toLowerCase();
+  // Run a JSON session import end-to-end: validate, show the preview modal, import.
+  async function importJSONFromText(filename: string, text: string): Promise<boolean> {
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(text);
+    } catch {
+      alert(`Could not parse "${filename}" as JSON.`);
+      return false;
+    }
+    const data = validateSessionPayload(parsed);
+    if (!data) {
+      alert(`"${filename}" doesn't look like a Partwright session file.`);
+      return false;
+    }
+    const summary = summarizeSessionImport(data);
+    const ok = await showImportPreview(filename, summary);
+    if (!ok) return false;
+    await importSessionPayload(data);
+    return true;
+  }
 
-    // Confirm before clobbering an active session
-    const cur = getState();
-    if (cur.session && cur.versionCount > 0) {
-      const ok = await showInlineConfirm(
-        editorUI,
-        `Open "${file.name}" as a new session? Your current session will be kept.`,
-      );
-      if (!ok) return;
+  // Import a .partwright.json session, or a raw .js / .scad file, into a new session.
+  // Returns whether the import committed (so callers know if the inbox should be updated).
+  async function handleImportFile(file: File, options: { skipPreActiveConfirm?: boolean } = {}): Promise<boolean> {
+    const source = classifyImportSource(file.name);
+    if (!source) {
+      alert(`Unsupported file type: ${file.name}\n\nSupported: .partwright.json, .js, .scad`);
+      return false;
+    }
+
+    // Raw code imports don't get a preview modal of their own — confirm before clobber.
+    // JSON imports skip this confirm because the preview modal already serves as confirmation.
+    if (!options.skipPreActiveConfirm && source !== 'JSON') {
+      const cur = getState();
+      if (cur.session && cur.versionCount > 0) {
+        const ok = await showInlineConfirm(
+          editorUI,
+          `Open "${file.name}" as a new session? Your current session will be kept.`,
+        );
+        if (!ok) return false;
+      }
     }
 
     try {
-      if (lowerName.endsWith('.json')) {
+      let committed = false;
+      if (source === 'JSON') {
         const text = await file.text();
-        let parsed: unknown;
-        try {
-          parsed = JSON.parse(text);
-        } catch {
-          alert(`Could not parse "${file.name}" as JSON.`);
-          return;
-        }
-        const data = validateSessionPayload(parsed);
-        if (!data) {
-          alert(`"${file.name}" doesn't look like a Partwright session file.`);
-          return;
-        }
-        await importSessionPayload(data);
-      } else if (lowerName.endsWith('.js') || lowerName.endsWith('.scad')) {
+        committed = await importJSONFromText(file.name, text);
+      } else if (source === 'JS' || source === 'SCAD') {
         const code = await file.text();
-        const lang: Language = lowerName.endsWith('.scad') ? 'scad' : 'manifold-js';
+        const lang: Language = source === 'SCAD' ? 'scad' : 'manifold-js';
         const sessionName = file.name.replace(/\.(js|scad)$/i, '');
         await importCodePayload(code, lang, sessionName);
-      } else {
-        alert(`Unsupported file type: ${file.name}\n\nSupported: .partwright.json, .js, .scad`);
+        committed = true;
       }
+      if (committed) registerImport(file, file.name, source);
+      return committed;
     } catch (e) {
       alert(`Failed to import "${file.name}": ${(e as Error).message}`);
+      return false;
+    }
+  }
+
+  // Re-import an entry from the Recent Imports inbox. Reuses the same flow as
+  // a fresh file import, including the JSON preview modal — it is still a
+  // session-creating action and the user may want to verify before clobbering.
+  async function handleReimportInboxEntry(entry: ImportInboxEntry): Promise<void> {
+    try {
+      if (entry.source === 'JSON') {
+        const text = await entry.blob.text();
+        await importJSONFromText(entry.filename, text);
+      } else {
+        const cur = getState();
+        if (cur.session && cur.versionCount > 0) {
+          const ok = await showInlineConfirm(
+            editorUI,
+            `Re-import "${entry.filename}" as a new session? Your current session will be kept.`,
+          );
+          if (!ok) return;
+        }
+        const code = await entry.blob.text();
+        const lang: Language = entry.source === 'SCAD' ? 'scad' : 'manifold-js';
+        const sessionName = entry.filename.replace(/\.(js|scad)$/i, '');
+        await importCodePayload(code, lang, sessionName);
+      }
+    } catch (e) {
+      alert(`Failed to re-import "${entry.filename}": ${(e as Error).message}`);
     }
   }
 
@@ -912,7 +965,8 @@ async function main() {
     onExportRawCode: () => {
       exportRawCode(getValue(), getActiveLanguage());
     },
-    onImportFile: handleImportFile,
+    onImportFile: async (file) => { await handleImportFile(file); },
+    onImportInboxEntry: handleReimportInboxEntry,
     onExampleSelect: async (entry: ExampleEntry) => {
       // Auto-switch engine + editor mode if the example uses a different language.
       if (entry.language !== getActiveLanguage()) {

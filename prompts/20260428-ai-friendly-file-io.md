@@ -87,3 +87,59 @@ itself, plus an export inbox so users can re-download recent exports.
 - Bad-payload import paths return helpful `{error}` messages
   ("payload missing partwright/mainifold brand…", "could not parse
   string as JSON").
+
+## Follow-up: Import dropdown + preview modal + Recent Imports
+
+After the initial review, expanded the import side to mirror the export
+UX:
+
+- `src/import/importInbox.ts` (new): in-memory ring buffer (max 10) of
+  imported file blobs with `registerImport` / `listImports` /
+  `getImport` / `clearImports` / `onImportInboxChange`, plus
+  `classifyImportSource(filename)` returning `'JSON' | 'JS' | 'SCAD'`.
+
+- `src/ui/importPreview.ts` (new): preview modal with
+  `summarizeSessionImport(data) -> SessionImportSummary` and
+  `showImportPreview(filename, summary)` returning `Promise<boolean>`.
+  The modal shows session name, schema version badge, version count,
+  language, notes, annotations, reference image sides, and last
+  updated timestamp before committing the import. Enter confirms;
+  Esc / overlay click / Cancel rejects.
+
+- `src/ui/toolbar.ts`: replaced the bare Import button with an
+  `import-wrapper` dropdown that holds a "Choose file…" entry (still
+  triggers the hidden `<input type="file">` so the OS picker
+  behaviour is unchanged for the user) plus a "Recent Imports"
+  section that renders inbox entries with a source badge, filename,
+  size, and relative timestamp. New `onImportInboxEntry` callback in
+  `ToolbarCallbacks`. Clear button empties the inbox.
+
+- `src/main.ts`:
+  - Extracted `importJSONFromText(filename, text)` which validates,
+    runs the preview modal, and commits.
+  - `handleImportFile()` now returns `boolean` (whether it
+    committed), routes JSON through the preview, and only adds to
+    the inbox if the import actually completed. The legacy
+    "Open as a new session?" confirm only runs for `.js` / `.scad`
+    now since the JSON preview already serves as confirmation.
+  - New `handleReimportInboxEntry(entry)` reuses the same paths for
+    Recent Imports re-clicks (preview for JSON, confirm-on-clobber
+    for JS/SCAD).
+
+- `window.partwright.importSessionData()` deliberately does **not**
+  show the preview — it's the programmatic entry point and the agent
+  has already decided.
+
+### Verification (follow-up)
+
+- `npm run build` clean.
+- Smoke test in Playwright on `/editor?view=ai`:
+  - Import button toggles the new dropdown (no immediate file picker).
+  - Synthetic File dispatched at the hidden input opens the preview
+    modal with correct stats; Cancel closes cleanly with no inbox
+    entry; Import commits and adds the entry with badge + size +
+    "just now".
+  - JS file path still uses the existing confirm modal and lands in
+    Recent Imports with source badge "JS".
+  - Re-clicking a Recent Imports JSON entry replays the preview;
+    Clear empties the list and hides the section.

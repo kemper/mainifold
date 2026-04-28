@@ -8,6 +8,12 @@ import {
   onExportInboxChange,
   type ExportInboxEntry,
 } from '../export/exportInbox';
+import {
+  listImports,
+  clearImports,
+  onImportInboxChange,
+  type ImportInboxEntry,
+} from '../import/importInbox';
 
 export interface ExampleEntry {
   code: string;
@@ -23,6 +29,8 @@ export interface ToolbarCallbacks {
   onExportSessionJSON: () => void;
   onExportRawCode: () => void;
   onImportFile: (file: File) => void | Promise<void>;
+  /** Re-import a blob already held in the inbox (e.g. recent-imports re-click). */
+  onImportInboxEntry: (entry: ImportInboxEntry) => void | Promise<void>;
   onExampleSelect: (entry: ExampleEntry) => void;
   onLanguageSwitch: (lang: 'manifold-js' | 'scad') => void;
   onGoHome: () => void;
@@ -180,11 +188,17 @@ export function createToolbar(
   });
   toolbar.appendChild(select);
 
-  // Import button — file picker accepting .partwright.json / .js / .scad
+  // Import dropdown — mirrors the Export dropdown. Holds a "Choose file…" entry
+  // (the existing OS file picker) and a "Recent Imports" section for re-import.
+  const importWrapper = document.createElement('div');
+  importWrapper.className = 'relative ml-2';
+  importWrapper.id = 'import-wrapper';
+
   const btnImport = createButton('btn-import', '\u2191 Import');
   btnImport.title = 'Import a .partwright.json session, or a .js / .scad file';
-  btnImport.classList.add('ml-2');
+  importWrapper.appendChild(btnImport);
 
+  // Hidden file input — kept inside the wrapper so click-outside-to-close still works.
   const importInput = document.createElement('input');
   importInput.type = 'file';
   importInput.accept = IMPORT_ACCEPT;
@@ -194,10 +208,106 @@ export function createToolbar(
     if (file) await callbacks.onImportFile(file);
     importInput.value = '';
   });
+  importWrapper.appendChild(importInput);
 
-  btnImport.addEventListener('click', () => importInput.click());
-  toolbar.appendChild(btnImport);
-  toolbar.appendChild(importInput);
+  const importDropdown = document.createElement('div');
+  importDropdown.id = 'import-dropdown';
+  importDropdown.className = 'absolute right-0 top-full mt-1 bg-zinc-800 border border-zinc-600 rounded shadow-lg py-1 hidden z-20 w-72 max-h-[80vh] overflow-y-auto';
+
+  importDropdown.appendChild(createSectionHeader('From file'));
+  const chooseFileOpt = createDescribedItem(
+    'Choose file\u2026',
+    'Open a .partwright.json session, or a .js / .scad file.',
+  );
+  chooseFileOpt.addEventListener('click', () => {
+    importDropdown.classList.add('hidden');
+    importInput.click();
+  });
+  importDropdown.appendChild(chooseFileOpt);
+
+  // Recent Imports section — populated from the import inbox.
+  const importRecentDivider = createDivider();
+  const importRecentHeaderRow = document.createElement('div');
+  importRecentHeaderRow.className = 'flex items-center justify-between px-3 pt-1 pb-0.5';
+  const importRecentHeader = document.createElement('div');
+  importRecentHeader.className = 'text-[10px] uppercase tracking-wider text-zinc-500 font-semibold';
+  importRecentHeader.textContent = 'Recent Imports';
+  const importClearBtn = document.createElement('button');
+  importClearBtn.className = 'text-[10px] text-zinc-500 hover:text-zinc-300 transition-colors';
+  importClearBtn.textContent = 'Clear';
+  importClearBtn.title = 'Clear recent imports list';
+  importClearBtn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    clearImports();
+  });
+  importRecentHeaderRow.appendChild(importRecentHeader);
+  importRecentHeaderRow.appendChild(importClearBtn);
+
+  const importRecentList = document.createElement('div');
+  importRecentList.id = 'import-recent-list';
+
+  function renderImportRecent() {
+    const entries = listImports();
+    const hasEntries = entries.length > 0;
+    importRecentDivider.classList.toggle('hidden', !hasEntries);
+    importRecentHeaderRow.classList.toggle('hidden', !hasEntries);
+    importRecentList.classList.toggle('hidden', !hasEntries);
+    importRecentList.replaceChildren(...entries.map(renderImportRecentItem));
+  }
+
+  function renderImportRecentItem(entry: ImportInboxEntry): HTMLElement {
+    const btn = document.createElement('button');
+    btn.className = 'block w-full text-left px-3 py-1 hover:bg-zinc-700 transition-colors';
+    btn.title = `Re-import ${entry.filename}`;
+
+    const top = document.createElement('div');
+    top.className = 'flex items-center gap-1.5';
+
+    const sourceBadge = document.createElement('span');
+    sourceBadge.className = 'text-[9px] uppercase tracking-wide text-zinc-400 border border-zinc-600 rounded px-1 py-px shrink-0';
+    sourceBadge.textContent = entry.source;
+    top.appendChild(sourceBadge);
+
+    const nameEl = document.createElement('span');
+    nameEl.className = 'text-xs text-zinc-200 truncate';
+    nameEl.textContent = entry.filename;
+    top.appendChild(nameEl);
+
+    btn.appendChild(top);
+
+    const meta = document.createElement('div');
+    meta.className = 'text-[10px] text-zinc-500 leading-tight mt-0.5';
+    meta.textContent = `${formatSize(entry.sizeBytes)} • ${formatRelativeTime(entry.timestamp)}`;
+    btn.appendChild(meta);
+
+    btn.addEventListener('click', () => {
+      importDropdown.classList.add('hidden');
+      void callbacks.onImportInboxEntry(entry);
+    });
+
+    return btn;
+  }
+
+  importDropdown.appendChild(importRecentDivider);
+  importDropdown.appendChild(importRecentHeaderRow);
+  importDropdown.appendChild(importRecentList);
+  renderImportRecent();
+  onImportInboxChange(renderImportRecent);
+
+  importWrapper.appendChild(importDropdown);
+
+  btnImport.addEventListener('click', () => {
+    renderImportRecent();
+    importDropdown.classList.toggle('hidden');
+  });
+
+  document.addEventListener('click', (e) => {
+    if (!importWrapper.contains(e.target as Node)) {
+      importDropdown.classList.add('hidden');
+    }
+  });
+
+  toolbar.appendChild(importWrapper);
 
   // Export dropdown
   const exportWrapper = document.createElement('div');
