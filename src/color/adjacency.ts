@@ -89,9 +89,16 @@ export function buildAdjacency(mesh: MeshData): AdjacencyGraph {
   };
 }
 
-/** BFS from a seed triangle, collecting all adjacent triangles whose normal is
- *  within `normalTolerance` (dot product threshold, e.g. 0.9995) of the seed's normal.
- *  Returns the set of triangle indices forming the coplanar region. */
+/** BFS from a seed triangle, crossing each edge only when the bend angle
+ *  between the two faces sharing that edge is small enough — i.e. when
+ *  `cos(angle) >= normalTolerance`. The tolerance is checked against the
+ *  *parent* (already-visited) triangle's normal, not the seed's, so flood-fill
+ *  follows curved surfaces (e.g. a cylinder side) where each adjacent face
+ *  bends only a small amount even though the cumulative bend is large.
+ *
+ *  `normalTolerance` is in [-1, 1] — the cosine of the maximum allowed bend
+ *  angle. 1 = strict (only exactly-coplanar faces); -1 = no limit (whole
+ *  connected component). Default 0.9995 ≈ 1.8°. */
 export function findCoplanarRegion(
   seedTri: number,
   adjacency: AdjacencyGraph,
@@ -100,15 +107,15 @@ export function findCoplanarRegion(
   const { neighbors, normals } = adjacency;
   const result = new Set<number>();
 
-  const seedNx = normals[seedTri * 3];
-  const seedNy = normals[seedTri * 3 + 1];
-  const seedNz = normals[seedTri * 3 + 2];
-
   const queue = [seedTri];
   result.add(seedTri);
 
   while (queue.length > 0) {
     const current = queue.pop()!;
+    const cnx = normals[current * 3];
+    const cny = normals[current * 3 + 1];
+    const cnz = normals[current * 3 + 2];
+
     const adj = neighbors[current];
     for (let i = 0; i < adj.length; i++) {
       const neighbor = adj[i];
@@ -118,7 +125,7 @@ export function findCoplanarRegion(
       const ny = normals[neighbor * 3 + 1];
       const nz = normals[neighbor * 3 + 2];
 
-      const dot = seedNx * nx + seedNy * ny + seedNz * nz;
+      const dot = cnx * nx + cny * ny + cnz * nz;
       if (dot >= normalTolerance) {
         result.add(neighbor);
         queue.push(neighbor);

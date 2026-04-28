@@ -1,7 +1,19 @@
-// Paint mode UI — button toggle, color picker, region count badge,
-// undo/redo/hide/clear actions.
+// Paint mode UI — button toggle, color picker, region count badge, tool
+// selection (bucket / brush / slab), and undo/redo/hide/clear actions.
 
-import { activate, deactivate, isActive, setColor } from './paintMode';
+import {
+  activate,
+  deactivate,
+  isActive,
+  setColor,
+  setTool,
+  getTool,
+  setBucketTolerance,
+  getBucketTolerance,
+  setSlabAxis,
+  getSlabAxis,
+  type PaintTool,
+} from './paintMode';
 import {
   getRegions,
   onChange as onRegionsChange,
@@ -35,24 +47,24 @@ let regionCountBadge: HTMLElement | null = null;
 let visibilityBtn: HTMLButtonElement | null = null;
 let undoBtn: HTMLButtonElement | null = null;
 let redoBtn: HTMLButtonElement | null = null;
+let toolButtons: Partial<Record<PaintTool, HTMLButtonElement>> = {};
+let bucketControls: HTMLElement | null = null;
+let slabControls: HTMLElement | null = null;
 
 /** Initialize the paint UI inside the clip-controls overlay area. */
 export function initPaintUI(controlsContainer: HTMLElement): void {
-  // Paint toggle button
   paintBtn = document.createElement('button');
   paintBtn.id = 'paint-toggle';
   paintBtn.className = 'px-2 py-1 rounded text-xs bg-zinc-800/80 backdrop-blur text-zinc-400 hover:text-zinc-200 hover:bg-zinc-700/80 transition-colors border border-zinc-600/50';
   paintBtn.textContent = '\uD83C\uDFA8 Paint';
   paintBtn.title = 'Paint color regions on model faces';
 
-  // Region count badge
   regionCountBadge = document.createElement('span');
   regionCountBadge.className = 'hidden ml-1 px-1.5 py-0.5 rounded-full text-[10px] font-bold bg-blue-500 text-white leading-none';
   paintBtn.appendChild(regionCountBadge);
 
   paintBtn.addEventListener('click', togglePaintMode);
 
-  // Insert before the measure toggle
   const measureBtn = controlsContainer.querySelector('#measure-toggle');
   if (measureBtn) {
     controlsContainer.insertBefore(paintBtn, measureBtn);
@@ -60,11 +72,9 @@ export function initPaintUI(controlsContainer: HTMLElement): void {
     controlsContainer.appendChild(paintBtn);
   }
 
-  // Color picker panel (hidden by default)
   pickerPanel = createPickerPanel();
   controlsContainer.appendChild(pickerPanel);
 
-  // Update badge + button states when regions / redo / visibility change
   onRegionsChange(() => {
     updateBadge();
     updateUndoButton();
@@ -83,13 +93,13 @@ function togglePaintMode(): void {
     updateButtonState(false);
     pickerPanel?.classList.add('hidden');
   } else {
-    // Mutual exclusion with annotate (pen + text + select) modes.
     forceDeactivateAnnotate();
     forceDeactivateAnnotateText();
     forceDeactivateAnnotateSelect();
     activate();
     updateButtonState(true);
     pickerPanel?.classList.remove('hidden');
+    syncToolPanels();
   }
 }
 
@@ -117,15 +127,28 @@ function createPickerPanel(): HTMLElement {
   const panel = document.createElement('div');
   panel.id = 'paint-picker-panel';
   panel.className = 'hidden absolute top-10 right-2 z-20 bg-zinc-800/95 backdrop-blur border border-zinc-600/60 rounded-lg p-2.5 shadow-xl';
-  panel.style.minWidth = '160px';
+  panel.style.minWidth = '200px';
+  panel.style.maxWidth = '240px';
 
-  // Title
+  // === Tool selector ===
+  const toolTitle = document.createElement('div');
+  toolTitle.className = 'text-[10px] text-zinc-500 uppercase tracking-wider mb-1.5 font-medium';
+  toolTitle.textContent = 'Tool';
+  panel.appendChild(toolTitle);
+
+  const toolRow = document.createElement('div');
+  toolRow.className = 'grid grid-cols-3 gap-1 mb-2.5';
+  toolRow.appendChild(createToolButton('bucket', '\u{1FAA3} Bucket', 'Flood-fill across coplanar faces'));
+  toolRow.appendChild(createToolButton('brush', '\u{1F58C}\uFE0F Brush', 'Paint individual triangles (drag to paint)'));
+  toolRow.appendChild(createToolButton('slab', '\u{1F9F1} Slab', 'Paint all faces inside a slab range'));
+  panel.appendChild(toolRow);
+
+  // === Color picker ===
   const title = document.createElement('div');
   title.className = 'text-[10px] text-zinc-500 uppercase tracking-wider mb-1.5 font-medium';
   title.textContent = 'Color';
   panel.appendChild(title);
 
-  // Preset swatches grid
   const grid = document.createElement('div');
   grid.className = 'grid grid-cols-4 gap-1.5 mb-2';
 
@@ -134,22 +157,16 @@ function createPickerPanel(): HTMLElement {
     swatch.className = 'w-6 h-6 rounded border-2 border-transparent hover:border-white/50 transition-colors';
     swatch.style.backgroundColor = rgbToCSS(color);
     swatch.title = rgbToHex(color);
-
     swatch.addEventListener('click', () => {
       setColor(color);
       updateActiveSwatch(grid, swatch);
     });
-
     grid.appendChild(swatch);
   }
-
-  // Mark first swatch as active
   const first = grid.children[0] as HTMLElement;
   if (first) first.classList.add('border-white/80', 'ring-1', 'ring-white/30');
-
   panel.appendChild(grid);
 
-  // Custom color input
   const customRow = document.createElement('div');
   customRow.className = 'flex items-center gap-1.5';
 
@@ -158,14 +175,12 @@ function createPickerPanel(): HTMLElement {
   colorInput.value = rgbToHex(PRESET_COLORS[0]);
   colorInput.className = 'w-6 h-6 rounded cursor-pointer border-0 p-0 bg-transparent';
   colorInput.title = 'Custom color';
-
   colorInput.addEventListener('input', () => {
     const hex = colorInput.value;
     const r = parseInt(hex.slice(1, 3), 16) / 255;
     const g = parseInt(hex.slice(3, 5), 16) / 255;
     const b = parseInt(hex.slice(5, 7), 16) / 255;
     setColor([r, g, b]);
-    // Clear active swatch borders
     for (const child of Array.from(grid.children)) {
       (child as HTMLElement).classList.remove('border-white/80', 'ring-1', 'ring-white/30');
     }
@@ -179,7 +194,15 @@ function createPickerPanel(): HTMLElement {
   customRow.appendChild(customLabel);
   panel.appendChild(customRow);
 
-  // Region list (compact)
+  // === Bucket tool controls (tolerance slider) ===
+  bucketControls = createBucketControls();
+  panel.appendChild(bucketControls);
+
+  // === Slab tool controls ===
+  slabControls = createSlabControls();
+  panel.appendChild(slabControls);
+
+  // === Region list ===
   const regionList = document.createElement('div');
   regionList.id = 'paint-region-list';
   regionList.className = 'mt-2 border-t border-zinc-700 pt-2 max-h-32 overflow-y-auto';
@@ -187,7 +210,7 @@ function createPickerPanel(): HTMLElement {
 
   onRegionsChange(() => updateRegionList(regionList));
 
-  // Action row: visibility, undo, redo, clear
+  // === Action row ===
   const actions = document.createElement('div');
   actions.className = 'flex items-center gap-1.5 mt-2 pt-2 border-t border-zinc-700 flex-wrap';
 
@@ -223,6 +246,141 @@ function createPickerPanel(): HTMLElement {
   panel.appendChild(actions);
 
   return panel;
+}
+
+function createToolButton(tool: PaintTool, label: string, tooltip: string): HTMLButtonElement {
+  const btn = document.createElement('button');
+  btn.className = toolButtonClass(tool === getTool());
+  btn.textContent = label;
+  btn.title = tooltip;
+  btn.addEventListener('click', () => {
+    setTool(tool);
+    syncToolPanels();
+  });
+  toolButtons[tool] = btn;
+  return btn;
+}
+
+function toolButtonClass(active: boolean): string {
+  if (active) {
+    return 'px-1.5 py-1 rounded text-[10px] bg-blue-500/30 text-blue-200 border border-blue-500/50 transition-colors text-center';
+  }
+  return 'px-1.5 py-1 rounded text-[10px] bg-zinc-700/40 text-zinc-300 hover:bg-zinc-600/60 border border-transparent transition-colors text-center';
+}
+
+function syncToolPanels(): void {
+  const tool = getTool();
+  for (const [t, btn] of Object.entries(toolButtons)) {
+    if (btn) btn.className = toolButtonClass(t === tool);
+  }
+  if (bucketControls) bucketControls.classList.toggle('hidden', tool !== 'bucket');
+  if (slabControls) slabControls.classList.toggle('hidden', tool !== 'slab');
+}
+
+function createBucketControls(): HTMLElement {
+  const wrap = document.createElement('div');
+  wrap.className = 'mt-2 pt-2 border-t border-zinc-700';
+
+  const label = document.createElement('div');
+  label.className = 'text-[10px] text-zinc-500 uppercase tracking-wider mb-1 font-medium flex items-center justify-between';
+  const labelText = document.createElement('span');
+  labelText.textContent = 'Bucket tolerance';
+  const valueSpan = document.createElement('span');
+  valueSpan.className = 'text-zinc-400 normal-case tracking-normal';
+  valueSpan.textContent = formatTolerance(getBucketTolerance());
+  label.appendChild(labelText);
+  label.appendChild(valueSpan);
+  wrap.appendChild(label);
+
+  // Slider exposes 1 - tolerance on a quasi-log scale so small changes near
+  // 1.0 (the strict end) are easy to dial in.
+  const slider = document.createElement('input');
+  slider.type = 'range';
+  slider.min = '0';
+  slider.max = '100';
+  slider.step = '1';
+  slider.value = String(toleranceToSliderPct(getBucketTolerance()));
+  slider.className = 'w-full accent-blue-500';
+  slider.title = 'Maximum bend angle (0\u00B0\u2013180\u00B0) between adjacent faces the flood-fill is allowed to cross';
+  slider.addEventListener('input', () => {
+    const tol = sliderPctToTolerance(parseInt(slider.value, 10));
+    setBucketTolerance(tol);
+    valueSpan.textContent = formatTolerance(tol);
+  });
+  wrap.appendChild(slider);
+
+  const help = document.createElement('div');
+  help.className = 'text-[10px] text-zinc-500 mt-1';
+  help.textContent = 'Coplanar only \u2190\u2014\u2014\u2192 Whole connected mesh';
+  wrap.appendChild(help);
+
+  return wrap;
+}
+
+function toleranceToSliderPct(tol: number): number {
+  // Slider 0..100 maps to angle 0°..180° (i.e. tol = cos(angle)).
+  // 0 = strict (only exactly-coplanar adjacent faces);
+  // 100 = no limit (paints the whole connected component).
+  const angleDeg = Math.acos(Math.max(-1, Math.min(1, tol))) * 180 / Math.PI;
+  return Math.round(Math.max(0, Math.min(180, angleDeg)) / 180 * 100);
+}
+
+function sliderPctToTolerance(pct: number): number {
+  const angleDeg = Math.max(0, Math.min(100, pct)) / 100 * 180;
+  return Math.cos(angleDeg * Math.PI / 180);
+}
+
+function formatTolerance(tol: number): string {
+  // Show as "θ ≤ N°" — the angle whose cosine is `tol`. Friendlier than 0.9995.
+  const angleDeg = Math.acos(Math.max(-1, Math.min(1, tol))) * 180 / Math.PI;
+  return `\u2264 ${angleDeg.toFixed(1)}\u00B0`;
+}
+
+function createSlabControls(): HTMLElement {
+  const wrap = document.createElement('div');
+  wrap.className = 'mt-2 pt-2 border-t border-zinc-700 hidden';
+
+  // Axis selector
+  const axisRow = document.createElement('div');
+  axisRow.className = 'mb-2';
+  const axisLabel = document.createElement('div');
+  axisLabel.className = 'text-[10px] text-zinc-500 uppercase tracking-wider mb-1 font-medium';
+  axisLabel.textContent = 'Slab axis';
+  axisRow.appendChild(axisLabel);
+
+  const axisBtns = document.createElement('div');
+  axisBtns.className = 'grid grid-cols-3 gap-1';
+  for (const a of ['x', 'y', 'z'] as const) {
+    const btn = document.createElement('button');
+    btn.dataset.axis = a;
+    btn.textContent = a.toUpperCase();
+    btn.className = axisButtonClass(a === getSlabAxis());
+    btn.addEventListener('click', () => {
+      setSlabAxis(a);
+      for (const child of Array.from(axisBtns.children)) {
+        const el = child as HTMLButtonElement;
+        el.className = axisButtonClass(el.dataset.axis === getSlabAxis());
+      }
+    });
+    axisBtns.appendChild(btn);
+  }
+  axisRow.appendChild(axisBtns);
+  wrap.appendChild(axisRow);
+
+  // Hint text
+  const hint = document.createElement('div');
+  hint.className = 'text-[10px] text-zinc-400 leading-relaxed';
+  hint.innerHTML = 'Hover the model to preview the slab plane.<br>Click and drag to extend the slab along the chosen axis. Release to paint.';
+  wrap.appendChild(hint);
+
+  return wrap;
+}
+
+function axisButtonClass(active: boolean): string {
+  if (active) {
+    return 'px-2 py-1 rounded text-[11px] bg-blue-500/30 text-blue-200 border border-blue-500/50 transition-colors';
+  }
+  return 'px-2 py-1 rounded text-[11px] bg-zinc-700/40 text-zinc-300 hover:bg-zinc-600/60 border border-transparent transition-colors';
 }
 
 function updateVisibilityButton(): void {

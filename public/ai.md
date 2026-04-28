@@ -188,8 +188,10 @@ await partwright.listSessions()          // -> [{id, name, updated}]
 await partwright.openSession(id)         // Open existing session
 await partwright.clearAllSessions()      // Delete all sessions & versions
 
-// Color regions -- tag coplanar face regions with a color (see #color-regions)
-partwright.paintRegion({point, normal, color, name?, tolerance?}) // -> {id, name, triangles} or {error}
+// Color regions -- tag face regions with a color (see #color-regions)
+partwright.paintRegion({point, normal, color, name?, tolerance?}) // bucket: coplanar flood-fill -> {id, name, triangles} or {error}
+partwright.paintFaces({triangleIds, color, name?})                // brush: paint specific triangle indices -> {id, name, triangles} or {error}
+partwright.paintSlab({axis|normal, offset, thickness, color, name?}) // slab: paint a planar range -> {id, name, triangles} or {error}
 partwright.listRegions()                 // -> [{id, name, color, source, triangles, order}, ...]
 partwright.clearColors()                 // Remove all regions
 
@@ -433,6 +435,41 @@ partwright.clearColors()    // remove all regions
 ```
 
 **How face matching works.** `paintRegion` flood-fills outward from the seed triangle, including any neighbor whose normal is within `tolerance` of the seed's. Pick `point` slightly inside the model surface and pass the outward-pointing `normal` -- the seed resolver looks for the triangle whose plane the point lies on and whose normal aligns with yours.
+
+**Other paint tools.**
+
+```js
+// Brush: paint specific triangle indices (no flood-fill).
+// Use partwright.getGeometry() to find triangle indices, or capture them from
+// hover during a UI-driven paint session.
+partwright.paintFaces({
+  triangleIds: [12, 13, 14, 27],
+  color: [0, 0.6, 1],
+  name: "Inset detail",
+});
+
+// Slab: paint every face whose centroid falls inside a planar slab.
+// Axis-aligned slab (most common — pick X/Y/Z and slide along that axis):
+partwright.paintSlab({
+  axis: "z",
+  offset: 0,           // slab spans Z in [offset, offset + thickness]
+  thickness: 5,
+  color: [1, 0.4, 0],
+  name: "Bottom 5mm",
+});
+
+// Tilted/oblique slab — pass an arbitrary normal vector. Doesn't need to be
+// unit-length; it gets normalized. The slab is the set of points P satisfying
+// offset <= P · normal <= offset + thickness.
+partwright.paintSlab({
+  normal: [1, 0, 1],   // 45° between +X and +Z
+  offset: 0,
+  thickness: 8,
+  color: [0.8, 0, 0.5],
+});
+```
+
+**Bucket tolerance.** `paintRegion`'s `tolerance` is a cosine threshold for the bend angle between adjacent faces (default `0.9995`, ≈ 1.8°). The flood-fill crosses an edge only when the bend at that edge is below the angle threshold — checked between the *parent* face and each *neighbor*, not against the seed. This means flood-fill follows curved surfaces: a 32-sided cylinder bends ~11° per face, so any tolerance ≥ cos(11°) ≈ `0.98` covers the whole cylinder. Set tolerance to `-1` (180°) to paint the entire connected mesh. The Paint UI exposes the same control as a slider labeled in degrees (0°–180°).
 
 **Editor lock.** When color regions exist, the editor is locked (the model can't be re-run, because new geometry would invalidate the saved triangle indices). To edit code, the user clicks "Unlock to edit" in the UI. Agents that need to iterate on the geometry should call `clearColors()` first, or fork a new uncolored version with `forkVersion`.
 
