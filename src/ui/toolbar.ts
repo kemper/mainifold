@@ -204,26 +204,25 @@ export function createToolbar(
   dropdown.id = 'export-dropdown';
   dropdown.className = 'absolute right-0 top-full mt-1 bg-zinc-800 border border-zinc-600 rounded shadow-lg py-1 hidden z-20 w-72 max-h-[80vh] overflow-y-auto';
 
-  // Section: 3D model formats — ordered by Bambu Studio compatibility
+  // Section: 3D model formats
   dropdown.appendChild(createSectionHeader('3D model'));
-
-  const objOpt = createDescribedItem(
-    'OBJ',
-    'Geometry + color. Best for Bambu Studio multi-color prints.',
-    'recommended',
-  );
-  objOpt.addEventListener('click', () => {
-    dropdown.classList.add('hidden');
-    callbacks.onExportOBJ();
-  });
 
   const threemfOpt = createDescribedItem(
     '3MF',
-    'Generic 3D format. Geometry only — color regions are not preserved on Bambu import.',
+    'Geometry + color. Native format for Bambu Studio multi-color prints.',
   );
   threemfOpt.addEventListener('click', () => {
     dropdown.classList.add('hidden');
     callbacks.onExport3MF();
+  });
+
+  const objOpt = createDescribedItem(
+    'OBJ',
+    'Geometry + color via MTL. Extract ZIP before importing into slicer.',
+  );
+  objOpt.addEventListener('click', () => {
+    dropdown.classList.add('hidden');
+    callbacks.onExportOBJ();
   });
 
   const stlOpt = createDescribedItem(
@@ -237,15 +236,15 @@ export function createToolbar(
 
   const glbOpt = createDescribedItem(
     'GLB',
-    'Web/preview format with materials. Does not import into Bambu Studio.',
+    'Web/preview format with vertex colors. Not supported by slicers.',
   );
   glbOpt.addEventListener('click', () => {
     dropdown.classList.add('hidden');
     callbacks.onExportGLB();
   });
 
-  dropdown.appendChild(objOpt);
   dropdown.appendChild(threemfOpt);
+  dropdown.appendChild(objOpt);
   dropdown.appendChild(stlOpt);
   dropdown.appendChild(glbOpt);
 
