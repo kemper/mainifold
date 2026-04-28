@@ -1,6 +1,27 @@
-// Shared mesh cleanup for export — vertex deduplication and degenerate triangle filtering
+// Shared mesh cleanup and color helpers for export
 
 import type { MeshData } from '../geometry/types';
+import { isPainted as checkPainted } from '../color/regions';
+
+/** Default model color used when faces have no paint. */
+export const DEFAULT_COLOR_HEX = '#4a9eff';
+
+/** Get the hex color string for a triangle (e.g. '#ff3333'), or DEFAULT_COLOR_HEX if unpainted. */
+export function triColorHex(triColors: Uint8Array, t: number): string {
+  if (!checkPainted(triColors, t)) return DEFAULT_COLOR_HEX;
+  const r = triColors[t * 3].toString(16).padStart(2, '0');
+  const g = triColors[t * 3 + 1].toString(16).padStart(2, '0');
+  const b = triColors[t * 3 + 2].toString(16).padStart(2, '0');
+  return `#${r}${g}${b}`;
+}
+
+/** Check if any triangle in a list is painted. */
+export function hasAnyPainted(triColors: Uint8Array, tris: number[]): boolean {
+  for (const t of tris) {
+    if (checkPainted(triColors, t)) return true;
+  }
+  return false;
+}
 
 export interface CleanMesh {
   remap: Uint32Array;        // old vertex index → new (deduplicated) index
