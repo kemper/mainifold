@@ -14,6 +14,7 @@ import {
   onImportInboxChange,
   type ImportInboxEntry,
 } from '../import/importInbox';
+import { showExamplesModal } from './examplesModal';
 
 export interface ExampleEntry {
   code: string;
@@ -167,36 +168,15 @@ export function createToolbar(
   spacer.className = 'flex-1';
   toolbar.appendChild(spacer);
 
-  // Example select
-  const select = document.createElement('select');
-  select.id = 'example-select';
-  select.className = 'bg-zinc-800 border border-zinc-600 rounded px-2 py-1 text-xs text-zinc-300 cursor-pointer';
-
-  const defaultOpt = document.createElement('option');
-  defaultOpt.textContent = 'Load example\u2026';
-  defaultOpt.value = '';
-  select.appendChild(defaultOpt);
-
-  for (const [name, entry] of Object.entries(examples)) {
-    const opt = document.createElement('option');
-    const displayName = name
-      .replace(/^.*\//, '')
-      .replace(/\.(js|scad)$/, '')
-      .replace(/_/g, ' ');
-    const tag = entry.language === 'scad' ? ' [SCAD]' : '';
-    opt.textContent = displayName + tag;
-    opt.value = name;
-    select.appendChild(opt);
-  }
-
-  select.addEventListener('change', () => {
-    const key = select.value;
-    if (key && examples[key]) {
-      callbacks.onExampleSelect(examples[key]);
-      select.value = '';
-    }
+  // Examples — opens a modal of categorized example models with previews.
+  const btnExamples = createButton('btn-examples', '\u2630 Examples');
+  btnExamples.title = 'Browse example models (JavaScript and OpenSCAD)';
+  btnExamples.addEventListener('click', () => {
+    void showExamplesModal(examples, (_key, entry) => {
+      callbacks.onExampleSelect(entry);
+    });
   });
-  toolbar.appendChild(select);
+  toolbar.appendChild(btnExamples);
 
   // Import dropdown — mirrors the Export dropdown. Holds a "Choose file…" entry
   // (the existing OS file picker) and a "Recent Imports" section for re-import.

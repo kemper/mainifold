@@ -987,6 +987,14 @@ async function main() {
       if (entry.language !== getActiveLanguage()) {
         await switchLanguage(entry.language);
       }
+      // Examples always load into a fresh session so they don't mutate the
+      // user's in-progress work (annotations, notes, reference images).
+      // The previous session is preserved if it has versions/notes; if it
+      // was empty, createSession() auto-deletes it via deleteIfEmpty().
+      await createSession(undefined, entry.language);
+      clearAllAnnotations();
+      _clearRefImages();
+      persistReferenceImages(null);
       setValue(entry.code);
       runCode(entry.code);
     },
