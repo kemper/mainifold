@@ -1,5 +1,5 @@
 // Annotate UI — toggle button, sub-mode (pen/text/select) selector, color
-// picker, width/font-size picker, restore-view, undo/clear actions, count badge.
+// picker, width/font-size picker, restore-view, undo/redo/clear actions, count badge.
 
 import {
   activate as activatePen,
@@ -28,7 +28,16 @@ import {
   onSelectionChange,
   restoreView as restoreSelectionView,
 } from './selectMode';
-import { getCount, onChange as onStrokesChange, removeLastStroke, clearStrokes, clearAll } from './annotations';
+import {
+  getCount,
+  onChange as onStrokesChange,
+  onRedoChange,
+  removeLastStroke,
+  redoLastStroke,
+  canRedoStroke,
+  clearStrokes,
+  clearAll,
+} from './annotations';
 import { setAnnotationsVisible, isAnnotationsVisible } from './annotationOverlay';
 import { endSession as endSessionPlane, hidePlaneOutline } from './sessionPlane';
 
@@ -67,6 +76,7 @@ let selectTabBtn: HTMLButtonElement | null = null;
 let widthRow: HTMLElement | null = null;
 let fontRow: HTMLElement | null = null;
 let restoreViewBtn: HTMLButtonElement | null = null;
+let redoBtn: HTMLButtonElement | null = null;
 let selectionInfo: HTMLElement | null = null;
 
 const inactiveBtnClass = 'px-2 py-1 rounded text-xs bg-zinc-800/80 backdrop-blur text-zinc-400 hover:text-zinc-200 hover:bg-zinc-700/80 transition-colors border border-zinc-600/50';
@@ -98,6 +108,7 @@ export function initAnnotateUI(controlsContainer: HTMLElement): void {
   controlsContainer.appendChild(pickerPanel);
 
   onStrokesChange(updateCountBadge);
+  onRedoChange(updateRedoButton);
   onPenActiveChange(updatePanelState);
   onTextActiveChange(updatePanelState);
   onSelectActiveChange(updatePanelState);
@@ -105,6 +116,7 @@ export function initAnnotateUI(controlsContainer: HTMLElement): void {
   updateCountBadge();
   updatePanelState();
   updateSelectionInfo(null);
+  updateRedoButton();
 }
 
 function isAnyActive(): boolean {
@@ -167,6 +179,14 @@ function updateSelectionInfo(id: string | null): void {
     restoreViewBtn.disabled = true;
     restoreViewBtn.classList.add('opacity-40', 'cursor-not-allowed');
   }
+}
+
+function updateRedoButton(): void {
+  if (!redoBtn) return;
+  const can = canRedoStroke();
+  redoBtn.disabled = !can;
+  redoBtn.classList.toggle('opacity-40', !can);
+  redoBtn.classList.toggle('cursor-not-allowed', !can);
 }
 
 function updateCountBadge(): void {
@@ -338,7 +358,7 @@ function createPickerPanel(): HTMLElement {
   selectionInfo.textContent = 'Drag to move. Delete to remove. Esc to deselect.';
   panel.appendChild(selectionInfo);
 
-  // Action row: visibility, restore-view, undo, clear
+  // Action row: visibility, restore-view, undo, redo, clear
   const actions = document.createElement('div');
   actions.className = 'flex items-center gap-1.5 mt-2 pt-2 border-t border-zinc-700 flex-wrap';
 
@@ -370,6 +390,14 @@ function createPickerPanel(): HTMLElement {
   undoBtn.title = 'Remove the most recent freehand stroke';
   undoBtn.addEventListener('click', () => { removeLastStroke(); });
   actions.appendChild(undoBtn);
+
+  redoBtn = document.createElement('button');
+  redoBtn.className = 'px-2 py-1 rounded text-[10px] bg-zinc-700/60 text-zinc-300 hover:bg-zinc-600/60 transition-colors opacity-40 cursor-not-allowed';
+  redoBtn.textContent = 'Redo stroke';
+  redoBtn.title = 'Restore the most recently undone freehand stroke';
+  redoBtn.disabled = true;
+  redoBtn.addEventListener('click', () => { redoLastStroke(); });
+  actions.appendChild(redoBtn);
 
   const clearStrokesBtn = document.createElement('button');
   clearStrokesBtn.className = 'px-2 py-1 rounded text-[10px] bg-zinc-700/60 text-zinc-300 hover:bg-zinc-600/60 transition-colors';

@@ -30,10 +30,32 @@ type ChangeListener = () => void;
 
 let regions: ColorRegion[] = [];
 let nextOrder = 1;
+let visible = true;
 const listeners: ChangeListener[] = [];
+const visibilityListeners: ChangeListener[] = [];
+const redoListeners: ChangeListener[] = [];
+
+// Redo stack — regions removed via `removeLastRegion()`. Any other mutation
+// (add, clear, deserialize) drops the stack so redo can never resurrect a
+// region into a state where the user wouldn't expect it.
+let regionRedoStack: ColorRegion[] = [];
 
 function notify(): void {
   for (const fn of listeners) fn();
+}
+
+function notifyVisibility(): void {
+  for (const fn of visibilityListeners) fn();
+}
+
+function notifyRedo(): void {
+  for (const fn of redoListeners) fn();
+}
+
+function clearRedoStack(): void {
+  if (regionRedoStack.length === 0) return;
+  regionRedoStack = [];
+  notifyRedo();
 }
 
 export function onChange(fn: ChangeListener): void {
@@ -43,6 +65,32 @@ export function onChange(fn: ChangeListener): void {
 export function removeChangeListener(fn: ChangeListener): void {
   const idx = listeners.indexOf(fn);
   if (idx >= 0) listeners.splice(idx, 1);
+}
+
+export function onVisibilityChange(fn: ChangeListener): () => void {
+  visibilityListeners.push(fn);
+  return () => {
+    const i = visibilityListeners.indexOf(fn);
+    if (i >= 0) visibilityListeners.splice(i, 1);
+  };
+}
+
+export function onRedoChange(fn: ChangeListener): () => void {
+  redoListeners.push(fn);
+  return () => {
+    const i = redoListeners.indexOf(fn);
+    if (i >= 0) redoListeners.splice(i, 1);
+  };
+}
+
+export function isVisible(): boolean {
+  return visible;
+}
+
+export function setVisible(v: boolean): void {
+  if (visible === v) return;
+  visible = v;
+  notifyVisibility();
 }
 
 export function getRegions(): readonly ColorRegion[] {
@@ -71,6 +119,7 @@ export function addRegion(
     triangles,
   };
   regions.push(region);
+  clearRedoStack();
   notify();
   return region;
 }
@@ -79,8 +128,33 @@ export function removeRegion(id: number): boolean {
   const idx = regions.findIndex(r => r.id === id);
   if (idx < 0) return false;
   regions.splice(idx, 1);
+  clearRedoStack();
   notify();
   return true;
+}
+
+/** Pop the most recently added region and push it onto the redo stack. */
+export function removeLastRegion(): ColorRegion | null {
+  if (regions.length === 0) return null;
+  const region = regions.pop()!;
+  regionRedoStack.push(region);
+  notifyRedo();
+  notify();
+  return region;
+}
+
+/** Pop the redo stack and re-add the region. Returns null if nothing to redo. */
+export function redoLastRegion(): ColorRegion | null {
+  const region = regionRedoStack.pop() ?? null;
+  if (!region) return null;
+  regions.push(region);
+  notifyRedo();
+  notify();
+  return region;
+}
+
+export function canRedoRegion(): boolean {
+  return regionRedoStack.length > 0;
 }
 
 export function updateRegionColor(id: number, color: [number, number, number]): void {
@@ -95,6 +169,7 @@ export function clearRegions(): void {
   if (regions.length === 0) return;
   regions = [];
   nextOrder = 1;
+  clearRedoStack();
   notify();
 }
 
@@ -161,6 +236,7 @@ export function deserialize(data: SerializedColorRegion[]): void {
     triangles: new Set<number>(),
   }));
   nextOrder = regions.reduce((max, r) => Math.max(max, r.order + 1), 1);
+  clearRedoStack();
 }
 
 /** Apply triColors to a MeshData, returning a new object (non-destructive). */
@@ -168,4 +244,12 @@ export function applyTriColors(mesh: MeshData): MeshData {
   const triColors = buildTriColors(mesh.numTri);
   if (!triColors) return mesh;
   return { ...mesh, triColors };
+}
+
+/** Same as `applyTriColors` but returns the mesh unchanged when paint
+ *  visibility is toggled off. Use this for viewport rendering; exports should
+ *  call `applyTriColors` directly so colors persist regardless of UI state. */
+export function applyTriColorsIfVisible(mesh: MeshData): MeshData {
+  if (!visible) return mesh;
+  return applyTriColors(mesh);
 }

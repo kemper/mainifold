@@ -55,6 +55,13 @@ export type SerializedAnnotation =
 let annotations: Annotation[] = [];
 const listeners: Array<() => void> = [];
 
+// Redo stack — strokes that were removed via `removeLastStroke()`. Any other
+// mutation (new add, clear, specific delete, session load) drops the stack so
+// redo can never resurrect a stroke into a state where the user wouldn't
+// expect it.
+let strokeRedoStack: StrokeAnnotation[] = [];
+const redoListeners: Array<() => void> = [];
+
 export function getStrokes(): readonly StrokeAnnotation[] {
   return annotations.filter((a): a is StrokeAnnotation => a.type === 'stroke');
 }
@@ -73,11 +80,13 @@ export function getCount(): number {
 
 export function addStroke(stroke: StrokeAnnotation): void {
   annotations.push(stroke);
+  clearRedoStack();
   notify();
 }
 
 export function addText(text: TextAnnotation): void {
   annotations.push(text);
+  clearRedoStack();
   notify();
 }
 
@@ -102,6 +111,8 @@ export function removeLastStroke(): StrokeAnnotation | null {
     const a = annotations[i];
     if (a.type === 'stroke') {
       annotations.splice(i, 1);
+      strokeRedoStack.push(a);
+      notifyRedo();
       notify();
       return a;
     }
@@ -109,9 +120,26 @@ export function removeLastStroke(): StrokeAnnotation | null {
   return null;
 }
 
+/** Re-add the most recently undone stroke. Returns null if nothing to redo. */
+export function redoLastStroke(): StrokeAnnotation | null {
+  const stroke = strokeRedoStack.pop() ?? null;
+  if (!stroke) return null;
+  annotations.push(stroke);
+  notifyRedo();
+  notify();
+  return stroke;
+}
+
+export function canRedoStroke(): boolean {
+  return strokeRedoStack.length > 0;
+}
+
 export function removeLastAnnotation(): Annotation | null {
   const popped = annotations.pop() ?? null;
-  if (popped) notify();
+  if (popped) {
+    clearRedoStack();
+    notify();
+  }
   return popped;
 }
 
@@ -119,6 +147,7 @@ export function removeAnnotationById(id: string): Annotation | null {
   const i = annotations.findIndex(a => a.id === id);
   if (i < 0) return null;
   const [removed] = annotations.splice(i, 1);
+  clearRedoStack();
   notify();
   return removed;
 }
@@ -126,18 +155,25 @@ export function removeAnnotationById(id: string): Annotation | null {
 export function clearStrokes(): void {
   const before = annotations.length;
   annotations = annotations.filter(a => a.type !== 'stroke');
-  if (annotations.length !== before) notify();
+  if (annotations.length !== before) {
+    clearRedoStack();
+    notify();
+  }
 }
 
 export function clearTexts(): void {
   const before = annotations.length;
   annotations = annotations.filter(a => a.type !== 'text');
-  if (annotations.length !== before) notify();
+  if (annotations.length !== before) {
+    clearRedoStack();
+    notify();
+  }
 }
 
 export function clearAll(): void {
   if (annotations.length === 0) return;
   annotations = [];
+  clearRedoStack();
   notify();
 }
 
@@ -170,6 +206,7 @@ export function serializeAll(): SerializedAnnotation[] {
 
 /** Replace all in-memory annotations with the given serialized snapshot. */
 export function loadFromSerialized(serialized: SerializedAnnotation[]): void {
+  clearRedoStack();
   annotations = serialized.map((s): Annotation => {
     if (s.type === 'stroke') {
       return {
@@ -204,6 +241,24 @@ export function onChange(fn: () => void): () => void {
   };
 }
 
+export function onRedoChange(fn: () => void): () => void {
+  redoListeners.push(fn);
+  return () => {
+    const i = redoListeners.indexOf(fn);
+    if (i >= 0) redoListeners.splice(i, 1);
+  };
+}
+
 function notify(): void {
   for (const fn of listeners) fn();
+}
+
+function notifyRedo(): void {
+  for (const fn of redoListeners) fn();
+}
+
+function clearRedoStack(): void {
+  if (strokeRedoStack.length === 0) return;
+  strokeRedoStack = [];
+  notifyRedo();
 }

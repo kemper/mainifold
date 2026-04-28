@@ -1,7 +1,19 @@
-// Paint mode UI — button toggle, color picker, region count badge
+// Paint mode UI — button toggle, color picker, region count badge,
+// undo/redo/hide/clear actions.
 
 import { activate, deactivate, isActive, setColor } from './paintMode';
-import { getRegions, onChange as onRegionsChange } from './regions';
+import {
+  getRegions,
+  onChange as onRegionsChange,
+  onRedoChange,
+  onVisibilityChange,
+  isVisible as isPaintVisible,
+  setVisible as setPaintVisible,
+  removeLastRegion,
+  redoLastRegion,
+  canRedoRegion,
+  clearRegions,
+} from './regions';
 import { forceDeactivate as forceDeactivateAnnotate } from '../annotations/annotateUI';
 import { forceDeactivate as forceDeactivateAnnotateText } from '../annotations/textMode';
 import { forceDeactivate as forceDeactivateAnnotateSelect } from '../annotations/selectMode';
@@ -20,6 +32,9 @@ const PRESET_COLORS: [number, number, number][] = [
 let paintBtn: HTMLButtonElement | null = null;
 let pickerPanel: HTMLElement | null = null;
 let regionCountBadge: HTMLElement | null = null;
+let visibilityBtn: HTMLButtonElement | null = null;
+let undoBtn: HTMLButtonElement | null = null;
+let redoBtn: HTMLButtonElement | null = null;
 
 /** Initialize the paint UI inside the clip-controls overlay area. */
 export function initPaintUI(controlsContainer: HTMLElement): void {
@@ -49,9 +64,17 @@ export function initPaintUI(controlsContainer: HTMLElement): void {
   pickerPanel = createPickerPanel();
   controlsContainer.appendChild(pickerPanel);
 
-  // Update badge when regions change
-  onRegionsChange(updateBadge);
+  // Update badge + button states when regions / redo / visibility change
+  onRegionsChange(() => {
+    updateBadge();
+    updateUndoButton();
+  });
+  onRedoChange(updateRedoButton);
+  onVisibilityChange(updateVisibilityButton);
   updateBadge();
+  updateUndoButton();
+  updateRedoButton();
+  updateVisibilityButton();
 }
 
 function togglePaintMode(): void {
@@ -164,7 +187,63 @@ function createPickerPanel(): HTMLElement {
 
   onRegionsChange(() => updateRegionList(regionList));
 
+  // Action row: visibility, undo, redo, clear
+  const actions = document.createElement('div');
+  actions.className = 'flex items-center gap-1.5 mt-2 pt-2 border-t border-zinc-700 flex-wrap';
+
+  visibilityBtn = document.createElement('button');
+  visibilityBtn.className = 'px-2 py-1 rounded text-[10px] bg-zinc-700/60 text-zinc-300 hover:bg-zinc-600/60 transition-colors';
+  visibilityBtn.title = 'Toggle paint region visibility in viewport (exports keep colors regardless)';
+  visibilityBtn.addEventListener('click', () => { setPaintVisible(!isPaintVisible()); });
+  actions.appendChild(visibilityBtn);
+
+  undoBtn = document.createElement('button');
+  undoBtn.className = 'px-2 py-1 rounded text-[10px] bg-zinc-700/60 text-zinc-300 hover:bg-zinc-600/60 transition-colors opacity-40 cursor-not-allowed';
+  undoBtn.textContent = 'Undo paint';
+  undoBtn.title = 'Remove the most recent paint region';
+  undoBtn.disabled = true;
+  undoBtn.addEventListener('click', () => { removeLastRegion(); });
+  actions.appendChild(undoBtn);
+
+  redoBtn = document.createElement('button');
+  redoBtn.className = 'px-2 py-1 rounded text-[10px] bg-zinc-700/60 text-zinc-300 hover:bg-zinc-600/60 transition-colors opacity-40 cursor-not-allowed';
+  redoBtn.textContent = 'Redo paint';
+  redoBtn.title = 'Restore the most recently undone paint region';
+  redoBtn.disabled = true;
+  redoBtn.addEventListener('click', () => { redoLastRegion(); });
+  actions.appendChild(redoBtn);
+
+  const clearBtn = document.createElement('button');
+  clearBtn.className = 'px-2 py-1 rounded text-[10px] bg-red-700/60 text-red-200 hover:bg-red-600/60 transition-colors';
+  clearBtn.textContent = 'Clear';
+  clearBtn.title = 'Remove all paint regions';
+  clearBtn.addEventListener('click', () => { clearRegions(); });
+  actions.appendChild(clearBtn);
+
+  panel.appendChild(actions);
+
   return panel;
+}
+
+function updateVisibilityButton(): void {
+  if (!visibilityBtn) return;
+  visibilityBtn.textContent = isPaintVisible() ? 'Hide' : 'Show';
+}
+
+function updateUndoButton(): void {
+  if (!undoBtn) return;
+  const can = getRegions().length > 0;
+  undoBtn.disabled = !can;
+  undoBtn.classList.toggle('opacity-40', !can);
+  undoBtn.classList.toggle('cursor-not-allowed', !can);
+}
+
+function updateRedoButton(): void {
+  if (!redoBtn) return;
+  const can = canRedoRegion();
+  redoBtn.disabled = !can;
+  redoBtn.classList.toggle('opacity-40', !can);
+  redoBtn.classList.toggle('cursor-not-allowed', !can);
 }
 
 function updateActiveSwatch(grid: HTMLElement, activeSwatch: HTMLElement): void {
