@@ -54,8 +54,13 @@ import {
  *           Each version snapshots its own annotations, so switching versions swaps
  *           them in. On import, files at schema 1.2 (top-level annotations) are
  *           assigned to the latest version for back-compat.
+ *  - `1.4` — optional embedded version thumbnails (`versions[].thumbnail`) as
+ *           base64 PNG data URLs. Only written when the caller opts in via
+ *           {@link ExportOptions.includeThumbnails}. Importers prefer the
+ *           embedded thumbnail when present and fall back to regenerating from
+ *           code; older readers ignore the field.
  */
-export const SCHEMA_VERSION = '1.3';
+export const SCHEMA_VERSION = '1.4';
 
 const CURRENT_MAJOR = 1;
 
@@ -86,6 +91,13 @@ export interface ExportedSession {
      * @since 1.3
      */
     annotations?: SerializedAnnotation[];
+    /**
+     * Optional base64 PNG data URL of the version thumbnail. Only written when
+     * the caller opts in (catalog/gallery use cases). Importers prefer this
+     * over regenerating from code.
+     * @since 1.4
+     */
+    thumbnail?: string;
   }[];
   notes?: { text: string; timestamp: number }[];
   /**
@@ -588,31 +600,98 @@ function extractColorRegions(geometryData: Record<string, unknown> | null): Seri
   return undefined;
 }
 
-export async function exportSession(sessionId?: string): Promise<ExportedSession | null> {
+/**
+ * Toggles for what gets included in an exported session JSON. Defaults match
+ * the historical behavior (all session-bound data on, thumbnails off — since
+ * the importer regenerates them from code unless an embedded one is present).
+ */
+export interface ExportOptions {
+  includeThumbnails?: boolean;
+  includeAnnotations?: boolean;
+  includeNotes?: boolean;
+  includeColorRegions?: boolean;
+}
+
+const DEFAULT_EXPORT_OPTIONS: Required<ExportOptions> = {
+  includeThumbnails: false,
+  includeAnnotations: true,
+  includeNotes: true,
+  includeColorRegions: true,
+};
+
+/** Read a Blob as a base64 data URL (e.g. "data:image/png;base64,..."). */
+function blobToDataURL(blob: Blob): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result as string);
+    reader.onerror = () => reject(reader.error ?? new Error('FileReader failed'));
+    reader.readAsDataURL(blob);
+  });
+}
+
+/** Decode a base64 data URL back into a Blob. Returns null on parse failure. */
+function dataURLToBlob(dataUrl: string): Blob | null {
+  const match = /^data:([^;,]+)(?:;base64)?,(.*)$/s.exec(dataUrl);
+  if (!match) return null;
+  const [, mime, payload] = match;
+  const isBase64 = dataUrl.includes(';base64,');
+  try {
+    const bin = isBase64 ? atob(payload) : decodeURIComponent(payload);
+    const buf = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) buf[i] = bin.charCodeAt(i);
+    return new Blob([buf], { type: mime || 'application/octet-stream' });
+  } catch {
+    return null;
+  }
+}
+
+/** Strip `colorRegions` from a geometryData blob without mutating the original. */
+function stripColorRegions(geometryData: Record<string, unknown> | null): Record<string, unknown> | null {
+  if (!geometryData) return geometryData;
+  if (!('colorRegions' in geometryData)) return geometryData;
+  const { colorRegions: _omit, ...rest } = geometryData;
+  return rest;
+}
+
+export async function exportSession(
+  sessionId?: string,
+  options?: ExportOptions,
+): Promise<ExportedSession | null> {
   const id = sessionId ?? currentState.session?.id;
   if (!id) return null;
 
   const session = await getSession(id);
   if (!session) return null;
 
+  const opts: Required<ExportOptions> = { ...DEFAULT_EXPORT_OPTIONS, ...options };
+
   const versions = await dbListVersions(id);
-  const notes = await dbListNotes(id);
+  const notes = opts.includeNotes ? await dbListNotes(id) : [];
+
+  // Thumbnail conversion: read each version's Blob and convert to base64 data URL.
+  // Done in parallel since FileReader is async per-blob.
+  const thumbnailDataUrls: (string | null)[] = await Promise.all(
+    versions.map(v => (opts.includeThumbnails && v.thumbnail) ? blobToDataURL(v.thumbnail) : Promise.resolve(null)),
+  );
 
   return {
     partwright: SCHEMA_VERSION,
     session: { name: session.name, created: session.created, updated: session.updated, images: session.images ?? null, ...(session.language ? { language: session.language } : {}) },
-    versions: versions.map(v => {
-      const colorRegions = extractColorRegions(v.geometryData);
-      const versionAnnotations = (v.annotations ?? []) as SerializedAnnotation[];
+    versions: versions.map((v, i) => {
+      const colorRegions = opts.includeColorRegions ? extractColorRegions(v.geometryData) : undefined;
+      const geometryData = opts.includeColorRegions ? v.geometryData : stripColorRegions(v.geometryData);
+      const versionAnnotations = opts.includeAnnotations ? ((v.annotations ?? []) as SerializedAnnotation[]) : [];
+      const thumbDataUrl = thumbnailDataUrls[i];
       return {
         index: v.index,
         code: v.code,
         label: v.label,
-        geometryData: v.geometryData,
+        geometryData,
         timestamp: v.timestamp,
         ...(v.notes ? { notes: v.notes } : {}),
         ...(colorRegions ? { colorRegions } : {}),
         ...(versionAnnotations.length > 0 ? { annotations: versionAnnotations } : {}),
+        ...(thumbDataUrl ? { thumbnail: thumbDataUrl } : {}),
       };
     }),
     ...(notes.length > 0 ? { notes: notes.map(n => ({ text: n.text, timestamp: n.timestamp })) } : {}),
@@ -659,8 +738,12 @@ export async function importSession(
       geometryData = { ...(geometryData ?? {}), colorRegions: regions };
     }
 
+    // Prefer an embedded thumbnail (schema 1.3+) — avoids re-running WASM
+    // and gives us the exact image the exporter saw. Fall back to
+    // regenerating from code when the field is absent.
     let thumbnail: Blob | null = null;
-    if (regenerateThumbnail) {
+    if (v.thumbnail) thumbnail = dataURLToBlob(v.thumbnail);
+    if (!thumbnail && regenerateThumbnail) {
       thumbnail = await regenerateThumbnail(v.code);
     }
 
@@ -705,12 +788,12 @@ export async function importSession(
   updateURL();
   notify();
 
-  // Restore the latest version's annotations into the in-memory store. The
-  // imported session is now the active context, so we replace whatever was
-  // there. (Per-version annotations live on each Version row; older 1.2 files
-  // got migrated onto the latest version above.)
-  const latestAnnotations = (latest?.annotations ?? []) as SerializedAnnotation[];
-  loadAnnotations(latestAnnotations);
+  // Note: annotations are NOT loaded here on purpose. The caller is expected to
+  // route the imported session through `loadVersionIntoEditor` (or equivalent)
+  // which will run the version's code, render the mesh, and call
+  // `applyVersionAnnotations`. Loading them twice (once here, once in the editor
+  // path) causes redundant rebuilds of the multiview offscreen renderer that
+  // can land mid-render and produce a frame that misses the annotations.
 
   return refreshedSession;
 }
