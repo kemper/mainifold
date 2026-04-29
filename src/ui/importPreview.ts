@@ -18,11 +18,22 @@ export interface SessionImportSummary {
 
 /** Build a SessionImportSummary from a parsed .partwright.json payload. */
 export function summarizeSessionImport(data: ExportedSession): SessionImportSummary {
-  const refs = data.session.referenceImages ?? null;
+  // Build a list of image labels for the import preview. Handle three shapes:
+  //   - current: array of {id, src, label?}
+  //   - pre-unification: array of {id, angle, src, label?} — fall back to angle
+  //   - pre-array: object map {front: 'url', ...} — use the keys
+  // Items with no label and no angle are listed as "(unlabeled)".
+  const imgs = data.session.images ?? data.session.referenceImages ?? null;
   const referenceSides: string[] = [];
-  if (refs && typeof refs === 'object') {
+  if (Array.isArray(imgs)) {
+    for (const item of imgs) {
+      const it = item as { label?: string; angle?: string };
+      const label = (it.label ?? '').trim() || (it.angle ? it.angle : '');
+      referenceSides.push(label || '(unlabeled)');
+    }
+  } else if (imgs && typeof imgs === 'object') {
     for (const k of ['front', 'right', 'back', 'left', 'top', 'perspective'] as const) {
-      if ((refs as Record<string, unknown>)[k]) referenceSides.push(k);
+      if ((imgs as Record<string, unknown>)[k]) referenceSides.push(k);
     }
   }
   // Annotations live per-version since schema 1.3, but 1.2 files put them at

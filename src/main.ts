@@ -2,7 +2,8 @@ import './style.css';
 import { initEngine, executeCode, executeCodeAsync, validateCodeAsync, ensureEngineReady, getModule, getActiveLanguage, setActiveLanguage, type Language } from './geometry/engine';
 import { sliceAtZ, getBoundingBox } from './geometry/crossSection';
 import { initViewport, updateMesh, setClipping, setClipZ, getClipState, getCameraState, getCanvas, getMeshGroup, getCamera, setMeasureLock, setUserOrbitLock, isUserOrbitLocked, onUserOrbitLockChange, setDimensionsVisible, isDimensionsVisible, setGridVisible, isGridVisible } from './renderer/viewport';
-import { renderCompositeCanvas, renderElevationsToContainer, renderSingleView, renderSliceSVG, setReferenceImages as _setRefImages, clearReferenceImages as _clearRefImages, getReferenceImages as _getRefImages, type ReferenceImages } from './renderer/multiview';
+import { renderCompositeCanvas, renderElevationsToContainer, renderSingleView, renderSliceSVG, setImages as _setImages, clearImages as _clearImages, getImages as _getImages, type AttachedImage } from './renderer/multiview';
+import { generateId } from './storage/db';
 import { setPhantom, clearPhantom, hasPhantom, type PhantomOptions } from './renderer/phantomGeometry';
 import { initEditor, setValue, getValue, setLanguage as setEditorLanguage, setEditorDiagnostics, clearEditorDiagnostics, revealFirstDiagnostic } from './editor/codeEditor';
 import { createLayout, type TabName } from './ui/layout';
@@ -15,6 +16,7 @@ import { createNotFoundPage } from './ui/notFound';
 import { initViewsPanel, updateMultiView } from './ui/panels';
 import { createSessionBar } from './ui/sessionBar';
 import { createGalleryView, refreshGallery } from './ui/gallery';
+import { createImagesView, refreshImages } from './ui/imagesView';
 import { createDiffView, refreshDiff } from './ui/diffView';
 import { createNotesView, refreshNotes } from './ui/notes';
 import { initSessionList, showSessionList } from './ui/sessionList';
@@ -78,8 +80,9 @@ import { addTextAnnotationAtAnchor, setFontSize as setAnnotateFontSize, getFontS
 import { restoreView as restoreAnnotationViewById } from './annotations/selectMode';
 import { applyTriColors, applyTriColorsIfVisible, hasRegions as hasColorRegions, onChange as onColorRegionsChange, onVisibilityChange as onPaintVisibilityChange, clearRegions, serialize as serializeRegions, addRegion, getRegions, type SerializedColorRegion } from './color/regions';
 import { initEditorLock, syncLockState, setUnlockHandlers } from './color/editorLock';
-import { buildAdjacency, findCoplanarRegion, resolveSeed } from './color/adjacency';
+import { buildAdjacency, findCoplanarRegion, resolveSeed, findNearestTriangle } from './color/adjacency';
 import { findSlabTriangles } from './color/slabPaint';
+import { computeFaceGroups } from './color/faceGroups';
 import {
   getSessionIdFromURL,
   getVersionFromURL,
@@ -101,8 +104,8 @@ import {
   exportSession,
   importSession,
   clearAllSessions,
-  saveReferenceImages as persistReferenceImages,
-  getReferenceImagesFromSession,
+  saveImages as persistImages,
+  getImagesFromSession,
   addSessionNote,
   listSessionNotes,
   deleteIfEmpty,
@@ -113,7 +116,6 @@ import {
   onStateChange,
   type ExportedSession,
   type ExportOptions,
-  type ReferenceImagesData,
 } from './storage/sessionManager';
 import type { Version } from './storage/db';
 
@@ -446,7 +448,7 @@ function updateGeometryData(executionTimeMs?: number, sourceCode?: string) {
 function captureThumbnail(): Promise<Blob | null> {
   if (!currentMeshData) return Promise.resolve(null);
   try {
-    const canvas = renderCompositeCanvas(currentMeshData);
+    const canvas = renderCompositeCanvas(applyTriColorsIfVisible(currentMeshData));
     return new Promise(resolve => {
       canvas.toBlob(b => resolve(b), 'image/png');
     });
@@ -740,7 +742,7 @@ function shouldShowLanding(): boolean {
   const params = new URLSearchParams(window.location.search);
   // Landing if at root path AND no query params that indicate a specific view
   const isRootPath = path === '/' || path === '';
-  return isRootPath && !params.has('view') && !params.has('session') && !params.has('gallery') && !params.has('diff') && !params.has('notes');
+  return isRootPath && !params.has('view') && !params.has('session') && !params.has('gallery') && !params.has('images') && !params.has('diff') && !params.has('notes');
 }
 
 function shouldShowHelp(): boolean {
@@ -760,6 +762,7 @@ function getTabFromURL(): TabName {
   const params = new URLSearchParams(window.location.search);
   if (params.has('notes')) return 'notes';
   if (params.has('diff')) return 'diff';
+  if (params.has('images')) return 'images';
   if (params.has('gallery')) return 'gallery';
   if (params.get('view') === 'elevations') return 'elevations';
   if (params.get('view') === 'ai') return 'ai';
@@ -1036,31 +1039,17 @@ async function main() {
       }
       applyVersionAnnotations(loadedVersion);
     },
-    onOpenGallery: () => {
-      switchTab('gallery');
-      refreshGallery();
-    },
     onOpenSessionList: () => showSessionList(),
-    onLoadReferenceImages: (images: Record<string, string>) => {
-      _setRefImages(images as ReferenceImages);
-      persistReferenceImages(images as ReferenceImagesData);
-      if (currentMeshData) {
-        renderElevationsToContainer(
-          document.getElementById('elevations-container')!,
-          currentMeshData,
-        );
-      }
-    },
     onNewSession: () => {
       const freshCode = '// New session\nconst { Manifold } = api;\nreturn Manifold.cube([10, 10, 10], true);';
       setValue(freshCode);
       runCode(freshCode);
-      _clearRefImages();
+      _clearImages();
     },
   });
 
   // Create layout
-  const { editorContainer, editorErrorPanel, viewportPane, viewsContainer, elevationsContainer, galleryContainer, diffContainer, notesContainer, statusBar, clipControls, switchTab } = createLayout(editorUI);
+  const { editorContainer, editorErrorPanel, viewportPane, viewsContainer, elevationsContainer, galleryContainer, imagesContainer, diffContainer, notesContainer, statusBar, clipControls, switchTab } = createLayout(editorUI);
 
   // Init views panel
   initViewsPanel(viewsContainer);
@@ -1078,6 +1067,20 @@ async function main() {
     switchTab('interactive');
   });
 
+  // Init images view
+  createImagesView(imagesContainer, {
+    onChange: async (next) => {
+      _setImages(next);
+      await persistImages(next);
+      if (currentMeshData) {
+        renderElevationsToContainer(
+          document.getElementById('elevations-container')!,
+          currentMeshData,
+        );
+      }
+    },
+  });
+
   // Init diff view
   createDiffView(diffContainer, (code: string) => {
     setValue(code);
@@ -1088,9 +1091,10 @@ async function main() {
   // Init notes panel
   createNotesView(notesContainer);
 
-  // Refresh gallery/notes whenever their tabs are selected
+  // Refresh tabs when they're selected
   window.addEventListener('tab-switched', ((e: CustomEvent) => {
     if (e.detail.tab === 'gallery') refreshGallery();
+    if (e.detail.tab === 'images') refreshImages();
     if (e.detail.tab === 'diff') refreshDiff();
     if (e.detail.tab === 'notes') refreshNotes();
   }) as EventListener);
@@ -1148,11 +1152,11 @@ async function main() {
     await runCodeSync(version.code);
     rehydrateColorRegions(version.geometryData);
     applyVersionAnnotations(version);
-    const refImages = await getReferenceImagesFromSession();
-    if (refImages) {
-      _setRefImages(refImages as ReferenceImages);
+    const sessionImages = await getImagesFromSession();
+    if (sessionImages) {
+      _setImages(sessionImages);
     } else {
-      _clearRefImages();
+      _clearImages();
     }
   }
 
@@ -1998,7 +2002,7 @@ async function main() {
         assertNumber(o.size, 'renderView(options).size', { optional: true, min: 1, integer: true });
       }
       if (!currentMeshData) return null;
-      return renderSingleView(currentMeshData, options ?? {});
+      return renderSingleView(applyTriColorsIfVisible(currentMeshData), options ?? {});
     },
 
     /** Render a cross-section at Z height as an SVG string for visual verification */
@@ -2011,22 +2015,85 @@ async function main() {
       return { svg, area: s.area, contours: s.polygons.length };
     },
 
-    // === Reference image API ===
+    // === Images API ===
 
-    /** Load reference images for side-by-side comparison in Elevations tab.
-     *  Keys: front, right, back, left, top, perspective. Values: data URLs or image URLs.
-     *  If a session is active, also persists to IndexedDB. */
-    setReferenceImages(images: ReferenceImages): void {
-      const REF_KEYS = ['front', 'right', 'back', 'left', 'top', 'perspective'] as const;
-      const obj = assertObject(images, 'setReferenceImages(images)')!;
-      assertNoUnknownKeys(obj, REF_KEYS, 'setReferenceImages(images)');
-      for (const k of REF_KEYS) {
-        if (obj[k] !== undefined) assertString(obj[k], `setReferenceImages(images).${k}`, { allowEmpty: false });
+    /** Attach images for side-by-side comparison in the Images, Elevations, and Gallery
+     *  tabs. Each item is `{src, label?}`. `src` is a data URL or http(s) URL.
+     *  `label` is an optional caption — common values like "Front", "Right", "Back",
+     *  "Left", "Top", "Perspective" are presets that drive ordering in the Elevations
+     *  strip; any other string is also valid. Multiple items may share a label.
+     *  Replaces all currently attached images. If a session is active, also persists
+     *  to IndexedDB. Returns the canonical list with assigned ids. */
+    setImages(images: Array<{ src: string; id?: string; label?: string }>): AttachedImage[] {
+      const arr = assertArray(images, 'setImages(images)') as Array<Record<string, unknown>>;
+      const items: AttachedImage[] = [];
+      for (let i = 0; i < arr.length; i++) {
+        const item = assertObject(arr[i], `setImages(images)[${i}]`)!;
+        assertNoUnknownKeys(item, ['src', 'id', 'label'] as const, `setImages(images)[${i}]`);
+        assertString(item.src, `setImages(images)[${i}].src`, { allowEmpty: false });
+        if (item.id !== undefined) assertString(item.id, `setImages(images)[${i}].id`, { allowEmpty: false });
+        if (item.label !== undefined) assertString(item.label, `setImages(images)[${i}].label`, { optional: true, allowEmpty: true });
+        const built: AttachedImage = {
+          id: (item.id as string | undefined) ?? generateId(),
+          src: item.src as string,
+        };
+        const lbl = (item.label as string | undefined)?.trim();
+        if (lbl) built.label = lbl;
+        items.push(built);
       }
-      _setRefImages(images);
-      // Persist to session if one is active
-      persistReferenceImages(images as ReferenceImagesData);
-      // Re-render elevations with reference images if we have mesh data
+      _setImages(items);
+      persistImages(items);
+      if (currentMeshData) {
+        renderElevationsToContainer(
+          document.getElementById('elevations-container')!,
+          currentMeshData,
+        );
+      }
+      return items;
+    },
+
+    /** Append a single image. Returns the appended item with its assigned id. */
+    addImage(image: { src: string; label?: string }): AttachedImage {
+      const obj = assertObject(image, 'addImage(image)')!;
+      assertNoUnknownKeys(obj, ['src', 'label'] as const, 'addImage(image)');
+      assertString(obj.src, 'addImage(image).src', { allowEmpty: false });
+      if (obj.label !== undefined) assertString(obj.label, 'addImage(image).label', { optional: true, allowEmpty: true });
+      const item: AttachedImage = { id: generateId(), src: obj.src as string };
+      const lbl = (obj.label as string | undefined)?.trim();
+      if (lbl) item.label = lbl;
+      const next = [..._getImages(), item];
+      _setImages(next);
+      persistImages(next);
+      if (currentMeshData) {
+        renderElevationsToContainer(
+          document.getElementById('elevations-container')!,
+          currentMeshData,
+        );
+      }
+      return item;
+    },
+
+    /** Remove an image by id. Returns true if an image was removed. */
+    removeImage(id: string): boolean {
+      assertString(id, 'removeImage(id)', { allowEmpty: false });
+      const current = _getImages();
+      const next = current.filter(img => img.id !== id);
+      if (next.length === current.length) return false;
+      _setImages(next);
+      persistImages(next);
+      if (currentMeshData) {
+        renderElevationsToContainer(
+          document.getElementById('elevations-container')!,
+          currentMeshData,
+        );
+      }
+      return true;
+    },
+
+    /** Clear all images */
+    clearImages(): void {
+      _clearImages();
+      persistImages(null);
       if (currentMeshData) {
         renderElevationsToContainer(
           document.getElementById('elevations-container')!,
@@ -2035,22 +2102,9 @@ async function main() {
       }
     },
 
-    /** Clear all reference images */
-    clearReferenceImages(): void {
-      _clearRefImages();
-      // Clear from session if one is active
-      persistReferenceImages(null);
-      if (currentMeshData) {
-        renderElevationsToContainer(
-          document.getElementById('elevations-container')!,
-          currentMeshData,
-        );
-      }
-    },
-
-    /** Get currently loaded reference images (or null if none) */
-    getReferenceImages(): ReferenceImages | null {
-      return _getRefImages();
+    /** Get the currently attached images as an array of `{id, angle, src}`. */
+    getImages(): AttachedImage[] {
+      return _getImages();
     },
 
     // === Session API ===
@@ -2074,7 +2128,7 @@ async function main() {
       return sessions.map(s => ({ id: s.id, name: s.name, updated: s.updated }));
     },
 
-    /** Open an existing session (loads latest version, restores reference images, restores language) */
+    /** Open an existing session (loads latest version, restores attached images, restores language) */
     async openSession(id: string) {
       const check = guard(() => assertString(id, 'openSession(id)', { allowEmpty: false }));
       if (typeof check === 'object' && check !== null && 'error' in check) return check;
@@ -2088,10 +2142,10 @@ async function main() {
         setValue(version.code);
         await runCodeSync(version.code);
       }
-      // Restore reference images from session
-      const refImages = await getReferenceImagesFromSession();
-      if (refImages) {
-        _setRefImages(refImages as ReferenceImages);
+      // Restore images from session
+      const sessionImages = await getImagesFromSession();
+      if (sessionImages) {
+        _setImages(sessionImages);
         if (currentMeshData) {
           renderElevationsToContainer(
             document.getElementById('elevations-container')!,
@@ -2099,7 +2153,7 @@ async function main() {
           );
         }
       } else {
-        _clearRefImages();
+        _clearImages();
       }
       return version ? { id: version.id, index: version.index, label: version.label } : null;
     },
@@ -2115,12 +2169,22 @@ async function main() {
       await deleteSession(id);
     },
 
-    /** Save current state as a new version in the active session */
+    /** Save current state as a new version in the active session.
+     *  Returns `{ id, index, label }` on success, `{ error }` if no session is
+     *  active, or `{ skipped: true, reason }` when nothing has changed since
+     *  the current version (code, annotations, and color regions all match). */
     async saveVersion(label?: string) {
       assertString(label, 'saveVersion(label)', { optional: true });
+      if (!getState().session) {
+        return { error: 'No active session. Call createSession() or openSession(id) first.' };
+      }
       const thumbnail = await captureThumbnail();
       const version = await saveVersion(getValue(), enrichGeometryDataWithColors(getGeometryDataObj()), thumbnail, label);
-      return version ? { id: version.id, index: version.index, label: version.label } : null;
+      if (version) return { id: version.id, index: version.index, label: version.label };
+      return {
+        skipped: true,
+        reason: 'No changes since the current version (code, annotations, and color regions all match). Add a new region, edit code, or pass a different label to force a save.',
+      };
     },
 
     /** List all versions in the current session */
@@ -2431,10 +2495,10 @@ async function main() {
         setValue(version.code);
         await runCodeSync(version.code);
       }
-      // Restore reference images from imported session
-      const refImages = await getReferenceImagesFromSession();
-      if (refImages) {
-        _setRefImages(refImages as ReferenceImages);
+      // Restore images from imported session
+      const sessionImages = await getImagesFromSession();
+      if (sessionImages) {
+        _setImages(sessionImages);
         if (currentMeshData) {
           renderElevationsToContainer(
             document.getElementById('elevations-container')!,
@@ -2955,9 +3019,73 @@ async function main() {
       const colored = applyTriColorsIfVisible(currentMeshData);
       updateMesh(colored, { skipAutoFrame: true });
       updateMultiView(colored);
+      renderElevationsToContainer(elevationsContainer, colored);
       syncLockState();
 
       return { id: region.id, name: region.name, triangles: triangles.size };
+    },
+
+    /** Paint a coplanar region by snapping the seed point to the nearest face on
+     *  the model. Tolerant of off-surface points within `searchRadius` (default
+     *  `Infinity` — always picks the closest face). The seed normal is taken
+     *  from the snapped triangle, so callers don't need to know it. Returns
+     *  `{ id, name, triangles, snappedTo: { point, normal, distance } }` on
+     *  success, or `{ error, nearestDistance? }` on failure. */
+    paintNearestRegion(opts: {
+      point: [number, number, number];
+      color: [number, number, number];
+      searchRadius?: number;
+      name?: string;
+      tolerance?: number;
+    }) {
+      if (!currentMeshData) return { error: 'No geometry loaded' };
+      if (!opts || typeof opts !== 'object') {
+        return { error: 'paintNearestRegion requires {point, color, searchRadius?, tolerance?}' };
+      }
+      const { point, color, searchRadius, name, tolerance } = opts;
+      if (!Array.isArray(point) || point.length !== 3) return { error: 'point must be [x,y,z]' };
+      if (!Array.isArray(color) || color.length !== 3) return { error: 'color must be [r,g,b] with values 0..1' };
+      if (searchRadius !== undefined && (typeof searchRadius !== 'number' || !Number.isFinite(searchRadius) || searchRadius < 0)) {
+        return { error: 'searchRadius must be a non-negative finite number' };
+      }
+
+      const normalTolerance = tolerance ?? 0.9995;
+      const adjacency = buildAdjacency(currentMeshData);
+      const nearest = findNearestTriangle(point as [number, number, number], currentMeshData, adjacency);
+      if (nearest.triIndex < 0) return { error: 'Mesh has no triangles' };
+
+      if (searchRadius !== undefined && nearest.distance > searchRadius) {
+        return {
+          error: `Nearest face is ${nearest.distance.toFixed(4)} units from the seed point, outside searchRadius=${searchRadius}. Increase searchRadius or move the point closer to the surface.`,
+          nearestDistance: nearest.distance,
+        };
+      }
+
+      const triangles = findCoplanarRegion(nearest.triIndex, adjacency, normalTolerance);
+      const regionName = name ?? `Region ${getRegions().length + 1}`;
+      const region = addRegion(
+        regionName,
+        color as [number, number, number],
+        'face-pick',
+        { kind: 'coplanar', seedPoint: nearest.closest, seedNormal: nearest.normal, normalTolerance },
+        triangles,
+      );
+
+      const colored = applyTriColorsIfVisible(currentMeshData);
+      updateMesh(colored, { skipAutoFrame: true });
+      updateMultiView(colored);
+      syncLockState();
+
+      return {
+        id: region.id,
+        name: region.name,
+        triangles: triangles.size,
+        snappedTo: {
+          point: nearest.closest,
+          normal: nearest.normal,
+          distance: nearest.distance,
+        },
+      };
     },
 
     /** Paint a specific set of triangle indices as a single region.
@@ -2991,6 +3119,7 @@ async function main() {
       const colored = applyTriColorsIfVisible(currentMeshData);
       updateMesh(colored, { skipAutoFrame: true });
       updateMultiView(colored);
+      renderElevationsToContainer(elevationsContainer, colored);
       syncLockState();
 
       return { id: region.id, name: region.name, triangles: triangles.size };
@@ -3036,6 +3165,7 @@ async function main() {
       const colored = applyTriColorsIfVisible(currentMeshData);
       updateMesh(colored, { skipAutoFrame: true });
       updateMultiView(colored);
+      renderElevationsToContainer(elevationsContainer, colored);
       syncLockState();
 
       return { id: region.id, name: region.name, triangles: triangles.size };
@@ -3059,9 +3189,193 @@ async function main() {
       if (currentMeshData) {
         updateMesh(currentMeshData, { skipAutoFrame: true });
         updateMultiView(currentMeshData);
+        renderElevationsToContainer(elevationsContainer, currentMeshData);
       }
       syncLockState();
       return { cleared: true };
+    },
+
+    /** Query triangles on the current mesh by geometric or color filters.
+     *  Returns `{ triangleIds, count, sampled }` so the result can be passed
+     *  directly to `paintFaces({ triangleIds, color })`.
+     *
+     *  Filters (all optional, ANDed together):
+     *  - `box`: `{ min: [x,y,z], max: [x,y,z] }` — triangle centroid lies inside
+     *  - `normal`: `[nx,ny,nz]` — triangle normal aligns within `normalTolerance`
+     *  - `normalTolerance`: cosine threshold (default `0.95`, ≈18°)
+     *  - `color`: `[r,g,b]` — triangle is currently painted this color (RGB 0..1, matched to ±0.01)
+     *  - `region`: number — only triangles inside the listRegions() entry with this `id`
+     *  - `maxResults`: cap output (default `5000`)
+     */
+    findFaces(opts: {
+      box?: { min: [number, number, number]; max: [number, number, number] };
+      normal?: [number, number, number];
+      normalTolerance?: number;
+      color?: [number, number, number];
+      region?: number;
+      maxResults?: number;
+    } = {}) {
+      if (!currentMeshData) return { error: 'No geometry loaded' };
+      if (typeof opts !== 'object' || opts === null) {
+        return { error: 'findFaces requires an options object — see /ai.md#color-regions' };
+      }
+
+      const { box, normal, normalTolerance, color, region, maxResults } = opts;
+
+      let boxMin: [number, number, number] | null = null;
+      let boxMax: [number, number, number] | null = null;
+      if (box !== undefined) {
+        if (typeof box !== 'object' || box === null || !Array.isArray(box.min) || !Array.isArray(box.max)) {
+          return { error: 'findFaces.box must be { min: [x,y,z], max: [x,y,z] }' };
+        }
+        if (box.min.length !== 3 || box.max.length !== 3) {
+          return { error: 'findFaces.box.min/max must be 3-tuples' };
+        }
+        boxMin = box.min as [number, number, number];
+        boxMax = box.max as [number, number, number];
+        for (let i = 0; i < 3; i++) {
+          if (!Number.isFinite(boxMin[i]) || !Number.isFinite(boxMax[i])) {
+            return { error: 'findFaces.box values must be finite numbers' };
+          }
+          if (boxMin[i] > boxMax[i]) return { error: `findFaces.box.min[${i}] (${boxMin[i]}) must be <= box.max[${i}] (${boxMax[i]})` };
+        }
+      }
+
+      let nrm: [number, number, number] | null = null;
+      if (normal !== undefined) {
+        if (!Array.isArray(normal) || normal.length !== 3) return { error: 'findFaces.normal must be [nx,ny,nz]' };
+        const [nx, ny, nz] = normal;
+        const len = Math.hypot(nx, ny, nz);
+        if (!Number.isFinite(len) || len === 0) return { error: 'findFaces.normal must be a non-zero 3-vector' };
+        nrm = [nx / len, ny / len, nz / len];
+      }
+
+      const cosTol = normalTolerance ?? 0.95;
+      if (typeof cosTol !== 'number' || !Number.isFinite(cosTol)) {
+        return { error: 'findFaces.normalTolerance must be a finite number in [-1, 1]' };
+      }
+
+      let colorTarget: [number, number, number] | null = null;
+      if (color !== undefined) {
+        if (!Array.isArray(color) || color.length !== 3) return { error: 'findFaces.color must be [r,g,b] with values 0..1' };
+        colorTarget = [color[0], color[1], color[2]];
+      }
+
+      let regionTriangles: Set<number> | null = null;
+      if (region !== undefined) {
+        if (typeof region !== 'number' || !Number.isInteger(region)) {
+          return { error: 'findFaces.region must be a region id (integer) from listRegions()' };
+        }
+        const found = getRegions().find(r => r.id === region);
+        if (!found) return { error: `findFaces.region: no region with id=${region}. Use listRegions() to see ids.` };
+        regionTriangles = found.triangles;
+      }
+
+      const limit = maxResults ?? 5000;
+      if (typeof limit !== 'number' || !Number.isInteger(limit) || limit <= 0) {
+        return { error: 'findFaces.maxResults must be a positive integer' };
+      }
+
+      const mesh = currentMeshData;
+      const adjacency = nrm ? buildAdjacency(mesh) : null;
+      const triColors = colorTarget ? (() => {
+        const numTri = mesh.numTri;
+        return (function() {
+          const buf = new Uint8Array(numTri * 3);
+          for (const r of [...getRegions()].sort((a, b) => a.order - b.order)) {
+            const rr = Math.round(r.color[0] * 255);
+            const gg = Math.round(r.color[1] * 255);
+            const bb = Math.round(r.color[2] * 255);
+            for (const t of r.triangles) {
+              if (t >= 0 && t < numTri) {
+                buf[t * 3] = rr;
+                buf[t * 3 + 1] = gg;
+                buf[t * 3 + 2] = bb;
+              }
+            }
+          }
+          return buf;
+        })();
+      })() : null;
+
+      const result: number[] = [];
+      let visited = 0;
+
+      const cR = colorTarget ? Math.round(colorTarget[0] * 255) : 0;
+      const cG = colorTarget ? Math.round(colorTarget[1] * 255) : 0;
+      const cB = colorTarget ? Math.round(colorTarget[2] * 255) : 0;
+
+      for (let t = 0; t < mesh.numTri; t++) {
+        if (regionTriangles && !regionTriangles.has(t)) continue;
+
+        if (boxMin && boxMax) {
+          const v0 = mesh.triVerts[t * 3];
+          const v1 = mesh.triVerts[t * 3 + 1];
+          const v2 = mesh.triVerts[t * 3 + 2];
+          const cx = (mesh.vertProperties[v0 * mesh.numProp] + mesh.vertProperties[v1 * mesh.numProp] + mesh.vertProperties[v2 * mesh.numProp]) / 3;
+          const cy = (mesh.vertProperties[v0 * mesh.numProp + 1] + mesh.vertProperties[v1 * mesh.numProp + 1] + mesh.vertProperties[v2 * mesh.numProp + 1]) / 3;
+          const cz = (mesh.vertProperties[v0 * mesh.numProp + 2] + mesh.vertProperties[v1 * mesh.numProp + 2] + mesh.vertProperties[v2 * mesh.numProp + 2]) / 3;
+          if (cx < boxMin[0] || cx > boxMax[0] || cy < boxMin[1] || cy > boxMax[1] || cz < boxMin[2] || cz > boxMax[2]) continue;
+        }
+
+        if (nrm && adjacency) {
+          const nx = adjacency.normals[t * 3];
+          const ny = adjacency.normals[t * 3 + 1];
+          const nz = adjacency.normals[t * 3 + 2];
+          const dot = nrm[0] * nx + nrm[1] * ny + nrm[2] * nz;
+          if (dot < cosTol) continue;
+        }
+
+        if (triColors) {
+          if (triColors[t * 3] !== cR || triColors[t * 3 + 1] !== cG || triColors[t * 3 + 2] !== cB) continue;
+        }
+
+        visited++;
+        if (result.length < limit) result.push(t);
+      }
+
+      return {
+        triangleIds: result,
+        count: result.length,
+        matched: visited,
+        truncated: visited > result.length,
+      };
+    },
+
+    /** Summarize the mesh as a list of coplanar face groups, sorted by
+     *  triangle count descending. Each group reports a centroid, area-weighted
+     *  normal, area, bounding box, and a sample of triangle ids. Use this to
+     *  pick paint targets procedurally without trial-and-error point placement.
+     *
+     *  Options:
+     *  - `tolerance`: cosine bend threshold (default `0.9995`, ≈1.8°)
+     *  - `minTriangles`: skip groups smaller than this (default `1`)
+     *  - `maxTrianglesPerGroup`: cap reported triangleIds per group (default `64`, `0` to omit)
+     *  - `maxGroups`: cap number of returned groups (default `256`, `0` for unlimited)
+     */
+    getMeshSummary(opts?: { tolerance?: number; minTriangles?: number; maxTrianglesPerGroup?: number; maxGroups?: number }) {
+      if (!currentMeshData) return { error: 'No geometry loaded' };
+      const o = opts ?? {};
+      if (o.tolerance !== undefined && (typeof o.tolerance !== 'number' || !Number.isFinite(o.tolerance))) {
+        return { error: 'getMeshSummary.tolerance must be a finite number in [-1, 1]' };
+      }
+      if (o.minTriangles !== undefined && (typeof o.minTriangles !== 'number' || !Number.isInteger(o.minTriangles) || o.minTriangles < 1)) {
+        return { error: 'getMeshSummary.minTriangles must be a positive integer' };
+      }
+      if (o.maxTrianglesPerGroup !== undefined && (typeof o.maxTrianglesPerGroup !== 'number' || !Number.isInteger(o.maxTrianglesPerGroup) || o.maxTrianglesPerGroup < 0)) {
+        return { error: 'getMeshSummary.maxTrianglesPerGroup must be a non-negative integer' };
+      }
+      if (o.maxGroups !== undefined && (typeof o.maxGroups !== 'number' || !Number.isInteger(o.maxGroups) || o.maxGroups < 0)) {
+        return { error: 'getMeshSummary.maxGroups must be a non-negative integer' };
+      }
+
+      const summary = computeFaceGroups(currentMeshData, o);
+      return {
+        groups: summary.groups,
+        totalTriangles: summary.totalTriangles,
+        groupCount: summary.groups.length,
+        tolerance: summary.tolerance,
+      };
     },
 
     // === Annotations API ===
@@ -3310,6 +3624,11 @@ async function main() {
         'clearRecentExports': { signature: 'clearRecentExports() -- Empty the Recent Exports list', docs: '/ai.md#ai-friendly-file-io' },
         // Color regions
         'paintRegion':     { signature: 'paintRegion({point, normal, color, name?, tolerance?}) -- Paint coplanar face region', docs: '/ai.md#color-regions' },
+        'paintNearestRegion': { signature: 'paintNearestRegion({point, color, searchRadius?, name?, tolerance?}) -- Snap seed to nearest face, then paint coplanar region', docs: '/ai.md#color-regions' },
+        'paintFaces':      { signature: 'paintFaces({triangleIds, color, name?}) -- Paint specific triangle indices', docs: '/ai.md#color-regions' },
+        'paintSlab':       { signature: 'paintSlab({axis|normal, offset, thickness, color, name?}) -- Paint planar slab range', docs: '/ai.md#color-regions' },
+        'findFaces':       { signature: 'findFaces({box?, normal?, normalTolerance?, color?, region?, maxResults?}) -- Query triangle ids by geometry/color filters', docs: '/ai.md#color-regions' },
+        'getMeshSummary':  { signature: 'getMeshSummary({tolerance?, minTriangles?, maxTrianglesPerGroup?, maxGroups?}?) -- List coplanar face groups with centroid/normal/area/bbox', docs: '/ai.md#color-regions' },
         'listRegions':     { signature: 'listRegions() -- List all color regions', docs: '/ai.md#color-regions' },
         'clearColors':     { signature: 'clearColors() -- Remove all color regions', docs: '/ai.md#color-regions' },
         // Annotations
@@ -3424,6 +3743,11 @@ async function main() {
       clearEditorDiagnostics();
       clearEditorErrorPanel(editorErrorPanel);
       currentMeshData = result.mesh;
+      // Release the previous Manifold's WASM-heap memory before overwriting.
+      // Manifold objects live outside the JS heap and require manual .delete().
+      if (currentManifold && currentManifold !== result.manifold && typeof currentManifold.delete === 'function') {
+        try { currentManifold.delete(); } catch { /* already deleted */ }
+      }
       currentManifold = result.manifold;
 
       // Apply any existing color regions to the mesh

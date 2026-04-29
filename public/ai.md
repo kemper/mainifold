@@ -18,7 +18,7 @@ Partwright is a browser-based parametric CAD tool with two modeling engines: **m
 - [Print-safe geometry](#print-safe-geometry)
 - [Color regions](#color-regions)
 - [AI-friendly file I/O](#ai-friendly-file-io)
-- [Reference images](#reference-images)
+- [Images](#images)
 - [Photo-to-model workflow](#photo-to-model-workflow) (optional tooling)
 - [Iteration workflow](#iteration-workflow)
 - [Visual verification](#visual-verification)
@@ -74,7 +74,7 @@ Selecting a SCAD example from the toolbar dropdown auto-switches to OpenSCAD mod
 - **Not reading session context before modifying** -- when opening an existing session, always call `getSessionContext()` first and read the notes/version history before making changes. See [Resuming a session](#resuming-a-session).
 - **Branching off a prior version by hand** -- don't chain `loadVersion` -> `getCode` -> modify -> `runAndSave`. A silent failure (blocked return value, stale buffer) can drop parts of the parent. Use [`forkVersion({index} | {id}, transformFn, label, assertions?)`](#forking-a-prior-version) instead -- it loads the parent's code server-side, applies your transform, validates, and saves atomically.
 - **Passing a bare index or id instead of `{index}` / `{id}`** -- `loadVersion` and `forkVersion` take an object with exactly one of `{index: number}` or `{id: string}`, e.g. `loadVersion({index: 2})` or `loadVersion({id: "Kx3Pq9mA2wEr"})`. Bare `loadVersion(2)` will return `{error: "...target must be { index: number } or { id: string }..."}`.
-- **Passing the wrong object shape to `setReferenceImages`, `setReferenceGeometry`, `query`, `runAndAssert`, etc.** -- the API rejects unknown keys and wrong-type values. See [Argument validation](#argument-validation).
+- **Passing the wrong object shape to `setImages`, `setReferenceGeometry`, `query`, `runAndAssert`, etc.** -- the API rejects unknown keys and wrong-type values. See [Argument validation](#argument-validation).
 
 ## Argument validation
 
@@ -82,8 +82,8 @@ Every `window.partwright` method validates its arguments at runtime. If you pass
 
 **Conventions:**
 
-- **Methods that return a value** (e.g. `runAndSave`, `loadVersion`, `query`, `importSession`, `setReferenceGeometry`, notes/session CRUD) return `{ error: "..." }` on a validation failure. The error string names the exact parameter and expected type, e.g. `"setReferenceImages(images).front must be a string, got null. See /ai.md#argument-validation"`.
-- **Void setters** (`setCode`, `setClipZ`, `setReferenceImages`, `setView`, `setUnits`, `measureAt`, `measureBetween`, `probeRay`, `measurePoints`, `renameSession`) **throw** a `ValidationError`. Wrap calls in a try/catch if you want to handle failure rather than crash the console.
+- **Methods that return a value** (e.g. `runAndSave`, `loadVersion`, `query`, `importSession`, `setReferenceGeometry`, notes/session CRUD) return `{ error: "..." }` on a validation failure. The error string names the exact parameter and expected type, e.g. `"setImages(images)[0].src must be a non-empty string, got "". See /ai.md#argument-validation"`.
+- **Void setters** (`setCode`, `setClipZ`, `setImages`, `setView`, `setUnits`, `measureAt`, `measureBetween`, `probeRay`, `measurePoints`, `renameSession`) **throw** a `ValidationError`. Wrap calls in a try/catch if you want to handle failure rather than crash the console.
 - **No coercion.** `setClipZ("5")` throws -- strings are not auto-converted to numbers. Pass the right type.
 - **Unknown object keys are rejected.** `runAndAssert(code, { widthToDeep: [1,2] })` errors on the typo; it does not silently ignore it. Allowed keys are listed on each assertion/options interface.
 - **Empty strings are rejected** by default for required string params (names, IDs, note text, code). Optional strings can be omitted but, if provided, must still be non-empty unless noted otherwise.
@@ -95,7 +95,7 @@ partwright.navigateVersion('backward')            // ValidationError: direction 
 partwright.setView('sketch')                      // ValidationError: tab must be one of: ...
 partwright.measureAt([5])                         // ValidationError: measureAt(xy) must have exactly 2 elements
 partwright.probeRay([0,0,0], [0, '1', 0])         // ValidationError: probeRay(direction)[1] must be a finite number
-partwright.setReferenceImages({ fron: '...' })    // ValidationError: setReferenceImages(images).fron is not a recognized field
+partwright.setImages([{ src: '' }])  // ValidationError: setImages(images)[0].src must be a non-empty string, got ""
 partwright.setReferenceGeometry(code, { opacity: 2 })  // returns { success: false, error: "... .opacity must be <= 1 ..." }
 await partwright.runAndAssert(code, { minVolume: '1000' })  // returns { passed: false, failures: ["... .minVolume must be a finite number ..."] }
 await partwright.runAndSave(code, 'v1', { boundsRatio: { widthToDeep: [1,2] } })  // typo caught: not a recognized field
@@ -169,10 +169,12 @@ partwright.renderView({elevation?, azimuth?, ortho?, size?}) // Render from any 
 partwright.sliceAtZVisual(z)            // Cross-section SVG at height z -> {svg, area, contours}
 partwright.isRunning()                   // -> boolean (is code executing?)
 
-// Reference images -- compare model against photos
-partwright.setReferenceImages({front?, right?, back?, left?, top?, perspective?})
-partwright.clearReferenceImages()
-partwright.getReferenceImages()
+// Images -- attach photos to compare model against
+partwright.setImages([{src, label?}, ...])  // replace all; src is data URL or http(s) URL; label is an optional caption
+partwright.addImage({src, label?})          // append one; returns {id, src, label?}
+partwright.removeImage(id)                  // remove by id; returns true if removed
+partwright.clearImages()
+partwright.getImages()                      // -> [{id, src, label?}, ...]
 
 // Sessions -- save/compare design iterations
 await partwright.createSession(name?)    // -> {id, url, galleryUrl}
@@ -189,9 +191,12 @@ await partwright.openSession(id)         // Open existing session
 await partwright.clearAllSessions()      // Delete all sessions & versions
 
 // Color regions -- tag face regions with a color (see #color-regions)
-partwright.paintRegion({point, normal, color, name?, tolerance?}) // bucket: coplanar flood-fill -> {id, name, triangles} or {error}
-partwright.paintFaces({triangleIds, color, name?})                // brush: paint specific triangle indices -> {id, name, triangles} or {error}
-partwright.paintSlab({axis|normal, offset, thickness, color, name?}) // slab: paint a planar range -> {id, name, triangles} or {error}
+partwright.paintRegion({point, normal, color, name?, tolerance?})         // bucket: coplanar flood-fill -> {id, name, triangles} or {error}
+partwright.paintNearestRegion({point, color, searchRadius?, name?, tolerance?}) // snap seed to nearest face, then flood-fill -> {id, name, triangles, snappedTo} or {error}
+partwright.paintFaces({triangleIds, color, name?})                        // brush: paint specific triangle indices -> {id, name, triangles} or {error}
+partwright.paintSlab({axis|normal, offset, thickness, color, name?})      // slab: paint a planar range -> {id, name, triangles} or {error}
+partwright.findFaces({box?, normal?, normalTolerance?, color?, region?, maxResults?}) // query triangle ids by geometry/color -> {triangleIds, count, matched, truncated}
+partwright.getMeshSummary({tolerance?, minTriangles?, maxTrianglesPerGroup?, maxGroups?}?) // -> {groups[{id, normal, centroid, area, triangleCount, bbox, triangleIds}], totalTriangles, groupCount, tolerance}
 partwright.listRegions()                 // -> [{id, name, color, source, triangles, order}, ...]
 partwright.clearColors()                 // Remove all regions
 
@@ -436,12 +441,49 @@ partwright.clearColors()    // remove all regions
 
 **How face matching works.** `paintRegion` flood-fills outward from the seed triangle, including any neighbor whose normal is within `tolerance` of the seed's. Pick `point` slightly inside the model surface and pass the outward-pointing `normal` -- the seed resolver looks for the triangle whose plane the point lies on and whose normal aligns with yours.
 
+**`paintRegion` is strict about seed placement** -- the point must lie on the surface within ~0.01 units. If you'd rather snap to the nearest face within a tolerance and skip the trial-and-error of placing a point exactly, use `paintNearestRegion`:
+
+```js
+// Snap [8, 0.39, 5] to whatever face is closest within 1.0 units, then paint.
+const r = partwright.paintNearestRegion({
+  point: [8, 0.39, 5],
+  color: [0, 0.6, 1],
+  searchRadius: 1.0,        // optional cap; omit to always pick the closest face
+  name: "Fin",              // optional
+  tolerance: 0.9995,        // optional flood-fill tolerance, same semantics as paintRegion
+});
+// On success: { id, name, triangles, snappedTo: { point, normal, distance } }
+// On failure: { error: "...nearest face is X.XX units away, outside searchRadius=...", nearestDistance }
+// The seed normal is taken from the snapped triangle, so callers don't have to know it in advance.
+```
+
+**Targeting faces by geometry instead of by point.** `findFaces` queries triangle indices by box, normal, color, or region — pass the result straight to `paintFaces` to color procedurally. `getMeshSummary` partitions the mesh into coplanar face groups (sorted largest-first) and reports each group's centroid, normal, area, and bounding box; pick a group, then call `paintFaces({ triangleIds: group.triangleIds, color })`.
+
+```js
+// Find every roughly-upward face inside a bounding box (e.g. the top of a part).
+const top = partwright.findFaces({
+  box: { min: [-50, -50, 9], max: [50, 50, 11] },
+  normal: [0, 0, 1],
+  normalTolerance: 0.95,    // ~18° cone around +Z
+});
+// -> { triangleIds: [...], count, matched, truncated }
+partwright.paintFaces({ triangleIds: top.triangleIds, color: [1, 0.6, 0], name: "Top" });
+
+// Or get a structural overview and pick by area.
+const summary = partwright.getMeshSummary({ minTriangles: 4 });
+// summary.groups is sorted largest first.
+const largestSideFace = summary.groups.find(g => Math.abs(g.normal[2]) < 0.1);
+partwright.paintFaces({ triangleIds: largestSideFace.triangleIds, color: [0.2, 0.4, 0.9] });
+```
+
+`findFaces` filters all AND together. Pass `region: <id>` from `listRegions()` to subset by an existing painted region. The default `normalTolerance` is `0.95` (≈18° cone) — looser than `paintRegion`'s `0.9995` because it's intended for catching whole faces of a primitive, not exact-coplanar fills.
+
 **Other paint tools.**
 
 ```js
-// Brush: paint specific triangle indices (no flood-fill).
-// Use partwright.getGeometry() to find triangle indices, or capture them from
-// hover during a UI-driven paint session.
+// Brush: paint specific triangle indices (no flood-fill). Use findFaces() or
+// getMeshSummary() to source the indices procedurally; the Paint UI also
+// emits indices when picking faces interactively.
 partwright.paintFaces({
   triangleIds: [12, 13, 14, 27],
   color: [0, 0.6, 1],
@@ -472,6 +514,8 @@ partwright.paintSlab({
 **Bucket tolerance.** `paintRegion`'s `tolerance` is a cosine threshold for the bend angle between adjacent faces (default `0.9995`, ≈ 1.8°). The flood-fill crosses an edge only when the bend at that edge is below the angle threshold — checked between the *parent* face and each *neighbor*, not against the seed. This means flood-fill follows curved surfaces: a 32-sided cylinder bends ~11° per face, so any tolerance ≥ cos(11°) ≈ `0.98` covers the whole cylinder. Set tolerance to `-1` (180°) to paint the entire connected mesh. The Paint UI exposes the same control as a slider labeled in degrees (0°–180°).
 
 **Editor lock.** When color regions exist, the editor is locked (the model can't be re-run, because new geometry would invalidate the saved triangle indices). To edit code, the user clicks "Unlock to edit" in the UI. Agents that need to iterate on the geometry should call `clearColors()` first, or fork a new uncolored version with `forkVersion`.
+
+**Saving a colored version.** Calling `saveVersion(label)` after painting *will* persist the regions onto a new version — the dedupe check considers code, annotations, and color regions together. If nothing has changed, `saveVersion()` returns `{ skipped: true, reason: "..." }` instead of `null`, so a no-op is visible. If you want to be sure a save happened, check the return shape: `{ id, index, label }` on success, `{ skipped }` on no-op, `{ error }` if no session is open.
 
 **Export behavior.**
 - `exportGLB()` -- vertex colors flow through automatically.
@@ -530,32 +574,44 @@ partwright.clearRecentExports()
 
 This is also the easiest way to inspect what the user just exported manually: the bytes stay in memory until they're pushed out by newer exports.
 
-## Reference images
+## Images
 
-Load reference photos to compare against your model's elevations:
+Attach reference photos so the model can be compared against them. Each image has just two user-facing fields:
+
+- `src` — a `data:` URL or `http(s)` URL.
+- `label` (optional) — a free-form caption. Common values like `"Front"`, `"Right"`, `"Back"`, `"Left"`, `"Top"`, and `"Perspective"` are **presets**: the UI offers them as one-click pickers and the system uses them to order the strip in the Elevations tab. Any other string is also valid (`"south elevation, morning light"`, `"Inspiration: Frank Lloyd Wright"`). Empty / omitted means no caption.
+
+Multiple images may share a label — nothing is overwritten. The label is what appears in the Gallery thumbnail caption, in the lightbox, and in tooltips. Items whose label matches a preset (case-insensitive) sort first in preset order; the rest keep their insertion order at the end.
+
 ```js
-// Load reference images for side-by-side comparison in Elevations tab
-partwright.setReferenceImages({
-  front: 'data:image/jpeg;base64,...',   // or a URL
-  right: 'data:image/jpeg;base64,...',
-  back: 'data:image/jpeg;base64,...',
-  left: 'data:image/jpeg;base64,...',
-  top: 'data:image/jpeg;base64,...',     // optional
-  perspective: 'data:image/jpeg;base64,...', // optional - original photo
-})
+// Replace the full list. Each item is {src, label?}; the call returns the
+// same items with a server-assigned `id` so you can remove individuals later.
+const items = partwright.setImages([
+  { src: 'data:image/jpeg;base64,...', label: 'Front' },                       // preset
+  { src: 'https://cdn.example.com/view-right.jpg', label: 'Right' },           // preset
+  { src: 'data:image/png;base64,...',  label: 'south elevation, morning' },    // custom
+  { src: 'data:image/png;base64,...' },                                        // no label
+])
+// items -> [{id: 'A1bC2dE3fG', src: '...', label: 'Front'}, ...]
 
-// Clear reference images
-partwright.clearReferenceImages()
+// Append one without disturbing existing items
+const added = partwright.addImage({ src: '...', label: 'Perspective' })
 
-// Get current reference image state
-partwright.getReferenceImages()  // -> {front?, right?, ...} or null
+// Remove a specific item by id
+partwright.removeImage(added.id)
+
+// Clear all attached images
+partwright.clearImages()
+
+// Get the currently attached images
+partwright.getImages()  // -> [{id, src, label?}, ...]
 ```
 
-When reference images are loaded, the Elevations tab shows each model view side-by-side with the corresponding reference image. This enables direct visual comparison for accuracy.
+When images are attached, the Elevations tab shows them in a strip alongside the model views, enabling direct visual comparison.
 
 ## Photo-to-model workflow
 
-> **Optional tooling.** This workflow uses `scripts/generate-views.js` and Gemini, which may not be installed in every environment. If unavailable, skip the analysis step and supply reference images manually via `setReferenceImages()`.
+> **Optional tooling.** This workflow uses `scripts/generate-views.js` and Gemini, which may not be installed in every environment. If unavailable, skip the analysis step and supply images manually via `setImages()`.
 
 To recreate a building or object from a photo:
 
@@ -571,10 +627,14 @@ This calls Gemini to analyze the photo and produces a JSON file with:
 - Feature positions (windows, doors, porches) as percentages
 - Elevation descriptions for all 4 sides
 
-### 2. Load reference images
-If you have multiple angle photos (or Gemini-generated views), load them:
+### 2. Attach images
+If you have multiple angle photos (or Gemini-generated views), attach them:
 ```js
-partwright.setReferenceImages({ front: frontDataUrl, right: rightDataUrl, ... })
+partwright.setImages([
+  { src: frontDataUrl, label: 'Front' },
+  { src: rightDataUrl, label: 'Right' },
+  // ...
+])
 ```
 
 ### 3. Build major masses first
@@ -590,7 +650,7 @@ const r = await partwright.runAndAssert(code, {
 ```
 
 ### 4. Compare elevations after each structural change
-Switch to Elevations tab and compare model silhouette against reference at each angle. Focus on:
+Switch to Elevations tab and compare model silhouette against the attached image at each angle. Focus on:
 - Overall proportions and mass placement
 - Roof profile (side view reveals pitch and overhangs)
 - Feature alignment (windows, doors at correct heights)
@@ -598,7 +658,7 @@ Switch to Elevations tab and compare model silhouette against reference at each 
 
 ### 5. Iterate on details
 Add features in order of visual impact: roof -> porch -> windows/doors -> trim details.
-After each addition, verify the relevant elevation matches the reference.
+After each addition, verify the relevant elevation matches the attached image.
 
 ## Iteration workflow
 
