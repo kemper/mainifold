@@ -2,7 +2,8 @@ import './style.css';
 import { initEngine, executeCode, executeCodeAsync, validateCodeAsync, ensureEngineReady, getModule, getActiveLanguage, setActiveLanguage, type Language } from './geometry/engine';
 import { sliceAtZ, getBoundingBox } from './geometry/crossSection';
 import { initViewport, updateMesh, setClipping, setClipZ, getClipState, getCameraState, getCanvas, getMeshGroup, getCamera, setMeasureLock, setUserOrbitLock, isUserOrbitLocked, onUserOrbitLockChange, setDimensionsVisible, isDimensionsVisible, setGridVisible, isGridVisible } from './renderer/viewport';
-import { renderCompositeCanvas, renderElevationsToContainer, renderSingleView, renderSliceSVG, setReferenceImages as _setRefImages, clearReferenceImages as _clearRefImages, getReferenceImages as _getRefImages, type ReferenceImages } from './renderer/multiview';
+import { renderCompositeCanvas, renderElevationsToContainer, renderSingleView, renderSliceSVG, setImages as _setImages, clearImages as _clearImages, getImages as _getImages, type AttachedImage } from './renderer/multiview';
+import { generateId } from './storage/db';
 import { setPhantom, clearPhantom, hasPhantom, type PhantomOptions } from './renderer/phantomGeometry';
 import { initEditor, setValue, getValue, setLanguage as setEditorLanguage, setEditorDiagnostics, clearEditorDiagnostics, revealFirstDiagnostic } from './editor/codeEditor';
 import { createLayout, type TabName } from './ui/layout';
@@ -15,6 +16,7 @@ import { createNotFoundPage } from './ui/notFound';
 import { initViewsPanel, updateMultiView } from './ui/panels';
 import { createSessionBar } from './ui/sessionBar';
 import { createGalleryView, refreshGallery } from './ui/gallery';
+import { createImagesView, refreshImages } from './ui/imagesView';
 import { createDiffView, refreshDiff } from './ui/diffView';
 import { createNotesView, refreshNotes } from './ui/notes';
 import { initSessionList, showSessionList } from './ui/sessionList';
@@ -101,8 +103,8 @@ import {
   exportSession,
   importSession,
   clearAllSessions,
-  saveReferenceImages as persistReferenceImages,
-  getReferenceImagesFromSession,
+  saveImages as persistImages,
+  getImagesFromSession,
   addSessionNote,
   listSessionNotes,
   deleteIfEmpty,
@@ -113,7 +115,6 @@ import {
   onStateChange,
   type ExportedSession,
   type ExportOptions,
-  type ReferenceImagesData,
 } from './storage/sessionManager';
 import type { Version } from './storage/db';
 
@@ -740,7 +741,7 @@ function shouldShowLanding(): boolean {
   const params = new URLSearchParams(window.location.search);
   // Landing if at root path AND no query params that indicate a specific view
   const isRootPath = path === '/' || path === '';
-  return isRootPath && !params.has('view') && !params.has('session') && !params.has('gallery') && !params.has('diff') && !params.has('notes');
+  return isRootPath && !params.has('view') && !params.has('session') && !params.has('gallery') && !params.has('images') && !params.has('diff') && !params.has('notes');
 }
 
 function shouldShowHelp(): boolean {
@@ -760,6 +761,7 @@ function getTabFromURL(): TabName {
   const params = new URLSearchParams(window.location.search);
   if (params.has('notes')) return 'notes';
   if (params.has('diff')) return 'diff';
+  if (params.has('images')) return 'images';
   if (params.has('gallery')) return 'gallery';
   if (params.get('view') === 'elevations') return 'elevations';
   if (params.get('view') === 'ai') return 'ai';
@@ -1036,31 +1038,17 @@ async function main() {
       }
       applyVersionAnnotations(loadedVersion);
     },
-    onOpenGallery: () => {
-      switchTab('gallery');
-      refreshGallery();
-    },
     onOpenSessionList: () => showSessionList(),
-    onLoadReferenceImages: (images: Record<string, string>) => {
-      _setRefImages(images as ReferenceImages);
-      persistReferenceImages(images as ReferenceImagesData);
-      if (currentMeshData) {
-        renderElevationsToContainer(
-          document.getElementById('elevations-container')!,
-          currentMeshData,
-        );
-      }
-    },
     onNewSession: () => {
       const freshCode = '// New session\nconst { Manifold } = api;\nreturn Manifold.cube([10, 10, 10], true);';
       setValue(freshCode);
       runCode(freshCode);
-      _clearRefImages();
+      _clearImages();
     },
   });
 
   // Create layout
-  const { editorContainer, editorErrorPanel, viewportPane, viewsContainer, elevationsContainer, galleryContainer, diffContainer, notesContainer, statusBar, clipControls, switchTab } = createLayout(editorUI);
+  const { editorContainer, editorErrorPanel, viewportPane, viewsContainer, elevationsContainer, galleryContainer, imagesContainer, diffContainer, notesContainer, statusBar, clipControls, switchTab } = createLayout(editorUI);
 
   // Init views panel
   initViewsPanel(viewsContainer);
@@ -1078,6 +1066,20 @@ async function main() {
     switchTab('interactive');
   });
 
+  // Init images view
+  createImagesView(imagesContainer, {
+    onChange: async (next) => {
+      _setImages(next);
+      await persistImages(next);
+      if (currentMeshData) {
+        renderElevationsToContainer(
+          document.getElementById('elevations-container')!,
+          currentMeshData,
+        );
+      }
+    },
+  });
+
   // Init diff view
   createDiffView(diffContainer, (code: string) => {
     setValue(code);
@@ -1088,9 +1090,10 @@ async function main() {
   // Init notes panel
   createNotesView(notesContainer);
 
-  // Refresh gallery/notes whenever their tabs are selected
+  // Refresh tabs when they're selected
   window.addEventListener('tab-switched', ((e: CustomEvent) => {
     if (e.detail.tab === 'gallery') refreshGallery();
+    if (e.detail.tab === 'images') refreshImages();
     if (e.detail.tab === 'diff') refreshDiff();
     if (e.detail.tab === 'notes') refreshNotes();
   }) as EventListener);
@@ -1148,11 +1151,11 @@ async function main() {
     await runCodeSync(version.code);
     rehydrateColorRegions(version.geometryData);
     applyVersionAnnotations(version);
-    const refImages = await getReferenceImagesFromSession();
-    if (refImages) {
-      _setRefImages(refImages as ReferenceImages);
+    const sessionImages = await getImagesFromSession();
+    if (sessionImages) {
+      _setImages(sessionImages);
     } else {
-      _clearRefImages();
+      _clearImages();
     }
   }
 
@@ -2011,22 +2014,85 @@ async function main() {
       return { svg, area: s.area, contours: s.polygons.length };
     },
 
-    // === Reference image API ===
+    // === Images API ===
 
-    /** Load reference images for side-by-side comparison in Elevations tab.
-     *  Keys: front, right, back, left, top, perspective. Values: data URLs or image URLs.
-     *  If a session is active, also persists to IndexedDB. */
-    setReferenceImages(images: ReferenceImages): void {
-      const REF_KEYS = ['front', 'right', 'back', 'left', 'top', 'perspective'] as const;
-      const obj = assertObject(images, 'setReferenceImages(images)')!;
-      assertNoUnknownKeys(obj, REF_KEYS, 'setReferenceImages(images)');
-      for (const k of REF_KEYS) {
-        if (obj[k] !== undefined) assertString(obj[k], `setReferenceImages(images).${k}`, { allowEmpty: false });
+    /** Attach images for side-by-side comparison in the Images, Elevations, and Gallery
+     *  tabs. Each item is `{src, label?}`. `src` is a data URL or http(s) URL.
+     *  `label` is an optional caption — common values like "Front", "Right", "Back",
+     *  "Left", "Top", "Perspective" are presets that drive ordering in the Elevations
+     *  strip; any other string is also valid. Multiple items may share a label.
+     *  Replaces all currently attached images. If a session is active, also persists
+     *  to IndexedDB. Returns the canonical list with assigned ids. */
+    setImages(images: Array<{ src: string; id?: string; label?: string }>): AttachedImage[] {
+      const arr = assertArray(images, 'setImages(images)') as Array<Record<string, unknown>>;
+      const items: AttachedImage[] = [];
+      for (let i = 0; i < arr.length; i++) {
+        const item = assertObject(arr[i], `setImages(images)[${i}]`)!;
+        assertNoUnknownKeys(item, ['src', 'id', 'label'] as const, `setImages(images)[${i}]`);
+        assertString(item.src, `setImages(images)[${i}].src`, { allowEmpty: false });
+        if (item.id !== undefined) assertString(item.id, `setImages(images)[${i}].id`, { allowEmpty: false });
+        if (item.label !== undefined) assertString(item.label, `setImages(images)[${i}].label`, { optional: true, allowEmpty: true });
+        const built: AttachedImage = {
+          id: (item.id as string | undefined) ?? generateId(),
+          src: item.src as string,
+        };
+        const lbl = (item.label as string | undefined)?.trim();
+        if (lbl) built.label = lbl;
+        items.push(built);
       }
-      _setRefImages(images);
-      // Persist to session if one is active
-      persistReferenceImages(images as ReferenceImagesData);
-      // Re-render elevations with reference images if we have mesh data
+      _setImages(items);
+      persistImages(items);
+      if (currentMeshData) {
+        renderElevationsToContainer(
+          document.getElementById('elevations-container')!,
+          currentMeshData,
+        );
+      }
+      return items;
+    },
+
+    /** Append a single image. Returns the appended item with its assigned id. */
+    addImage(image: { src: string; label?: string }): AttachedImage {
+      const obj = assertObject(image, 'addImage(image)')!;
+      assertNoUnknownKeys(obj, ['src', 'label'] as const, 'addImage(image)');
+      assertString(obj.src, 'addImage(image).src', { allowEmpty: false });
+      if (obj.label !== undefined) assertString(obj.label, 'addImage(image).label', { optional: true, allowEmpty: true });
+      const item: AttachedImage = { id: generateId(), src: obj.src as string };
+      const lbl = (obj.label as string | undefined)?.trim();
+      if (lbl) item.label = lbl;
+      const next = [..._getImages(), item];
+      _setImages(next);
+      persistImages(next);
+      if (currentMeshData) {
+        renderElevationsToContainer(
+          document.getElementById('elevations-container')!,
+          currentMeshData,
+        );
+      }
+      return item;
+    },
+
+    /** Remove an image by id. Returns true if an image was removed. */
+    removeImage(id: string): boolean {
+      assertString(id, 'removeImage(id)', { allowEmpty: false });
+      const current = _getImages();
+      const next = current.filter(img => img.id !== id);
+      if (next.length === current.length) return false;
+      _setImages(next);
+      persistImages(next);
+      if (currentMeshData) {
+        renderElevationsToContainer(
+          document.getElementById('elevations-container')!,
+          currentMeshData,
+        );
+      }
+      return true;
+    },
+
+    /** Clear all images */
+    clearImages(): void {
+      _clearImages();
+      persistImages(null);
       if (currentMeshData) {
         renderElevationsToContainer(
           document.getElementById('elevations-container')!,
@@ -2035,22 +2101,9 @@ async function main() {
       }
     },
 
-    /** Clear all reference images */
-    clearReferenceImages(): void {
-      _clearRefImages();
-      // Clear from session if one is active
-      persistReferenceImages(null);
-      if (currentMeshData) {
-        renderElevationsToContainer(
-          document.getElementById('elevations-container')!,
-          currentMeshData,
-        );
-      }
-    },
-
-    /** Get currently loaded reference images (or null if none) */
-    getReferenceImages(): ReferenceImages | null {
-      return _getRefImages();
+    /** Get the currently attached images as an array of `{id, angle, src}`. */
+    getImages(): AttachedImage[] {
+      return _getImages();
     },
 
     // === Session API ===
@@ -2074,7 +2127,7 @@ async function main() {
       return sessions.map(s => ({ id: s.id, name: s.name, updated: s.updated }));
     },
 
-    /** Open an existing session (loads latest version, restores reference images, restores language) */
+    /** Open an existing session (loads latest version, restores attached images, restores language) */
     async openSession(id: string) {
       const check = guard(() => assertString(id, 'openSession(id)', { allowEmpty: false }));
       if (typeof check === 'object' && check !== null && 'error' in check) return check;
@@ -2088,10 +2141,10 @@ async function main() {
         setValue(version.code);
         await runCodeSync(version.code);
       }
-      // Restore reference images from session
-      const refImages = await getReferenceImagesFromSession();
-      if (refImages) {
-        _setRefImages(refImages as ReferenceImages);
+      // Restore images from session
+      const sessionImages = await getImagesFromSession();
+      if (sessionImages) {
+        _setImages(sessionImages);
         if (currentMeshData) {
           renderElevationsToContainer(
             document.getElementById('elevations-container')!,
@@ -2099,7 +2152,7 @@ async function main() {
           );
         }
       } else {
-        _clearRefImages();
+        _clearImages();
       }
       return version ? { id: version.id, index: version.index, label: version.label } : null;
     },
@@ -2431,10 +2484,10 @@ async function main() {
         setValue(version.code);
         await runCodeSync(version.code);
       }
-      // Restore reference images from imported session
-      const refImages = await getReferenceImagesFromSession();
-      if (refImages) {
-        _setRefImages(refImages as ReferenceImages);
+      // Restore images from imported session
+      const sessionImages = await getImagesFromSession();
+      if (sessionImages) {
+        _setImages(sessionImages);
         if (currentMeshData) {
           renderElevationsToContainer(
             document.getElementById('elevations-container')!,

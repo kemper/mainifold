@@ -2,6 +2,7 @@ import * as THREE from 'three';
 import { createWhiteMaterial, createBlackWireframeMaterial } from './materials';
 import type { MeshData } from '../geometry/types';
 import { buildStrokesGroup, disposeStrokesGroup } from '../annotations/annotationOverlay';
+import { presetIndex } from '../storage/db';
 
 interface ViewConfig {
   name: string;
@@ -250,29 +251,45 @@ export function renderCompositeCanvas(meshData: MeshData): HTMLCanvasElement {
   return compositeCanvas;
 }
 
-// === Reference images for comparison ===
+// === Attached images for elevation comparison ===
 
-export interface ReferenceImages {
-  front?: string;
-  right?: string;
-  back?: string;
-  left?: string;
-  top?: string;
-  perspective?: string;
+export interface AttachedImage {
+  id: string;
+  src: string;
+  /** Optional user-facing caption. Drives ordering via preset matching. */
+  label?: string;
 }
 
-let _referenceImages: ReferenceImages | null = null;
+let _images: AttachedImage[] = [];
 
-export function setReferenceImages(images: ReferenceImages): void {
-  _referenceImages = images;
+export function setImages(images: AttachedImage[]): void {
+  _images = images;
+  window.dispatchEvent(new Event('images-changed'));
 }
 
-export function clearReferenceImages(): void {
-  _referenceImages = null;
+export function clearImages(): void {
+  _images = [];
+  window.dispatchEvent(new Event('images-changed'));
 }
 
-export function getReferenceImages(): ReferenceImages | null {
-  return _referenceImages;
+export function getImages(): AttachedImage[] {
+  return _images;
+}
+
+/** Stable sort: preset-matching labels first in preset order, others keep
+ *  their insertion order at the end. */
+export function sortImagesByPreset(images: readonly AttachedImage[]): AttachedImage[] {
+  return images
+    .map((item, idx) => ({ item, idx, p: presetIndex(item.label) }))
+    .sort((a, b) => {
+      const aHasPreset = a.p >= 0;
+      const bHasPreset = b.p >= 0;
+      if (aHasPreset && bHasPreset) return a.p - b.p;
+      if (aHasPreset) return -1;
+      if (bHasPreset) return 1;
+      return a.idx - b.idx;
+    })
+    .map(x => x.item);
 }
 
 // === Orthographic elevation views ===
@@ -282,15 +299,14 @@ interface ElevationConfig {
   // Camera direction: where the camera looks FROM (multiplied by distance)
   direction: [number, number, number];
   up: [number, number, number];
-  refKey: keyof ReferenceImages; // which reference image to show alongside
 }
 
 const ELEVATIONS: ElevationConfig[] = [
-  { name: 'Front',  direction: [0, -1, 0],  up: [0, 0, 1], refKey: 'front' },
-  { name: 'Right',  direction: [1, 0, 0],   up: [0, 0, 1], refKey: 'right' },
-  { name: 'Back',   direction: [0, 1, 0],   up: [0, 0, 1], refKey: 'back' },
-  { name: 'Left',   direction: [-1, 0, 0],  up: [0, 0, 1], refKey: 'left' },
-  { name: 'Top',    direction: [0, 0, 1],   up: [0, 1, 0], refKey: 'top' },
+  { name: 'Front',  direction: [0, -1, 0],  up: [0, 0, 1] },
+  { name: 'Right',  direction: [1, 0, 0],   up: [0, 0, 1] },
+  { name: 'Back',   direction: [0, 1, 0],   up: [0, 0, 1] },
+  { name: 'Left',   direction: [-1, 0, 0],  up: [0, 0, 1] },
+  { name: 'Top',    direction: [0, 0, 1],   up: [0, 1, 0] },
 ];
 
 function createElevationScene(geometry: THREE.BufferGeometry, bgColor: number): THREE.Scene {
@@ -371,12 +387,14 @@ export function renderElevationsToContainer(container: HTMLElement, meshData: Me
 
   const viewSize = 300;
   const renderer = getOffscreenRenderer(viewSize);
-  const hasRef = _referenceImages !== null;
+  const hasRef = _images.length > 0;
 
   const annotations = buildStrokesGroup(new THREE.Vector2(viewSize, viewSize));
   if (annotations) scene.add(annotations);
 
-  // Compact reference images row (above the elevation grid)
+  // Compact images row (above the elevation grid). Items whose label matches
+  // a preset (Front, Right, Back, etc.) sort first in preset order; the rest
+  // keep their insertion order at the end.
   if (hasRef) {
     const refSection = document.createElement('div');
     refSection.className = 'pb-1 border-b border-zinc-700 shrink-0';
@@ -386,24 +404,21 @@ export function renderElevationsToContainer(container: HTMLElement, meshData: Me
 
     const refLabel = document.createElement('span');
     refLabel.className = 'text-xs text-zinc-500 font-mono shrink-0 px-1';
-    refLabel.textContent = 'Refs:';
+    refLabel.textContent = 'Images:';
     refRow.appendChild(refLabel);
 
-    const refKeys: (keyof ReferenceImages)[] = ['perspective', 'front', 'right', 'back', 'left', 'top'];
-    for (const key of refKeys) {
-      const src = _referenceImages![key];
-      if (!src) continue;
-
+    const sorted = sortImagesByPreset(_images);
+    for (const item of sorted) {
       const refImg = document.createElement('img');
-      refImg.src = src;
+      refImg.src = item.src;
       refImg.className = 'h-16 object-contain rounded bg-zinc-950 border border-blue-500/30 cursor-pointer hover:border-blue-400 transition-colors shrink-0';
-      refImg.title = `${key.charAt(0).toUpperCase() + key.slice(1)} — click to enlarge`;
+      refImg.title = item.label ? `${item.label} — click to enlarge` : 'Click to enlarge';
       refImg.addEventListener('click', () => {
         const overlay = document.createElement('div');
         overlay.className = 'fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm';
         overlay.addEventListener('click', (e) => { if (e.target === overlay) overlay.remove(); });
         const img = document.createElement('img');
-        img.src = src;
+        img.src = item.src;
         img.className = 'max-w-[90vw] max-h-[90vh] object-contain rounded-lg shadow-2xl';
         overlay.appendChild(img);
         document.body.appendChild(overlay);

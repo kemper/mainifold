@@ -8,8 +8,8 @@
 //   - NANOBANANA_API_KEY environment variable set
 //
 // Output: saves <basename>.ref.<angle>.{png,jpg} files + <basename>.references.json
-// Load into partwright via "Load Refs" button or console:
-//   partwright.setReferenceImages({ perspective: "data:...", front: "data:...", ... })
+// Load into partwright via the Images tab "Attach image…" button or console:
+//   partwright.setImages([{angle: "perspective", src: "data:..."}, {angle: "front", src: "data:..."}, ...])
 
 const { execSync } = require('child_process');
 const path = require('path');
@@ -211,8 +211,8 @@ function main() {
   console.log(`References bundle: ${refsPath}`);
   console.log('');
   console.log('To load in partwright:');
-  console.log('  1. Click "Load Refs" in the session bar and select the .ref.*.png files, OR');
-  console.log('  2. In browser console, paste the references.json content into partwright.setReferenceImages(...)');
+  console.log('  1. Open the Images tab, click "Attach image…", and select the .ref.*.png files, OR');
+  console.log('  2. In browser console, paste the references.json content into partwright.setImages(...)');
 }
 
 main();

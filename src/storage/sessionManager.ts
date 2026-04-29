@@ -17,11 +17,16 @@ import {
   listNotes as dbListNotes,
   deleteNote as dbDeleteNote,
   updateNote as dbUpdateNote,
+  legacyImagesObjectToArray,
   type Session,
   type Version,
   type SessionNote,
-  type ReferenceImagesData,
+  type AttachedImage,
 } from './db';
+
+/** Legacy angle keys preserved only for typing the on-disk shapes we still
+ *  read for backward compatibility. */
+type LegacyImageAngle = 'front' | 'right' | 'back' | 'left' | 'top' | 'perspective';
 import type { SerializedColorRegion } from '../color/regions';
 import {
   serializeAll as serializeAnnotations,
@@ -64,7 +69,9 @@ export interface ExportedSession {
   partwright?: string;
   /** Legacy alias from the pre-rebrand era. Read as a fallback only. */
   mainifold?: string;
-  session: { name: string; created: number; updated: number; referenceImages?: ReferenceImagesData | null; language?: 'manifold-js' | 'scad' };
+  /** Images may be the array form or the legacy object map ({front, right, ...}).
+   * Both also exist under `referenceImages` for pre-rename exports. */
+  session: { name: string; created: number; updated: number; images?: AttachedImage[] | Partial<Record<LegacyImageAngle, string>> | null; referenceImages?: AttachedImage[] | Partial<Record<LegacyImageAngle, string>> | null; language?: 'manifold-js' | 'scad' };
   versions: {
     index: number;
     code: string;
@@ -138,7 +145,7 @@ export function getSchemaCompatibilityWarning(data: ExportedSession): string | n
   return null;
 }
 
-export type { Session, Version, SessionNote, ReferenceImagesData } from './db';
+export type { Session, Version, SessionNote, AttachedImage } from './db';
 
 export interface SessionState {
   session: Session | null;
@@ -417,27 +424,27 @@ export function getGalleryUrl(): string {
   return `${base}?session=${currentState.session.id}&gallery`;
 }
 
-// === Reference images ===
+// === Images ===
 
-export async function saveReferenceImages(images: ReferenceImagesData | null): Promise<void> {
+export async function saveImages(images: AttachedImage[] | null): Promise<void> {
   if (!currentState.session) return;
   await dbUpdateSession(currentState.session.id, {
-    referenceImages: images,
+    images,
     updated: Date.now(),
   });
   // Update local state so getState() reflects the change
   currentState = {
     ...currentState,
-    session: { ...currentState.session, referenceImages: images },
+    session: { ...currentState.session, images },
   };
   notify();
 }
 
-export async function getReferenceImagesFromSession(): Promise<ReferenceImagesData | null> {
+export async function getImagesFromSession(): Promise<AttachedImage[] | null> {
   if (!currentState.session) return null;
   // Refresh from DB in case it was updated externally
   const session = await getSession(currentState.session.id);
-  return session?.referenceImages ?? null;
+  return session?.images ?? null;
 }
 
 // === Notes ===
@@ -669,7 +676,7 @@ export async function exportSession(
 
   return {
     partwright: SCHEMA_VERSION,
-    session: { name: session.name, created: session.created, updated: session.updated, referenceImages: session.referenceImages ?? null, ...(session.language ? { language: session.language } : {}) },
+    session: { name: session.name, created: session.created, updated: session.updated, images: session.images ?? null, ...(session.language ? { language: session.language } : {}) },
     versions: versions.map((v, i) => {
       const colorRegions = opts.includeColorRegions ? extractColorRegions(v.geometryData) : undefined;
       const geometryData = opts.includeColorRegions ? v.geometryData : stripColorRegions(v.geometryData);
@@ -701,9 +708,15 @@ export async function importSession(
 
   const session = await dbCreateSession(data.session.name, data.session.language);
 
-  // Restore reference images if present in the exported data
-  if (data.session.referenceImages) {
-    await dbUpdateSession(session.id, { referenceImages: data.session.referenceImages });
+  // Restore images if present in the exported data. Handle two legacy shapes:
+  //   - pre-rename: `referenceImages` instead of `images`
+  //   - pre-array: object map `{front: 'url', ...}` instead of `[{id, angle, src}]`
+  const rawImages = data.session.images ?? data.session.referenceImages ?? null;
+  if (rawImages) {
+    const imagesArr = Array.isArray(rawImages)
+      ? rawImages
+      : legacyImagesObjectToArray(rawImages);
+    await dbUpdateSession(session.id, { images: imagesArr });
   }
 
   // Determine the index of the latest exported version. Schema 1.2 stored

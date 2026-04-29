@@ -18,7 +18,7 @@ Partwright is a browser-based parametric CAD tool with two modeling engines: **m
 - [Print-safe geometry](#print-safe-geometry)
 - [Color regions](#color-regions)
 - [AI-friendly file I/O](#ai-friendly-file-io)
-- [Reference images](#reference-images)
+- [Images](#images)
 - [Photo-to-model workflow](#photo-to-model-workflow) (optional tooling)
 - [Iteration workflow](#iteration-workflow)
 - [Visual verification](#visual-verification)
@@ -74,7 +74,7 @@ Selecting a SCAD example from the toolbar dropdown auto-switches to OpenSCAD mod
 - **Not reading session context before modifying** -- when opening an existing session, always call `getSessionContext()` first and read the notes/version history before making changes. See [Resuming a session](#resuming-a-session).
 - **Branching off a prior version by hand** -- don't chain `loadVersion` -> `getCode` -> modify -> `runAndSave`. A silent failure (blocked return value, stale buffer) can drop parts of the parent. Use [`forkVersion({index} | {id}, transformFn, label, assertions?)`](#forking-a-prior-version) instead -- it loads the parent's code server-side, applies your transform, validates, and saves atomically.
 - **Passing a bare index or id instead of `{index}` / `{id}`** -- `loadVersion` and `forkVersion` take an object with exactly one of `{index: number}` or `{id: string}`, e.g. `loadVersion({index: 2})` or `loadVersion({id: "Kx3Pq9mA2wEr"})`. Bare `loadVersion(2)` will return `{error: "...target must be { index: number } or { id: string }..."}`.
-- **Passing the wrong object shape to `setReferenceImages`, `setReferenceGeometry`, `query`, `runAndAssert`, etc.** -- the API rejects unknown keys and wrong-type values. See [Argument validation](#argument-validation).
+- **Passing the wrong object shape to `setImages`, `setReferenceGeometry`, `query`, `runAndAssert`, etc.** -- the API rejects unknown keys and wrong-type values. See [Argument validation](#argument-validation).
 
 ## Argument validation
 
@@ -82,8 +82,8 @@ Every `window.partwright` method validates its arguments at runtime. If you pass
 
 **Conventions:**
 
-- **Methods that return a value** (e.g. `runAndSave`, `loadVersion`, `query`, `importSession`, `setReferenceGeometry`, notes/session CRUD) return `{ error: "..." }` on a validation failure. The error string names the exact parameter and expected type, e.g. `"setReferenceImages(images).front must be a string, got null. See /ai.md#argument-validation"`.
-- **Void setters** (`setCode`, `setClipZ`, `setReferenceImages`, `setView`, `setUnits`, `measureAt`, `measureBetween`, `probeRay`, `measurePoints`, `renameSession`) **throw** a `ValidationError`. Wrap calls in a try/catch if you want to handle failure rather than crash the console.
+- **Methods that return a value** (e.g. `runAndSave`, `loadVersion`, `query`, `importSession`, `setReferenceGeometry`, notes/session CRUD) return `{ error: "..." }` on a validation failure. The error string names the exact parameter and expected type, e.g. `"setImages(images)[0].src must be a non-empty string, got "". See /ai.md#argument-validation"`.
+- **Void setters** (`setCode`, `setClipZ`, `setImages`, `setView`, `setUnits`, `measureAt`, `measureBetween`, `probeRay`, `measurePoints`, `renameSession`) **throw** a `ValidationError`. Wrap calls in a try/catch if you want to handle failure rather than crash the console.
 - **No coercion.** `setClipZ("5")` throws -- strings are not auto-converted to numbers. Pass the right type.
 - **Unknown object keys are rejected.** `runAndAssert(code, { widthToDeep: [1,2] })` errors on the typo; it does not silently ignore it. Allowed keys are listed on each assertion/options interface.
 - **Empty strings are rejected** by default for required string params (names, IDs, note text, code). Optional strings can be omitted but, if provided, must still be non-empty unless noted otherwise.
@@ -95,7 +95,7 @@ partwright.navigateVersion('backward')            // ValidationError: direction 
 partwright.setView('sketch')                      // ValidationError: tab must be one of: ...
 partwright.measureAt([5])                         // ValidationError: measureAt(xy) must have exactly 2 elements
 partwright.probeRay([0,0,0], [0, '1', 0])         // ValidationError: probeRay(direction)[1] must be a finite number
-partwright.setReferenceImages({ fron: '...' })    // ValidationError: setReferenceImages(images).fron is not a recognized field
+partwright.setImages([{ src: '' }])  // ValidationError: setImages(images)[0].src must be a non-empty string, got ""
 partwright.setReferenceGeometry(code, { opacity: 2 })  // returns { success: false, error: "... .opacity must be <= 1 ..." }
 await partwright.runAndAssert(code, { minVolume: '1000' })  // returns { passed: false, failures: ["... .minVolume must be a finite number ..."] }
 await partwright.runAndSave(code, 'v1', { boundsRatio: { widthToDeep: [1,2] } })  // typo caught: not a recognized field
@@ -169,10 +169,12 @@ partwright.renderView({elevation?, azimuth?, ortho?, size?}) // Render from any 
 partwright.sliceAtZVisual(z)            // Cross-section SVG at height z -> {svg, area, contours}
 partwright.isRunning()                   // -> boolean (is code executing?)
 
-// Reference images -- compare model against photos
-partwright.setReferenceImages({front?, right?, back?, left?, top?, perspective?})
-partwright.clearReferenceImages()
-partwright.getReferenceImages()
+// Images -- attach photos to compare model against
+partwright.setImages([{src, label?}, ...])  // replace all; src is data URL or http(s) URL; label is an optional caption
+partwright.addImage({src, label?})          // append one; returns {id, src, label?}
+partwright.removeImage(id)                  // remove by id; returns true if removed
+partwright.clearImages()
+partwright.getImages()                      // -> [{id, src, label?}, ...]
 
 // Sessions -- save/compare design iterations
 await partwright.createSession(name?)    // -> {id, url, galleryUrl}
@@ -530,32 +532,44 @@ partwright.clearRecentExports()
 
 This is also the easiest way to inspect what the user just exported manually: the bytes stay in memory until they're pushed out by newer exports.
 
-## Reference images
+## Images
 
-Load reference photos to compare against your model's elevations:
+Attach reference photos so the model can be compared against them. Each image has just two user-facing fields:
+
+- `src` — a `data:` URL or `http(s)` URL.
+- `label` (optional) — a free-form caption. Common values like `"Front"`, `"Right"`, `"Back"`, `"Left"`, `"Top"`, and `"Perspective"` are **presets**: the UI offers them as one-click pickers and the system uses them to order the strip in the Elevations tab. Any other string is also valid (`"south elevation, morning light"`, `"Inspiration: Frank Lloyd Wright"`). Empty / omitted means no caption.
+
+Multiple images may share a label — nothing is overwritten. The label is what appears in the Gallery thumbnail caption, in the lightbox, and in tooltips. Items whose label matches a preset (case-insensitive) sort first in preset order; the rest keep their insertion order at the end.
+
 ```js
-// Load reference images for side-by-side comparison in Elevations tab
-partwright.setReferenceImages({
-  front: 'data:image/jpeg;base64,...',   // or a URL
-  right: 'data:image/jpeg;base64,...',
-  back: 'data:image/jpeg;base64,...',
-  left: 'data:image/jpeg;base64,...',
-  top: 'data:image/jpeg;base64,...',     // optional
-  perspective: 'data:image/jpeg;base64,...', // optional - original photo
-})
+// Replace the full list. Each item is {src, label?}; the call returns the
+// same items with a server-assigned `id` so you can remove individuals later.
+const items = partwright.setImages([
+  { src: 'data:image/jpeg;base64,...', label: 'Front' },                       // preset
+  { src: 'https://cdn.example.com/view-right.jpg', label: 'Right' },           // preset
+  { src: 'data:image/png;base64,...',  label: 'south elevation, morning' },    // custom
+  { src: 'data:image/png;base64,...' },                                        // no label
+])
+// items -> [{id: 'A1bC2dE3fG', src: '...', label: 'Front'}, ...]
 
-// Clear reference images
-partwright.clearReferenceImages()
+// Append one without disturbing existing items
+const added = partwright.addImage({ src: '...', label: 'Perspective' })
 
-// Get current reference image state
-partwright.getReferenceImages()  // -> {front?, right?, ...} or null
+// Remove a specific item by id
+partwright.removeImage(added.id)
+
+// Clear all attached images
+partwright.clearImages()
+
+// Get the currently attached images
+partwright.getImages()  // -> [{id, src, label?}, ...]
 ```
 
-When reference images are loaded, the Elevations tab shows each model view side-by-side with the corresponding reference image. This enables direct visual comparison for accuracy.
+When images are attached, the Elevations tab shows them in a strip alongside the model views, enabling direct visual comparison.
 
 ## Photo-to-model workflow
 
-> **Optional tooling.** This workflow uses `scripts/generate-views.js` and Gemini, which may not be installed in every environment. If unavailable, skip the analysis step and supply reference images manually via `setReferenceImages()`.
+> **Optional tooling.** This workflow uses `scripts/generate-views.js` and Gemini, which may not be installed in every environment. If unavailable, skip the analysis step and supply images manually via `setImages()`.
 
 To recreate a building or object from a photo:
 
@@ -571,10 +585,14 @@ This calls Gemini to analyze the photo and produces a JSON file with:
 - Feature positions (windows, doors, porches) as percentages
 - Elevation descriptions for all 4 sides
 
-### 2. Load reference images
-If you have multiple angle photos (or Gemini-generated views), load them:
+### 2. Attach images
+If you have multiple angle photos (or Gemini-generated views), attach them:
 ```js
-partwright.setReferenceImages({ front: frontDataUrl, right: rightDataUrl, ... })
+partwright.setImages([
+  { src: frontDataUrl, label: 'Front' },
+  { src: rightDataUrl, label: 'Right' },
+  // ...
+])
 ```
 
 ### 3. Build major masses first
@@ -590,7 +608,7 @@ const r = await partwright.runAndAssert(code, {
 ```
 
 ### 4. Compare elevations after each structural change
-Switch to Elevations tab and compare model silhouette against reference at each angle. Focus on:
+Switch to Elevations tab and compare model silhouette against the attached image at each angle. Focus on:
 - Overall proportions and mass placement
 - Roof profile (side view reveals pitch and overhangs)
 - Feature alignment (windows, doors at correct heights)
@@ -598,7 +616,7 @@ Switch to Elevations tab and compare model silhouette against reference at each 
 
 ### 5. Iterate on details
 Add features in order of visual impact: roof -> porch -> windows/doors -> trim details.
-After each addition, verify the relevant elevation matches the reference.
+After each addition, verify the relevant elevation matches the attached image.
 
 ## Iteration workflow
 
