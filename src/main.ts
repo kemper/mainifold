@@ -3743,6 +3743,11 @@ async function main() {
       clearEditorDiagnostics();
       clearEditorErrorPanel(editorErrorPanel);
       currentMeshData = result.mesh;
+      // Release the previous Manifold's WASM-heap memory before overwriting.
+      // Manifold objects live outside the JS heap and require manual .delete().
+      if (currentManifold && currentManifold !== result.manifold && typeof currentManifold.delete === 'function') {
+        try { currentManifold.delete(); } catch { /* already deleted */ }
+      }
       currentManifold = result.manifold;
 
       // Apply any existing color regions to the mesh
