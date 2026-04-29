@@ -99,6 +99,7 @@ The app uses path-based routing for top-level pages and query parameters for vie
 **Paths:**
 - `/` — Landing page (hero + recent sessions grid)
 - `/editor` — Editor view (code + viewport)
+- `/catalog` — Curated catalog of premade sessions
 - `/help` — Help/docs page
 
 **Query parameters** (on `/editor`):
@@ -111,6 +112,20 @@ The app uses path-based routing for top-level pages and query parameters for vie
 - `?session=<id>&v=3` — Specific version
 
 AI agent URLs like `/editor?view=ai` bypass the landing page entirely. Tab switching is handled in `src/ui/layout.ts` (`switchTab`). Session/version state is handled in `src/storage/sessionManager.ts` (`updateURL`). Page-level routing is in `src/main.ts`.
+
+### Browser History (Back Button) Preservation
+
+`updateURL()` in `src/storage/sessionManager.ts` uses `history.replaceState`, not push. That is intentional for in-place updates within the editor (switching versions, naming a session) — those should not pollute the back stack. But it is a trap when navigating *into* the editor from another top-level page (`/`, `/catalog`, `/help`):
+
+- If you call any session-mutating function (`openSession`, `createSession`, `closeSession`, or anything that calls `importSessionPayload`) BEFORE pushing the editor history entry, that internal `replaceState` will overwrite the page you came from and break the browser back button.
+- **Always push the destination history entry first**, then run the state change. See `handleCatalogEntryLoad` and `openSessionFromLanding` in `src/main.ts` for the canonical ordering.
+- For in-page "Back" buttons on top-level pages (catalog, help), prefer `window.history.back()` when there's a real previous entry on the stack — falling back to `replace` (not push) when the page was loaded directly by URL. See the `helpHasAppBackTarget` / `catalogHasAppBackTarget` patterns.
+
+When adding a new top-level page or any cross-page navigation, walk through the flow before merging:
+
+1. Where am I coming from? What's already on the back stack?
+2. What does `window.location` look like after every async step (especially DB or session operations)?
+3. After landing on the destination, does the browser back button take me to the prior page, not two pages back?
 
 ### Resource Lifecycle
 
