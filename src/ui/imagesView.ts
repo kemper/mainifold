@@ -195,7 +195,7 @@ export function showAttachImageModal(
 
   const explanation = document.createElement('p');
   explanation.className = 'text-sm text-zinc-400 mb-4 leading-relaxed';
-  explanation.textContent = 'Add a photo or rendering you want your model to match. Each image gets a label — pick a preset like "Front" or type a custom caption. The label appears in the Gallery and orders the strip in the Elevations tab. You can edit it later from the tile.';
+  explanation.textContent = 'Add a photo or rendering you want your model to match. Each image is auto-labeled from its filename or URL — rename it from the tile after attaching. The label appears in the Gallery and orders the strip in the Elevations tab.';
 
   // File upload section
   const fileSection = document.createElement('div');
@@ -251,7 +251,7 @@ export function showAttachImageModal(
 
   const urlHint = document.createElement('div');
   urlHint.className = 'text-xs text-zinc-500 mb-2 leading-relaxed';
-  urlHint.textContent = 'The URL must serve the image with permissive CORS headers. If the host blocks cross-origin requests, download the file and use Upload above.';
+  urlHint.textContent = 'URLs containing front/right/back/left/top/perspective auto-set the label to the matching preset; anything else uses "Perspective". The host must serve permissive CORS headers — if the request is blocked, download the file and use Upload above.';
 
   const urlRow = document.createElement('div');
   urlRow.className = 'flex gap-2 items-stretch';
@@ -261,25 +261,12 @@ export function showAttachImageModal(
   urlInput.placeholder = 'https://example.com/photo.jpg';
   urlInput.className = 'flex-1 bg-zinc-800 text-zinc-200 font-mono text-xs px-2 py-1.5 rounded border border-zinc-600 outline-none focus:border-blue-500';
 
-  const labelInputForUrl = document.createElement('input');
-  labelInputForUrl.type = 'text';
-  labelInputForUrl.placeholder = 'Label';
-  labelInputForUrl.value = 'Perspective';
-  labelInputForUrl.setAttribute('list', DATALIST_ID);
-  labelInputForUrl.className = 'w-32 bg-zinc-800 text-zinc-200 text-xs px-2 py-1.5 rounded border border-zinc-600 outline-none focus:border-blue-500';
-
   const urlBtn = document.createElement('button');
   urlBtn.className = 'px-3 py-1.5 rounded text-xs font-medium bg-blue-600 hover:bg-blue-500 text-white transition-colors disabled:opacity-50 disabled:cursor-not-allowed';
   urlBtn.textContent = 'Load URL';
 
   const urlError = document.createElement('div');
   urlError.className = 'text-xs text-red-400 mt-2 hidden leading-relaxed';
-
-  urlInput.addEventListener('input', () => {
-    const url = urlInput.value.trim().toLowerCase();
-    const matched = PRESET_LABELS.find(p => url.includes(p.toLowerCase()));
-    if (matched) labelInputForUrl.value = matched;
-  });
 
   urlBtn.addEventListener('click', async () => {
     const url = urlInput.value.trim();
@@ -290,9 +277,8 @@ export function showAttachImageModal(
     urlBtn.textContent = 'Loading…';
     try {
       const dataUrl = await fetchImageAsDataURL(url);
-      const item: AttachedImage = { id: generateId(), src: dataUrl };
-      const lbl = labelInputForUrl.value.trim();
-      if (lbl) item.label = lbl;
+      const matched = PRESET_LABELS.find(p => url.toLowerCase().includes(p.toLowerCase()));
+      const item: AttachedImage = { id: generateId(), src: dataUrl, label: matched ?? 'Perspective' };
       await onSave([...current, item]);
       backdrop.remove();
     } catch (err) {
@@ -306,12 +292,8 @@ export function showAttachImageModal(
   urlInput.addEventListener('keydown', (e) => {
     if (e.key === 'Enter' && !urlBtn.disabled) urlBtn.click();
   });
-  labelInputForUrl.addEventListener('keydown', (e) => {
-    if (e.key === 'Enter' && !urlBtn.disabled) urlBtn.click();
-  });
 
   urlRow.appendChild(urlInput);
-  urlRow.appendChild(labelInputForUrl);
   urlRow.appendChild(urlBtn);
 
   urlSection.appendChild(urlLabel);
