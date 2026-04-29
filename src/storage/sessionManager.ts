@@ -692,12 +692,12 @@ export async function importSession(
   updateURL();
   notify();
 
-  // Restore the latest version's annotations into the in-memory store. The
-  // imported session is now the active context, so we replace whatever was
-  // there. (Per-version annotations live on each Version row; older 1.2 files
-  // got migrated onto the latest version above.)
-  const latestAnnotations = (latest?.annotations ?? []) as SerializedAnnotation[];
-  loadAnnotations(latestAnnotations);
+  // Note: annotations are NOT loaded here on purpose. The caller is expected to
+  // route the imported session through `loadVersionIntoEditor` (or equivalent)
+  // which will run the version's code, render the mesh, and call
+  // `applyVersionAnnotations`. Loading them twice (once here, once in the editor
+  // path) causes redundant rebuilds of the multiview offscreen renderer that
+  // can land mid-render and produce a frame that misses the annotations.
 
   return refreshedSession;
 }
