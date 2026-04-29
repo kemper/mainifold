@@ -1,6 +1,6 @@
 // Session JSON + raw code exports
 
-import { exportSession, getState, type ExportedSession } from '../storage/sessionManager';
+import { exportSession, getState, type ExportedSession, type ExportOptions } from '../storage/sessionManager';
 import { downloadBlob } from './download';
 import type { BuiltExport } from './gltf';
 
@@ -20,8 +20,11 @@ export interface BuiltSessionExport extends BuiltExport {
 }
 
 /** Build a `.partwright.json` blob for the current (or specified) session. */
-export async function buildSessionJSON(sessionId?: string): Promise<BuiltSessionExport | null> {
-  const data = await exportSession(sessionId);
+export async function buildSessionJSON(
+  sessionId?: string,
+  options?: ExportOptions,
+): Promise<BuiltSessionExport | null> {
+  const data = await exportSession(sessionId, options);
   if (!data) return null;
   const mimeType = 'application/json';
   const blob = new Blob([JSON.stringify(data, null, 2)], { type: mimeType });
@@ -37,8 +40,11 @@ export async function buildSessionJSON(sessionId?: string): Promise<BuiltSession
  * Export the current (or specified) session as a `.partwright.json` file.
  * Returns true if a download was triggered, false if no session was available.
  */
-export async function exportSessionJSON(sessionId?: string): Promise<boolean> {
-  const built = await buildSessionJSON(sessionId);
+export async function exportSessionJSON(
+  sessionId?: string,
+  options?: ExportOptions,
+): Promise<boolean> {
+  const built = await buildSessionJSON(sessionId, options);
   if (!built) return false;
   downloadBlob(built.blob, built.filename, 'Session JSON');
   return true;

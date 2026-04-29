@@ -15,11 +15,6 @@ import {
   type ImportInboxEntry,
 } from '../import/importInbox';
 
-export interface ExampleEntry {
-  code: string;
-  language: 'manifold-js' | 'scad';
-}
-
 export interface ToolbarCallbacks {
   onRun: () => void;
   onExportGLB: () => void;
@@ -31,7 +26,7 @@ export interface ToolbarCallbacks {
   onImportFile: (file: File) => void | Promise<void>;
   /** Re-import a blob already held in the inbox (e.g. recent-imports re-click). */
   onImportInboxEntry: (entry: ImportInboxEntry) => void | Promise<void>;
-  onExampleSelect: (entry: ExampleEntry) => void;
+  onOpenCatalog: () => void;
   onLanguageSwitch: (lang: 'manifold-js' | 'scad') => void;
   onGoHome: () => void;
 }
@@ -79,7 +74,6 @@ export function setToolbarLanguage(lang: 'manifold-js' | 'scad'): void {
 
 export function createToolbar(
   container: HTMLElement,
-  examples: Record<string, ExampleEntry>,
   callbacks: ToolbarCallbacks,
 ): HTMLElement {
   const toolbar = document.createElement('div');
@@ -167,36 +161,11 @@ export function createToolbar(
   spacer.className = 'flex-1';
   toolbar.appendChild(spacer);
 
-  // Example select
-  const select = document.createElement('select');
-  select.id = 'example-select';
-  select.className = 'bg-zinc-800 border border-zinc-600 rounded px-2 py-1 text-xs text-zinc-300 cursor-pointer';
-
-  const defaultOpt = document.createElement('option');
-  defaultOpt.textContent = 'Load example\u2026';
-  defaultOpt.value = '';
-  select.appendChild(defaultOpt);
-
-  for (const [name, entry] of Object.entries(examples)) {
-    const opt = document.createElement('option');
-    const displayName = name
-      .replace(/^.*\//, '')
-      .replace(/\.(js|scad)$/, '')
-      .replace(/_/g, ' ');
-    const tag = entry.language === 'scad' ? ' [SCAD]' : '';
-    opt.textContent = displayName + tag;
-    opt.value = name;
-    select.appendChild(opt);
-  }
-
-  select.addEventListener('change', () => {
-    const key = select.value;
-    if (key && examples[key]) {
-      callbacks.onExampleSelect(examples[key]);
-      select.value = '';
-    }
-  });
-  toolbar.appendChild(select);
+  // Catalog — navigates to /catalog where premade sessions are browsed.
+  const btnCatalog = createButton('btn-catalog', '\u2630 Catalog');
+  btnCatalog.title = 'Browse the catalog of premade models';
+  btnCatalog.addEventListener('click', callbacks.onOpenCatalog);
+  toolbar.appendChild(btnCatalog);
 
   // Import dropdown — mirrors the Export dropdown. Holds a "Choose file…" entry
   // (the existing OS file picker) and a "Recent Imports" section for re-import.

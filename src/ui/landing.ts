@@ -8,6 +8,7 @@ import { getTheme, onThemeChange, toggleTheme } from './theme';
 export interface LandingCallbacks {
   onOpenEditor: () => void;
   onOpenHelp: () => void;
+  onOpenCatalog: () => void;
   onOpenSession: (sessionId: string) => void;
 }
 
@@ -60,12 +61,18 @@ export async function createLandingPage(
   openEditorBtn.textContent = 'Open Editor';
   openEditorBtn.addEventListener('click', callbacks.onOpenEditor);
 
+  const catalogBtn = document.createElement('button');
+  catalogBtn.className = 'px-5 py-2 rounded-lg bg-zinc-700 hover:bg-zinc-600 text-zinc-200 text-sm font-medium transition-colors';
+  catalogBtn.textContent = 'Browse Catalog';
+  catalogBtn.addEventListener('click', callbacks.onOpenCatalog);
+
   const helpBtn = document.createElement('button');
   helpBtn.className = 'px-5 py-2 rounded-lg bg-zinc-700 hover:bg-zinc-600 text-zinc-200 text-sm font-medium transition-colors';
   helpBtn.textContent = 'How does this work?';
   helpBtn.addEventListener('click', callbacks.onOpenHelp);
 
   ctas.appendChild(openEditorBtn);
+  ctas.appendChild(catalogBtn);
   ctas.appendChild(helpBtn);
 
   hero.appendChild(title);
