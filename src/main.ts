@@ -1271,14 +1271,22 @@ async function main() {
   }
 
   let catalogEl: HTMLElement | null = null;
+  let catalogHasAppBackTarget = false;
   async function showCatalogPage(options: { history?: 'push' | 'replace' | 'none' } = {}) {
     const historyMode = options.history ?? 'push';
-    if (historyMode !== 'none') updateAppHistory('/catalog', historyMode);
+    if (historyMode !== 'none') {
+      catalogHasAppBackTarget = currentURLPathAndSearch() !== '/catalog';
+      updateAppHistory('/catalog', historyMode);
+    }
     if (!catalogEl) {
       catalogEl = await createCatalogPage(overlayContainer, {
         onBack: () => {
-          updateAppHistory('/', 'push');
-          void syncRouteFromURL();
+          if (catalogHasAppBackTarget) {
+            window.history.back();
+          } else {
+            updateAppHistory('/', 'replace');
+            void syncRouteFromURL();
+          }
         },
         onLoadEntry: handleCatalogEntryLoad,
       });
@@ -1294,10 +1302,15 @@ async function main() {
 
   // Import a catalog entry as a fresh session and navigate to the editor.
   async function handleCatalogEntryLoad(_entry: CatalogManifestEntry, payload: ExportedSession) {
+    // Push the editor history entry BEFORE importing. importSessionPayload
+    // calls openSession() internally, which uses replaceState (see
+    // sessionManager.updateURL). Without an earlier push, that replaceState
+    // would clobber whatever page we came from (e.g. /catalog) and break the
+    // browser back button.
+    updateAppHistory('/editor', 'push');
     transitionToEditor();
     await ensureEditorReady();
-    const { sessionId } = await importSessionPayload(payload);
-    updateAppHistory(`/editor?session=${sessionId}`, 'push');
+    await importSessionPayload(payload);
     updateDocumentTitle({ page: 'editor' });
   }
 
