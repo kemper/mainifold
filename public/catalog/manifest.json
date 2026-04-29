@@ -27,6 +27,13 @@
       "file": "openscad_twisted.partwright.json",
       "language": "scad",
       "description": "Twisted star column via OpenSCAD's linear_extrude."
+    },
+    {
+      "id": "retro-rocket",
+      "name": "Retro Rocket",
+      "file": "retro_rocket.partwright.json",
+      "language": "manifold-js",
+      "description": "Classic retro rocket with ogive nose cone, fins, porthole window, and thrust nozzle."
     }
   ]
 }
