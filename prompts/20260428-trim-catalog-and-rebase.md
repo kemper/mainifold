@@ -15,4 +15,4 @@ Keep only the OpenSCAD twisted, chess rook, christmas tree, and twisted vase in 
 
 Trimmed catalog to the four most visually distinct entries — kept the source files in `examples/` untouched (still useful as reference and for re-adding to the manifest later via the generator script's ENTRIES list). Updated `scripts/generate-catalog.cjs` ENTRIES to match so re-running the script preserves the curated set rather than regenerating the dropped six.
 
-Rebased onto latest staging (which now has per-version annotations and an annotation-aware Save button). No conflicts in the rebase since the catalog/export work touches different surface area.
+Rebased onto latest staging. Hit one expected conflict in `src/storage/sessionManager.ts`: staging had bumped to schema 1.3 for per-version annotations, and my branch had also bumped to 1.3 for embedded thumbnails. Resolved by promoting my addition to **schema 1.4** (additive on top of staging's 1.3) and merging both `versions[]` field additions plus both export-path code branches. Re-ran the generator so the four catalog files carry the bumped `"partwright": "1.4"` header.
