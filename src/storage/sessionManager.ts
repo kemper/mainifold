@@ -50,8 +50,12 @@ import {
  *  - `1.2` — annotations (freehand strokes + pinned text labels) included at the top
  *           level. Snapshots the in-memory annotation store at export time and is
  *           restored on import. Older readers ignore the field.
+ *  - `1.3` — annotations promoted to a per-version field (`versions[].annotations`).
+ *           Each version snapshots its own annotations, so switching versions swaps
+ *           them in. On import, files at schema 1.2 (top-level annotations) are
+ *           assigned to the latest version for back-compat.
  */
-export const SCHEMA_VERSION = '1.2';
+export const SCHEMA_VERSION = '1.3';
 
 const CURRENT_MAJOR = 1;
 
@@ -76,14 +80,20 @@ export interface ExportedSession {
      * @since 1.1
      */
     colorRegions?: SerializedColorRegion[];
+    /**
+     * Per-version snapshot of freehand strokes and pinned text labels drawn on
+     * the model to communicate intent. Promoted to a per-version field in 1.3.
+     * @since 1.3
+     */
+    annotations?: SerializedAnnotation[];
   }[];
   notes?: { text: string; timestamp: number }[];
   /**
-   * Freehand strokes and pinned text labels drawn on the model to communicate
-   * intent to AI agents working on it. Only included when exporting the
-   * currently active session (annotations live in transient module state and
-   * are not associated with non-active sessions).
-   * @since 1.2
+   * **Deprecated in 1.3** — top-level annotations were the 1.2 location.
+   * Still read on import (assigned to the latest version) for back-compat,
+   * but no longer written. New writers attach annotations per-version under
+   * `versions[].annotations`.
+   * @deprecated since 1.3
    */
   annotations?: SerializedAnnotation[];
 }
@@ -140,14 +150,28 @@ let currentState: SessionState = {
 };
 
 const listeners: StateChangeListener[] = [];
+const notesListeners: (() => void)[] = [];
 
 function notify() {
   for (const fn of listeners) fn(currentState);
   window.dispatchEvent(new CustomEvent('session-changed', { detail: currentState }));
 }
 
+function notifyNotes() {
+  for (const fn of notesListeners) fn();
+}
+
 export function onStateChange(fn: StateChangeListener): void {
   listeners.push(fn);
+}
+
+/** Subscribe to session-note mutations (add / update / delete). */
+export function onNotesChange(fn: () => void): () => void {
+  notesListeners.push(fn);
+  return () => {
+    const i = notesListeners.indexOf(fn);
+    if (i >= 0) notesListeners.splice(i, 1);
+  };
 }
 
 export function getState(): SessionState {
@@ -195,6 +219,9 @@ export async function createSession(name?: string, language?: 'manifold-js' | 's
   }
   const session = await dbCreateSession(name, language);
   currentState = { session, currentVersion: null, versionCount: 0 };
+  // Annotations are per-version; a fresh session starts empty so nothing
+  // bleeds in from the previously-active session.
+  loadAnnotations([]);
   updateURL();
   notify();
   return session;
@@ -231,6 +258,7 @@ export async function closeSession(): Promise<void> {
     await deleteIfEmpty(currentState.session.id);
   }
   currentState = { session: null, currentVersion: null, versionCount: 0 };
+  loadAnnotations([]);
   updateURL();
   notify();
 }
@@ -264,6 +292,17 @@ export async function setSessionLanguage(id: string, language: 'manifold-js' | '
 
 // === Version operations ===
 
+/** Stable structural comparison for annotation snapshots. Both are arrays of
+ *  POJOs, so JSON-stringify is the simplest "equal value" check — order is
+ *  meaningful (annotations are appended) so we don't sort. */
+function annotationsEqual(a: unknown[] | undefined, b: unknown[] | undefined): boolean {
+  const aArr = a ?? [];
+  const bArr = b ?? [];
+  if (aArr.length !== bArr.length) return false;
+  if (aArr.length === 0) return true;
+  return JSON.stringify(aArr) === JSON.stringify(bArr);
+}
+
 export async function saveVersion(
   code: string,
   geometryData: Record<string, unknown> | null,
@@ -274,8 +313,17 @@ export async function saveVersion(
 ): Promise<Version | null> {
   if (!currentState.session) return null;
 
-  // Skip if code is identical to the current version (unless forced)
-  if (!options?.force && currentState.currentVersion && currentState.currentVersion.code === code) {
+  const annotationSnapshot = serializeAnnotations();
+
+  // Skip if both code AND annotations are identical to the current version
+  // (unless forced). Annotations live per-version, so a save that only changes
+  // them must still create a new version — comparing code alone would no-op.
+  if (
+    !options?.force &&
+    currentState.currentVersion &&
+    currentState.currentVersion.code === code &&
+    annotationsEqual(currentState.currentVersion.annotations, annotationSnapshot)
+  ) {
     return null;
   }
 
@@ -286,6 +334,8 @@ export async function saveVersion(
     thumbnail,
     label,
     notes,
+    undefined,
+    annotationSnapshot,
   );
 
   currentState = {
@@ -389,7 +439,9 @@ export async function getImagesFromSession(): Promise<AttachedImage[] | null> {
 
 export async function addSessionNote(text: string): Promise<SessionNote | null> {
   if (!currentState.session) return null;
-  return dbAddNote(currentState.session.id, text);
+  const note = await dbAddNote(currentState.session.id, text);
+  notifyNotes();
+  return note;
 }
 
 export async function listSessionNotes(): Promise<SessionNote[]> {
@@ -399,10 +451,12 @@ export async function listSessionNotes(): Promise<SessionNote[]> {
 
 export async function deleteSessionNote(noteId: string): Promise<void> {
   await dbDeleteNote(noteId);
+  notifyNotes();
 }
 
 export async function updateSessionNote(noteId: string, text: string): Promise<void> {
   await dbUpdateNote(noteId, text);
+  notifyNotes();
 }
 
 // === Recent error tracking (for agentHints) ===
@@ -519,6 +573,7 @@ export async function deleteIfEmpty(sessionId: string): Promise<boolean> {
 export async function clearAllSessions(): Promise<void> {
   await clearAllData();
   currentState = { session: null, currentVersion: null, versionCount: 0 };
+  loadAnnotations([]);
   updateURL();
   notify();
 }
@@ -543,17 +598,12 @@ export async function exportSession(sessionId?: string): Promise<ExportedSession
   const versions = await dbListVersions(id);
   const notes = await dbListNotes(id);
 
-  // Annotations live in transient module state, not in the database. Only attach
-  // them when the export target is the currently active session — exporting an
-  // inactive session shouldn't pick up annotations belonging to a different model.
-  const isActive = currentState.session?.id === id;
-  const annotations = isActive ? serializeAnnotations() : [];
-
   return {
     partwright: SCHEMA_VERSION,
     session: { name: session.name, created: session.created, updated: session.updated, images: session.images ?? null, ...(session.language ? { language: session.language } : {}) },
     versions: versions.map(v => {
       const colorRegions = extractColorRegions(v.geometryData);
+      const versionAnnotations = (v.annotations ?? []) as SerializedAnnotation[];
       return {
         index: v.index,
         code: v.code,
@@ -562,10 +612,10 @@ export async function exportSession(sessionId?: string): Promise<ExportedSession
         timestamp: v.timestamp,
         ...(v.notes ? { notes: v.notes } : {}),
         ...(colorRegions ? { colorRegions } : {}),
+        ...(versionAnnotations.length > 0 ? { annotations: versionAnnotations } : {}),
       };
     }),
     ...(notes.length > 0 ? { notes: notes.map(n => ({ text: n.text, timestamp: n.timestamp })) } : {}),
-    ...(annotations.length > 0 ? { annotations } : {}),
   };
 }
 
@@ -590,6 +640,11 @@ export async function importSession(
     await dbUpdateSession(session.id, { images: imagesArr });
   }
 
+  // Determine the index of the latest exported version. Schema 1.2 stored
+  // annotations at the top level; for back-compat we attach them to whichever
+  // version was most recent at export time (assumed to be the highest index).
+  const latestExportedIndex = data.versions.reduce((m, v) => Math.max(m, v.index), -Infinity);
+
   for (const v of data.versions) {
     // Normalize color regions: prefer the explicit (1.1+) field; fall back to the legacy
     // nested location (`geometryData.colorRegions`) for pre-1.1 files. Mirror the result
@@ -608,7 +663,24 @@ export async function importSession(
     if (regenerateThumbnail) {
       thumbnail = await regenerateThumbnail(v.code);
     }
-    await dbSaveVersion(session.id, v.code, geometryData, thumbnail, v.label, v.notes, v.timestamp);
+
+    // Annotations: prefer the per-version field (1.3+). Fall back to the
+    // top-level field (1.2) attached to the latest exported version only.
+    let versionAnnotations: SerializedAnnotation[] | undefined = v.annotations;
+    if (!versionAnnotations && data.annotations && data.annotations.length > 0 && v.index === latestExportedIndex) {
+      versionAnnotations = data.annotations;
+    }
+
+    await dbSaveVersion(
+      session.id,
+      v.code,
+      geometryData,
+      thumbnail,
+      v.label,
+      v.notes,
+      v.timestamp,
+      versionAnnotations,
+    );
   }
 
   // Restore session notes
@@ -633,11 +705,12 @@ export async function importSession(
   updateURL();
   notify();
 
-  // Restore annotations into the in-memory store. This replaces any existing
-  // annotations — the imported session is now the active context.
-  if (data.annotations && data.annotations.length > 0) {
-    loadAnnotations(data.annotations);
-  }
+  // Restore the latest version's annotations into the in-memory store. The
+  // imported session is now the active context, so we replace whatever was
+  // there. (Per-version annotations live on each Version row; older 1.2 files
+  // got migrated onto the latest version above.)
+  const latestAnnotations = (latest?.annotations ?? []) as SerializedAnnotation[];
+  loadAnnotations(latestAnnotations);
 
   return refreshedSession;
 }

@@ -129,6 +129,18 @@ await partwright.setActiveLanguage(lang) // Switch engine + editor mode ('manifo
 partwright.toggleClip(on?)     // Toggle 3D clipping plane -> {enabled, z, min, max}
 partwright.setClipZ(z)         // Set clip height -> {enabled, z, min, max}
 partwright.getClipState()      // -> {enabled, z, min, max}
+
+// Viewport controls
+partwright.setGridVisible(on?)       // Show/hide grid plane (omit to toggle) -> boolean
+partwright.isGridVisible()           // Whether grid plane is visible
+partwright.setDimensionsVisible(on?) // Show/hide bounding box dimensions (omit to toggle) -> boolean
+partwright.areDimensionsVisible()    // Whether dimensions overlay is visible
+partwright.setOrbitLock(on?)         // Lock/unlock camera rotation (omit to toggle) -> boolean
+partwright.isOrbitLocked()           // Whether camera orbit is locked
+partwright.setTheme('dark'|'light')  // Set color theme
+partwright.getTheme()                // -> 'dark' or 'light'
+partwright.setAutoRun(enabled)       // Enable/disable auto-render on code edit
+partwright.isAutoRunEnabled()        // Whether auto-run is active
 await partwright.exportGLB()   // Download GLB (browser file dialog -- prefer exportGLBData() in agent flows)
 partwright.exportSTL()         // Download STL ("                                       exportSTLData() ")
 partwright.exportOBJ()         // Download OBJ ("                                       exportOBJData() ")
@@ -178,8 +190,10 @@ await partwright.listSessions()          // -> [{id, name, updated}]
 await partwright.openSession(id)         // Open existing session
 await partwright.clearAllSessions()      // Delete all sessions & versions
 
-// Color regions -- tag coplanar face regions with a color (see #color-regions)
-partwright.paintRegion({point, normal, color, name?, tolerance?}) // -> {id, name, triangles} or {error}
+// Color regions -- tag face regions with a color (see #color-regions)
+partwright.paintRegion({point, normal, color, name?, tolerance?}) // bucket: coplanar flood-fill -> {id, name, triangles} or {error}
+partwright.paintFaces({triangleIds, color, name?})                // brush: paint specific triangle indices -> {id, name, triangles} or {error}
+partwright.paintSlab({axis|normal, offset, thickness, color, name?}) // slab: paint a planar range -> {id, name, triangles} or {error}
 partwright.listRegions()                 // -> [{id, name, color, source, triangles, order}, ...]
 partwright.clearColors()                 // Remove all regions
 
@@ -423,6 +437,41 @@ partwright.clearColors()    // remove all regions
 ```
 
 **How face matching works.** `paintRegion` flood-fills outward from the seed triangle, including any neighbor whose normal is within `tolerance` of the seed's. Pick `point` slightly inside the model surface and pass the outward-pointing `normal` -- the seed resolver looks for the triangle whose plane the point lies on and whose normal aligns with yours.
+
+**Other paint tools.**
+
+```js
+// Brush: paint specific triangle indices (no flood-fill).
+// Use partwright.getGeometry() to find triangle indices, or capture them from
+// hover during a UI-driven paint session.
+partwright.paintFaces({
+  triangleIds: [12, 13, 14, 27],
+  color: [0, 0.6, 1],
+  name: "Inset detail",
+});
+
+// Slab: paint every face whose centroid falls inside a planar slab.
+// Axis-aligned slab (most common — pick X/Y/Z and slide along that axis):
+partwright.paintSlab({
+  axis: "z",
+  offset: 0,           // slab spans Z in [offset, offset + thickness]
+  thickness: 5,
+  color: [1, 0.4, 0],
+  name: "Bottom 5mm",
+});
+
+// Tilted/oblique slab — pass an arbitrary normal vector. Doesn't need to be
+// unit-length; it gets normalized. The slab is the set of points P satisfying
+// offset <= P · normal <= offset + thickness.
+partwright.paintSlab({
+  normal: [1, 0, 1],   // 45° between +X and +Z
+  offset: 0,
+  thickness: 8,
+  color: [0.8, 0, 0.5],
+});
+```
+
+**Bucket tolerance.** `paintRegion`'s `tolerance` is a cosine threshold for the bend angle between adjacent faces (default `0.9995`, ≈ 1.8°). The flood-fill crosses an edge only when the bend at that edge is below the angle threshold — checked between the *parent* face and each *neighbor*, not against the seed. This means flood-fill follows curved surfaces: a 32-sided cylinder bends ~11° per face, so any tolerance ≥ cos(11°) ≈ `0.98` covers the whole cylinder. Set tolerance to `-1` (180°) to paint the entire connected mesh. The Paint UI exposes the same control as a slider labeled in degrees (0°–180°).
 
 **Editor lock.** When color regions exist, the editor is locked (the model can't be re-run, because new geometry would invalidate the saved triangle indices). To edit code, the user clicks "Unlock to edit" in the UI. Agents that need to iterate on the geometry should call `clearColors()` first, or fork a new uncolored version with `forkVersion`.
 
@@ -798,9 +847,14 @@ overlay). Two kinds of annotations:
 - **Text labels** placed with the text sub-mode -- pinned to a 3D anchor on the surface and
   rendered as a screen-facing label (so they stay readable from any angle).
 
-Both kinds are **not part of the model** -- they're an ephemeral, in-memory visual layer that
+Both kinds are **not part of the model** -- they're a visual feedback layer that
 survives orbiting and appears in **every** rendered output: the live viewport, `renderView()`
 output, the AI Views tab, and the Elevations tab.
+
+**Lifecycle**: annotations are scoped to the current version. `runAndSave` /
+`saveVersion` snapshots the current annotations into the new version, and
+`loadVersion` / `navigateVersion` swap them back in when you return. Unsaved
+annotations are dropped when you switch versions -- same as unsaved code.
 
 When the user has annotated, treat the marks as a directional cue tied to the geometry under
 them. Inspect them via `listAnnotations()` / `listTextAnnotations()`, infer which feature is
@@ -836,10 +890,10 @@ Each stroke and text label records its own color/width/font-size at creation, so
 active settings only affects new annotations.
 
 Annotations are intentionally separate from `paintRegion` colorization:
-- **Annotations** are floating visual marks on top of the surface -- ephemeral, not exported,
-  do not lock the editor.
+- **Annotations** are floating visual marks on top of the surface -- per-version, included in
+  session exports (`.partwright.json`), but do not modify the model geometry or lock the editor.
 - **Color regions** (`paintRegion`) modify the model's vertex colors -- persist with the
-  version, export with the model, and lock the editor while present.
+  version, export with the model (GLB/3MF), and lock the editor while present.
 
 ## Stat-based verification
 

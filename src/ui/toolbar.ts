@@ -41,9 +41,18 @@ export const IMPORT_ACCEPT = '.partwright.json,.json,.js,.scad';
 
 let _autoRun = true;
 let _onAutoRunChange: ((on: boolean) => void) | null = null;
+let _syncAutoRunUI: (() => void) | null = null;
 
 /** Whether auto-run on edit is enabled */
 export function isAutoRun(): boolean { return _autoRun; }
+
+/** Programmatically set auto-run state (also syncs the toolbar button UI) */
+export function setAutoRun(enabled: boolean): void {
+  if (_autoRun === enabled) return;
+  _autoRun = enabled;
+  _syncAutoRunUI?.();
+  if (_onAutoRunChange) _onAutoRunChange(_autoRun);
+}
 
 /** Register a callback for when auto-run state changes */
 export function onAutoRunChange(cb: (on: boolean) => void): void { _onAutoRunChange = cb; }
@@ -111,6 +120,7 @@ export function createToolbar(
       btnRun.classList.remove('hidden');
     }
   }
+  _syncAutoRunUI = syncAutoRunUI;
 
   autoRunBtn.addEventListener('click', () => {
     _autoRun = !_autoRun;

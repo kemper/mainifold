@@ -3,6 +3,7 @@
 import {
   getState,
   onStateChange,
+  onNotesChange,
   createSession,
   closeSession,
   saveVersion,
@@ -10,6 +11,8 @@ import {
   renameSession,
   type SessionState,
 } from '../storage/sessionManager';
+import { onChange as onColorRegionsChange } from '../color/regions';
+import { onChange as onAnnotationStrokesChange } from '../annotations/annotations';
 
 export interface SessionBarCallbacks {
   onSaveVersion: () => Promise<{ code: string; geometryData: Record<string, unknown> | null; thumbnail: Blob | null }>;
@@ -31,6 +34,13 @@ export function createSessionBar(container: HTMLElement, cb: SessionBarCallbacks
   barEl = bar;
   render(getState());
   onStateChange(render);
+
+  // Re-render when paint regions, annotations, or notes change so the Save
+  // button reflects current dirty state and is clickable after these edits.
+  const refresh = () => render(getState());
+  onColorRegionsChange(refresh);
+  onAnnotationStrokesChange(refresh);
+  onNotesChange(refresh);
 
   container.appendChild(bar);
   return bar;
@@ -134,19 +144,34 @@ function render(state: SessionState) {
 
   barEl.appendChild(el('span', 'text-zinc-600', '|'));
 
-  // Save version (with guard against double-click)
+  // Save version (with guard against double-click).
+  // The button must be re-enabled in finally so it doesn't get stuck disabled
+  // when saveVersion silently skips a code-identical save (e.g. clicking save
+  // after only painting, annotating, or adding notes — none of which mutate
+  // the code text). Force=true when colors differ so paint-only changes still
+  // create a new version.
   let saving = false;
   const saveBtn = btn('\uD83D\uDCBE Save', async () => {
     if (saving) return;
     saving = true;
     saveBtn.disabled = true;
-    saveBtn.className += ' opacity-50';
+    saveBtn.classList.add('opacity-50');
     try {
       const data = await callbacks.onSaveVersion();
       const label = `v${state.versionCount + 1}`;
-      await saveVersion(data.code, data.geometryData, data.thumbnail, label);
+      const force = colorRegionsDiffer(state.currentVersion?.geometryData, data.geometryData);
+      await saveVersion(
+        data.code,
+        data.geometryData,
+        data.thumbnail,
+        label,
+        undefined,
+        force ? { force: true } : undefined,
+      );
     } finally {
       saving = false;
+      saveBtn.disabled = false;
+      saveBtn.classList.remove('opacity-50');
     }
   });
   saveBtn.id = 'btn-save-version';
@@ -170,6 +195,15 @@ function el(tag: string, className: string, text: string): HTMLElement {
   e.className = className;
   e.textContent = text;
   return e;
+}
+
+function colorRegionsDiffer(
+  oldGeo: Record<string, unknown> | null | undefined,
+  newGeo: Record<string, unknown> | null | undefined,
+): boolean {
+  const oldColors = (oldGeo as Record<string, unknown> | null | undefined)?.colorRegions ?? null;
+  const newColors = (newGeo as Record<string, unknown> | null | undefined)?.colorRegions ?? null;
+  return JSON.stringify(oldColors) !== JSON.stringify(newColors);
 }
 
 function btn(text: string, onClick: () => void): HTMLButtonElement {

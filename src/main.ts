@@ -7,7 +7,7 @@ import { generateId } from './storage/db';
 import { setPhantom, clearPhantom, hasPhantom, type PhantomOptions } from './renderer/phantomGeometry';
 import { initEditor, setValue, getValue, setLanguage as setEditorLanguage, setEditorDiagnostics, clearEditorDiagnostics, revealFirstDiagnostic } from './editor/codeEditor';
 import { createLayout, type TabName } from './ui/layout';
-import { createToolbar, isAutoRun, setToolbarLanguage } from './ui/toolbar';
+import { createToolbar, isAutoRun, setAutoRun, setToolbarLanguage } from './ui/toolbar';
 import { createLandingPage } from './ui/landing';
 import { createHelpPage } from './ui/help';
 import { createNotFoundPage } from './ui/notFound';
@@ -49,7 +49,8 @@ import { checkContainment, type ContainmentWarning } from './geometry/containmen
 import { setUnits as _setUnits, getUnits as _getUnits, type UnitSystem } from './geometry/units';
 import { initMeasureTool, activate as activateMeasure, deactivate as deactivateMeasure, getState as getMeasureState } from './ui/measureTool';
 import { maybeStartTour, resetTour, startTour } from './ui/tour';
-import { initTheme } from './ui/theme';
+import { initTheme, getTheme, setTheme } from './ui/theme';
+import type { Theme } from './ui/theme';
 import { initPaintUI, isPaintOpen, forceDeactivate as closePaintMenu } from './color/paintUI';
 import { updatePaintMesh, setOnRegionPainted, isActive as isPaintActive } from './color/paintMode';
 import { initAnnotateUI, isAnnotateOpen, closeMenu as closeAnnotateMenu } from './annotations/annotateUI';
@@ -61,9 +62,11 @@ import {
   clearStrokes as clearStrokesStore,
   clearTexts as clearTextsStore,
   clearAll as clearAllAnnotations,
+  loadFromSerialized as loadAnnotations,
   removeLastAnnotation,
   removeAnnotationById,
   onChange as onAnnotationStrokesChange,
+  type SerializedAnnotation,
 } from './annotations/annotations';
 import {
   setAnnotationsVisible as setAnnotationsVisibleOverlay,
@@ -76,6 +79,7 @@ import { restoreView as restoreAnnotationViewById } from './annotations/selectMo
 import { applyTriColors, applyTriColorsIfVisible, hasRegions as hasColorRegions, onChange as onColorRegionsChange, onVisibilityChange as onPaintVisibilityChange, clearRegions, serialize as serializeRegions, addRegion, getRegions, type SerializedColorRegion } from './color/regions';
 import { initEditorLock, syncLockState, setUnlockHandlers } from './color/editorLock';
 import { buildAdjacency, findCoplanarRegion, resolveSeed } from './color/adjacency';
+import { findSlabTriangles } from './color/slabPaint';
 import {
   getSessionIdFromURL,
   getVersionFromURL,
@@ -455,6 +459,14 @@ function getGeometryDataObj(): Record<string, unknown> | null {
   }
 }
 
+/** Swap the in-memory annotation store to the version's snapshot.
+ *  Treats absence as "empty", so navigating to a version without annotations
+ *  clears any that were on screen for the previously-active version. */
+function applyVersionAnnotations(version: Version | null | undefined): void {
+  const snapshot = (version?.annotations ?? []) as SerializedAnnotation[];
+  loadAnnotations(snapshot);
+}
+
 /** Rehydrate color regions from a version's geometryData.
  *  Rebuilds adjacency + BFS for coplanar descriptors against the current mesh. */
 function rehydrateColorRegions(geometryData: Record<string, unknown> | null): void {
@@ -478,6 +490,9 @@ function rehydrateColorRegions(geometryData: Record<string, unknown> | null): vo
       }
     } else if (region.descriptor.kind === 'triangles') {
       triangles = new Set(region.descriptor.ids);
+    } else if (region.descriptor.kind === 'slab') {
+      const { normal, offset, thickness } = region.descriptor;
+      triangles = findSlabTriangles(mesh, normal, offset, thickness);
     }
 
     if (triangles.size > 0) {
@@ -1013,6 +1028,7 @@ async function main() {
       if (loadedVersion) {
         rehydrateColorRegions(loadedVersion.geometryData);
       }
+      applyVersionAnnotations(loadedVersion);
     },
     onOpenSessionList: () => showSessionList(),
     onNewSession: () => {
@@ -1033,11 +1049,12 @@ async function main() {
   createGalleryView(galleryContainer, async (code: string) => {
     setValue(code);
     await runCodeSync(code);
-    // Rehydrate color regions from the loaded version
+    // Rehydrate color regions and annotations from the loaded version
     const loadedVersion = getState().currentVersion;
     if (loadedVersion) {
       rehydrateColorRegions(loadedVersion.geometryData);
     }
+    applyVersionAnnotations(loadedVersion);
     switchTab('interactive');
   });
 
@@ -1124,6 +1141,7 @@ async function main() {
     setValue(version.code);
     await runCodeSync(version.code);
     rehydrateColorRegions(version.geometryData);
+    applyVersionAnnotations(version);
     const sessionImages = await getImagesFromSession();
     if (sessionImages) {
       _setImages(sessionImages);
@@ -1851,6 +1869,73 @@ async function main() {
       return getClipState();
     },
 
+    // === Viewport controls API ===
+
+    /** Show or hide the grid plane. Pass a boolean to set, omit to toggle. */
+    setGridVisible(visible?: boolean): boolean {
+      assertBoolean(visible, 'setGridVisible(visible)', { optional: true });
+      const on = visible ?? !isGridVisible();
+      setGridVisible(on);
+      return isGridVisible();
+    },
+
+    /** Whether the grid plane is currently visible */
+    isGridVisible(): boolean {
+      return isGridVisible();
+    },
+
+    /** Show or hide the bounding box dimension overlays. Pass a boolean to set, omit to toggle. */
+    setDimensionsVisible(visible?: boolean): boolean {
+      assertBoolean(visible, 'setDimensionsVisible(visible)', { optional: true });
+      const on = visible ?? !isDimensionsVisible();
+      setDimensionsVisible(on);
+      return isDimensionsVisible();
+    },
+
+    /** Whether bounding box dimensions are currently visible */
+    areDimensionsVisible(): boolean {
+      return isDimensionsVisible();
+    },
+
+    /** Lock or unlock camera orbit rotation. Pass a boolean to set, omit to toggle. */
+    setOrbitLock(locked?: boolean): boolean {
+      assertBoolean(locked, 'setOrbitLock(locked)', { optional: true });
+      const on = locked ?? !isUserOrbitLocked();
+      setUserOrbitLock(on);
+      return isUserOrbitLocked();
+    },
+
+    /** Whether camera orbit is currently locked */
+    isOrbitLocked(): boolean {
+      return isUserOrbitLocked();
+    },
+
+    // === Theme API ===
+
+    /** Set the color theme. */
+    setTheme(theme: Theme): void {
+      assertEnum(theme, ['dark', 'light'], 'setTheme(theme)');
+      setTheme(theme);
+    },
+
+    /** Get the current color theme */
+    getTheme(): Theme {
+      return getTheme();
+    },
+
+    // === Auto-run API ===
+
+    /** Enable or disable auto-run (re-render on edit). */
+    setAutoRun(enabled: boolean): void {
+      assertBoolean(enabled, 'setAutoRun(enabled)');
+      setAutoRun(enabled);
+    },
+
+    /** Whether auto-run is currently enabled */
+    isAutoRunEnabled(): boolean {
+      return isAutoRun();
+    },
+
     // === View rendering API ===
 
     /** Render a single view from any camera angle. Returns a data URL (PNG).
@@ -2070,6 +2155,7 @@ async function main() {
       setValue(version.code);
       await runCodeSync(version.code);
       rehydrateColorRegions(version.geometryData);
+      applyVersionAnnotations(version);
       return {
         id: version.id,
         index: version.index,
@@ -2088,6 +2174,7 @@ async function main() {
         setValue(version.code);
         await runCodeSync(version.code);
         rehydrateColorRegions(version.geometryData);
+        applyVersionAnnotations(version);
       }
       return version ? { id: version.id, index: version.index, label: version.label } : null;
     },
@@ -2870,6 +2957,87 @@ async function main() {
       return { id: region.id, name: region.name, triangles: triangles.size };
     },
 
+    /** Paint a specific set of triangle indices as a single region.
+     *  Useful for paintbrush-style selections produced programmatically. */
+    paintFaces(opts: { triangleIds: number[]; color: [number, number, number]; name?: string }) {
+      if (!currentMeshData) return { error: 'No geometry loaded' };
+      if (!opts || typeof opts !== 'object') return { error: 'paintFaces requires {triangleIds, color}' };
+      const { triangleIds, color, name } = opts;
+      if (!Array.isArray(triangleIds) || triangleIds.length === 0) return { error: 'triangleIds must be a non-empty array of integers' };
+      if (!Array.isArray(color) || color.length !== 3) return { error: 'color must be [r,g,b] with values 0..1' };
+
+      const numTri = currentMeshData.numTri;
+      const ids: number[] = [];
+      for (const id of triangleIds) {
+        if (typeof id !== 'number' || !Number.isInteger(id) || id < 0 || id >= numTri) {
+          return { error: `triangleIds contains invalid index ${id} (expected 0..${numTri - 1})` };
+        }
+        ids.push(id);
+      }
+
+      const triangles = new Set<number>(ids);
+      const regionName = name ?? `Region ${getRegions().length + 1}`;
+      const region = addRegion(
+        regionName,
+        color as [number, number, number],
+        'paintbrush',
+        { kind: 'triangles', ids: [...triangles] },
+        triangles,
+      );
+
+      const colored = applyTriColorsIfVisible(currentMeshData);
+      updateMesh(colored, { skipAutoFrame: true });
+      updateMultiView(colored);
+      syncLockState();
+
+      return { id: region.id, name: region.name, triangles: triangles.size };
+    },
+
+    /** Paint a slab — all faces whose centroid falls inside a planar slab.
+     *  `axis` is shorthand for axis-aligned slabs ('x'/'y'/'z'). For oblique
+     *  slabs, pass `normal` directly (does not need to be normalized). */
+    paintSlab(opts: { axis?: 'x' | 'y' | 'z'; normal?: [number, number, number]; offset: number; thickness: number; color: [number, number, number]; name?: string }) {
+      if (!currentMeshData) return { error: 'No geometry loaded' };
+      if (!opts || typeof opts !== 'object') return { error: 'paintSlab requires {axis|normal, offset, thickness, color}' };
+      const { axis, normal: rawNormal, offset, thickness, color, name } = opts;
+
+      let normal: [number, number, number];
+      if (axis !== undefined) {
+        if (axis !== 'x' && axis !== 'y' && axis !== 'z') return { error: "axis must be 'x', 'y', or 'z'" };
+        normal = axis === 'x' ? [1, 0, 0] : axis === 'y' ? [0, 1, 0] : [0, 0, 1];
+      } else if (Array.isArray(rawNormal) && rawNormal.length === 3) {
+        const [nx, ny, nz] = rawNormal;
+        const len = Math.hypot(nx, ny, nz);
+        if (!Number.isFinite(len) || len === 0) return { error: 'normal must be a non-zero 3-vector' };
+        normal = [nx / len, ny / len, nz / len];
+      } else {
+        return { error: 'paintSlab requires either axis (x|y|z) or normal [nx,ny,nz]' };
+      }
+
+      if (typeof offset !== 'number' || !Number.isFinite(offset)) return { error: 'offset must be a finite number' };
+      if (typeof thickness !== 'number' || !Number.isFinite(thickness) || thickness <= 0) return { error: 'thickness must be a positive finite number' };
+      if (!Array.isArray(color) || color.length !== 3) return { error: 'color must be [r,g,b] with values 0..1' };
+
+      const triangles = findSlabTriangles(currentMeshData, normal, offset, thickness);
+      if (triangles.size === 0) return { error: 'No triangles found inside the slab' };
+
+      const regionName = name ?? `Region ${getRegions().length + 1}`;
+      const region = addRegion(
+        regionName,
+        color as [number, number, number],
+        'slab',
+        { kind: 'slab', normal, offset, thickness },
+        triangles,
+      );
+
+      const colored = applyTriColorsIfVisible(currentMeshData);
+      updateMesh(colored, { skipAutoFrame: true });
+      updateMultiView(colored);
+      syncLockState();
+
+      return { id: region.id, name: region.name, triangles: triangles.size };
+    },
+
     /** List all color regions on the current geometry */
     listRegions() {
       return getRegions().map(r => ({
@@ -3103,6 +3271,17 @@ async function main() {
         'renderView':      { signature: 'renderView({elevation?, azimuth?, ortho?, size?}) -- Render from any angle -> data URL', docs: '/ai.md#visual-verification' },
         'analyzeProfile':  { signature: 'analyzeProfile(sampleCount?) -- Z-profile feature summary', docs: '/ai.md#console-api--windowpartwright' },
         'measureAt':       { signature: 'measureAt([x,y]) -- Ray-cast probe at XY -> {hits, thickness, topZ, bottomZ}', docs: '/ai.md#console-api--windowpartwright' },
+        // Viewport controls
+        'setGridVisible':       { signature: 'setGridVisible(on?) -- Show/hide grid plane (omit to toggle) -> boolean', docs: '/ai.md#viewport-controls' },
+        'isGridVisible':        { signature: 'isGridVisible() -- Whether grid plane is visible', docs: '/ai.md#viewport-controls' },
+        'setDimensionsVisible': { signature: 'setDimensionsVisible(on?) -- Show/hide bounding box dimensions (omit to toggle) -> boolean', docs: '/ai.md#viewport-controls' },
+        'areDimensionsVisible': { signature: 'areDimensionsVisible() -- Whether dimensions overlay is visible', docs: '/ai.md#viewport-controls' },
+        'setOrbitLock':         { signature: 'setOrbitLock(on?) -- Lock/unlock camera rotation (omit to toggle) -> boolean', docs: '/ai.md#viewport-controls' },
+        'isOrbitLocked':        { signature: 'isOrbitLocked() -- Whether camera orbit is locked', docs: '/ai.md#viewport-controls' },
+        'setTheme':             { signature: 'setTheme("dark"|"light") -- Set color theme', docs: '/ai.md#viewport-controls' },
+        'getTheme':             { signature: 'getTheme() -- Current color theme', docs: '/ai.md#viewport-controls' },
+        'setAutoRun':           { signature: 'setAutoRun(enabled) -- Enable/disable auto-render on edit', docs: '/ai.md#viewport-controls' },
+        'isAutoRunEnabled':     { signature: 'isAutoRunEnabled() -- Whether auto-run is active', docs: '/ai.md#viewport-controls' },
         // View
         'setView':         { signature: 'setView(tab) -- Switch tab: "interactive", "ai", "elevations", "gallery", "diff"', docs: '/ai.md#view-tabs' },
         'getViewState':    { signature: 'getViewState() -- Current tab and camera state', docs: '/ai.md#view-tabs' },
