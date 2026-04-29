@@ -22,15 +22,9 @@ const BASE_URL = process.argv[2] || 'http://localhost:5173';
 
 // Ordered manifest. Keep this list in sync with examples/ when adding new ones.
 const ENTRIES = [
-  { id: 'basic-shapes',     name: 'Basic Shapes',     file: 'basic_shapes.partwright.json',     language: 'manifold-js', source: 'basic_shapes.js',     description: 'A cube with a cylindrical hole — boolean subtraction primer.' },
-  { id: 'boolean-demo',     name: 'Boolean Demo',     file: 'boolean_demo.partwright.json',     language: 'manifold-js', source: 'boolean_demo.js',     description: 'Sphere ∩ cube with cylindrical holes along three axes.' },
   { id: 'twisted-vase',     name: 'Twisted Vase',     file: 'twisted_vase.partwright.json',     language: 'manifold-js', source: 'twisted_vase.js',     description: 'Stacked rotated rings forming a hex-faceted twisted profile.' },
   { id: 'christmas-tree',   name: 'Christmas Tree',   file: 'christmas_tree.partwright.json',   language: 'manifold-js', source: 'christmas_tree.js',   description: 'Low-poly tiered tree with a stellated octahedron star on top.' },
-  { id: 'desk-organizer',   name: 'Desk Organizer',   file: 'desk_organizer.partwright.json',   language: 'manifold-js', source: 'desk_organizer.js',   description: 'Rounded base with three pen holders and a wide compartment.' },
-  { id: 'l-bracket',        name: 'L Bracket',        file: 'l_bracket.partwright.json',        language: 'manifold-js', source: 'l_bracket.js',        description: 'L-bracket with inner fillet and four mounting holes.' },
-  { id: 'spur-gear',        name: 'Spur Gear',        file: 'spur_gear.partwright.json',        language: 'manifold-js', source: 'spur_gear.js',        description: 'Involute spur gear — 16 teeth, module 2, with a center bore.' },
   { id: 'chess-rook',       name: 'Chess Rook',       file: 'chess_rook.partwright.json',       language: 'manifold-js', source: 'chess_rook.js',       description: 'Hollow chess rook with crenellations cut from the parapet.' },
-  { id: 'openscad-basic',   name: 'OpenSCAD: Basic',  file: 'openscad_basic.partwright.json',   language: 'scad',         source: 'openscad_basic.scad',  description: 'Same boolean demo, written in OpenSCAD syntax.' },
   { id: 'openscad-twisted', name: 'OpenSCAD: Twisted', file: 'openscad_twisted.partwright.json', language: 'scad',         source: 'openscad_twisted.scad', description: 'Twisted star column via OpenSCAD\'s linear_extrude.' },
 ];
 

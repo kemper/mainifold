@@ -1,20 +1,6 @@
 {
   "entries": [
     {
-      "id": "basic-shapes",
-      "name": "Basic Shapes",
-      "file": "basic_shapes.partwright.json",
-      "language": "manifold-js",
-      "description": "A cube with a cylindrical hole — boolean subtraction primer."
-    },
-    {
-      "id": "boolean-demo",
-      "name": "Boolean Demo",
-      "file": "boolean_demo.partwright.json",
-      "language": "manifold-js",
-      "description": "Sphere ∩ cube with cylindrical holes along three axes."
-    },
-    {
       "id": "twisted-vase",
       "name": "Twisted Vase",
       "file": "twisted_vase.partwright.json",
@@ -29,39 +15,11 @@
       "description": "Low-poly tiered tree with a stellated octahedron star on top."
     },
     {
-      "id": "desk-organizer",
-      "name": "Desk Organizer",
-      "file": "desk_organizer.partwright.json",
-      "language": "manifold-js",
-      "description": "Rounded base with three pen holders and a wide compartment."
-    },
-    {
-      "id": "l-bracket",
-      "name": "L Bracket",
-      "file": "l_bracket.partwright.json",
-      "language": "manifold-js",
-      "description": "L-bracket with inner fillet and four mounting holes."
-    },
-    {
-      "id": "spur-gear",
-      "name": "Spur Gear",
-      "file": "spur_gear.partwright.json",
-      "language": "manifold-js",
-      "description": "Involute spur gear — 16 teeth, module 2, with a center bore."
-    },
-    {
       "id": "chess-rook",
       "name": "Chess Rook",
       "file": "chess_rook.partwright.json",
       "language": "manifold-js",
       "description": "Hollow chess rook with crenellations cut from the parapet."
-    },
-    {
-      "id": "openscad-basic",
-      "name": "OpenSCAD: Basic",
-      "file": "openscad_basic.partwright.json",
-      "language": "scad",
-      "description": "Same boolean demo, written in OpenSCAD syntax."
     },
     {
       "id": "openscad-twisted",
