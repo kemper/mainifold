@@ -17,6 +17,7 @@ Partwright is a browser-based parametric CAD tool with two modeling engines: **m
 - [Common pitfalls for boolean operations](#common-pitfalls-for-boolean-operations)
 - [Print-safe geometry](#print-safe-geometry)
 - [Color regions](#color-regions)
+- [Common gotchas](#common-gotchas)
 - [AI-friendly file I/O](#ai-friendly-file-io)
 - [Images](#images)
 - [Photo-to-model workflow](#photo-to-model-workflow) (optional tooling)
@@ -191,13 +192,18 @@ await partwright.openSession(id)         // Open existing session
 await partwright.clearAllSessions()      // Delete all sessions & versions
 
 // Color regions -- tag face regions with a color (see #color-regions)
-partwright.paintRegion({point, normal, color, name?, tolerance?})         // bucket: coplanar flood-fill -> {id, name, triangles} or {error}
+partwright.paintRegion({point, normal, color, name?, tolerance?})         // bucket: coplanar flood-fill -> {id, name, triangles} or {error, nearest?}
 partwright.paintNearestRegion({point, color, searchRadius?, name?, tolerance?}) // snap seed to nearest face, then flood-fill -> {id, name, triangles, snappedTo} or {error}
+partwright.paintNear({point, radius, normalCone?, color, name?})          // sphere: paint triangles whose centroid is within radius -> {id, name, triangles, bbox, centroid} or {error}
+partwright.paintInBox({box, normalCone?, color, name?})                   // box: paint triangles inside an AABB -> {id, name, triangles, bbox, centroid} or {error}
 partwright.paintFaces({triangleIds, color, name?})                        // brush: paint specific triangle indices -> {id, name, triangles} or {error}
 partwright.paintSlab({axis|normal, offset, thickness, color, name?})      // slab: paint a planar range -> {id, name, triangles} or {error}
+partwright.paintPreview({box?|point+radius?|triangleIds?, normalCone?, view?}) // dry-run: highlight a candidate region -> {thumbnail, triangleCount, bbox, centroid} (does not commit)
+partwright.assertPaint({region, expectedTriangleCount?, expectedBoundingBox?, expectedCentroid?}) // verify a region -> {passed, failures?}
 partwright.findFaces({box?, normal?, normalTolerance?, color?, region?, maxResults?}) // query triangle ids by geometry/color -> {triangleIds, count, matched, truncated}
+partwright.getMesh()                     // -> {numVert, numTri, vertices, triangles, normals, centroids, boundingBox} (typed arrays)
 partwright.getMeshSummary({tolerance?, minTriangles?, maxTrianglesPerGroup?, maxGroups?}?) // -> {groups[{id, normal, centroid, area, triangleCount, bbox, triangleIds}], totalTriangles, groupCount, tolerance}
-partwright.listRegions()                 // -> [{id, name, color, source, triangles, order}, ...]
+partwright.listRegions()                 // -> [{id, name, color, source, triangles, order, bbox, centroid}, ...]
 partwright.clearColors()                 // Remove all regions
 
 // Notes -- track design context, decisions, and measurements
@@ -441,6 +447,14 @@ partwright.clearColors()    // remove all regions
 
 **How face matching works.** `paintRegion` flood-fills outward from the seed triangle, including any neighbor whose normal is within `tolerance` of the seed's. Pick `point` slightly inside the model surface and pass the outward-pointing `normal` -- the seed resolver looks for the triangle whose plane the point lies on and whose normal aligns with yours.
 
+**Diagnostic on failure.** When `paintRegion` can't resolve a seed, the returned `error` string includes the position and normal of the *nearest* triangle, the angle off your requested normal, and a suggested tolerance value that would accept it. The same data is available structured under `{ error, nearest: { point, normal, distance, angleDeg, suggestedTolerance } }`. So a failed call tells you exactly what to change rather than leaving you guessing.
+
+```js
+const r = partwright.paintRegion({ point: [50, 50, 50], normal: [0, 0, 1], color: [1, 0, 0] });
+// r.error = "paintRegion: no face matched at point=[50.00, 50.00, 50.00], normal=[0.000, 0.000, 1.000], tolerance=0.9995. Nearest face is at [...] with normal [...] (3.2° off requested, distance 12.345). try tolerance 0.9981 (currently 0.9995)"
+// r.nearest = { point, normal, distance, angleDeg, suggestedTolerance }
+```
+
 **`paintRegion` is strict about seed placement** -- the point must lie on the surface within ~0.01 units. If you'd rather snap to the nearest face within a tolerance and skip the trial-and-error of placing a point exactly, use `paintNearestRegion`:
 
 ```js
@@ -478,17 +492,55 @@ partwright.paintFaces({ triangleIds: largestSideFace.triangleIds, color: [0.2, 0
 
 `findFaces` filters all AND together. Pass `region: <id>` from `listRegions()` to subset by an existing painted region. The default `normalTolerance` is `0.95` (≈18° cone) — looser than `paintRegion`'s `0.9995` because it's intended for catching whole faces of a primitive, not exact-coplanar fills.
 
-**Other paint tools.**
+**Predictable paint primitives (no flood-fill tolerance to tune).** `paintRegion` is the right tool when you have a flat face with sharp edges around it — pick a point on the face, paint that face. It's the *wrong* tool on smooth surfaces (capsules, hulled spheres, organic shapes) because the flood-fill threshold is bimodal: too tight and you paint 2 triangles, too loose and you paint the whole connected component, with almost no useful middle. Reach for `paintNear` or `paintInBox` instead — both filter triangles by world-space geometry, so the region you paint is described in coordinates rather than tolerances.
+```js
+// Sphere: every triangle whose centroid is within `radius` of `point`.
+// `normalCone` (optional) further restricts to triangles whose face normal is
+// within `angleDeg` of `axis`. Both narrow the result without flood-fill magic.
+partwright.paintNear({
+  point:  [10, 5, 67],                    // world-space center
+  radius: 4,
+  normalCone: { axis: [0, -1, 0.45], angleDeg: 25 }, // dorsal-facing only
+  color:  [0.88, 0.30, 0.45],
+  name:   "Index nail",
+});
+// -> { id, name, triangles, bbox, centroid } or { error }
+
+// Box: every triangle whose centroid lies inside an axis-aligned box.
+partwright.paintInBox({
+  box: { min: [-3, -2, 60], max: [3, 0, 75] },
+  normalCone: { axis: [0, -1, 0], angleDeg: 30 },    // optional
+  color: [0.88, 0.30, 0.45],
+  name:  "Front of fingertip",
+});
+```
+
+`paintNear` and `paintInBox` ignore mesh edges entirely — they collect triangles by *position* and (optionally) by face-normal direction, so the result is independent of how the boolean union tessellated the surface. Use them for organic geometry; use `paintRegion` for flat plates with crisp 90° edges.
+
+**Brush + slab + procedural targeting.**
 
 ```js
-// Brush: paint specific triangle indices (no flood-fill). Use findFaces() or
-// getMeshSummary() to source the indices procedurally; the Paint UI also
+// Brush: paint specific triangle indices (no flood-fill). Use findFaces(),
+// getMeshSummary(), or getMesh() to source ids procedurally; the Paint UI also
 // emits indices when picking faces interactively.
 partwright.paintFaces({
   triangleIds: [12, 13, 14, 27],
   color: [0, 0.6, 1],
   name: "Inset detail",
 });
+
+// Direct mesh access. getMesh() exposes typed arrays (vertices, triangles,
+// per-triangle normals, per-triangle centroids, bbox) so you can implement any
+// selection strategy yourself. Triangle indices are stable for a saved version.
+const mesh = partwright.getMesh();
+// mesh.numTri, mesh.normals (Float32Array, 3 per tri), mesh.centroids, ...
+const ids = [];
+for (let t = 0; t < mesh.numTri; t++) {
+  const cz = mesh.centroids[t * 3 + 2];
+  const nz = mesh.normals[t * 3 + 2];
+  if (cz > 60 && nz < -0.5) ids.push(t);   // backward-facing tris up high
+}
+partwright.paintFaces({ triangleIds: ids, color: [0.9, 0.3, 0.4] });
 
 // Slab: paint every face whose centroid falls inside a planar slab.
 // Axis-aligned slab (most common — pick X/Y/Z and slide along that axis):
@@ -511,6 +563,35 @@ partwright.paintSlab({
 });
 ```
 
+**Verifying paint before you commit it.** `paintPreview` accepts the same selectors as `paintInBox` / `paintNear` / `paintFaces` and returns a thumbnail with the candidate triangles tinted bright yellow on top of any existing paint, *without* adding a region. Use it to confirm the shape of a region before committing.
+
+```js
+const preview = partwright.paintPreview({
+  point: [10.4, 5.2, 67],
+  radius: 3,
+  normalCone: { axis: [0, -0.89, 0.45], angleDeg: 25 },
+  view: { elevation: 0, azimuth: 180, ortho: true, size: 320 }, // optional
+});
+// preview = { thumbnail, triangleCount, bbox, centroid }
+// Display preview.thumbnail (data URL) -- no region created, no editor lock.
+```
+
+**Asserting paint after you commit it.** `assertPaint` checks a region against expected triangle count and bbox/centroid ranges — same shape as `runAndAssert`, but for color regions. Use this in iterative agent loops to catch regressions when the underlying mesh changes (e.g. after a forkVersion).
+
+```js
+partwright.assertPaint({
+  region: 'Index nail',                              // or numeric region id
+  expectedTriangleCount: { min: 15, max: 60 },       // or exact number
+  expectedBoundingBox: {
+    z: [60, 75],                                     // any subset of axes
+    y: [3, 7],
+  },
+  expectedCentroid: { z: [62, 72] },
+});
+// -> { passed: true, region: { ... } }
+//    or { passed: false, failures: ["..."], region: { ... } }
+```
+
 **Bucket tolerance.** `paintRegion`'s `tolerance` is a cosine threshold for the bend angle between adjacent faces (default `0.9995`, ≈ 1.8°). The flood-fill crosses an edge only when the bend at that edge is below the angle threshold — checked between the *parent* face and each *neighbor*, not against the seed. This means flood-fill follows curved surfaces: a 32-sided cylinder bends ~11° per face, so any tolerance ≥ cos(11°) ≈ `0.98` covers the whole cylinder. Set tolerance to `-1` (180°) to paint the entire connected mesh. The Paint UI exposes the same control as a slider labeled in degrees (0°–180°).
 
 **Editor lock.** When color regions exist, the editor is locked (the model can't be re-run, because new geometry would invalidate the saved triangle indices). To edit code, the user clicks "Unlock to edit" in the UI. Agents that need to iterate on the geometry should call `clearColors()` first, or fork a new uncolored version with `forkVersion`.
@@ -521,6 +602,86 @@ partwright.paintSlab({
 - `exportGLB()` -- vertex colors flow through automatically.
 - `export3MF()` -- regions become `<basematerials>` entries with per-triangle `pid` attributes (compatible with PrusaSlicer / Bambu Studio multi-material slicing).
 - `exportSTL()` and `exportOBJ()` -- formats don't carry color, so colors are dropped.
+
+## Common gotchas
+
+These are the traps that previously cost an agent multiple turns of trial and error. Read once, save the next agent the same loop.
+
+### `paintRegion` flood-fill is bimodal on smooth surfaces
+
+On capsules, hulled spheres, and other smooth (no-edge) geometry, the bend angle between adjacent triangles is roughly the angular subdivision (e.g. 7.5° for a 48-segment cylinder, ≈ cos 7.5° = 0.991). Any tolerance > 0.991 paints almost nothing; any tolerance ≤ 0.99 paints almost everything. There is no useful middle.
+
+**Fix:** use `paintNear` (sphere selector) or `paintInBox` (AABB selector) for organic geometry. Both filter by world coordinates — predictable and bounded:
+
+```js
+// Don't:
+partwright.paintRegion({ point: [...], normal: [...], color, tolerance: 0.95 }); // floods entire finger
+
+// Do:
+partwright.paintNear({ point: [...], radius: 4, color });               // bounded by radius
+partwright.paintInBox({ box: { min, max }, normalCone: { axis, angleDeg: 25 }, color });
+```
+
+`paintRegion` is still the right tool for flat plates with crisp 90° edges (e.g. a cube face). For curved surfaces, prefer the position-based primitives.
+
+### Trust `probeRay`'s hit normal — don't derive your own
+
+`paintRegion`'s seed-resolution requires the seed normal to align with an actual triangle's normal within `tolerance`. Computed normals (e.g. derived from your construction math) are slightly off from the post-boolean-union mesh normals — they look right but won't match. The fix is one line:
+
+```js
+// Don't:
+const dorsal = [0, -Math.cos(P), Math.sin(P)];                          // looks correct...
+partwright.paintRegion({ point: derivedPoint, normal: dorsal, ... });   // ...silently misses
+
+// Do:
+const hit = partwright.probeRay(start, dir).hits[0];
+partwright.paintRegion({ point: hit.point, normal: hit.normal, tolerance: 0.999, ... });
+```
+
+`probeRay` returns the same data the resolver looks at internally; using it eliminates an entire class of "no matching face found" failures.
+
+### Manifold's `rotate` direction
+
+Manifold uses `rotate([degX, degY, degZ])` applied X→Y→Z. The convention follows the standard right-hand rule about each axis. Quick verification snippet:
+
+```js
+const cube = api.Manifold.cube([2, 4, 4], false);          // x∈[0,2], y∈[0,4], z∈[0,4]
+const rotated = cube.rotate([90, 0, 0]);                   // rotate +90° about X
+// After rotation: y∈[-4,0], z∈[0,4]. (0,1,0) → (0,0,1) → (0,-1,0).
+```
+
+If your rotated geometry looks mirrored, negate the angle. This burned 10+ minutes of debugging in earlier sessions — the test snippet above runs in `runIsolated` and resolves it in seconds.
+
+### Painting locks the editor — `clearColors()` to iterate
+
+Once any region exists, the editor goes read-only and `runAndSave` is rejected. To change the geometry mid-session, call `partwright.clearColors()` first, *then* run new code. To preserve a colored version while iterating, call `forkVersion(...)` instead — it loads, transforms, validates, and saves a fresh uncolored child without touching the colored one.
+
+### Verify before you commit
+
+Use `paintPreview` to see the candidate region tinted bright yellow on a thumbnail before adding a region. Saves the paint → render → undo loop:
+
+```js
+const dry = partwright.paintPreview({ point: [...], radius: 4, view: { ortho: true, size: 240 } });
+// Inspect dry.thumbnail; if happy, call paintNear with the same args to commit.
+```
+
+Use `assertPaint` to verify regions stayed where you expected after a re-render or version load:
+
+```js
+partwright.assertPaint({ region: 'Index nail', expectedTriangleCount: { min: 15, max: 60 } });
+```
+
+### `runAndSave` is for committed iterations; `runIsolated` is for sanity checks
+
+`runAndSave` writes a version to the gallery (and the lock state, and the diff, etc.). For "does this code produce 1 component or 7" questions, prefer `runIsolated(code)` — it returns `{ geometryData, thumbnail }` without mutating anything.
+
+```js
+const r = await partwright.runIsolated(`
+  const { Manifold } = api;
+  return Manifold.cube([1, 1, 1], true).hull();
+`);
+// r.geometryData.componentCount, r.thumbnail (data URL)
+```
 
 ## AI-friendly file I/O
 

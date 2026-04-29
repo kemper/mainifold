@@ -3004,7 +3004,10 @@ async function main() {
     // === Color Regions API ===
 
     /** Paint a coplanar region by specifying a point and normal on the model surface.
-     *  Returns the created region or {error}. */
+     *  Returns the created region or `{error}`. On failure, the error message
+     *  includes a diagnostic — the nearest hit point, its normal, the angle
+     *  off the requested normal, and a suggested tolerance value that would
+     *  include it. Pair with `probeRay` to get a known-on-surface seed. */
     paintRegion(opts: { point: [number, number, number]; normal: [number, number, number]; color: [number, number, number]; name?: string; tolerance?: number }) {
       if (!currentMeshData) return { error: 'No geometry loaded' };
       if (!opts || typeof opts !== 'object') return { error: 'paintRegion requires {point, normal, color}' };
@@ -3016,7 +3019,9 @@ async function main() {
       const normalTolerance = tolerance ?? 0.9995;
       const adjacency = buildAdjacency(currentMeshData);
       const seedTri = resolveSeed(point as [number, number, number], normal as [number, number, number], currentMeshData, adjacency, normalTolerance);
-      if (seedTri < 0) return { error: 'No matching face found at the given point/normal' };
+      if (seedTri < 0) {
+        return diagnoseSeedFailure(point as [number, number, number], normal as [number, number, number], currentMeshData, adjacency, normalTolerance);
+      }
 
       const triangles = findCoplanarRegion(seedTri, adjacency, normalTolerance);
       const regionName = name ?? `Region ${getRegions().length + 1}`;
@@ -3184,16 +3189,326 @@ async function main() {
       return { id: region.id, name: region.name, triangles: triangles.size };
     },
 
-    /** List all color regions on the current geometry */
+    /** List all color regions on the current geometry. Each entry includes
+     *  `bbox` (axis-aligned bounding box of the painted triangles' vertices)
+     *  and `centroid` (mean of those vertex positions) so callers can verify
+     *  *where* a region landed without re-rendering. Returns `{ ..., bbox: null,
+     *  centroid: null }` for regions whose triangles haven't been resolved
+     *  yet (e.g. just deserialized from a saved version). */
     listRegions() {
-      return getRegions().map(r => ({
-        id: r.id,
-        name: r.name,
-        color: r.color,
-        source: r.source,
-        triangles: r.triangles.size,
-        order: r.order,
-      }));
+      const mesh = currentMeshData;
+      return getRegions().map(r => {
+        const stats = mesh ? regionTriangleStats(r.triangles, mesh) : null;
+        return {
+          id: r.id,
+          name: r.name,
+          color: r.color,
+          source: r.source,
+          triangles: r.triangles.size,
+          order: r.order,
+          bbox: stats?.bbox ?? null,
+          centroid: stats?.centroid ?? null,
+        };
+      });
+    },
+
+    /** Direct mesh access for procedural paint workflows. Returns flat typed
+     *  arrays plus per-triangle face normals and centroids (the same arrays
+     *  the paint resolver uses internally), so a caller can implement any
+     *  selection strategy without trial-and-error tolerance tuning.
+     *
+     *  Shape:
+     *  ```
+     *  {
+     *    numVert, numTri,
+     *    vertices: Float32Array,   // numVert * 3 (x,y,z packed)
+     *    triangles: Uint32Array,   // numTri * 3 (vertex indices)
+     *    normals: Float32Array,    // numTri * 3 (face normals)
+     *    centroids: Float32Array,  // numTri * 3 (face centroids)
+     *    boundingBox: { min:[x,y,z], max:[x,y,z] }
+     *  }
+     *  ```
+     *  Triangle indices are stable for a given saved version — pass them to
+     *  `paintFaces({triangleIds})` directly. */
+    getMesh() {
+      const mesh = currentMeshData;
+      if (!mesh) return { error: 'No geometry loaded' };
+      const adjacency = buildAdjacency(mesh);
+      const numTri = mesh.numTri;
+      const numVert = mesh.numVert;
+
+      // Pack vertex positions into a tight Float32Array (mesh.vertProperties may
+      // include per-vertex extras like colors that callers don't need).
+      const vertices = new Float32Array(numVert * 3);
+      for (let v = 0; v < numVert; v++) {
+        vertices[v * 3] = mesh.vertProperties[v * mesh.numProp];
+        vertices[v * 3 + 1] = mesh.vertProperties[v * mesh.numProp + 1];
+        vertices[v * 3 + 2] = mesh.vertProperties[v * mesh.numProp + 2];
+      }
+
+      // Triangle indices may be backed by Uint32 already; copy to a stable, owned buffer.
+      const triangles = new Uint32Array(numTri * 3);
+      for (let t = 0; t < numTri * 3; t++) triangles[t] = mesh.triVerts[t];
+
+      // Centroids — average of the three vertex positions per triangle.
+      const centroids = new Float32Array(numTri * 3);
+      for (let t = 0; t < numTri; t++) {
+        const v0 = triangles[t * 3];
+        const v1 = triangles[t * 3 + 1];
+        const v2 = triangles[t * 3 + 2];
+        centroids[t * 3] = (vertices[v0 * 3] + vertices[v1 * 3] + vertices[v2 * 3]) / 3;
+        centroids[t * 3 + 1] = (vertices[v0 * 3 + 1] + vertices[v1 * 3 + 1] + vertices[v2 * 3 + 1]) / 3;
+        centroids[t * 3 + 2] = (vertices[v0 * 3 + 2] + vertices[v1 * 3 + 2] + vertices[v2 * 3 + 2]) / 3;
+      }
+
+      // Bounding box from the packed vertices (avoids walking the full vertProperties).
+      let xMin = Infinity, yMin = Infinity, zMin = Infinity;
+      let xMax = -Infinity, yMax = -Infinity, zMax = -Infinity;
+      for (let v = 0; v < numVert; v++) {
+        const x = vertices[v * 3], y = vertices[v * 3 + 1], z = vertices[v * 3 + 2];
+        if (x < xMin) xMin = x; if (x > xMax) xMax = x;
+        if (y < yMin) yMin = y; if (y > yMax) yMax = y;
+        if (z < zMin) zMin = z; if (z > zMax) zMax = z;
+      }
+
+      return {
+        numVert,
+        numTri,
+        vertices,
+        triangles,
+        normals: adjacency.normals,
+        centroids,
+        boundingBox: {
+          min: [xMin, yMin, zMin] as [number, number, number],
+          max: [xMax, yMax, zMax] as [number, number, number],
+        },
+      };
+    },
+
+    /** Paint every triangle whose centroid lies inside an axis-aligned bounding
+     *  box. Optional `normalCone` further restricts to triangles whose face
+     *  normal is within `angleDeg` of `axis` (a unit vector). One-shot wrapper
+     *  around `findFaces` + `paintFaces` for the common "paint that region of
+     *  the model" intent.
+     *
+     *  ```
+     *  partwright.paintInBox({
+     *    box: { min: [-5, -5, 60], max: [5, 5, 75] },
+     *    normalCone: { axis: [0, -1, 0.4], angleDeg: 20 },  // back-facing only
+     *    color: [0.88, 0.30, 0.45],
+     *    name: 'Index nail',
+     *  })
+     *  ```
+     *  Returns `{ id, name, triangles, bbox, centroid }` on success or
+     *  `{ error }`. Empty match returns `{ error: 'no triangles matched' }`. */
+    paintInBox(opts: {
+      box: { min: [number, number, number]; max: [number, number, number] };
+      normalCone?: { axis: [number, number, number]; angleDeg: number };
+      color: [number, number, number];
+      name?: string;
+    }) {
+      if (!currentMeshData) return { error: 'No geometry loaded' };
+      if (!opts || typeof opts !== 'object') return { error: 'paintInBox requires { box, color }' };
+      const filterErr = validateBoxAndCone(opts.box, opts.normalCone);
+      if (filterErr) return { error: filterErr };
+      if (!Array.isArray(opts.color) || opts.color.length !== 3) return { error: 'color must be [r,g,b] with values 0..1' };
+
+      const triangles = collectTrianglesByFilter(currentMeshData, opts.box, opts.normalCone, null);
+      if (triangles.size === 0) return { error: 'paintInBox: no triangles matched the box (and normalCone, if any). Try widening the box, raising angleDeg, or call findFaces() to see what passes each filter individually.' };
+
+      return commitPaintFromSet(triangles, opts.color, opts.name, 'paintbrush');
+    },
+
+    /** Paint every triangle whose centroid lies within `radius` of `point`.
+     *  Optional `normalCone` restricts by face normal direction. Use this for
+     *  "paint a fingernail-sized patch around X" without picking edge tolerances.
+     *
+     *  ```
+     *  partwright.paintNear({
+     *    point: [10, 5, 67],
+     *    radius: 4,
+     *    normalCone: { axis: [0, -0.89, 0.45], angleDeg: 25 },
+     *    color: [0.88, 0.30, 0.45],
+     *  })
+     *  ```
+     *  Returns `{ id, name, triangles, bbox, centroid }` or `{ error }`. */
+    paintNear(opts: {
+      point: [number, number, number];
+      radius: number;
+      normalCone?: { axis: [number, number, number]; angleDeg: number };
+      color: [number, number, number];
+      name?: string;
+    }) {
+      if (!currentMeshData) return { error: 'No geometry loaded' };
+      if (!opts || typeof opts !== 'object') return { error: 'paintNear requires { point, radius, color }' };
+      if (!Array.isArray(opts.point) || opts.point.length !== 3) return { error: 'point must be [x,y,z]' };
+      for (let i = 0; i < 3; i++) {
+        if (typeof opts.point[i] !== 'number' || !Number.isFinite(opts.point[i])) return { error: 'point components must be finite numbers' };
+      }
+      if (typeof opts.radius !== 'number' || !Number.isFinite(opts.radius) || opts.radius <= 0) return { error: 'radius must be a positive finite number' };
+      const coneErr = validateNormalCone(opts.normalCone);
+      if (coneErr) return { error: coneErr };
+      if (!Array.isArray(opts.color) || opts.color.length !== 3) return { error: 'color must be [r,g,b] with values 0..1' };
+
+      const triangles = collectTrianglesBySphere(currentMeshData, opts.point as [number, number, number], opts.radius, opts.normalCone);
+      if (triangles.size === 0) return { error: `paintNear: no triangles within ${opts.radius} of [${opts.point.join(', ')}]. Try a larger radius — call findFaces() with a bigger box first to see what's around.` };
+
+      return commitPaintFromSet(triangles, opts.color, opts.name, 'paintbrush');
+    },
+
+    /** Render a preview of the current model with a candidate region tinted
+     *  bright yellow, *without* committing the paint to the regions list.
+     *  Accepts the same selectors as `paintInBox` / `paintNear` plus an
+     *  optional explicit `triangleIds` set. Returns
+     *  `{ thumbnail, triangleCount, bbox, centroid }` so an agent can verify
+     *  the shape of the would-be region in one call instead of paint → render → undo.
+     *
+     *  ```
+     *  const preview = partwright.paintPreview({
+     *    box: { min: [...], max: [...] },
+     *    normalCone: { axis: [...], angleDeg: 25 },
+     *  })
+     *  // Display preview.thumbnail (data URL) to confirm before committing.
+     *  ```
+     *  `view` is forwarded to `renderView` (elevation/azimuth/ortho/size). */
+    paintPreview(opts: {
+      box?: { min: [number, number, number]; max: [number, number, number] };
+      normalCone?: { axis: [number, number, number]; angleDeg: number };
+      point?: [number, number, number];
+      radius?: number;
+      triangleIds?: number[];
+      view?: { elevation?: number; azimuth?: number; ortho?: boolean; size?: number };
+    } = {}) {
+      const mesh = currentMeshData;
+      if (!mesh) return { error: 'No geometry loaded' };
+
+      let triangles: Set<number>;
+      if (opts.triangleIds !== undefined) {
+        if (!Array.isArray(opts.triangleIds)) return { error: 'triangleIds must be an array of integers' };
+        triangles = new Set();
+        for (const id of opts.triangleIds) {
+          if (!Number.isInteger(id) || id < 0 || id >= mesh.numTri) return { error: `triangleIds contains invalid index ${id} (expected 0..${mesh.numTri - 1})` };
+          triangles.add(id);
+        }
+      } else if (opts.point !== undefined && opts.radius !== undefined) {
+        if (!Array.isArray(opts.point) || opts.point.length !== 3) return { error: 'point must be [x,y,z]' };
+        if (typeof opts.radius !== 'number' || !Number.isFinite(opts.radius) || opts.radius <= 0) return { error: 'radius must be a positive finite number' };
+        const coneErr = validateNormalCone(opts.normalCone);
+        if (coneErr) return { error: coneErr };
+        triangles = collectTrianglesBySphere(mesh, opts.point, opts.radius, opts.normalCone);
+      } else if (opts.box !== undefined) {
+        const err = validateBoxAndCone(opts.box, opts.normalCone);
+        if (err) return { error: err };
+        triangles = collectTrianglesByFilter(mesh, opts.box, opts.normalCone, null);
+      } else {
+        return { error: 'paintPreview requires one of: { triangleIds }, { point, radius }, or { box }' };
+      }
+
+      const stats = regionTriangleStats(triangles, mesh);
+      // Build a temporary mesh with the candidate triangles tinted bright yellow,
+      // overlayed on top of any existing regions.
+      const baseColored = applyTriColors(mesh) ?? mesh;
+      const numTri = mesh.numTri;
+      const triColors = new Uint8Array(numTri * 3);
+      const baseBuf = baseColored.triColors as Uint8Array | undefined;
+      const basePainted = baseBuf ? (baseBuf as Uint8Array & { _painted?: Uint8Array })._painted : undefined;
+      const painted = new Uint8Array(numTri);
+      for (let t = 0; t < numTri; t++) {
+        if (baseBuf && basePainted && basePainted[t]) {
+          triColors[t * 3] = baseBuf[t * 3];
+          triColors[t * 3 + 1] = baseBuf[t * 3 + 1];
+          triColors[t * 3 + 2] = baseBuf[t * 3 + 2];
+          painted[t] = 1;
+        }
+      }
+      // Highlight color: bright yellow-orange, strongly distinct from skin/nail palettes.
+      for (const t of triangles) {
+        triColors[t * 3] = 255;
+        triColors[t * 3 + 1] = 230;
+        triColors[t * 3 + 2] = 0;
+        painted[t] = 1;
+      }
+      (triColors as Uint8Array & { _painted?: Uint8Array })._painted = painted;
+      const previewMesh: MeshData = { ...mesh, triColors };
+      const thumbnail = renderSingleView(previewMesh, opts.view ?? {});
+      return {
+        thumbnail,
+        triangleCount: triangles.size,
+        bbox: stats.bbox,
+        centroid: stats.centroid,
+      };
+    },
+
+    /** Assert facts about a previously-painted region. Returns
+     *  `{ passed: true }` on success, otherwise `{ passed: false, failures: [...] }`.
+     *
+     *  ```
+     *  partwright.assertPaint({
+     *    region: 'Index nail',                            // or numeric region id
+     *    expectedTriangleCount: { min: 15, max: 60 },     // or exact number
+     *    expectedBoundingBox: {
+     *      x: [8, 11], y: [3, 7], z: [60, 75],            // any subset of axes
+     *    },
+     *    expectedCentroid: { z: [62, 72] },               // approximate centroid axes
+     *  })
+     *  ``` */
+    assertPaint(opts: {
+      region: number | string;
+      expectedTriangleCount?: number | { min?: number; max?: number };
+      expectedBoundingBox?: { x?: [number, number]; y?: [number, number]; z?: [number, number] };
+      expectedCentroid?: { x?: [number, number]; y?: [number, number]; z?: [number, number] };
+    }) {
+      const mesh = currentMeshData;
+      if (!mesh) return { passed: false, failures: ['No geometry loaded'] };
+      if (!opts || typeof opts !== 'object') return { passed: false, failures: ['assertPaint requires an options object'] };
+      if (opts.region === undefined) return { passed: false, failures: ['assertPaint.region (id or name) is required'] };
+
+      const regions = getRegions();
+      const region = typeof opts.region === 'number'
+        ? regions.find(r => r.id === opts.region)
+        : regions.find(r => r.name === opts.region);
+      if (!region) return { passed: false, failures: [`No region matching ${JSON.stringify(opts.region)}. Existing: ${regions.map(r => `"${r.name}" (id=${r.id})`).join(', ') || '(none)'}`] };
+
+      const stats = regionTriangleStats(region.triangles, mesh);
+      const failures: string[] = [];
+
+      if (opts.expectedTriangleCount !== undefined) {
+        const c = region.triangles.size;
+        if (typeof opts.expectedTriangleCount === 'number') {
+          if (c !== opts.expectedTriangleCount) failures.push(`triangle count: expected ${opts.expectedTriangleCount}, got ${c}`);
+        } else {
+          const { min, max } = opts.expectedTriangleCount;
+          if (typeof min === 'number' && c < min) failures.push(`triangle count: expected >= ${min}, got ${c}`);
+          if (typeof max === 'number' && c > max) failures.push(`triangle count: expected <= ${max}, got ${c}`);
+        }
+      }
+
+      if (opts.expectedBoundingBox && stats.bbox) {
+        const axes = ['x', 'y', 'z'] as const;
+        for (let i = 0; i < 3; i++) {
+          const axis = axes[i];
+          const range = opts.expectedBoundingBox[axis];
+          if (!range) continue;
+          const lo = stats.bbox.min[i], hi = stats.bbox.max[i];
+          if (lo < range[0]) failures.push(`bbox.${axis}.min: expected >= ${range[0]}, got ${lo.toFixed(3)}`);
+          if (hi > range[1]) failures.push(`bbox.${axis}.max: expected <= ${range[1]}, got ${hi.toFixed(3)}`);
+        }
+      }
+
+      if (opts.expectedCentroid && stats.centroid) {
+        const axes = ['x', 'y', 'z'] as const;
+        for (let i = 0; i < 3; i++) {
+          const axis = axes[i];
+          const range = opts.expectedCentroid[axis];
+          if (!range) continue;
+          const c = stats.centroid[i];
+          if (c < range[0] || c > range[1]) failures.push(`centroid.${axis}: expected within [${range[0]}, ${range[1]}], got ${c.toFixed(3)}`);
+        }
+      }
+
+      return failures.length === 0
+        ? { passed: true, region: { id: region.id, name: region.name, triangles: region.triangles.size, bbox: stats.bbox, centroid: stats.centroid } }
+        : { passed: false, failures, region: { id: region.id, name: region.name, triangles: region.triangles.size, bbox: stats.bbox, centroid: stats.centroid } };
     },
 
     /** Clear all color regions */
@@ -3636,13 +3951,18 @@ async function main() {
         'downloadRecentExport': { signature: 'downloadRecentExport(id) -- Re-trigger browser download for an inbox entry', docs: '/ai.md#ai-friendly-file-io' },
         'clearRecentExports': { signature: 'clearRecentExports() -- Empty the Recent Exports list', docs: '/ai.md#ai-friendly-file-io' },
         // Color regions
-        'paintRegion':     { signature: 'paintRegion({point, normal, color, name?, tolerance?}) -- Paint coplanar face region', docs: '/ai.md#color-regions' },
+        'paintRegion':     { signature: 'paintRegion({point, normal, color, name?, tolerance?}) -- Paint coplanar face region (flood-fill, edge-bounded). Diagnostic error on failure.', docs: '/ai.md#color-regions' },
         'paintNearestRegion': { signature: 'paintNearestRegion({point, color, searchRadius?, name?, tolerance?}) -- Snap seed to nearest face, then paint coplanar region', docs: '/ai.md#color-regions' },
+        'paintNear':       { signature: 'paintNear({point, radius, normalCone?, color, name?}) -- Paint triangles whose centroid is within `radius` of `point`. Predictable, no flood-fill tolerance to tune.', docs: '/ai.md#color-regions' },
+        'paintInBox':      { signature: 'paintInBox({box, normalCone?, color, name?}) -- Paint triangles whose centroid is inside an axis-aligned box (and optional normal cone).', docs: '/ai.md#color-regions' },
         'paintFaces':      { signature: 'paintFaces({triangleIds, color, name?}) -- Paint specific triangle indices', docs: '/ai.md#color-regions' },
         'paintSlab':       { signature: 'paintSlab({axis|normal, offset, thickness, color, name?}) -- Paint planar slab range', docs: '/ai.md#color-regions' },
+        'paintPreview':    { signature: 'paintPreview({box?|point+radius?|triangleIds?, normalCone?, view?}) -- Highlight a candidate region without committing -> {thumbnail, triangleCount, bbox, centroid}', docs: '/ai.md#color-regions' },
+        'assertPaint':     { signature: 'assertPaint({region, expectedTriangleCount?, expectedBoundingBox?, expectedCentroid?}) -- Verify a previously-painted region -> {passed, failures?}', docs: '/ai.md#color-regions' },
         'findFaces':       { signature: 'findFaces({box?, normal?, normalTolerance?, color?, region?, maxResults?}) -- Query triangle ids by geometry/color filters', docs: '/ai.md#color-regions' },
+        'getMesh':         { signature: 'getMesh() -- Direct triangle/vertex/normal/centroid access for procedural paint workflows', docs: '/ai.md#color-regions' },
         'getMeshSummary':  { signature: 'getMeshSummary({tolerance?, minTriangles?, maxTrianglesPerGroup?, maxGroups?}?) -- List coplanar face groups with centroid/normal/area/bbox', docs: '/ai.md#color-regions' },
-        'listRegions':     { signature: 'listRegions() -- List all color regions', docs: '/ai.md#color-regions' },
+        'listRegions':     { signature: 'listRegions() -- List all color regions with bbox + centroid for each', docs: '/ai.md#color-regions' },
         'clearColors':     { signature: 'clearColors() -- Remove all color regions', docs: '/ai.md#color-regions' },
         // Annotations
         'listAnnotations':    { signature: 'listAnnotations() -- List freehand strokes -> [{id, color, width, points}]', docs: '/ai.md#annotations' },
@@ -3716,6 +4036,214 @@ async function main() {
   console.info('Partwright: AI agents should use window.partwright -- start with partwright.help(). window.mainifold remains as a legacy alias. See /llms.txt');
 
   // === Internal functions ===
+
+  /** Report bounding box + centroid for a triangle set, walking only the
+   *  vertices used by those triangles. Returns `null` when the set is empty. */
+  function regionTriangleStats(triangles: Set<number>, mesh: MeshData): { bbox: { min: [number, number, number]; max: [number, number, number] }; centroid: [number, number, number] } | { bbox: null; centroid: null } {
+    if (triangles.size === 0) return { bbox: null, centroid: null };
+    const { triVerts, vertProperties, numProp } = mesh;
+    let xMin = Infinity, yMin = Infinity, zMin = Infinity;
+    let xMax = -Infinity, yMax = -Infinity, zMax = -Infinity;
+    let sx = 0, sy = 0, sz = 0, count = 0;
+    for (const t of triangles) {
+      for (let k = 0; k < 3; k++) {
+        const vi = triVerts[t * 3 + k];
+        const x = vertProperties[vi * numProp];
+        const y = vertProperties[vi * numProp + 1];
+        const z = vertProperties[vi * numProp + 2];
+        if (x < xMin) xMin = x; if (x > xMax) xMax = x;
+        if (y < yMin) yMin = y; if (y > yMax) yMax = y;
+        if (z < zMin) zMin = z; if (z > zMax) zMax = z;
+        sx += x; sy += y; sz += z; count++;
+      }
+    }
+    return {
+      bbox: { min: [xMin, yMin, zMin], max: [xMax, yMax, zMax] },
+      centroid: [sx / count, sy / count, sz / count],
+    };
+  }
+
+  /** Build a friendly diagnostic for `paintRegion` failures: locate the closest
+   *  surface point, report its position/normal, the angle off the requested
+   *  normal, and a tolerance value that would accept it. Avoids the
+   *  "no matching face found" black box that wastes agent debugging cycles. */
+  function diagnoseSeedFailure(
+    point: [number, number, number],
+    requestedNormal: [number, number, number],
+    mesh: MeshData,
+    adjacency: ReturnType<typeof buildAdjacency>,
+    tolerance: number,
+  ): { error: string; nearest?: { point: [number, number, number]; normal: [number, number, number]; distance: number; angleDeg: number; suggestedTolerance: number } } {
+    const nearest = findNearestTriangle(point, mesh, adjacency);
+    if (nearest.triIndex < 0) return { error: 'paintRegion: mesh has no triangles' };
+
+    // Normalize the requested normal so the angle calc is meaningful.
+    const len = Math.hypot(requestedNormal[0], requestedNormal[1], requestedNormal[2]);
+    const nx = len > 0 ? requestedNormal[0] / len : 0;
+    const ny = len > 0 ? requestedNormal[1] / len : 0;
+    const nz = len > 0 ? requestedNormal[2] / len : 0;
+    const dot = nx * nearest.normal[0] + ny * nearest.normal[1] + nz * nearest.normal[2];
+    const clamped = Math.max(-1, Math.min(1, dot));
+    const angleDeg = Math.acos(clamped) * 180 / Math.PI;
+
+    // Suggest a tolerance just permissive enough to include the nearest face.
+    // Round down to 4 decimal places so the suggestion clearly passes the threshold.
+    const suggested = Math.max(-1, Math.floor(clamped * 10000) / 10000 - 0.0001);
+    const suggestText = clamped >= tolerance
+      ? `tolerance ${tolerance} should already match — the seed point may be too far off the surface (${nearest.distance.toFixed(3)} units). Use the hit point/normal from probeRay() instead, or call paintNearestRegion({point, color}) which auto-snaps.`
+      : `try tolerance ${suggested.toFixed(4)} (currently ${tolerance})`;
+
+    return {
+      error: `paintRegion: no face matched at point=[${point.map(n => n.toFixed(2)).join(', ')}], normal=[${requestedNormal.map(n => n.toFixed(3)).join(', ')}], tolerance=${tolerance}. Nearest face is at [${nearest.closest.map(n => n.toFixed(2)).join(', ')}] with normal [${nearest.normal.map(n => n.toFixed(3)).join(', ')}] (${angleDeg.toFixed(1)}° off requested, distance ${nearest.distance.toFixed(3)}). ${suggestText}`,
+      nearest: {
+        point: nearest.closest,
+        normal: nearest.normal,
+        distance: nearest.distance,
+        angleDeg,
+        suggestedTolerance: suggested,
+      },
+    };
+  }
+
+  /** Validate `{ axis, angleDeg }` shape used by paint cone filters. Returns
+   *  an error string or `null`. */
+  function validateNormalCone(cone: { axis: [number, number, number]; angleDeg: number } | undefined): string | null {
+    if (cone === undefined) return null;
+    if (typeof cone !== 'object' || cone === null) return 'normalCone must be { axis: [x,y,z], angleDeg: number }';
+    if (!Array.isArray(cone.axis) || cone.axis.length !== 3) return 'normalCone.axis must be [nx, ny, nz]';
+    for (let i = 0; i < 3; i++) {
+      if (typeof cone.axis[i] !== 'number' || !Number.isFinite(cone.axis[i])) return 'normalCone.axis components must be finite numbers';
+    }
+    const len = Math.hypot(cone.axis[0], cone.axis[1], cone.axis[2]);
+    if (len === 0) return 'normalCone.axis must be a non-zero vector';
+    if (typeof cone.angleDeg !== 'number' || !Number.isFinite(cone.angleDeg)) return 'normalCone.angleDeg must be a finite number';
+    if (cone.angleDeg < 0 || cone.angleDeg > 180) return 'normalCone.angleDeg must be in [0, 180]';
+    return null;
+  }
+
+  function validateBoxAndCone(
+    box: { min: [number, number, number]; max: [number, number, number] } | undefined,
+    cone: { axis: [number, number, number]; angleDeg: number } | undefined,
+  ): string | null {
+    if (box === undefined || typeof box !== 'object' || box === null) return 'box must be { min: [x,y,z], max: [x,y,z] }';
+    if (!Array.isArray(box.min) || box.min.length !== 3 || !Array.isArray(box.max) || box.max.length !== 3) {
+      return 'box.min and box.max must be 3-tuples';
+    }
+    for (let i = 0; i < 3; i++) {
+      if (typeof box.min[i] !== 'number' || !Number.isFinite(box.min[i])) return `box.min[${i}] must be a finite number`;
+      if (typeof box.max[i] !== 'number' || !Number.isFinite(box.max[i])) return `box.max[${i}] must be a finite number`;
+      if (box.min[i] > box.max[i]) return `box.min[${i}] (${box.min[i]}) must be <= box.max[${i}] (${box.max[i]})`;
+    }
+    return validateNormalCone(cone);
+  }
+
+  /** Collect triangle ids whose centroid lies inside `box` and (optionally)
+   *  whose face normal aligns with `cone.axis` within `cone.angleDeg`.
+   *  `regionFilter`, when non-null, restricts to ids in that set. */
+  function collectTrianglesByFilter(
+    mesh: MeshData,
+    box: { min: [number, number, number]; max: [number, number, number] },
+    cone: { axis: [number, number, number]; angleDeg: number } | undefined,
+    regionFilter: Set<number> | null,
+  ): Set<number> {
+    const adjacency = cone ? buildAdjacency(mesh) : null;
+    let coneAxis: [number, number, number] | null = null;
+    let coneCos = -1;
+    if (cone) {
+      const len = Math.hypot(cone.axis[0], cone.axis[1], cone.axis[2]);
+      coneAxis = [cone.axis[0] / len, cone.axis[1] / len, cone.axis[2] / len];
+      coneCos = Math.cos(cone.angleDeg * Math.PI / 180);
+    }
+    const result = new Set<number>();
+    const { triVerts, vertProperties, numProp, numTri } = mesh;
+    for (let t = 0; t < numTri; t++) {
+      if (regionFilter && !regionFilter.has(t)) continue;
+      const v0 = triVerts[t * 3];
+      const v1 = triVerts[t * 3 + 1];
+      const v2 = triVerts[t * 3 + 2];
+      const cx = (vertProperties[v0 * numProp] + vertProperties[v1 * numProp] + vertProperties[v2 * numProp]) / 3;
+      const cy = (vertProperties[v0 * numProp + 1] + vertProperties[v1 * numProp + 1] + vertProperties[v2 * numProp + 1]) / 3;
+      const cz = (vertProperties[v0 * numProp + 2] + vertProperties[v1 * numProp + 2] + vertProperties[v2 * numProp + 2]) / 3;
+      if (cx < box.min[0] || cx > box.max[0]) continue;
+      if (cy < box.min[1] || cy > box.max[1]) continue;
+      if (cz < box.min[2] || cz > box.max[2]) continue;
+      if (coneAxis && adjacency) {
+        const nx = adjacency.normals[t * 3];
+        const ny = adjacency.normals[t * 3 + 1];
+        const nz = adjacency.normals[t * 3 + 2];
+        const dot = coneAxis[0] * nx + coneAxis[1] * ny + coneAxis[2] * nz;
+        if (dot < coneCos) continue;
+      }
+      result.add(t);
+    }
+    return result;
+  }
+
+  /** Collect triangle ids whose centroid lies within `radius` of `point`. */
+  function collectTrianglesBySphere(
+    mesh: MeshData,
+    point: [number, number, number],
+    radius: number,
+    cone: { axis: [number, number, number]; angleDeg: number } | undefined,
+  ): Set<number> {
+    const adjacency = cone ? buildAdjacency(mesh) : null;
+    let coneAxis: [number, number, number] | null = null;
+    let coneCos = -1;
+    if (cone) {
+      const len = Math.hypot(cone.axis[0], cone.axis[1], cone.axis[2]);
+      coneAxis = [cone.axis[0] / len, cone.axis[1] / len, cone.axis[2] / len];
+      coneCos = Math.cos(cone.angleDeg * Math.PI / 180);
+    }
+    const r2 = radius * radius;
+    const result = new Set<number>();
+    const { triVerts, vertProperties, numProp, numTri } = mesh;
+    for (let t = 0; t < numTri; t++) {
+      const v0 = triVerts[t * 3];
+      const v1 = triVerts[t * 3 + 1];
+      const v2 = triVerts[t * 3 + 2];
+      const cx = (vertProperties[v0 * numProp] + vertProperties[v1 * numProp] + vertProperties[v2 * numProp]) / 3;
+      const cy = (vertProperties[v0 * numProp + 1] + vertProperties[v1 * numProp + 1] + vertProperties[v2 * numProp + 1]) / 3;
+      const cz = (vertProperties[v0 * numProp + 2] + vertProperties[v1 * numProp + 2] + vertProperties[v2 * numProp + 2]) / 3;
+      const dx = cx - point[0], dy = cy - point[1], dz = cz - point[2];
+      if (dx * dx + dy * dy + dz * dz > r2) continue;
+      if (coneAxis && adjacency) {
+        const nx = adjacency.normals[t * 3];
+        const ny = adjacency.normals[t * 3 + 1];
+        const nz = adjacency.normals[t * 3 + 2];
+        const dot = coneAxis[0] * nx + coneAxis[1] * ny + coneAxis[2] * nz;
+        if (dot < coneCos) continue;
+      }
+      result.add(t);
+    }
+    return result;
+  }
+
+  /** Commit a triangle set as a region and refresh the viewport — shared by
+   *  `paintInBox` and `paintNear` so they stay byte-for-byte consistent with
+   *  the existing `paintFaces`/`paintRegion` rendering path. */
+  function commitPaintFromSet(
+    triangles: Set<number>,
+    color: [number, number, number],
+    name: string | undefined,
+    source: 'face-pick' | 'paintbrush',
+  ) {
+    if (!currentMeshData) return { error: 'No geometry loaded' };
+    const regionName = name ?? `Region ${getRegions().length + 1}`;
+    const region = addRegion(
+      regionName,
+      color,
+      source,
+      { kind: 'triangles', ids: [...triangles] },
+      triangles,
+    );
+    const colored = applyTriColorsIfVisible(currentMeshData);
+    updateMesh(colored, { skipAutoFrame: true });
+    updateMultiView(colored);
+    renderElevationsToContainer(elevationsContainer, colored);
+    syncLockState();
+    const stats = regionTriangleStats(triangles, currentMeshData);
+    return { id: region.id, name: region.name, triangles: triangles.size, bbox: stats.bbox, centroid: stats.centroid };
+  }
 
   function runCode(code?: string) {
     const src = code ?? getValue();
