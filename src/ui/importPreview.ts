@@ -25,12 +25,20 @@ export function summarizeSessionImport(data: ExportedSession): SessionImportSumm
       if ((refs as Record<string, unknown>)[k]) referenceSides.push(k);
     }
   }
+  // Annotations live per-version since schema 1.3, but 1.2 files put them at
+  // the top level. Sum across both locations so the preview is accurate
+  // regardless of which schema the file was exported with.
+  const perVersionAnnotations = data.versions.reduce(
+    (sum, v) => sum + (v.annotations?.length ?? 0),
+    0,
+  );
+  const topLevelAnnotations = data.annotations?.length ?? 0;
   return {
     sessionName: data.session.name || '(unnamed)',
     schemaVersion: data.partwright ?? data.mainifold ?? 'unknown',
     versionCount: data.versions.length,
     noteCount: data.notes?.length ?? 0,
-    annotationCount: data.annotations?.length ?? 0,
+    annotationCount: perVersionAnnotations + topLevelAnnotations,
     referenceSides,
     language: data.session.language ?? 'manifold-js',
     createdAt: data.session.created ?? null,
