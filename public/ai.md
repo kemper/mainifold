@@ -189,9 +189,12 @@ await partwright.openSession(id)         // Open existing session
 await partwright.clearAllSessions()      // Delete all sessions & versions
 
 // Color regions -- tag face regions with a color (see #color-regions)
-partwright.paintRegion({point, normal, color, name?, tolerance?}) // bucket: coplanar flood-fill -> {id, name, triangles} or {error}
-partwright.paintFaces({triangleIds, color, name?})                // brush: paint specific triangle indices -> {id, name, triangles} or {error}
-partwright.paintSlab({axis|normal, offset, thickness, color, name?}) // slab: paint a planar range -> {id, name, triangles} or {error}
+partwright.paintRegion({point, normal, color, name?, tolerance?})         // bucket: coplanar flood-fill -> {id, name, triangles} or {error}
+partwright.paintNearestRegion({point, color, searchRadius?, name?, tolerance?}) // snap seed to nearest face, then flood-fill -> {id, name, triangles, snappedTo} or {error}
+partwright.paintFaces({triangleIds, color, name?})                        // brush: paint specific triangle indices -> {id, name, triangles} or {error}
+partwright.paintSlab({axis|normal, offset, thickness, color, name?})      // slab: paint a planar range -> {id, name, triangles} or {error}
+partwright.findFaces({box?, normal?, normalTolerance?, color?, region?, maxResults?}) // query triangle ids by geometry/color -> {triangleIds, count, matched, truncated}
+partwright.getMeshSummary({tolerance?, minTriangles?, maxTrianglesPerGroup?, maxGroups?}?) // -> {groups[{id, normal, centroid, area, triangleCount, bbox, triangleIds}], totalTriangles, groupCount, tolerance}
 partwright.listRegions()                 // -> [{id, name, color, source, triangles, order}, ...]
 partwright.clearColors()                 // Remove all regions
 
@@ -436,12 +439,49 @@ partwright.clearColors()    // remove all regions
 
 **How face matching works.** `paintRegion` flood-fills outward from the seed triangle, including any neighbor whose normal is within `tolerance` of the seed's. Pick `point` slightly inside the model surface and pass the outward-pointing `normal` -- the seed resolver looks for the triangle whose plane the point lies on and whose normal aligns with yours.
 
+**`paintRegion` is strict about seed placement** -- the point must lie on the surface within ~0.01 units. If you'd rather snap to the nearest face within a tolerance and skip the trial-and-error of placing a point exactly, use `paintNearestRegion`:
+
+```js
+// Snap [8, 0.39, 5] to whatever face is closest within 1.0 units, then paint.
+const r = partwright.paintNearestRegion({
+  point: [8, 0.39, 5],
+  color: [0, 0.6, 1],
+  searchRadius: 1.0,        // optional cap; omit to always pick the closest face
+  name: "Fin",              // optional
+  tolerance: 0.9995,        // optional flood-fill tolerance, same semantics as paintRegion
+});
+// On success: { id, name, triangles, snappedTo: { point, normal, distance } }
+// On failure: { error: "...nearest face is X.XX units away, outside searchRadius=...", nearestDistance }
+// The seed normal is taken from the snapped triangle, so callers don't have to know it in advance.
+```
+
+**Targeting faces by geometry instead of by point.** `findFaces` queries triangle indices by box, normal, color, or region — pass the result straight to `paintFaces` to color procedurally. `getMeshSummary` partitions the mesh into coplanar face groups (sorted largest-first) and reports each group's centroid, normal, area, and bounding box; pick a group, then call `paintFaces({ triangleIds: group.triangleIds, color })`.
+
+```js
+// Find every roughly-upward face inside a bounding box (e.g. the top of a part).
+const top = partwright.findFaces({
+  box: { min: [-50, -50, 9], max: [50, 50, 11] },
+  normal: [0, 0, 1],
+  normalTolerance: 0.95,    // ~18° cone around +Z
+});
+// -> { triangleIds: [...], count, matched, truncated }
+partwright.paintFaces({ triangleIds: top.triangleIds, color: [1, 0.6, 0], name: "Top" });
+
+// Or get a structural overview and pick by area.
+const summary = partwright.getMeshSummary({ minTriangles: 4 });
+// summary.groups is sorted largest first.
+const largestSideFace = summary.groups.find(g => Math.abs(g.normal[2]) < 0.1);
+partwright.paintFaces({ triangleIds: largestSideFace.triangleIds, color: [0.2, 0.4, 0.9] });
+```
+
+`findFaces` filters all AND together. Pass `region: <id>` from `listRegions()` to subset by an existing painted region. The default `normalTolerance` is `0.95` (≈18° cone) — looser than `paintRegion`'s `0.9995` because it's intended for catching whole faces of a primitive, not exact-coplanar fills.
+
 **Other paint tools.**
 
 ```js
-// Brush: paint specific triangle indices (no flood-fill).
-// Use partwright.getGeometry() to find triangle indices, or capture them from
-// hover during a UI-driven paint session.
+// Brush: paint specific triangle indices (no flood-fill). Use findFaces() or
+// getMeshSummary() to source the indices procedurally; the Paint UI also
+// emits indices when picking faces interactively.
 partwright.paintFaces({
   triangleIds: [12, 13, 14, 27],
   color: [0, 0.6, 1],
@@ -472,6 +512,8 @@ partwright.paintSlab({
 **Bucket tolerance.** `paintRegion`'s `tolerance` is a cosine threshold for the bend angle between adjacent faces (default `0.9995`, ≈ 1.8°). The flood-fill crosses an edge only when the bend at that edge is below the angle threshold — checked between the *parent* face and each *neighbor*, not against the seed. This means flood-fill follows curved surfaces: a 32-sided cylinder bends ~11° per face, so any tolerance ≥ cos(11°) ≈ `0.98` covers the whole cylinder. Set tolerance to `-1` (180°) to paint the entire connected mesh. The Paint UI exposes the same control as a slider labeled in degrees (0°–180°).
 
 **Editor lock.** When color regions exist, the editor is locked (the model can't be re-run, because new geometry would invalidate the saved triangle indices). To edit code, the user clicks "Unlock to edit" in the UI. Agents that need to iterate on the geometry should call `clearColors()` first, or fork a new uncolored version with `forkVersion`.
+
+**Saving a colored version.** Calling `saveVersion(label)` after painting *will* persist the regions onto a new version — the dedupe check considers code, annotations, and color regions together. If nothing has changed, `saveVersion()` returns `{ skipped: true, reason: "..." }` instead of `null`, so a no-op is visible. If you want to be sure a save happened, check the return shape: `{ id, index, label }` on success, `{ skipped }` on no-op, `{ error }` if no session is open.
 
 **Export behavior.**
 - `exportGLB()` -- vertex colors flow through automatically.

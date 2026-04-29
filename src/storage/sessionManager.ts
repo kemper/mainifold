@@ -308,6 +308,19 @@ function annotationsEqual(a: unknown[] | undefined, b: unknown[] | undefined): b
   return JSON.stringify(aArr) === JSON.stringify(bArr);
 }
 
+/** Color regions are persisted as `geometryData.colorRegions` on each version.
+ *  Compare them so a save that only adds/edits color regions still creates a
+ *  new version — code may be identical, but the painted state is the change. */
+function colorRegionsEqual(prev: Record<string, unknown> | null | undefined, next: Record<string, unknown> | null | undefined): boolean {
+  const prevRegions = (prev?.colorRegions ?? []) as unknown[];
+  const nextRegions = (next?.colorRegions ?? []) as unknown[];
+  if (prevRegions.length !== nextRegions.length) return false;
+  if (prevRegions.length === 0) return true;
+  // Order is stable across saves — regions are stored in the order they were
+  // added, and we serialize via the same path.
+  return JSON.stringify(prevRegions) === JSON.stringify(nextRegions);
+}
+
 export async function saveVersion(
   code: string,
   geometryData: Record<string, unknown> | null,
@@ -320,14 +333,16 @@ export async function saveVersion(
 
   const annotationSnapshot = serializeAnnotations();
 
-  // Skip if both code AND annotations are identical to the current version
-  // (unless forced). Annotations live per-version, so a save that only changes
-  // them must still create a new version — comparing code alone would no-op.
+  // Skip if code AND annotations AND color regions are all identical to the
+  // current version (unless forced). Annotations and color regions live
+  // per-version, so a save that only changes either must still create a new
+  // version — comparing code alone would no-op.
   if (
     !options?.force &&
     currentState.currentVersion &&
     currentState.currentVersion.code === code &&
-    annotationsEqual(currentState.currentVersion.annotations, annotationSnapshot)
+    annotationsEqual(currentState.currentVersion.annotations, annotationSnapshot) &&
+    colorRegionsEqual(currentState.currentVersion.geometryData as Record<string, unknown> | null, geometryData)
   ) {
     return null;
   }
