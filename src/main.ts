@@ -446,7 +446,7 @@ function updateGeometryData(executionTimeMs?: number, sourceCode?: string) {
 function captureThumbnail(): Promise<Blob | null> {
   if (!currentMeshData) return Promise.resolve(null);
   try {
-    const canvas = renderCompositeCanvas(currentMeshData);
+    const canvas = renderCompositeCanvas(applyTriColorsIfVisible(currentMeshData));
     return new Promise(resolve => {
       canvas.toBlob(b => resolve(b), 'image/png');
     });
@@ -1998,7 +1998,7 @@ async function main() {
         assertNumber(o.size, 'renderView(options).size', { optional: true, min: 1, integer: true });
       }
       if (!currentMeshData) return null;
-      return renderSingleView(currentMeshData, options ?? {});
+      return renderSingleView(applyTriColorsIfVisible(currentMeshData), options ?? {});
     },
 
     /** Render a cross-section at Z height as an SVG string for visual verification */
@@ -2955,6 +2955,7 @@ async function main() {
       const colored = applyTriColorsIfVisible(currentMeshData);
       updateMesh(colored, { skipAutoFrame: true });
       updateMultiView(colored);
+      renderElevationsToContainer(elevationsContainer, colored);
       syncLockState();
 
       return { id: region.id, name: region.name, triangles: triangles.size };
@@ -2991,6 +2992,7 @@ async function main() {
       const colored = applyTriColorsIfVisible(currentMeshData);
       updateMesh(colored, { skipAutoFrame: true });
       updateMultiView(colored);
+      renderElevationsToContainer(elevationsContainer, colored);
       syncLockState();
 
       return { id: region.id, name: region.name, triangles: triangles.size };
@@ -3036,6 +3038,7 @@ async function main() {
       const colored = applyTriColorsIfVisible(currentMeshData);
       updateMesh(colored, { skipAutoFrame: true });
       updateMultiView(colored);
+      renderElevationsToContainer(elevationsContainer, colored);
       syncLockState();
 
       return { id: region.id, name: region.name, triangles: triangles.size };
@@ -3059,6 +3062,7 @@ async function main() {
       if (currentMeshData) {
         updateMesh(currentMeshData, { skipAutoFrame: true });
         updateMultiView(currentMeshData);
+        renderElevationsToContainer(elevationsContainer, currentMeshData);
       }
       syncLockState();
       return { cleared: true };
