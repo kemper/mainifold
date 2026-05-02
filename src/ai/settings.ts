@@ -1,0 +1,144 @@
+// Per-browser AI settings (preset, model, toggles). Persisted to
+// localStorage as one JSON blob — they're sticky across sessions and
+// separate from the per-session chat transcripts in IndexedDB.
+
+import type { ChatToggles, ModelId, Preset } from './types';
+
+const STORAGE_KEY = 'partwright-ai-settings-v1';
+
+export interface AiSettings {
+  preset: Preset;
+  toggles: ChatToggles;
+  /** When `false`, the chat drawer starts collapsed on page load. */
+  drawerOpen: boolean;
+  /** Default for new sessions before the user has touched the toggle bar. */
+  autoCompactMode: 'off' | 'conservative' | 'standard' | 'aggressive';
+}
+
+const PRESET_TOGGLES: Record<Exclude<Preset, 'custom'>, ChatToggles> = {
+  minimal: {
+    vision: { views: false },
+    scope: { runCode: true, saveVersions: true, paintFaces: false },
+    autoRetry: 0,
+    model: 'claude-haiku-4-5',
+  },
+  standard: {
+    vision: { views: true },
+    scope: { runCode: true, saveVersions: true, paintFaces: true },
+    autoRetry: 1,
+    model: 'claude-sonnet-4-6',
+  },
+  full: {
+    vision: { views: true },
+    scope: { runCode: true, saveVersions: true, paintFaces: true },
+    autoRetry: 3,
+    model: 'claude-opus-4-7',
+  },
+};
+
+const DEFAULT_SETTINGS: AiSettings = {
+  preset: 'standard',
+  toggles: PRESET_TOGGLES.standard,
+  drawerOpen: false,
+  autoCompactMode: 'off',
+};
+
+let cached: AiSettings | null = null;
+const listeners = new Set<(settings: AiSettings) => void>();
+
+export function loadSettings(): AiSettings {
+  if (cached) return cached;
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY);
+    if (raw) {
+      const parsed = JSON.parse(raw) as Partial<AiSettings>;
+      cached = mergeWithDefaults(parsed);
+      return cached;
+    }
+  } catch {
+    // Fall through to defaults on parse / storage error.
+  }
+  cached = { ...DEFAULT_SETTINGS, toggles: { ...DEFAULT_SETTINGS.toggles, vision: { ...DEFAULT_SETTINGS.toggles.vision }, scope: { ...DEFAULT_SETTINGS.toggles.scope } } };
+  return cached;
+}
+
+export function saveSettings(next: AiSettings): void {
+  cached = next;
+  try {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(next));
+  } catch {
+    // localStorage may be full or disabled (private browsing). Settings
+    // remain applied for this session; we don't surface the failure.
+  }
+  for (const fn of listeners) fn(next);
+}
+
+export function onSettingsChange(fn: (settings: AiSettings) => void): () => void {
+  listeners.add(fn);
+  return () => listeners.delete(fn);
+}
+
+export function applyPreset(settings: AiSettings, preset: Preset): AiSettings {
+  if (preset === 'custom') return { ...settings, preset };
+  const p = PRESET_TOGGLES[preset];
+  return {
+    ...settings,
+    preset,
+    toggles: {
+      vision: { ...p.vision },
+      scope: { ...p.scope },
+      autoRetry: p.autoRetry,
+      model: p.model,
+    },
+  };
+}
+
+export function setModel(settings: AiSettings, model: ModelId): AiSettings {
+  return {
+    ...settings,
+    preset: 'custom',
+    toggles: { ...settings.toggles, model },
+  };
+}
+
+export function setToggles(settings: AiSettings, partial: DeepPartial<ChatToggles>): AiSettings {
+  const next: ChatToggles = {
+    vision: { ...settings.toggles.vision, ...(partial.vision ?? {}) },
+    scope: { ...settings.toggles.scope, ...(partial.scope ?? {}) },
+    autoRetry: partial.autoRetry ?? settings.toggles.autoRetry,
+    model: partial.model ?? settings.toggles.model,
+  };
+  return { ...settings, preset: 'custom', toggles: next };
+}
+
+type DeepPartial<T> = {
+  [K in keyof T]?: T[K] extends object ? DeepPartial<T[K]> : T[K];
+};
+
+function mergeWithDefaults(partial: Partial<AiSettings>): AiSettings {
+  const tgls: Partial<ChatToggles> = partial.toggles ?? {};
+  return {
+    preset: partial.preset ?? DEFAULT_SETTINGS.preset,
+    autoCompactMode: partial.autoCompactMode ?? DEFAULT_SETTINGS.autoCompactMode,
+    drawerOpen: partial.drawerOpen ?? DEFAULT_SETTINGS.drawerOpen,
+    toggles: {
+      vision: { ...DEFAULT_SETTINGS.toggles.vision, ...(tgls.vision ?? {}) },
+      scope: { ...DEFAULT_SETTINGS.toggles.scope, ...(tgls.scope ?? {}) },
+      autoRetry: tgls.autoRetry ?? DEFAULT_SETTINGS.toggles.autoRetry,
+      model: tgls.model ?? DEFAULT_SETTINGS.toggles.model,
+    },
+  };
+}
+
+export const MODEL_OPTIONS: { id: ModelId; label: string }[] = [
+  { id: 'claude-haiku-4-5', label: 'Haiku 4.5' },
+  { id: 'claude-sonnet-4-6', label: 'Sonnet 4.6' },
+  { id: 'claude-opus-4-7', label: 'Opus 4.7' },
+];
+
+export const PRESET_OPTIONS: { id: Preset; label: string; hint: string }[] = [
+  { id: 'minimal', label: 'Minimal', hint: 'code-only, Haiku, no retries' },
+  { id: 'standard', label: 'Standard', hint: 'code + iso views, Sonnet, 1 retry' },
+  { id: 'full', label: 'Full', hint: 'all tools + views, Opus, 3 retries' },
+  { id: 'custom', label: 'Custom', hint: 'your toggles' },
+];

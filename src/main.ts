@@ -7,7 +7,9 @@ import { generateId } from './storage/db';
 import { setPhantom, clearPhantom, hasPhantom, type PhantomOptions } from './renderer/phantomGeometry';
 import { initEditor, setValue, getValue, setLanguage as setEditorLanguage, setEditorDiagnostics, clearEditorDiagnostics, revealFirstDiagnostic } from './editor/codeEditor';
 import { createLayout, type TabName } from './ui/layout';
-import { createToolbar, isAutoRun, setAutoRun, setToolbarLanguage } from './ui/toolbar';
+import { createToolbar, isAutoRun, setAutoRun, setToolbarLanguage, setAiToolbarState } from './ui/toolbar';
+import { initAiPanel, setActiveSession as setAiActiveSession, toggleAiPanel } from './ui/aiPanel';
+import { getKey as getAiKey } from './ai/db';
 import { createLandingPage } from './ui/landing';
 import { createHelpPage } from './ui/help';
 import { showExportOptionsDialog } from './ui/exportOptionsDialog';
@@ -1001,6 +1003,7 @@ async function main() {
     },
     onImportFile: async (file) => { await handleImportFile(file); },
     onImportInboxEntry: handleReimportInboxEntry,
+    onToggleAi: () => { toggleAiPanel(); },
     onLanguageSwitch: async (lang: 'manifold-js' | 'scad') => {
       if (lang === getActiveLanguage()) return;
       // If current session has work, ask before switching
@@ -1537,7 +1540,30 @@ async function main() {
   // Update document title when session state changes (create, open, close, rename)
   onStateChange((state) => {
     updateDocumentTitle({ page: 'editor', sessionName: state.session?.name ?? null });
+    // Re-bind the AI panel to the current session so chat history follows.
+    void setAiActiveSession(state.session?.id ?? null);
   });
+
+  // Initialize the AI chat side drawer once the editor UI is mounted.
+  // Wraps initAiPanel + setAiToolbarState; tolerated if it fails (e.g.
+  // network blocks /ai.md) — toolbar still shows the Connect button.
+  void (async () => {
+    try {
+      await initAiPanel();
+      const cur = getState();
+      await setAiActiveSession(cur.session?.id ?? null);
+      const key = await getAiKey('anthropic');
+      setAiToolbarState(!!key);
+      // Watch for key changes via a poll-on-focus trigger — cheap, and
+      // matches the chip's update cadence in the AI settings modal.
+      window.addEventListener('focus', async () => {
+        const k = await getAiKey('anthropic');
+        setAiToolbarState(!!k);
+      });
+    } catch (err) {
+      console.warn('AI panel init failed:', err);
+    }
+  })();
 
   // Set initial editor title if we're on the editor page
   if (!showLanding && !showHelpPage && !show404) {
