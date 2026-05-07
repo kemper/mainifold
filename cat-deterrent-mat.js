@@ -1,13 +1,18 @@
-// Cat-deterrent mat -- a semi-spikey, bumpy surface designed to discourage
-// cats from walking across it. Tile or scale as needed.
+// Cat-deterrent mat -- low-plastic redesign. A dense field of small
+// truncated-cone spikes on a thin base; cats avoid it because every step
+// lands on 4-6 uneven points, not because individual spikes are sharp.
 //
 // Design:
-//   - 100 x 100 x 2 mm base plate (centered on origin, sits on z = 0)
-//   - 8 x 8 grid of features with slight position jitter
-//   - ~70% truncated-cone spikes (8-12 mm tall) with 0.5 mm blunt tips
-//     (above the FDM slicer drop threshold; deters but won't pierce paw pads)
-//   - ~30% stubby rounded bumps (3.5-5 mm tall) for visual / tactile variety
+//   - 100 x 100 x 1 mm base plate (centered on origin, sits on z = 0)
+//   - 12 x 12 grid (~7.5 mm spacing) with slight position jitter
+//   - All features are truncated cones: 1.5 mm base radius, 0.5 mm blunt
+//     tip (~0.78 mm^2 plateau, above the FDM slicer drop threshold)
+//   - Heights randomly 4-6 mm so the surface reads as both spikey and
+//     bumpy without paying for tall pyramids or wide dome bumps
 //   - Deterministic seeded RNG so the layout is reproducible
+//
+// Plastic budget: ~12 cm^3 (about half the previous 2 mm-base / tall-spike
+// version). Spikes alone are ~17 mm^3 each; the rest is the thin base.
 //
 // Print orientation: flat side down on the bed, no supports needed.
 
@@ -15,10 +20,10 @@ const { Manifold } = api;
 
 const baseW    = 100;   // base width  (mm)
 const baseD    = 100;   // base depth  (mm)
-const baseT    = 2;     // base thickness (mm)
-const spacing  = 12;    // feature center spacing (mm)
-const margin   = 7;     // border around features (mm)
-const segments = 24;    // circular segments per feature
+const baseT    = 1;     // base thickness (mm) -- 5 layers at 0.2 mm
+const spacing  = 7.5;   // feature center spacing (mm)
+const margin   = 5;     // border around features (mm)
+const segments = 16;    // circular segments per spike
 
 const cols = Math.floor((baseW - 2 * margin) / spacing) + 1;
 const rows = Math.floor((baseD - 2 * margin) / spacing) + 1;
@@ -38,27 +43,17 @@ const yStart = -baseD / 2 + margin + ((baseD - 2 * margin) - (rows - 1) * spacin
 
 for (let i = 0; i < cols; i++) {
   for (let j = 0; j < rows; j++) {
-    const x = xStart + i * spacing + (rand() - 0.5) * 1.5;
-    const y = yStart + j * spacing + (rand() - 0.5) * 1.5;
-    const pick = rand();
+    const x = xStart + i * spacing + (rand() - 0.5) * 1.0;
+    const y = yStart + j * spacing + (rand() - 0.5) * 1.0;
 
-    let feature;
-    if (pick < 0.7) {
-      // Tall spike: truncated cone, 0.5 mm blunt tip
-      const h     = 8.0 + rand() * 4.0;     // 8 - 12 mm above base
-      const baseR = 3.0 + rand() * 0.6;     // 3.0 - 3.6 mm
-      const topR  = 0.5;                     // ~0.78 mm^2 plateau
-      feature = Manifold.cylinder(h + 0.5, baseR, topR, segments)
-        .translate([x, y, baseT - 0.5]);    // overlap base by 0.5 mm to weld
-    } else {
-      // Stubby bump: short, fat truncated cone (reads as a rounded nub)
-      const h     = 3.5 + rand() * 1.5;     // 3.5 - 5 mm above base
-      const baseR = 4.0 + rand() * 0.6;     // 4.0 - 4.6 mm
-      const topR  = 2.2 + rand() * 0.4;     // 2.2 - 2.6 mm
-      feature = Manifold.cylinder(h + 0.5, baseR, topR, segments)
-        .translate([x, y, baseT - 0.5]);
-    }
-    mat = mat.add(feature);
+    const h     = 4.0 + rand() * 2.0;   // 4 - 6 mm above base
+    const baseR = 1.5;                   // narrow foot
+    const topR  = 0.5;                   // blunt printable tip
+
+    const spike = Manifold.cylinder(h + 0.4, baseR, topR, segments)
+      .translate([x, y, baseT - 0.4]);   // 0.4 mm overlap welds spike to base
+
+    mat = mat.add(spike);
   }
 }
 
