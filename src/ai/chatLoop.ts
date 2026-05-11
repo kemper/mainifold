@@ -12,7 +12,7 @@ import { streamTurn, buildApiMessages, type StreamCallbacks as AnthropicStreamCa
 import { streamLocalTurn, type StreamCallbacks as LocalStreamCallbacks } from './local';
 import { recordUsage, putMessages } from './db';
 import { buildToolList, executeTool } from './tools';
-import { buildSystemPrompt, loadAiMd, toggleSuffix } from './systemPrompt';
+import { buildLocalSystemPrompt, buildSystemPrompt, loadAiMd, toggleSuffix } from './systemPrompt';
 import { turnCostUsd } from './cost';
 import { activeModel, type ChatBlock, type ChatMessage, type ChatToggles, type PersistedToolCall, type PersistedToolResult, type TurnUsage } from './types';
 
@@ -56,8 +56,15 @@ const MAX_AGENT_ITERATIONS = 8;
 export async function runTurn(input: RunTurnInput, callbacks: RunTurnCallbacks = {}): Promise<ChatMessage[]> {
   const { apiKey, toggles, sessionId, history, userBlocks } = input;
   const tools = buildToolList(toggles);
-  const aiMd = await loadAiMd();
-  const systemPrompt = buildSystemPrompt(aiMd);
+  // The full ai.md is ~15K tokens — fine for hosted Claude with prompt
+  // caching, but ruinous for a local 1-8B model with a 4K window. Use a
+  // hand-tuned slim prompt on the local path.
+  let systemPrompt: string;
+  if (toggles.provider === 'local') {
+    systemPrompt = buildLocalSystemPrompt();
+  } else {
+    systemPrompt = buildSystemPrompt(await loadAiMd());
+  }
 
   const seqStart = nextSeq(history);
 

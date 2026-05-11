@@ -196,7 +196,10 @@ export async function streamLocalTurn(spec: LocalRequestSpec, callbacks: StreamC
     throw new Error(`Local model ${spec.modelId} is not loaded. Open AI settings → Local model to download it first.`);
   }
   const { engine, info } = loaded;
-  const maxTokens = spec.maxTokens ?? 1024;
+  // Default is intentionally modest — local models share a 4K context with
+  // the whole conversation. Reserving 768 for output leaves ~3300 tokens
+  // for the system prompt + tool docs + scrollback.
+  const maxTokens = spec.maxTokens ?? 768;
   const native = await supportsNativeToolCalls(spec.modelId);
 
   const systemSuffix = native
@@ -357,9 +360,12 @@ const TOOL_CALL_OPEN = '<tool_call>';
 const TOOL_CALL_CLOSE = '</tool_call>';
 
 /** Build a tool-use instruction block to append to the system prompt for
- *  models that don't accept the OpenAI `tools` request field. We list each
- *  tool's name, description, and JSON-schema parameters in a compact form
- *  the model can pattern-match against. */
+ *  models that don't accept the OpenAI `tools` request field. Kept terse —
+ *  local models share a 4K context window with the whole conversation, so
+ *  every token counts. We summarize each tool as one line:
+ *      name(arg1: type[, ...]) — short description.
+ *  Detailed JSON schema is omitted; the few tools whose arguments need
+ *  call-time structure (paint, find) get a single-line example. */
 function appendPromptToolDocs(existingSuffix: string, tools: ToolDefinition[]): string {
   if (tools.length === 0) return existingSuffix;
   const lines: string[] = [];
@@ -367,30 +373,27 @@ function appendPromptToolDocs(existingSuffix: string, tools: ToolDefinition[]): 
   lines.push('');
   lines.push('## Tool calling');
   lines.push('');
-  lines.push('You can call tools by emitting a `<tool_call>` block — JSON only, exactly this shape:');
-  lines.push('');
-  lines.push('<tool_call>');
-  lines.push('{"name": "tool_name", "arguments": { /* args object */ }}');
-  lines.push('</tool_call>');
-  lines.push('');
-  lines.push('Rules:');
-  lines.push('- One JSON object per `<tool_call>` block. Multiple blocks are allowed per turn.');
-  lines.push('- `arguments` must validate against the tool\'s parameter schema below.');
-  lines.push('- Emit nothing between `<tool_call>` and the JSON — no commentary, no code fences, no extra whitespace.');
-  lines.push('- After a tool call, stop and wait for the result before continuing.');
+  lines.push('Call a tool by emitting (verbatim):');
+  lines.push('<tool_call>{"name": "tool_name", "arguments": {…}}</tool_call>');
+  lines.push('After a tool call, stop and wait for the result. Multiple calls per turn are allowed.');
   lines.push('');
   lines.push('Available tools:');
-  lines.push('');
-  for (const t of tools) {
-    lines.push(`### ${t.name}`);
-    lines.push(t.description);
-    lines.push('Parameters (JSON schema):');
-    lines.push('```json');
-    lines.push(JSON.stringify(t.input_schema, null, 2));
-    lines.push('```');
-    lines.push('');
-  }
+  for (const t of tools) lines.push(`- ${compactToolSignature(t)}`);
   return lines.join('\n');
+}
+
+function compactToolSignature(t: ToolDefinition): string {
+  const props = (t.input_schema.properties ?? {}) as Record<string, { type?: string; items?: { type?: string } }>;
+  const required = new Set(t.input_schema.required ?? []);
+  const args = Object.entries(props).map(([name, schema]) => {
+    let type = schema.type ?? 'any';
+    if (type === 'array' && schema.items?.type) type = `${schema.items.type}[]`;
+    return required.has(name) ? `${name}: ${type}` : `${name}?: ${type}`;
+  }).join(', ');
+  // Trim description to a single sentence — most descriptions already end
+  // at the first period.
+  const shortDesc = t.description.split(/[.!]\s/)[0].trim();
+  return `\`${t.name}(${args})\` — ${shortDesc}.`;
 }
 
 /** Pull `<tool_call>...</tool_call>` blocks out of a model response. Returns
