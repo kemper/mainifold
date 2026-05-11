@@ -935,15 +935,103 @@ async function sendMessage(): Promise<void> {
       // any in-memory error bubble from this turn — the persisted view
       // wouldn't have it (errored placeholders aren't written to DB).
       const erroredFromThisTurn = state.history.filter(m => m.errored);
-      void loadHistoryForCurrentSession().then(() => {
+      void loadHistoryForCurrentSession().then(async () => {
         for (const m of erroredFromThisTurn) state.history.push(m);
         renderTranscript();
         renderCostMeter();
+        // Only auto-compact when the turn ended cleanly — there's no point
+        // condensing a transcript that errored out before it finished.
+        if (erroredFromThisTurn.length === 0) {
+          await maybeAutoCompact();
+        }
       });
     },
   });
 
   state.inFlight = false;
+}
+
+// === Auto-compaction ===
+
+/** Run after every successful turn. Decides whether the active
+ *  autoCompactMode warrants firing the compactor — and if so, does it
+ *  silently (no confirm modal). Auto-promoted notes from the proposal
+ *  get written to the session log so they survive future compactions. */
+async function maybeAutoCompact(): Promise<void> {
+  const settings = loadSettings();
+  const mode = settings.autoCompactMode;
+  if (mode === 'off') return;
+
+  // Decide whether the current history justifies a compaction. The
+  // threshold is per-mode; aggressive fires every turn it can.
+  const tokens = totalTokensEstimate(state.history, state.systemPromptChars);
+  const ctxLimit = settings.toggles.provider === 'local'
+    ? (settings.localContext.windowSizeOverride ?? 8192)
+    : (settings.toggles.anthropicModel === 'claude-haiku-4-5' ? 200_000 : 1_000_000);
+  const pct = ctxLimit > 0 ? tokens / ctxLimit : 0;
+
+  let keepTail: number;
+  if (mode === 'aggressive') {
+    // Keep just the last user+assistant exchange (2 messages). Compact
+    // anytime there's more than that to compact.
+    keepTail = 2;
+    if (state.history.length <= keepTail + 1) return;
+  } else if (mode === 'standard') {
+    // Compact at 70% full; keep 4 trailing messages.
+    keepTail = 4;
+    if (pct < 0.7) return;
+    if (state.history.length <= keepTail + 1) return;
+  } else if (mode === 'conservative') {
+    // Don't auto-run; just hint when over 80%.
+    if (pct >= 0.8) setTransientStatus('Context is over 80% full — consider clicking Compact.');
+    return;
+  } else {
+    return;
+  }
+
+  // For local provider we may need to (re)load the model into GPU first
+  // since proposeCompaction calls into it. ensureModelLoaded is a no-op
+  // when the model's already resident.
+  let apiKey: string | undefined;
+  if (settings.toggles.provider === 'anthropic') {
+    const key = await getKey('anthropic');
+    if (!key) return; // silently skip; the next manual run will prompt
+    apiKey = key.apiKey;
+  } else if (!settings.toggles.localModel) {
+    return;
+  }
+
+  let proposal;
+  try {
+    proposal = await proposeCompaction({ toggles: settings.toggles, apiKey }, state.history, keepTail);
+  } catch {
+    // Auto-compaction is opportunistic — swallow errors so a flaky local
+    // model doesn't stop the user's actual conversation.
+    return;
+  }
+
+  // Promote any proposed notes silently so insights survive.
+  const w = window as unknown as { partwright?: { addSessionNote?: (t: string) => Promise<unknown> } };
+  if (w.partwright?.addSessionNote && state.sessionId !== GLOBAL_CHAT_BUCKET) {
+    for (const note of proposal.proposedNotes) {
+      try { await w.partwright.addSessionNote(note); } catch { /* noop */ }
+    }
+  }
+
+  const summaryMsg: ChatMessage = {
+    id: generateId(),
+    sessionId: state.sessionId,
+    role: 'assistant',
+    blocks: [{ type: 'text', text: `[auto-compacted ${proposal.drop.length} turn(s)]\n${proposal.summary}` }],
+    createdAt: Date.now(),
+    seq: -1,
+    compacted: true,
+  };
+  await deleteMessages(proposal.drop.map(m => m.id));
+  await putMessages([summaryMsg]);
+  await loadHistoryForCurrentSession();
+  renderTranscript();
+  renderCostMeter();
 }
 
 // === Compaction ===

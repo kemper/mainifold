@@ -26,7 +26,7 @@ export interface CompactionProposal {
   usage: { inputTokens: number; outputTokens: number };
 }
 
-const KEEP_TAIL = 4;
+const DEFAULT_KEEP_TAIL = 4;
 
 const COMPACTION_SYSTEM = `You are condensing a Partwright modeling-session transcript so the
 follow-up conversation pays less for context. Output ONLY a JSON object,
@@ -65,12 +65,15 @@ export interface CompactionContext {
 export async function proposeCompaction(
   ctx: CompactionContext,
   history: ChatMessage[],
+  /** Number of most-recent messages to keep verbatim. Aggressive auto-compaction
+   *  passes a small number (2); manual compaction uses the larger default. */
+  keepTail: number = DEFAULT_KEEP_TAIL,
 ): Promise<CompactionProposal> {
-  if (history.length <= KEEP_TAIL) {
+  if (history.length <= keepTail) {
     throw new Error('Not enough history to compact yet — chat for a few more turns first.');
   }
-  const keep = history.slice(-KEEP_TAIL);
-  const drop = history.slice(0, history.length - KEEP_TAIL);
+  const keep = history.slice(-keepTail);
+  const drop = history.slice(0, history.length - keepTail);
   const transcript = drop.map(formatForSummary).join('\n\n');
   const prompt = `Compact this transcript:\n\n${transcript}`;
 

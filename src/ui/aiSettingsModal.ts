@@ -9,7 +9,7 @@ import { formatUsd } from '../ai/cost';
 import { showAiKeyModal } from './aiKeyModal';
 import { showAiLocalModal } from './aiLocalModal';
 import { showSystemPromptModal } from './aiSystemPromptModal';
-import { loadSettings, saveSettings, setLocalContext, setProvider } from '../ai/settings';
+import { loadSettings, saveSettings, setAutoCompactMode, setLocalContext, setProvider, AUTO_COMPACT_OPTIONS } from '../ai/settings';
 import { isModelLoaded, resolveLocalModel } from '../ai/local';
 
 let modalEl: HTMLElement | null = null;
@@ -50,6 +50,8 @@ export async function showAiSettingsModal(cb: AiSettingsCallbacks): Promise<void
   body.appendChild(localSection);
   body.appendChild(document.createElement('hr')).className = 'border-zinc-700';
   body.appendChild(buildLocalContextSection(cb));
+  body.appendChild(document.createElement('hr')).className = 'border-zinc-700';
+  body.appendChild(buildAutoCompactSection(cb));
   body.appendChild(document.createElement('hr')).className = 'border-zinc-700';
   body.appendChild(buildSystemPromptSection(cb));
   body.appendChild(document.createElement('hr')).className = 'border-zinc-700';
@@ -272,6 +274,52 @@ function buildLocalContextSection(cb: AiSettingsCallbacks): HTMLElement {
   reloadHint.className = 'text-[10px] text-zinc-500';
   reloadHint.textContent = 'Changes apply the next time the model is loaded into GPU.';
   wrap.appendChild(reloadHint);
+  return wrap;
+}
+
+/** Auto-compaction mode picker. Aggressive mode compacts after every
+ *  assistant turn, keeping just the last exchange — ideal for an app like
+ *  this where the live editor + version gallery hold the actual state and
+ *  the chat is mostly a tool-driving channel. */
+function buildAutoCompactSection(cb: AiSettingsCallbacks): HTMLElement {
+  const wrap = document.createElement('div');
+  wrap.className = 'flex flex-col gap-2';
+  const head = document.createElement('div');
+  head.className = 'text-xs text-zinc-400';
+  head.textContent = 'Auto-compaction';
+  wrap.appendChild(head);
+
+  const settings = loadSettings();
+  const desc = document.createElement('div');
+  desc.className = 'text-[11px] text-zinc-400 leading-snug';
+  desc.innerHTML = 'Condenses older turns into a one-paragraph summary so the conversation keeps fitting in context. Compaction itself runs through the active provider — local turns are free; Anthropic turns cost a tiny Haiku request each time. Insights get auto-promoted to the session\'s note log when applicable.';
+  wrap.appendChild(desc);
+
+  const seg = document.createElement('div');
+  seg.className = 'flex flex-wrap gap-1';
+  for (const opt of AUTO_COMPACT_OPTIONS) {
+    const b = document.createElement('button');
+    const active = settings.autoCompactMode === opt.id;
+    b.className = active
+      ? 'px-2 py-1 rounded text-[11px] bg-zinc-700 text-zinc-100 border border-zinc-600'
+      : 'px-2 py-1 rounded text-[11px] text-zinc-300 border border-zinc-700 hover:bg-zinc-700/60';
+    b.textContent = opt.label;
+    b.title = opt.hint;
+    b.addEventListener('click', () => {
+      saveSettings(setAutoCompactMode(loadSettings(), opt.id));
+      cb.onChange();
+      closeModal();
+      void showAiSettingsModal(cb);
+    });
+    seg.appendChild(b);
+  }
+  wrap.appendChild(seg);
+
+  const hintBox = document.createElement('div');
+  hintBox.className = 'text-[11px] text-zinc-500 leading-snug';
+  const active = AUTO_COMPACT_OPTIONS.find(o => o.id === settings.autoCompactMode);
+  if (active) hintBox.textContent = active.hint;
+  wrap.appendChild(hintBox);
   return wrap;
 }
 

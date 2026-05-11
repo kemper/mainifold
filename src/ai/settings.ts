@@ -237,6 +237,17 @@ export function setLocalContext(settings: AiSettings, partial: Partial<LocalCont
   };
 }
 
+export function setAutoCompactMode(settings: AiSettings, mode: AiSettings['autoCompactMode']): AiSettings {
+  return { ...settings, autoCompactMode: mode };
+}
+
+export const AUTO_COMPACT_OPTIONS: { id: AiSettings['autoCompactMode']; label: string; hint: string }[] = [
+  { id: 'off', label: 'Off', hint: 'Only the Compact button condenses the chat.' },
+  { id: 'conservative', label: 'Hint at 80%', hint: 'Nag you to compact when the context fills up; never runs without your click.' },
+  { id: 'standard', label: 'Auto at 70%', hint: 'Silently compact when 70% full; keep the last 4 turns verbatim.' },
+  { id: 'aggressive', label: 'After every turn', hint: 'Compact after every assistant turn; keep only the last exchange. Best when full history doesn\'t matter — like driving the modeler.' },
+];
+
 export function addCustomLocalModel(settings: AiSettings, model: CustomLocalModel): AiSettings {
   // De-dupe by id — replace any existing entry with the same id.
   const filtered = settings.customLocalModels.filter(m => m.id !== model.id);

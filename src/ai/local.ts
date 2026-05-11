@@ -51,6 +51,25 @@ function resolveCustomContextWindow(modelId: string): number | null {
   return Math.floor(c.contextWindowSize);
 }
 
+/** How many tokens to anchor at the front of the context when sliding-window
+ *  mode is active. We size it generously to cover the entire system prompt
+ *  plus the tool-call instructions appended for prompt-engineered models —
+ *  if those scroll off, the model forgets it has tools and the agent loop
+ *  collapses. Numbers are conservative estimates (~chars/4) measured against
+ *  the actual prompt text; bump the constants in `buildLocalSystemPrompt` /
+ *  `appendPromptToolDocs` if you change those. */
+function computeAttentionSink(info: LocalModelInfo): number {
+  const promptBudget = info.promptTier === 'medium' ? 1300 : 600;
+  // Native function-callers (Hermes 3 family) get the OpenAI `tools` field,
+  // not a `<tool_call>` instruction block in the prompt, so they need less
+  // sink budget. Other models append a ~400-token tool documentation block.
+  const toolsBudget = info.officialToolCalling ? 100 : 500;
+  const safetyMargin = 200;
+  // Cap at half the smallest plausible window so we never accidentally
+  // freeze the entire context as sink.
+  return Math.min(2048, promptBudget + toolsBudget + safetyMargin);
+}
+
 function buildCustomModelEntries(webllm: typeof import('@mlc-ai/web-llm')): import('@mlc-ai/web-llm').ModelRecord[] {
   const customs = loadSettings().customLocalModels;
   return customs.map(c => {
@@ -264,15 +283,18 @@ export async function ensureModelLoaded(modelId: string, opts: LoadOptions = {})
     // Compute the context override. Priority: user-set global override,
     // then the model's declared default, then a safe 4096 fallback. If
     // sliding window is enabled we pass `sliding_window_size` instead —
-    // WebLLM rejects requests that set both at once.
+    // WebLLM rejects requests that set both at once. Sliding-window mode
+    // also needs an `attention_sink_size` (StreamingLLM-style anchored
+    // tokens) so the system prompt stays in view as old turns roll off.
     const { localContext } = loadSettings();
     const customWindow = resolveCustomContextWindow(modelId);
     const desired = localContext.windowSizeOverride
       ?? customWindow
       ?? info.contextWindowSize
       ?? 4096;
+    const sinkSize = computeAttentionSink(info);
     const reloadConfig = localContext.sliding
-      ? { sliding_window_size: desired, attention_sink_size: 4 }
+      ? { sliding_window_size: desired, attention_sink_size: sinkSize }
       : { context_window_size: desired };
 
     try {
