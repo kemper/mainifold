@@ -28,6 +28,22 @@ export interface ToolExecResult {
 
 const ALL_TOOLS: ToolDefinition[] = [
   {
+    name: 'getActiveLanguage',
+    description: 'Returns the editor\'s current modeling language: "manifold-js" or "scad". The per-turn system suffix already includes this, but call when in doubt or after a tool sequence that might have switched it.',
+    input_schema: { type: 'object', properties: {} },
+  },
+  {
+    name: 'setActiveLanguage',
+    description: 'Switch the editor between "manifold-js" and "scad". Switching DISCARDS the current editor contents and resets to a stub — only do this when the user asked for the switch, or when the new request is much better expressed in the other language. Do NOT switch back and forth speculatively.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        lang: { type: 'string', enum: ['manifold-js', 'scad'] },
+      },
+      required: ['lang'],
+    },
+  },
+  {
     name: 'getCode',
     description: 'Read the current code in the editor. Always available. Returns the full source as a string.',
     input_schema: { type: 'object', properties: {} },
@@ -312,6 +328,8 @@ const ALL_TOOLS: ToolDefinition[] = [
 ];
 
 const ALWAYS_AVAILABLE = new Set([
+  'getActiveLanguage',
+  'setActiveLanguage',
   'getCode',
   'setCode',
   'getGeometryData',
@@ -422,6 +440,10 @@ function executeRenderView(api: PartwrightAPI, input: Record<string, unknown>): 
 
 async function dispatch(api: PartwrightAPI, name: string, input: Record<string, unknown>): Promise<unknown> {
   switch (name) {
+    case 'getActiveLanguage':
+      return api.getActiveLanguage();
+    case 'setActiveLanguage':
+      return api.setActiveLanguage(input.lang as 'manifold-js' | 'scad');
     case 'getCode':
       return api.getCode();
     case 'setCode':

@@ -12,8 +12,13 @@ let aiMdPromise: Promise<string> | null = null;
 const PREAMBLE = `You are an AI modeling assistant embedded inside Partwright, a parametric
 CAD tool that runs in the user's browser. You drive the app through tools
 that wrap window.partwright. Always use a session for user-requested
-geometry (do not write to examples/). When you write code, return a
-Manifold object — see ai.md below for the full conventions.
+geometry (do not write to examples/). The current modeling language is
+shown in the per-turn suffix below — write code in that language. If the
+user explicitly asks for a different language, or if the request is much
+better expressed in the other one, switch via setActiveLanguage('scad'
+| 'manifold-js'); otherwise stay in whatever the user has open. When you
+write JavaScript, return a Manifold object — see ai.md below for the
+full conventions.
 
 Be concise in chat. Long explanations cost tokens the user pays for. When a
 task involves geometry, prefer to act (call a tool, run code, save a
@@ -105,10 +110,12 @@ export function toggleSuffix(toggles: ChatToggles): string {
     restrictions.push('You CANNOT call renderView. The user disabled auto-render to save cost — reason from code, geometry stats, and any images the user explicitly attaches (Show AI). Do not ask for screenshots.');
   }
 
+  const lang = currentLanguage();
   const lines = [
     '',
     '## Session toggle state',
     '',
+    `Active language: ${lang}  — write code in this language. Use setActiveLanguage to switch only when justified (e.g. user asked, or the request maps obviously better to the other engine: OpenSCAD for parametric extrusion-heavy parts, manifold-js for boolean composition and fine programmatic control).`,
     `Model: ${toggles.model}`,
     `Auto-retry on tool error: ${toggles.autoRetry}`,
   ];
@@ -118,6 +125,15 @@ export function toggleSuffix(toggles: ChatToggles): string {
     for (const r of restrictions) lines.push(`- ${r}`);
   }
   return lines.join('\n');
+}
+
+function currentLanguage(): string {
+  try {
+    const w = window as unknown as { partwright?: { getActiveLanguage?: () => string } };
+    return w.partwright?.getActiveLanguage?.() ?? 'manifold-js';
+  } catch {
+    return 'manifold-js';
+  }
 }
 
 export function buildSystemPrompt(aiMd: string): string {
