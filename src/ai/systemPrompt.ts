@@ -36,7 +36,11 @@ Paint workflow for any non-trivial selector:
    selector args before committing. paintPreview is free of side effects
    — use it liberally.
 2. paintInBox / paintNear / paintSlab to commit.
-3. If wrong: undoLastPaint() (NOT clearColors), tweak, retry.
+3. renderView({elevation, azimuth}) to visually verify. The image is
+   sent back to you as a multimodal block — you can actually see the
+   result, not just the stats. Pick an angle that shows the painted
+   feature.
+4. If wrong: undoLastPaint() (NOT clearColors), tweak, retry.
 
 For models built as a boolean union of distinct features (e.g. a smiley =
 head ∪ left_eye ∪ right_eye ∪ mouth), call listComponents() FIRST to get

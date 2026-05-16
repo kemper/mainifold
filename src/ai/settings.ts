@@ -24,7 +24,10 @@ const PRESET_TOGGLES: Record<Exclude<Preset, 'custom'>, ChatToggles> = {
   },
   standard: {
     vision: { views: true },
-    scope: { runCode: true, saveVersions: true, paintFaces: true },
+    // Paint off by default — color regions lock the editor and are easy
+    // for the model to mis-target. Users who want AI-driven painting
+    // can flip the Paint pill on, or pick the Full preset.
+    scope: { runCode: true, saveVersions: true, paintFaces: false },
     autoRetry: 1,
     model: 'claude-sonnet-4-6',
   },
@@ -137,8 +140,8 @@ export const MODEL_OPTIONS: { id: ModelId; label: string }[] = [
 ];
 
 export const PRESET_OPTIONS: { id: Preset; label: string; hint: string }[] = [
-  { id: 'minimal', label: 'Minimal', hint: 'code-only, Haiku, no retries' },
-  { id: 'standard', label: 'Standard', hint: 'code + iso views, Sonnet, 1 retry' },
-  { id: 'full', label: 'Full', hint: 'all tools + views, Opus, 3 retries' },
-  { id: 'custom', label: 'Custom', hint: 'your toggles' },
+  { id: 'minimal', label: 'Minimal', hint: 'Haiku · code only · no images · no retries' },
+  { id: 'standard', label: 'Standard', hint: 'Sonnet · run + save + views · paint off · 1 retry' },
+  { id: 'full', label: 'Full', hint: 'Opus · every tool incl. paint · views · 3 retries' },
+  { id: 'custom', label: 'Custom', hint: 'whatever you have set with the toggles below' },
 ];

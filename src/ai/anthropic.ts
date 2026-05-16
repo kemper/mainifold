@@ -238,12 +238,29 @@ function userBlocksToApi(blocks: ChatBlock[], toolResults: PersistedToolResult[]
   // user text in that same turn.
   const out: Anthropic.ContentBlockParam[] = [];
   for (const r of toolResults) {
-    out.push({
-      type: 'tool_result',
-      tool_use_id: r.toolUseId,
-      content: r.content,
-      is_error: r.isError,
-    });
+    // When the tool returned an image (renderView), we pass array content
+    // with a short text block + the image block. The model treats this
+    // exactly like a multimodal user message: vision can interpret the
+    // pixels, and the text gives the result context (e.g. the camera
+    // parameters used).
+    if (r.image) {
+      out.push({
+        type: 'tool_result',
+        tool_use_id: r.toolUseId,
+        content: [
+          { type: 'text', text: r.content },
+          imageBlockToApi(r.image),
+        ],
+        is_error: r.isError,
+      });
+    } else {
+      out.push({
+        type: 'tool_result',
+        tool_use_id: r.toolUseId,
+        content: r.content,
+        is_error: r.isError,
+      });
+    }
   }
   for (const b of blocks) {
     if (b.type === 'text') {

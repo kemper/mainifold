@@ -221,6 +221,7 @@ async function executeAllWithRetry(
       toolUseId: tc.id,
       content: result.content,
       isError: result.isError,
+      ...(result.image ? { image: result.image } : {}),
     };
     results.push(persisted);
     callbacks.onToolResult?.(tc.id, tc.name, persisted);

@@ -15,9 +15,15 @@ export interface ToolDefinition {
   };
 }
 
+import type { ImageSource } from './types';
+
 export interface ToolExecResult {
   content: string;
   isError: boolean;
+  /** Optional image to forward back to the model as a multimodal content
+   *  block. Set by renderView (and any future tools that produce vision
+   *  output) so the agent can self-verify against a fresh snapshot. */
+  image?: ImageSource;
 }
 
 const ALL_TOOLS: ToolDefinition[] = [
@@ -84,8 +90,21 @@ const ALL_TOOLS: ToolDefinition[] = [
     input_schema: { type: 'object', properties: {} },
   },
   {
+    name: 'renderView',
+    description: 'Render the current model from a specified angle and return the PNG directly to you as a multimodal image. THIS IS HOW YOU SEE YOUR WORK — call after any paint or geometry change to visually verify the result, then undoLastPaint() if it landed wrong. Cheap (one render) but each image costs ~1500 input tokens on the next turn, so render with intent (one good angle that shows the feature) rather than spamming all 4 iso views.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        elevation: { type: 'number', description: 'Camera elevation in degrees. 0 = side view, 90 = top. Default 30.' },
+        azimuth: { type: 'number', description: 'Camera azimuth in degrees. 0 = front, 90 = right, 180 = back, 270 = left. Default 0.' },
+        ortho: { type: 'boolean', description: 'true = orthographic (technical drawing), false = perspective. Default false.' },
+        size: { type: 'integer', description: 'Pixel size of the rendered square. Default 320. Larger costs more tokens.' },
+      },
+    },
+  },
+  {
     name: 'paintPreview',
-    description: 'DRY-RUN: returns {triangleCount, bbox, centroid} for what a paint op WOULD select, WITHOUT committing. Same selector args as paintInBox / paintNear / paintFaces. Use to gauge whether your selector is too tight or too loose before spending the round-trip to paint and undo. (The underlying API also returns a thumbnail image — stripped from the tool result because you cannot interpret it.)',
+    description: 'DRY-RUN: returns {triangleCount, bbox, centroid} for what a paint op WOULD select, WITHOUT committing. Same selector args as paintInBox / paintNear / paintFaces. Use to gauge whether your selector is too tight or too loose before spending the round-trip to paint and undo. (The underlying API also returns a thumbnail image — stripped from the tool result because you cannot interpret it; call renderView separately if you need to see.)',
     input_schema: {
       type: 'object',
       properties: {
@@ -282,6 +301,11 @@ const ALWAYS_AVAILABLE = new Set([
 const RUN_GATED = new Set(['runCode']);
 const SAVE_GATED = new Set(['runAndSave', 'loadVersion']);
 const PAINT_GATED = new Set(['paintRegion', 'paintFaces', 'paintNear', 'paintInBox', 'paintSlab', 'paintNearestRegion', 'undoLastPaint', 'redoLastPaint', 'removeRegion', 'clearColors']);
+/** renderView ships a PNG back to the model via a multimodal content
+ *  block. Gated by the Views vision toggle so the user can disable
+ *  vision spend in one place — when off, the agent has to reason from
+ *  code + stats alone. */
+const VIEWS_GATED = new Set(['renderView']);
 
 export function buildToolList(toggles: ChatToggles): ToolDefinition[] {
   return ALL_TOOLS.filter(t => {
@@ -293,6 +317,7 @@ export function buildToolList(toggles: ChatToggles): ToolDefinition[] {
       return t.name === 'loadVersion' ? toggles.scope.saveVersions : (toggles.scope.runCode && toggles.scope.saveVersions);
     }
     if (PAINT_GATED.has(t.name)) return toggles.scope.paintFaces;
+    if (VIEWS_GATED.has(t.name)) return toggles.vision.views;
     return false;
   });
 }
@@ -309,18 +334,61 @@ function getApi(): PartwrightAPI {
 
 /** Dispatches a tool call to window.partwright and stringifies the result.
  *  Errors are caught and returned with isError: true so the loop can feed
- *  them back to the model for self-correction. */
+ *  them back to the model for self-correction. Tools that return an
+ *  image (renderView today) bypass the JSON path and return a structured
+ *  ToolExecResult directly. */
 export async function executeTool(name: string, input: Record<string, unknown>): Promise<ToolExecResult> {
   try {
     const api = getApi();
+    // renderView is the only tool that hands back an image. Handled
+    // directly here so the data-URL parsing + multimodal wrapping stays
+    // out of the generic dispatch helper.
+    if (name === 'renderView') return executeRenderView(api, input);
+
     const result = await dispatch(api, name, input);
     if (result === undefined) return { content: '(ok)', isError: false };
     if (typeof result === 'string') return { content: result, isError: false };
+    // If a dispatch returned an object that already looks like our
+    // ToolExecResult shape (image-bearing), pass it through. Otherwise
+    // serialize normally.
+    if (result && typeof result === 'object' && 'content' in (result as Record<string, unknown>) && 'isError' in (result as Record<string, unknown>)) {
+      return result as ToolExecResult;
+    }
     return { content: JSON.stringify(result, null, 2), isError: false };
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     return { content: msg, isError: true };
   }
+}
+
+function executeRenderView(api: PartwrightAPI, input: Record<string, unknown>): ToolExecResult {
+  const result = api.renderView(input) as string | { error: string } | null | undefined;
+  if (result == null) return { content: 'renderView returned no image — is there geometry loaded? Run code first.', isError: true };
+  if (typeof result === 'object' && 'error' in result) return { content: result.error, isError: true };
+  if (typeof result !== 'string') return { content: 'renderView returned an unexpected value', isError: true };
+
+  // data URL format: "data:image/png;base64,...."
+  const match = result.match(/^data:(image\/[a-z+]+);base64,(.+)$/i);
+  if (!match) return { content: 'renderView returned a non-data-URL string', isError: true };
+  const mediaTypeStr = match[1];
+  const data = match[2];
+  const safeMedia: ImageSource['mediaType'] =
+    mediaTypeStr === 'image/png' || mediaTypeStr === 'image/jpeg' ||
+    mediaTypeStr === 'image/gif' || mediaTypeStr === 'image/webp'
+      ? mediaTypeStr
+      : 'image/png';
+
+  const elevation = (input.elevation as number | undefined) ?? 30;
+  const azimuth = (input.azimuth as number | undefined) ?? 0;
+  const ortho = (input.ortho as boolean | undefined) ?? false;
+  const size = (input.size as number | undefined) ?? 320;
+  const label = `view: elev=${elevation}°, az=${azimuth}°${ortho ? ', ortho' : ''}, ${size}px`;
+
+  return {
+    content: `Rendered ${label}. The image is attached to this result — inspect it visually before deciding next steps.`,
+    isError: false,
+    image: { data, mediaType: safeMedia, label },
+  };
 }
 
 async function dispatch(api: PartwrightAPI, name: string, input: Record<string, unknown>): Promise<unknown> {

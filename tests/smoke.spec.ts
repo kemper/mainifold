@@ -126,6 +126,21 @@ test.describe('AI chat panel', () => {
     expect(ok).toBe(true);
   });
 
+  test('toggle pills carry tooltips explaining what they do', async ({ page }) => {
+    await page.goto('/editor');
+    await page.waitForSelector('#ai-panel');
+    await page.locator('#btn-ai').dispatchEvent('click');
+    const pillNames = ['👁 Views', '▶ Run', '💾 Save', '🎨 Paint'];
+    for (const name of pillNames) {
+      const pill = page.locator('#ai-panel button', { hasText: name });
+      await expect(pill).toBeVisible();
+      const title = await pill.getAttribute('title');
+      expect(title, `${name} should have a tooltip`).toBeTruthy();
+      expect(title!.length).toBeGreaterThan(20);
+      expect(title!.toLowerCase()).toMatch(/on|off|click/);
+    }
+  });
+
   test('drawer + send from landing page navigates to editor', async ({ page }) => {
     // Open the drawer on /editor first so it persists open, then go back
     // to the landing page. The drawer is a body-level overlay so it

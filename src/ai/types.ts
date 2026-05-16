@@ -84,6 +84,10 @@ export interface PersistedToolResult {
    *  message when `isError`. We don't store binary blobs in chat results. */
   content: string;
   isError?: boolean;
+  /** Optional image returned by the tool (e.g. renderView snapshots). Sent
+   *  to the model as a multimodal content block AND rendered inline in the
+   *  panel so the user sees what the agent saw. */
+  image?: ImageSource;
 }
 
 export interface TurnUsage {

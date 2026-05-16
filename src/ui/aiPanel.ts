@@ -304,6 +304,7 @@ function createIconButton(_label: string, glyph: string): HTMLButtonElement {
 function createModelSelect(): HTMLSelectElement {
   const sel = document.createElement('select');
   sel.className = 'px-2 py-1 rounded text-[11px] bg-zinc-800 border border-zinc-700 text-zinc-200 focus:outline-none';
+  sel.title = 'Claude model. Haiku is cheap and fast for simple iteration; Sonnet is the balanced default; Opus is the most capable but the most expensive.';
   for (const opt of MODEL_OPTIONS) {
     const o = document.createElement('option');
     o.value = opt.id;
@@ -322,6 +323,7 @@ function createModelSelect(): HTMLSelectElement {
 function createPresetSelect(): HTMLSelectElement {
   const sel = document.createElement('select');
   sel.className = 'px-2 py-1 rounded text-[11px] bg-zinc-800 border border-zinc-700 text-zinc-200 focus:outline-none';
+  sel.title = 'Preset bundles the model + toggle settings. Picking a preset resets the toggles below to its defaults; manually changing any toggle switches you to "Custom".';
   for (const opt of PRESET_OPTIONS) {
     const o = document.createElement('option');
     o.value = opt.id;
@@ -350,23 +352,43 @@ function renderToggleStrip(): void {
   const settings = loadSettings();
   const { toggles } = settings;
 
-  toggleStripEl.appendChild(togglePill('👁 Views', toggles.vision.views, () => {
-    saveSettings(setToggles(loadSettings(), { vision: { views: !toggles.vision.views } }));
-    renderToggleStrip();
-    renderCostMeter();
-  }));
-  toggleStripEl.appendChild(togglePill('▶ Run', toggles.scope.runCode, () => {
-    saveSettings(setToggles(loadSettings(), { scope: { runCode: !toggles.scope.runCode } }));
-    renderToggleStrip();
-  }));
-  toggleStripEl.appendChild(togglePill('💾 Save', toggles.scope.saveVersions, () => {
-    saveSettings(setToggles(loadSettings(), { scope: { saveVersions: !toggles.scope.saveVersions } }));
-    renderToggleStrip();
-  }));
-  toggleStripEl.appendChild(togglePill('🎨 Paint', toggles.scope.paintFaces, () => {
-    saveSettings(setToggles(loadSettings(), { scope: { paintFaces: !toggles.scope.paintFaces } }));
-    renderToggleStrip();
-  }));
+  toggleStripEl.appendChild(togglePill(
+    '👁 Views',
+    toggles.vision.views,
+    'Vision: send rendered images to the AI (Show AI snapshot + renderView tool). When ON, the model can see what it modeled — costs ~1500 tokens per image. When OFF, the model reasons from code + geometry stats only.',
+    () => {
+      saveSettings(setToggles(loadSettings(), { vision: { views: !toggles.vision.views } }));
+      renderToggleStrip();
+      renderCostMeter();
+    },
+  ));
+  toggleStripEl.appendChild(togglePill(
+    '▶ Run',
+    toggles.scope.runCode,
+    'Run code: allow the AI to execute geometry code (runCode, runAndSave). OFF makes it suggest code in chat without running.',
+    () => {
+      saveSettings(setToggles(loadSettings(), { scope: { runCode: !toggles.scope.runCode } }));
+      renderToggleStrip();
+    },
+  ));
+  toggleStripEl.appendChild(togglePill(
+    '💾 Save',
+    toggles.scope.saveVersions,
+    'Save versions: allow the AI to commit results to the gallery (runAndSave, loadVersion). OFF keeps the model in run-only / dry-run mode.',
+    () => {
+      saveSettings(setToggles(loadSettings(), { scope: { saveVersions: !toggles.scope.saveVersions } }));
+      renderToggleStrip();
+    },
+  ));
+  toggleStripEl.appendChild(togglePill(
+    '🎨 Paint',
+    toggles.scope.paintFaces,
+    'Paint: allow the AI to set color regions (paintInBox, paintSlab, paintNear, etc.). OFF by default — painting locks the editor and is the easiest place for the AI to over-select.',
+    () => {
+      saveSettings(setToggles(loadSettings(), { scope: { paintFaces: !toggles.scope.paintFaces } }));
+      renderToggleStrip();
+    },
+  ));
 
   const retry = document.createElement('select');
   retry.className = 'px-1.5 py-0.5 rounded text-[10px] bg-zinc-800 border border-zinc-700 text-zinc-300 focus:outline-none';
@@ -384,12 +406,14 @@ function renderToggleStrip(): void {
   toggleStripEl.appendChild(retry);
 }
 
-function togglePill(label: string, on: boolean, onClick: () => void): HTMLButtonElement {
+function togglePill(label: string, on: boolean, tooltip: string, onClick: () => void): HTMLButtonElement {
   const btn = document.createElement('button');
   btn.className = on
     ? 'px-2 py-0.5 rounded text-[10px] bg-emerald-700/40 border border-emerald-700/60 text-emerald-200'
     : 'px-2 py-0.5 rounded text-[10px] bg-zinc-800 border border-zinc-700 text-zinc-500';
   btn.textContent = label;
+  btn.title = `${tooltip}\n\nCurrently: ${on ? 'ON' : 'OFF'} — click to ${on ? 'disable' : 'enable'}.`;
+  btn.setAttribute('aria-pressed', String(on));
   btn.addEventListener('click', onClick);
   return btn;
 }
@@ -600,9 +624,14 @@ function renderToolCallChip(name: string, input: Record<string, unknown>): HTMLE
 }
 
 function renderToolResultBubble(result: PersistedToolResult): HTMLElement {
+  const wrap = document.createElement('div');
+  wrap.className = 'flex flex-col items-start gap-1 max-w-[90%]';
   const chip = document.createElement('details');
   const tone = result.isError ? 'border-red-700/60 bg-red-900/20 text-red-200' : 'border-emerald-700/40 bg-emerald-900/10 text-emerald-200';
-  chip.className = `max-w-[90%] text-[11px] rounded border ${tone} px-2 py-1`;
+  chip.className = `text-[11px] rounded border ${tone} px-2 py-1`;
+  // If the tool returned an image, default to open so the user can see
+  // it without expanding — that's the whole point of the affordance.
+  if (result.image) chip.open = true;
   const summary = document.createElement('summary');
   summary.className = 'cursor-pointer select-none';
   const head = result.content.split('\n')[0].slice(0, 80);
@@ -612,7 +641,13 @@ function renderToolResultBubble(result: PersistedToolResult): HTMLElement {
   pre.className = 'mt-1 text-[10px] opacity-80 overflow-x-auto whitespace-pre-wrap';
   pre.textContent = result.content;
   chip.appendChild(pre);
-  return chip;
+  wrap.appendChild(chip);
+  // Image bubble — the same render the AI sees, so the human and the
+  // model are looking at literally the same pixels.
+  if (result.image) {
+    wrap.appendChild(renderImageBubble(result.image));
+  }
+  return wrap;
 }
 
 // === Pending images ===
@@ -840,11 +875,11 @@ function setSendButtonMode(mode: 'send' | 'stop'): void {
   if (mode === 'stop') {
     sendBtnRef.textContent = 'Stop';
     sendBtnRef.className = 'shrink-0 px-3 py-1.5 rounded text-xs font-medium bg-red-600 hover:bg-red-500 text-white';
-    sendBtnRef.title = 'Stop the model; partial output is kept so you can redirect.';
+    sendBtnRef.title = 'Stop the model. Partial output is kept so you can redirect.';
   } else {
     sendBtnRef.textContent = 'Send';
     sendBtnRef.className = 'shrink-0 px-3 py-1.5 rounded text-xs font-medium bg-blue-600 hover:bg-blue-500 text-white disabled:opacity-50 disabled:cursor-not-allowed';
-    sendBtnRef.title = '';
+    sendBtnRef.title = 'Send your message (Enter). Shift+Enter for newline.';
   }
 }
 
