@@ -96,7 +96,11 @@ export interface RequestSpec {
   maxTokens?: number;
 }
 
-export async function streamTurn(spec: RequestSpec, callbacks: StreamCallbacks = {}): Promise<StreamResult> {
+export async function streamTurn(
+  spec: RequestSpec,
+  callbacks: StreamCallbacks = {},
+  signal?: AbortSignal,
+): Promise<StreamResult> {
   const client = getClient(spec.apiKey);
   const max_tokens = spec.maxTokens ?? 8192;
 
@@ -125,10 +129,13 @@ export async function streamTurn(spec: RequestSpec, callbacks: StreamCallbacks =
     messages: spec.apiMessages,
   });
 
-  // Wire up text deltas so the UI can render progressively.
-  if (callbacks.onText) {
-    stream.on('text', delta => callbacks.onText!(delta));
-  }
+  // Mirror text deltas into a local buffer so we still have the partial
+  // response if the stream is aborted before finalMessage() resolves.
+  let collectedText = '';
+  stream.on('text', delta => {
+    collectedText += delta;
+    callbacks.onText?.(delta);
+  });
 
   // Track tool_use blocks as they start so the UI can render a "calling X..."
   // bubble even before the input is fully streamed.
@@ -140,8 +147,40 @@ export async function streamTurn(spec: RequestSpec, callbacks: StreamCallbacks =
     });
   }
 
-  const finalMessage = await stream.finalMessage();
-  return collectResult(finalMessage);
+  // Tear down the stream when the caller aborts. The SDK exposes both
+  // stream.abort() and the underlying AbortController via stream.controller;
+  // abort() is the public API and works across SDK versions.
+  const abortListener = () => { try { stream.abort(); } catch { /* already done */ } };
+  if (signal) {
+    if (signal.aborted) abortListener();
+    else signal.addEventListener('abort', abortListener);
+  }
+
+  try {
+    const finalMessage = await stream.finalMessage();
+    return collectResult(finalMessage);
+  } catch (err) {
+    if (signal?.aborted) {
+      // Abort race: return what we collected. Tool calls are dropped
+      // because a tool_use block that streamed only partial input cannot
+      // be a valid request to the model on the next turn — the parser
+      // would reject it. The partial text stays so the user can see how
+      // far the model had gotten.
+      const partialBlocks: Anthropic.ContentBlock[] = collectedText.length > 0
+        ? [{ type: 'text', text: collectedText, citations: null }]
+        : [];
+      return {
+        text: collectedText,
+        toolCalls: [],
+        stopReason: 'aborted',
+        usage: { inputTokens: 0, outputTokens: 0, cacheCreationInputTokens: 0, cacheReadInputTokens: 0 },
+        rawAssistantBlocks: partialBlocks,
+      };
+    }
+    throw err;
+  } finally {
+    if (signal) signal.removeEventListener('abort', abortListener);
+  }
 }
 
 function collectResult(message: Anthropic.Message): StreamResult {

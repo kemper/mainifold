@@ -88,7 +88,8 @@ test.describe('AI chat panel', () => {
   test('key modal opens and closes', async ({ page }) => {
     await page.goto('/editor?view=ai');
     await page.click('#btn-ai');
-    await page.locator('#ai-panel button:has-text("Connect Anthropic API")').click();
+    // dispatchEvent — same flex-child viewport quirk as the toggle pills.
+    await page.locator('#ai-panel button:has-text("Connect Anthropic API")').dispatchEvent('click');
     await expect(page.locator('input[type="password"]')).toBeVisible();
     await expect(page.getByRole('heading', { name: 'Connect Anthropic API' })).toBeVisible();
 

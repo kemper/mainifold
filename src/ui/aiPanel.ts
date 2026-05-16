@@ -14,7 +14,7 @@ import { generateId } from '../storage/db';
 import { showAiKeyModal } from './aiKeyModal';
 import { showAiSettingsModal } from './aiSettingsModal';
 import { showCompactConfirmModal } from './aiCompactModal';
-import type { ChatBlock, ChatMessage, ImageSource, ModelId, PersistedToolResult } from '../ai/types';
+import type { ChatBlock, ChatMessage, ChatToggles, ImageSource, ModelId, PersistedToolResult } from '../ai/types';
 
 interface PanelState {
   open: boolean;
@@ -23,6 +23,9 @@ interface PanelState {
   pendingImages: ImageSource[];
   systemPromptChars: number;
   inFlight: boolean;
+  /** Live for the duration of a turn. Stop button aborts via this. Null
+   *  when no turn is in flight. */
+  inFlightController: AbortController | null;
 }
 
 const state: PanelState = {
@@ -32,7 +35,10 @@ const state: PanelState = {
   pendingImages: [],
   systemPromptChars: 0,
   inFlight: false,
+  inFlightController: null,
 };
+
+let sendBtnRef: HTMLButtonElement | null = null;
 
 let drawerEl: HTMLElement | null = null;
 let transcriptEl: HTMLElement | null = null;
@@ -41,6 +47,8 @@ let pendingImagesEl: HTMLElement | null = null;
 let toggleStripEl: HTMLElement | null = null;
 let costMeterEl: HTMLElement | null = null;
 let panelStatusEl: HTMLElement | null = null;
+let progressEl: HTMLElement | null = null;
+let progressTickerId: number | null = null;
 
 let onPanelStateChange: ((open: boolean) => void) | null = null;
 
@@ -179,6 +187,14 @@ function buildDrawer(): void {
   pendingImagesEl.className = 'px-3 pb-1.5 flex flex-wrap gap-1.5 shrink-0 hidden';
   root.appendChild(pendingImagesEl);
 
+  // In-progress indicator — shown while a turn is in flight so the user
+  // knows we haven't frozen. Hidden by default; populated by
+  // showProgress() / hideProgress() driven by runTurn's onProgress callback
+  // and the stall watchdog.
+  progressEl = document.createElement('div');
+  progressEl.className = 'px-3 pb-1.5 text-[11px] text-zinc-400 flex items-center gap-2 shrink-0 hidden';
+  root.appendChild(progressEl);
+
   // Input row
   const inputRow = document.createElement('div');
   inputRow.className = 'px-3 py-2 border-t border-zinc-700 flex items-end gap-2 shrink-0';
@@ -236,7 +252,16 @@ function buildDrawer(): void {
   const sendBtn = document.createElement('button');
   sendBtn.className = 'shrink-0 px-3 py-1.5 rounded text-xs font-medium bg-blue-600 hover:bg-blue-500 text-white disabled:opacity-50 disabled:cursor-not-allowed';
   sendBtn.textContent = 'Send';
-  sendBtn.addEventListener('click', () => { void sendMessage(); });
+  sendBtn.addEventListener('click', () => {
+    // While a turn is in flight the button is "Stop" — click aborts the
+    // controller, which propagates through runTurn → streamTurn → SDK.
+    if (state.inFlight) {
+      state.inFlightController?.abort();
+      return;
+    }
+    void sendMessage();
+  });
+  sendBtnRef = sendBtn;
   inputRow.appendChild(sendBtn);
 
   root.appendChild(inputRow);
@@ -483,7 +508,40 @@ function renderMessage(msg: ChatMessage): HTMLElement {
     wrap.appendChild(meta);
   }
 
+  if (msg.role === 'assistant' && msg.aborted) {
+    const banner = document.createElement('div');
+    banner.className = 'flex items-center gap-2 text-[10px] text-amber-400';
+    const label = document.createElement('span');
+    label.textContent = '⊘ Stopped by user.';
+    banner.appendChild(label);
+    const discard = document.createElement('button');
+    discard.className = 'underline hover:text-amber-200';
+    discard.textContent = 'Discard partial';
+    discard.title = 'Delete this aborted message so the next turn starts clean.';
+    discard.addEventListener('click', () => { void discardPartial(msg.id); });
+    banner.appendChild(discard);
+    wrap.appendChild(banner);
+  }
+
   return wrap;
+}
+
+async function discardPartial(messageId: string): Promise<void> {
+  // Drop the aborted assistant message from both the DB and the in-memory
+  // history so the next turn doesn't see (or have to refer to) it. We also
+  // drop any tool_result message that immediately followed — that pair
+  // only makes sense together.
+  const idx = state.history.findIndex(m => m.id === messageId);
+  if (idx < 0) return;
+  const toDelete = [state.history[idx].id];
+  const next = state.history[idx + 1];
+  if (next && next.role === 'user' && next.toolResults && next.toolResults.length > 0) {
+    toDelete.push(next.id);
+  }
+  await deleteMessages(toDelete);
+  await loadHistoryForCurrentSession();
+  renderTranscript();
+  renderCostMeter();
 }
 
 function renderTextBubble(role: 'user' | 'assistant', text: string, compacted?: boolean): HTMLElement {
@@ -622,73 +680,218 @@ async function sendMessage(): Promise<void> {
   inputEl.value = '';
   state.pendingImages = [];
   renderPendingImages();
-  state.inFlight = true;
+  progressState.retryCount = 0;
+  stalledByWatchdog = false;
+  await runTurnWithStallRetry(key.apiKey, settings.toggles, blocks);
+}
 
-  let activeAssistantId: string | null = null;
-  let liveTextEl: HTMLElement | null = null;
+/** Wraps runTurn with: in-progress indicator, stall watchdog, and bounded
+ *  auto-retry. When the watchdog fires we abort and re-issue the same
+ *  conversation; on retry attempts userBlocks is empty because the user
+ *  message is already in history from the first attempt. */
+async function runTurnWithStallRetry(apiKey: string, toggles: ChatToggles, userBlocks: ChatBlock[]): Promise<void> {
+  let attempt = 0;
+  while (true) {
+    attempt++;
+    const controller = new AbortController();
+    state.inFlight = true;
+    state.inFlightController = controller;
+    setSendButtonMode('stop');
+    showProgress('thinking', 'starting…');
 
-  await runTurn({
-    apiKey: key.apiKey,
-    toggles: settings.toggles,
-    sessionId: state.sessionId,
-    history: state.history,
-    userBlocks: blocks,
-  }, {
-    onUserPersisted: msg => {
-      state.history.push(msg);
-      renderTranscript();
-    },
-    onAssistantStart: id => {
-      activeAssistantId = id;
-      const placeholder: ChatMessage = {
-        id, sessionId: state.sessionId, role: 'assistant',
-        blocks: [{ type: 'text', text: '' }], createdAt: Date.now(),
-        seq: (state.history[state.history.length - 1]?.seq ?? 0) + 1,
-      };
-      state.history.push(placeholder);
-      renderTranscript();
-      // Grab the just-rendered bubble's text element so we can append deltas
-      if (transcriptEl) {
-        const wrap = transcriptEl.querySelector(`[data-message-id="${id}"]`) as HTMLElement | null;
-        liveTextEl = wrap?.querySelector('.bg-zinc-800') as HTMLElement | null;
-        if (liveTextEl) liveTextEl.textContent = '';
-      }
-    },
-    onAssistantText: delta => {
-      if (liveTextEl) {
-        liveTextEl.textContent = (liveTextEl.textContent ?? '') + delta;
-        if (transcriptEl) transcriptEl.scrollTop = transcriptEl.scrollHeight;
-      }
-    },
-    onAssistantPersisted: msg => {
-      // Replace the placeholder with the persisted message
-      const idx = state.history.findIndex(m => m.id === activeAssistantId);
-      if (idx >= 0) state.history[idx] = msg;
-      activeAssistantId = null;
-      liveTextEl = null;
-      renderTranscript();
-      renderCostMeter();
-    },
-    onToolResult: (_id, _name, result) => {
-      // The user-message that carries the tool result will be rendered when
-      // the loop persists it; nothing to do here in v0 beyond a flash
-      // notification for errors.
-      if (result.isError) setTransientStatus('A tool errored. The agent will retry or surface the issue.');
-    },
-    onError: err => {
-      setTransientStatus(`Error: ${err.message}`);
-    },
-    onTurnComplete: () => {
-      // Refresh from DB to catch any tool-result messages
-      void loadHistoryForCurrentSession().then(() => {
+    let activeAssistantId: string | null = null;
+    let liveTextEl: HTMLElement | null = null;
+    const blocksForThisAttempt = attempt === 1 ? userBlocks : [];
+
+    await runTurn({
+      apiKey,
+      toggles,
+      sessionId: state.sessionId,
+      history: state.history,
+      userBlocks: blocksForThisAttempt,
+      signal: controller.signal,
+    }, {
+      onUserPersisted: msg => {
+        state.history.push(msg);
+        renderTranscript();
+      },
+      onAssistantStart: id => {
+        activeAssistantId = id;
+        const placeholder: ChatMessage = {
+          id, sessionId: state.sessionId, role: 'assistant',
+          blocks: [{ type: 'text', text: '' }], createdAt: Date.now(),
+          seq: (state.history[state.history.length - 1]?.seq ?? 0) + 1,
+        };
+        state.history.push(placeholder);
+        renderTranscript();
+        if (transcriptEl) {
+          const wrap = transcriptEl.querySelector(`[data-message-id="${id}"]`) as HTMLElement | null;
+          liveTextEl = wrap?.querySelector('.bg-zinc-800') as HTMLElement | null;
+          if (liveTextEl) liveTextEl.textContent = '';
+        }
+      },
+      onAssistantText: delta => {
+        if (liveTextEl) {
+          liveTextEl.textContent = (liveTextEl.textContent ?? '') + delta;
+          if (transcriptEl) transcriptEl.scrollTop = transcriptEl.scrollHeight;
+        }
+      },
+      onProgress: info => showProgress(info.phase, info.detail),
+      onAssistantPersisted: msg => {
+        const idx = state.history.findIndex(m => m.id === activeAssistantId);
+        if (idx >= 0) state.history[idx] = msg;
+        activeAssistantId = null;
+        liveTextEl = null;
         renderTranscript();
         renderCostMeter();
-      });
-    },
-  });
+      },
+      onToolResult: (_id, _name, result) => {
+        if (result.isError) setTransientStatus('A tool errored. The agent will retry or surface the issue.');
+      },
+      onError: err => {
+        setTransientStatus(`Error: ${err.message}`);
+      },
+      onAborted: () => {
+        // Only show the user-stopped notice if the user actually clicked
+        // Stop — when the watchdog fires, the message is misleading.
+        if (!stalledByWatchdog) {
+          setTransientStatus('Stopped. Type a new message to continue or redirect.');
+          inputEl?.focus();
+        }
+      },
+      onTurnComplete: () => {
+        void loadHistoryForCurrentSession().then(() => {
+          renderTranscript();
+          renderCostMeter();
+        });
+      },
+    });
 
-  state.inFlight = false;
+    state.inFlight = false;
+    state.inFlightController = null;
+    setSendButtonMode('send');
+    hideProgress();
+
+    if (stalledByWatchdog && progressState.retryCount <= MAX_STALL_RETRIES) {
+      // Strip the empty/partial assistant message left by the stalled
+      // attempt so the retry doesn't see (or send back to the model) a
+      // ghost bubble.
+      await stripLastAbortedAssistant();
+      stalledByWatchdog = false;
+      continue;
+    }
+    return;
+  }
 }
+
+/** Find the last assistant message marked `aborted` at the tail of the
+ *  in-memory history, delete it from IndexedDB, and reload. Used to clean
+ *  up after the stall watchdog. */
+async function stripLastAbortedAssistant(): Promise<void> {
+  for (let i = state.history.length - 1; i >= 0; i--) {
+    const m = state.history[i];
+    if (m.role !== 'assistant') continue;
+    if (m.aborted) {
+      await deleteMessages([m.id]);
+      await loadHistoryForCurrentSession();
+      renderTranscript();
+      return;
+    }
+    break;
+  }
+}
+
+function setSendButtonMode(mode: 'send' | 'stop'): void {
+  if (!sendBtnRef) return;
+  if (mode === 'stop') {
+    sendBtnRef.textContent = 'Stop';
+    sendBtnRef.className = 'shrink-0 px-3 py-1.5 rounded text-xs font-medium bg-red-600 hover:bg-red-500 text-white';
+    sendBtnRef.title = 'Stop the model; partial output is kept so you can redirect.';
+  } else {
+    sendBtnRef.textContent = 'Send';
+    sendBtnRef.className = 'shrink-0 px-3 py-1.5 rounded text-xs font-medium bg-blue-600 hover:bg-blue-500 text-white disabled:opacity-50 disabled:cursor-not-allowed';
+    sendBtnRef.title = '';
+  }
+}
+
+// === Progress indicator + stall watchdog ===
+
+interface ProgressTracker {
+  phase: 'thinking' | 'streaming' | 'tool' | 'idle';
+  detail?: string;
+  lastBeat: number;
+  retryCount: number;
+}
+
+const progressState: ProgressTracker = { phase: 'idle', lastBeat: 0, retryCount: 0 };
+
+/** Wall-clock seconds without a stream beat before we treat the request as
+ *  stalled. Anthropic's adaptive thinking can pause output for tens of
+ *  seconds during deep reasoning, so this threshold needs to be generous —
+ *  smaller numbers cause spurious "auto-resume" loops on Opus 4.7. */
+const STALL_THRESHOLD_MS = 45_000;
+const MAX_STALL_RETRIES = 2;
+
+function showProgress(phase: ProgressTracker['phase'], detail?: string): void {
+  progressState.phase = phase;
+  progressState.detail = detail;
+  progressState.lastBeat = Date.now();
+  renderProgress();
+  if (!progressEl) return;
+  progressEl.classList.remove('hidden');
+  if (progressTickerId === null) {
+    // Re-render every second so the "(15s)" elapsed counter updates and
+    // the stall watchdog can fire from the same tick.
+    progressTickerId = window.setInterval(renderProgress, 1000);
+  }
+}
+
+function hideProgress(): void {
+  progressState.phase = 'idle';
+  if (progressEl) progressEl.classList.add('hidden');
+  if (progressTickerId !== null) {
+    clearInterval(progressTickerId);
+    progressTickerId = null;
+  }
+}
+
+function renderProgress(): void {
+  if (!progressEl) return;
+  if (progressState.phase === 'idle') return;
+  const elapsedSec = Math.max(1, Math.round((Date.now() - progressState.lastBeat) / 1000));
+  const label =
+    progressState.phase === 'thinking' ? `🧠 thinking… (${elapsedSec}s silent)` :
+    progressState.phase === 'streaming' ? '✎ streaming response…' :
+    progressState.phase === 'tool' ? `🔧 ${progressState.detail ?? 'running tool'}…` :
+    '';
+  progressEl.replaceChildren();
+  const dot = document.createElement('span');
+  dot.className = 'inline-block w-2 h-2 rounded-full bg-blue-400 animate-pulse';
+  progressEl.appendChild(dot);
+  const text = document.createElement('span');
+  text.textContent = label;
+  progressEl.appendChild(text);
+  if (state.inFlightController && progressState.phase === 'thinking' && elapsedSec * 1000 > STALL_THRESHOLD_MS) {
+    triggerStallRetry();
+  }
+}
+
+function triggerStallRetry(): void {
+  if (progressState.retryCount >= MAX_STALL_RETRIES) {
+    // Hand off to the user — surface that we've given up auto-retrying.
+    setTransientStatus(`Model stalled (no tokens for ${Math.round(STALL_THRESHOLD_MS / 1000)}s) after ${MAX_STALL_RETRIES} retries — stopping.`);
+    state.inFlightController?.abort();
+    return;
+  }
+  // Abort the current attempt with a stall marker so sendMessage knows to
+  // re-issue rather than treat it as a user-initiated stop.
+  progressState.retryCount++;
+  setTransientStatus(`No response for ${Math.round(STALL_THRESHOLD_MS / 1000)}s — auto-resuming (retry ${progressState.retryCount}/${MAX_STALL_RETRIES})...`);
+  stalledByWatchdog = true;
+  state.inFlightController?.abort();
+}
+
+let stalledByWatchdog = false;
 
 // === Compaction ===
 

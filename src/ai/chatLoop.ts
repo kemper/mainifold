@@ -18,6 +18,10 @@ export interface RunTurnInput {
   history: ChatMessage[];
   /** The user's new message blocks (text + any pending image attachments). */
   userBlocks: ChatBlock[];
+  /** Optional abort signal — when fired, the in-flight stream and the
+   *  agent loop both stop at the next safe seam. Any partial assistant
+   *  text that was streamed is preserved as `aborted: true`. */
+  signal?: AbortSignal;
 }
 
 export interface RunTurnCallbacks {
@@ -36,8 +40,15 @@ export interface RunTurnCallbacks {
   onToolResult?: (toolUseId: string, toolName: string, result: PersistedToolResult) => void;
   /** Persisted assistant message at the end of one round (post-tools). */
   onAssistantPersisted?: (msg: ChatMessage) => void;
+  /** A "thinking" beat — fires when a turn begins, when each tool starts,
+   *  and on a wall-clock interval while waiting for the first text delta.
+   *  Use to keep an indicator alive so the user knows we haven't frozen. */
+  onProgress?: (info: { phase: 'thinking' | 'streaming' | 'tool' | 'idle'; detail?: string }) => void;
   /** Loop ended (either end_turn or unrecoverable error). */
   onTurnComplete?: (info: { totalCostUsd: number; toolCalls: number }) => void;
+  /** User aborted the turn. Fires after the partial assistant message has
+   *  been persisted. Distinct from onError — abort is intentional. */
+  onAborted?: () => void;
   /** Unrecoverable error — the loop stops here. */
   onError?: (err: Error) => void;
 }
@@ -46,7 +57,7 @@ const MAX_AGENT_ITERATIONS = 8;
 
 /** Run one user turn through the agent loop. Returns the final history. */
 export async function runTurn(input: RunTurnInput, callbacks: RunTurnCallbacks = {}): Promise<ChatMessage[]> {
-  const { apiKey, toggles, sessionId, history, userBlocks } = input;
+  const { apiKey, toggles, sessionId, history, userBlocks, signal } = input;
   const tools = buildToolList(toggles);
   const aiMd = await loadAiMd();
   const systemPrompt = buildSystemPrompt(aiMd);
@@ -73,9 +84,20 @@ export async function runTurn(input: RunTurnInput, callbacks: RunTurnCallbacks =
     const assistantId = generateId();
     callbacks.onAssistantStart?.(assistantId);
 
+    callbacks.onProgress?.({ phase: 'thinking', detail: 'Waiting for first token...' });
+    let sawFirstDelta = false;
     const streamCallbacks: StreamCallbacks = {
-      onText: callbacks.onAssistantText,
-      onToolStart: callbacks.onToolStart,
+      onText: delta => {
+        if (!sawFirstDelta) {
+          sawFirstDelta = true;
+          callbacks.onProgress?.({ phase: 'streaming' });
+        }
+        callbacks.onAssistantText?.(delta);
+      },
+      onToolStart: (id, name) => {
+        callbacks.onProgress?.({ phase: 'tool', detail: name });
+        callbacks.onToolStart?.(id, name);
+      },
     };
 
     let result;
@@ -87,7 +109,7 @@ export async function runTurn(input: RunTurnInput, callbacks: RunTurnCallbacks =
         systemSuffix: toggleSuffix(toggles),
         apiMessages,
         tools,
-      }, streamCallbacks);
+      }, streamCallbacks, signal);
     } catch (err) {
       callbacks.onError?.(err instanceof Error ? err : new Error(String(err)));
       return workingHistory;
@@ -95,6 +117,8 @@ export async function runTurn(input: RunTurnInput, callbacks: RunTurnCallbacks =
 
     const turnCost = turnCostUsd(toggles.model, result.usage);
     totalCostUsd += turnCost;
+
+    const aborted = result.stopReason === 'aborted' || signal?.aborted === true;
 
     const assistantMsg: ChatMessage = {
       id: assistantId,
@@ -106,6 +130,7 @@ export async function runTurn(input: RunTurnInput, callbacks: RunTurnCallbacks =
       costUsd: turnCost,
       createdAt: Date.now(),
       seq: seqStart + 1 + iter * 2,
+      ...(aborted ? { aborted: true } : {}),
     };
     await putMessages([assistantMsg]);
     workingHistory = [...workingHistory, assistantMsg];
@@ -113,13 +138,23 @@ export async function runTurn(input: RunTurnInput, callbacks: RunTurnCallbacks =
 
     void recordUsage('anthropic', result.usage.inputTokens + result.usage.cacheReadInputTokens + result.usage.cacheCreationInputTokens, result.usage.outputTokens, turnCost);
 
+    if (aborted) {
+      callbacks.onAborted?.();
+      callbacks.onTurnComplete?.({ totalCostUsd, toolCalls: totalToolCalls });
+      return workingHistory;
+    }
+
     if (result.stopReason !== 'tool_use' || result.toolCalls.length === 0) {
       callbacks.onTurnComplete?.({ totalCostUsd, toolCalls: totalToolCalls });
       return workingHistory;
     }
 
-    // Execute tools, then loop with the results posted back.
-    const toolResults = await executeAllWithRetry(result.toolCalls, toggles, callbacks);
+    // Execute tools, then loop with the results posted back. Tools run
+    // synchronously against window.partwright and can't be cancelled mid-
+    // flight, but we check the signal between calls so a stop request
+    // takes effect within ~one tool's duration.
+    callbacks.onProgress?.({ phase: 'tool', detail: `running ${result.toolCalls.length} tool(s)...` });
+    const toolResults = await executeAllWithRetry(result.toolCalls, toggles, callbacks, signal);
     totalToolCalls += result.toolCalls.length;
 
     const toolResultMsg: ChatMessage = {
@@ -133,6 +168,12 @@ export async function runTurn(input: RunTurnInput, callbacks: RunTurnCallbacks =
     };
     await putMessages([toolResultMsg]);
     workingHistory = [...workingHistory, toolResultMsg];
+
+    if (signal?.aborted) {
+      callbacks.onAborted?.();
+      callbacks.onTurnComplete?.({ totalCostUsd, toolCalls: totalToolCalls });
+      return workingHistory;
+    }
   }
 
   // Hit iteration cap — surface to the user so they can intervene.
@@ -145,12 +186,26 @@ async function executeAllWithRetry(
   toolCalls: PersistedToolCall[],
   toggles: ChatToggles,
   callbacks: RunTurnCallbacks,
+  signal?: AbortSignal,
 ): Promise<PersistedToolResult[]> {
   const results: PersistedToolResult[] = [];
   for (const tc of toolCalls) {
+    // If the user hit Stop, every remaining tool call gets a synthetic
+    // "aborted by user" result. The API requires every tool_use to have a
+    // matching tool_result on the next turn, so we can't just drop them.
+    if (signal?.aborted) {
+      const aborted: PersistedToolResult = {
+        toolUseId: tc.id,
+        content: '[aborted by user]',
+        isError: true,
+      };
+      results.push(aborted);
+      callbacks.onToolResult?.(tc.id, tc.name, aborted);
+      continue;
+    }
     let attempt = 0;
     let result = await executeTool(tc.name, tc.input);
-    while (result.isError && attempt < toggles.autoRetry) {
+    while (result.isError && attempt < toggles.autoRetry && !signal?.aborted) {
       attempt++;
       result = await executeTool(tc.name, tc.input);
     }

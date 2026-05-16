@@ -56,6 +56,8 @@ export interface ChatMessage {
   seq: number;
   /** When the message was synthesized by a compaction summary. */
   compacted?: boolean;
+  /** When the user hit Stop mid-stream and we preserved the partial. */
+  aborted?: boolean;
 }
 
 export type ChatBlock =

@@ -66,8 +66,16 @@ const ALL_TOOLS: ToolDefinition[] = [
   },
   {
     name: 'getMeshSummary',
-    description: 'Group triangles by coplanar regions and return per-group bounds + centroids. Useful before painting to know which face is where.',
-    input_schema: { type: 'object', properties: {} },
+    description: 'Group triangles by coplanar regions and return per-group {centroid, normal, area, bbox, triangleIds}. Use `maxGroups: 8` and `maxTrianglesPerGroup: 0` aggressively — the full mesh on complex models is hundreds of groups and tens of thousands of triangle ids, all charged as input tokens.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        tolerance: { type: 'number', description: 'Coplanarity cosine in [-1, 1]. Default 0.999.' },
+        minTriangles: { type: 'integer', description: 'Drop groups smaller than this. Default 1.' },
+        maxGroups: { type: 'integer', description: 'Return only the N largest groups. Default unlimited — pass 8-16 for a first pass.' },
+        maxTrianglesPerGroup: { type: 'integer', description: 'Cap triangleIds per group. Pass 0 to OMIT triangleIds entirely (saves the most tokens — use this when you just need centroids/normals to plan painting).' },
+      },
+    },
   },
   {
     name: 'getSessionContext',
@@ -123,7 +131,7 @@ const ALL_TOOLS: ToolDefinition[] = [
   },
   {
     name: 'paintFaces',
-    description: 'Paint a specific set of triangle ids. Use after findFaces() to act on a query result.',
+    description: 'Paint a specific set of triangle ids. Last-resort primitive — prefer paintInBox / paintNear / paintSlab when the intent is "all faces matching a geometric predicate", because they collapse the find+paint pair into one tool call (saves a full round-trip plus the triangleId payload).',
     input_schema: {
       type: 'object',
       properties: {
@@ -135,8 +143,67 @@ const ALL_TOOLS: ToolDefinition[] = [
     },
   },
   {
+    name: 'paintNear',
+    description: 'Paint every triangle within `radius` of `point` (optionally constrained by a normal cone). One call, no triangleId shuttling. Use for "paint the faces around this corner / nub / boss".',
+    input_schema: {
+      type: 'object',
+      properties: {
+        point: { type: 'array', items: { type: 'number' }, minItems: 3, maxItems: 3 },
+        radius: { type: 'number' },
+        normalCone: { type: 'object', description: 'Optional {normal: [x,y,z], angleDeg: n} to restrict to faces pointing roughly in that direction.' },
+        color: { type: 'array', items: { type: 'number' }, minItems: 3, maxItems: 3 },
+        name: { type: 'string' },
+      },
+      required: ['point', 'radius', 'color'],
+    },
+  },
+  {
+    name: 'paintInBox',
+    description: 'Paint every triangle whose centroid is inside the axis-aligned box (optionally constrained by a normal cone). One call. Use for "paint the top half / the right rim / everything below z=0".',
+    input_schema: {
+      type: 'object',
+      properties: {
+        box: { type: 'object', description: '{min: [x,y,z], max: [x,y,z]}' },
+        normalCone: { type: 'object', description: 'Optional {normal: [x,y,z], angleDeg: n}.' },
+        color: { type: 'array', items: { type: 'number' }, minItems: 3, maxItems: 3 },
+        name: { type: 'string' },
+      },
+      required: ['box', 'color'],
+    },
+  },
+  {
+    name: 'paintSlab',
+    description: 'Paint everything in a Z-slab (or arbitrary-axis slab). One call. Use for "paint the rim of this disk", "paint the side walls", "paint the top 5mm".',
+    input_schema: {
+      type: 'object',
+      properties: {
+        axis: { type: 'string', enum: ['x', 'y', 'z'], description: 'Slab axis. Or pass `normal` for an arbitrary direction.' },
+        normal: { type: 'array', items: { type: 'number' }, minItems: 3, maxItems: 3, description: 'Use instead of axis for an oblique slab.' },
+        offset: { type: 'number', description: 'Slab center along the axis/normal.' },
+        thickness: { type: 'number', description: 'Slab thickness (paint catches anything within ±thickness/2 of offset).' },
+        color: { type: 'array', items: { type: 'number' }, minItems: 3, maxItems: 3 },
+        name: { type: 'string' },
+      },
+      required: ['offset', 'thickness', 'color'],
+    },
+  },
+  {
+    name: 'paintNearestRegion',
+    description: 'Paint the nearest coplanar region to `point` within `searchRadius`. Use when paintRegion fails because the click point landed slightly off a face (common with iso-view coordinates).',
+    input_schema: {
+      type: 'object',
+      properties: {
+        point: { type: 'array', items: { type: 'number' }, minItems: 3, maxItems: 3 },
+        color: { type: 'array', items: { type: 'number' }, minItems: 3, maxItems: 3 },
+        searchRadius: { type: 'number', description: 'How far to look for a face. Default ~1.0.' },
+        name: { type: 'string' },
+      },
+      required: ['point', 'color'],
+    },
+  },
+  {
     name: 'findFaces',
-    description: 'Search for triangles matching a box / normal / color predicate. Returns { triangleIds, count }. Use before paintFaces to target by geometry.',
+    description: 'Search for triangles matching a box / normal / color predicate. Returns { triangleIds, count }. Use ONLY when you need to *inspect* matches first — if you intend to paint them right after, call paintInBox / paintNear / paintSlab directly instead and skip the round-trip.',
     input_schema: {
       type: 'object',
       properties: {
@@ -171,7 +238,7 @@ const ALWAYS_AVAILABLE = new Set([
 
 const RUN_GATED = new Set(['runCode']);
 const SAVE_GATED = new Set(['runAndSave', 'loadVersion']);
-const PAINT_GATED = new Set(['paintRegion', 'paintFaces', 'clearColors']);
+const PAINT_GATED = new Set(['paintRegion', 'paintFaces', 'paintNear', 'paintInBox', 'paintSlab', 'paintNearestRegion', 'clearColors']);
 
 export function buildToolList(toggles: ChatToggles): ToolDefinition[] {
   return ALL_TOOLS.filter(t => {
@@ -241,6 +308,14 @@ async function dispatch(api: PartwrightAPI, name: string, input: Record<string, 
       return api.paintRegion(input);
     case 'paintFaces':
       return api.paintFaces(input);
+    case 'paintNear':
+      return api.paintNear(input);
+    case 'paintInBox':
+      return api.paintInBox(input);
+    case 'paintSlab':
+      return api.paintSlab(input);
+    case 'paintNearestRegion':
+      return api.paintNearestRegion(input);
     case 'findFaces':
       return api.findFaces(input);
     case 'clearColors':
