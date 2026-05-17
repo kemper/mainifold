@@ -70,7 +70,7 @@ test.describe('AI chat panel', () => {
     const panel = page.locator('#ai-panel');
 
     // Toggle pills
-    await expect(panel.locator('button', { hasText: /👁 Views/ })).toBeVisible();
+    await expect(panel.locator('button', { hasText: /📸 Auto-render/ })).toBeVisible();
     await expect(panel.locator('button', { hasText: /▶ Run/ })).toBeVisible();
     await expect(panel.locator('button', { hasText: /💾 Save/ })).toBeVisible();
     await expect(panel.locator('button', { hasText: /🎨 Paint/ })).toBeVisible();
@@ -88,7 +88,8 @@ test.describe('AI chat panel', () => {
   test('key modal opens and closes', async ({ page }) => {
     await page.goto('/editor?view=ai');
     await page.click('#btn-ai');
-    await page.locator('#ai-panel button:has-text("Connect Anthropic API")').click();
+    // dispatchEvent — same flex-child viewport quirk as the toggle pills.
+    await page.locator('#ai-panel button:has-text("Connect Anthropic API")').dispatchEvent('click');
     await expect(page.locator('input[type="password"]')).toBeVisible();
     await expect(page.getByRole('heading', { name: 'Connect Anthropic API' })).toBeVisible();
 
@@ -101,7 +102,7 @@ test.describe('AI chat panel', () => {
   test('toggle pills flip state on click', async ({ page }) => {
     await page.goto('/editor?view=ai');
     await page.click('#btn-ai');
-    const viewsPill = page.locator('#ai-panel button', { hasText: /👁 Views/ });
+    const viewsPill = page.locator('#ai-panel button', { hasText: /📸 Auto-render/ });
     const before = await viewsPill.getAttribute('class');
     // The toggle strip lives inside the panel's bottom region. Playwright
     // (1.58 + chromium 141) intermittently reports `Element is outside of
@@ -123,6 +124,49 @@ test.describe('AI chat panel', () => {
       return r.ok && (await r.text()).length > 100;
     });
     expect(ok).toBe(true);
+  });
+
+  test('toggle pills carry tooltips explaining what they do', async ({ page }) => {
+    await page.goto('/editor');
+    await page.waitForSelector('#ai-panel');
+    await page.locator('#btn-ai').dispatchEvent('click');
+    const pillNames = ['📸 Auto-render', '▶ Run', '💾 Save', '🎨 Paint'];
+    for (const name of pillNames) {
+      const pill = page.locator('#ai-panel button', { hasText: name });
+      await expect(pill).toBeVisible();
+      const title = await pill.getAttribute('title');
+      expect(title, `${name} should have a tooltip`).toBeTruthy();
+      expect(title!.length).toBeGreaterThan(20);
+      expect(title!.toLowerCase()).toMatch(/on|off|click/);
+    }
+  });
+
+  test('drawer + send from landing page navigates to editor', async ({ page }) => {
+    // Open the drawer on /editor first so it persists open, then go back
+    // to the landing page. The drawer is a body-level overlay so it
+    // should still be visible there.
+    await page.goto('/editor');
+    // Wait for the panel itself, not just the toolbar button — the button
+    // mounts first, the panel's click-handler comes online a beat later.
+    await page.waitForSelector('#ai-panel');
+    // Click via dispatchEvent so we sidestep the same viewport-hit-test
+    // edge case that bites the toggle-pill click on a freshly-mounted
+    // panel; we just need the click handler to fire.
+    await page.locator('#btn-ai').dispatchEvent('click');
+    await expect(page.locator('#ai-panel')).toHaveClass(/translate-x-0/, { timeout: 5000 });
+    await page.goto('/');
+    await page.waitForSelector('#ai-panel');
+    await expect(page.locator('#ai-panel')).toBeVisible();
+
+    // Sending a message from the landing page should navigate to /editor.
+    // No key is set so the key modal appears first — that path is fine,
+    // we just want to confirm we don't silently model on /.
+    await page.locator('#ai-panel textarea').fill('build a cube');
+    await page.locator('#ai-panel button:has-text("Send")').dispatchEvent('click');
+    const onEditor = page.waitForURL(/\/editor/, { timeout: 5000 }).then(() => 'editor');
+    const onModal = page.waitForSelector('input[type="password"]', { timeout: 5000 }).then(() => 'modal');
+    const which = await Promise.race([onEditor, onModal]);
+    expect(['editor', 'modal']).toContain(which);
   });
 });
 

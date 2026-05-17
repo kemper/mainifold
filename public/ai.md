@@ -33,7 +33,9 @@ Partwright is a browser-based parametric CAD tool with two modeling engines: **m
 2. **Pick your engine:** manifold-js (default) or OpenSCAD. See [Choosing an engine](#choosing-an-engine).
 3. **manifold-js code must end with `return manifoldObject;`** -- a bare trailing expression won't work. OpenSCAD code uses standard SCAD syntax (no `return`).
 4. **Use `runAndSave(code, label, {isManifold: true, maxComponents: 1})`** to validate and commit a version.
-5. **Log decisions with `addSessionNote("[PREFIX] ...")`** -- prefixes: `[REQUIREMENT]`, `[DECISION]`, `[FEEDBACK]`, `[MEASUREMENT]`, `[ATTEMPT]`, `[TODO]`.
+5. **Verify visually after structural changes.** Stats alone can't catch warped roofs, twisted spires, or wrong proportions. Call `renderView({ortho: true})` from a few angles, or open the Elevations tab. See [Visual verification](#visual-verification).
+6. **Log decisions with `addSessionNote("[PREFIX] ...")`** -- prefixes: `[REQUIREMENT]`, `[DECISION]`, `[FEEDBACK]`, `[MEASUREMENT]`, `[ATTEMPT]`, `[TODO]`.
+7. **`await` every async method.** `createSession`, `runAndSave`, `runAndAssert`, `runIsolated`, `runAndExplain`, `loadVersion`, `forkVersion`, `getSessionContext`, every `*Data()` export, every notes/sessions call returns a Promise. Without `await` you'll inspect the Promise object instead of the result and silently work from stale or empty data.
 
 ## Choosing an engine
 
@@ -76,6 +78,7 @@ Selecting a SCAD example from the toolbar dropdown auto-switches to OpenSCAD mod
 - **Branching off a prior version by hand** -- don't chain `loadVersion` -> `getCode` -> modify -> `runAndSave`. A silent failure (blocked return value, stale buffer) can drop parts of the parent. Use [`forkVersion({index} | {id}, transformFn, label, assertions?)`](#forking-a-prior-version) instead -- it loads the parent's code server-side, applies your transform, validates, and saves atomically.
 - **Passing a bare index or id instead of `{index}` / `{id}`** -- `loadVersion` and `forkVersion` take an object with exactly one of `{index: number}` or `{id: string}`, e.g. `loadVersion({index: 2})` or `loadVersion({id: "Kx3Pq9mA2wEr"})`. Bare `loadVersion(2)` will return `{error: "...target must be { index: number } or { id: string }..."}`.
 - **Passing the wrong object shape to `setImages`, `setReferenceGeometry`, `query`, `runAndAssert`, etc.** -- the API rejects unknown keys and wrong-type values. See [Argument validation](#argument-validation).
+- **Doing `setCode` then `run` when you meant `runAndSave`.** `setCode` doesn't auto-run, `run` doesn't save and doesn't validate, and the gallery won't see the version. `runAndSave(code, label, assertions)` does all three atomically -- prefer it for committed iterations. See also [`runAndSave` is for committed iterations; `runIsolated` is for sanity checks](#runandsave-is-for-committed-iterations-runisolated-is-for-sanity-checks).
 
 ## Argument validation
 
@@ -161,12 +164,13 @@ partwright.downloadRecentExport(id)
 partwright.clearRecentExports()
 
 // Isolated execution -- test code without changing editor/viewport state
-await partwright.runIsolated(code)       // -> {geometryData, thumbnail}
+await partwright.runIsolated(code, view?)  // -> {geometryData, thumbnail}. Default thumbnail is 4-iso composite; pass `view` ({elevation, azimuth, ortho, size}) for a single-angle preview.
 await partwright.runAndAssert(code, assertions) // -> {passed, failures?, stats}
 await partwright.runAndExplain(code)     // -> {stats, components[], hints[]} (debug disconnects)
 await partwright.modifyAndTest(patchFn, assertions?) // Modify current code + test in isolation
 partwright.query({sliceAt?, decompose?, boundingBox?}) // Multi-query current geometry in one call
-partwright.renderView({elevation?, azimuth?, ortho?, size?}) // Render from any angle -> data URL
+partwright.renderView({elevation?, azimuth?, ortho?, size?})  // Render ONE angle -> data URL
+await partwright.renderViews({views?: 'auto'|'tri'|'all', size?})  // multi-angle labeled composite -> data URL; 'auto' (default) picks angles by aspect ratio; prefer for verification
 partwright.sliceAtZVisual(z)            // Cross-section SVG at height z -> {svg, area, contours}
 partwright.isRunning()                   // -> boolean (is code executing?)
 
@@ -183,7 +187,7 @@ await partwright.runAndSave(code, label?, assertions?) // Assert+save in one cal
 await partwright.createSessionWithVersions(name, [{code, label},...]) // Batch create
 await partwright.saveVersion(label?)     // Save current state as version
 await partwright.listVersions()          // -> [{id, index, label, timestamp, status}]
-await partwright.loadVersion({index} | {id})  // Load version into editor -> {id, index, label, code, geometryData} or {error}
+await partwright.loadVersion({index} | {id})  // Load version into editor -> {id, index, label, code, geometryData, labelsAvailable, labelCount} or {error}
 await partwright.forkVersion({index} | {id}, transformFn, label?, assertions?) // Load + modify + validate + save in one call
 partwright.getGalleryUrl()               // -> URL for gallery view (human review)
 partwright.getSessionUrl()               // -> URL for this session
@@ -192,19 +196,32 @@ await partwright.openSession(id)         // Open existing session
 await partwright.clearAllSessions()      // Delete all sessions & versions
 
 // Color regions -- tag face regions with a color (see #color-regions)
+partwright.probePixel({pixel, view})                                      // "click in your perception": pixel in a rendered view -> {point, normal, distance, triangleId} or null
+partwright.paintConnected({seed: {point, normal?}, maxDeviationDeg?, color, name?}) // BFS-flood from seed gated by seed-normal deviation (not adjacent). For organic / smooth meshes paintRegion can't handle.
 partwright.paintRegion({point, normal, color, name?, tolerance?})         // bucket: coplanar flood-fill -> {id, name, triangles} or {error, nearest?}
 partwright.paintNearestRegion({point, color, searchRadius?, name?, tolerance?}) // snap seed to nearest face, then flood-fill -> {id, name, triangles, snappedTo} or {error}
-partwright.paintNear({point, radius, normalCone?, color, name?})          // sphere: paint triangles whose centroid is within radius -> {id, name, triangles, bbox, centroid} or {error}
-partwright.paintInBox({box, normalCone?, color, name?})                   // box: paint triangles inside an AABB -> {id, name, triangles, bbox, centroid} or {error}
+partwright.paintNear({point, radius, normalCone?, topOnly?, coverageMode?, maxTriangleArea?, color, name?})    // sphere: paint triangles within radius -> {id, name, triangles, bbox, centroid} or {error}
+partwright.paintInBox({box, normalCone?, topOnly?, coverageMode?, maxTriangleArea?, color, name?})             // box: paint triangles inside an AABB -> {id, name, triangles, bbox, centroid} or {error}
 partwright.paintFaces({triangleIds, color, name?})                        // brush: paint specific triangle indices -> {id, name, triangles} or {error}
-partwright.paintSlab({axis|normal, offset, thickness, color, name?})      // slab: paint a planar range -> {id, name, triangles} or {error}
-partwright.paintPreview({box?|point+radius?|triangleIds?, normalCone?, view?}) // dry-run: highlight a candidate region -> {thumbnail, triangleCount, bbox, centroid} (does not commit)
+partwright.paintSlab({axis|normal, offset, thickness, coverageMode?, maxTriangleArea?, color, name?})      // slab: paint a planar range -> {id, name, triangles} or {error}
+partwright.paintPreview({box?|point+radius?|triangleIds?, normalCone?, coverageMode?, maxTriangleArea?, withImage?, view?}) // dry-run -> {triangleCount, bbox, centroid, totalArea, largestTriangleArea, [thumbnail]}
+partwright.paintExplain({region, withImage?, view?}) // diagnose committed region -> {triangleCount, area, largestTriangleArea, bbox, centroid, normalHistogram, [thumbnail]}
 partwright.assertPaint({region, expectedTriangleCount?, expectedBoundingBox?, expectedCentroid?}) // verify a region -> {passed, failures?}
 partwright.findFaces({box?, normal?, normalTolerance?, color?, region?, maxResults?}) // query triangle ids by geometry/color -> {triangleIds, count, matched, truncated}
 partwright.getMesh()                     // -> {numVert, numTri, vertices, triangles, normals, centroids, boundingBox} (typed arrays)
-partwright.getMeshSummary({tolerance?, minTriangles?, maxTrianglesPerGroup?, maxGroups?}?) // -> {groups[{id, normal, centroid, area, triangleCount, bbox, triangleIds}], totalTriangles, groupCount, tolerance}
+partwright.getMeshSummary({tolerance?, minTriangles?, maxTrianglesPerGroup?, maxGroups?, withinBox?}?) // -> {groups[{id, normal, centroid, area, triangleCount, bbox, triangleIds}], totalTriangles, groupCount, tolerance, unfiltered?}
 partwright.listRegions()                 // -> [{id, name, color, source, triangles, order, bbox, centroid}, ...]
-partwright.clearColors()                 // Remove all regions
+partwright.listComponents()              // -> {count, components: [{index, centroid, boundingBox, volume, surfaceArea}]} -- per-piece bbox for unioned models
+partwright.paintComponent({index, color, name?, topOnly?}) // One-call: paint the Nth boolean-distinct piece
+partwright.listLabels()                  // -> {count, labels: [{name, triangleCount, bbox, centroid}]} -- labels registered via api.label(shape, name) in the current run
+partwright.paintByLabel({label, color, name?}) // Paint a labelled feature by name. Exact, survives boolean ops. manifold-js only.
+partwright.paintByLabels([{label, color, name?}, ...]) // Batch sibling. N features in one call -> {results, failed}. Coalesces viewport refresh under one rAF.
+partwright.getFeatureCentroids({maxGroups?, withinBox?}?)  // Lightweight planning: centroids + normals + bbox per face group, NO triangleIds
+partwright.paintPreview({box?|point+radius?|triangleIds?, normalCone?, coverageMode?, maxTriangleArea?, withImage?, view?}) // DRY-RUN -> {triangleCount, bbox, centroid, totalArea, largestTriangleArea, [thumbnail]}
+partwright.undoLastPaint()               // Reverse the SINGLE most recent paint op -> {undone, id, ...}
+partwright.redoLastPaint()               // Reapply the most recently undone paint -> {redone, id, ...}
+partwright.removeRegion(id)              // Delete ONE region by id from listRegions()
+partwright.clearColors()                 // Remove ALL regions (destructive — prefer undoLastPaint/removeRegion for fixing single mistakes)
 
 // Notes -- track design context, decisions, and measurements
 await partwright.addSessionNote(text)    // -> {id, text, timestamp}
@@ -274,6 +291,8 @@ revolve(cs, n?, degrees?)
     Only positive-X side used. degrees defaults to 360.
 Segments guide: 6-8 low-poly, 32-48 smooth, 64+ high quality
 ```
+
+**Default segment count:** Partwright seeds `setCircularSegments()` from the user's Modeling Quality preset (gear icon in the toolbar) before each run. The default preset is **Highest** (128 segments), so curves render smooth out of the box without any explicit configuration. Users can drop to Low/Medium/High in the settings modal if they prefer faster renders. Your code can still call `setCircularSegments(n)` or pass an explicit segments argument to a primitive to override on a per-script or per-call basis.
 
 ### All constructors
 
@@ -442,8 +461,176 @@ const r = partwright.paintRegion({
 // r = { id, name, triangles } on success, or { error } if no matching face found
 
 partwright.listRegions()    // [{ id, name, color, source, triangles, order }, ...]
-partwright.clearColors()    // remove all regions
+partwright.undoLastPaint()  // reverse just the most recent paint op
+partwright.removeRegion(id) // delete one region by id (older mistake)
+partwright.clearColors()    // remove ALL regions — destructive, prefer the two above for single mistakes
 ```
+
+**Preview before commit (default workflow).** `paintPreview()` accepts
+the same selector args as `paintInBox` / `paintNear` / `paintFaces` but
+doesn't commit. By default it returns `{triangleCount, bbox, centroid,
+totalArea, largestTriangleArea}` — count and area summary are essentially
+free and catch most bad selectors. Inspect the ratio
+`largestTriangleArea / (totalArea / triangleCount)`: ratios above ~10
+are a fan-topology red flag (see "fan-bleed" below). Pass
+`withImage: true` when the count or ratio surprises you — the
+yellow-highlighted thumbnail shows the real triangle extents, including
+the bleed.
+
+**Diagnose a bad paint.** `paintExplain({region: id})` returns
+triangleCount, area, largestTriangleArea, bbox, centroid, a
+normal-distribution histogram (`{xPos, xNeg, yPos, yNeg, zPos, zNeg,
+oblique}` summing to ~1), and a thumbnail of the region tinted yellow.
+Use after a paint that looks wrong — the histogram tells you in one
+number whether the region wrapped onto a face you didn't intend
+(e.g. `zPos: 0.4, xPos: 0.3` = caught the top AND a side), and
+`largestTriangleArea` confirms whether fan-bleed is to blame.
+
+**Avoiding fan-topology bleed.** `cylinder` / `revolve` / `linear_extrude`
+generate triangulations where every face triangle has one vertex at
+the central axis — long radial "fan wedges" that stretch from the
+center out to the rim. After a boolean union, those long triangles
+get inherited into the merged mesh. `paintNear` and `paintInBox`
+default to a *centroid* containment test, so a fan wedge with its
+centroid inside your selector gets painted even though most of its
+area extends visibly outside. The result looks like a "paint smear"
+beyond the intended region. Two fixes, in order of preference:
+
+```js
+// 1. Tighten the containment test — fully_inside requires all 3
+//    vertices in the selection, which excludes fan wedges that
+//    straddle the boundary:
+partwright.paintNear({ point: [0, 5, 2], radius: 3, coverageMode: 'fully_inside', color: ... });
+
+// 2. Or backstop with a max triangle area — set to ~3-5× the
+//    typical triangle of the feature you intend to paint:
+partwright.paintInBox({ box: { ... }, maxTriangleArea: 4, color: ... });
+
+// 3. If you're authoring the code: refine the mesh before painting
+//    so cylinder/revolve geometry has small local triangles instead
+//    of radial fans. .refine(2) doubles the resolution; the shape
+//    doesn't change.
+const head = api.Manifold.cylinder(10, 20).refine(2);
+```
+
+Inspect `paintPreview`'s `largestTriangleArea` to choose a sensible
+`maxTriangleArea`. Sphere / cube / hull primitives don't have fan
+topology and don't need either workaround — the centroid default is
+fine there.
+
+**Verify from multiple angles.** Use `renderViews()` for verification
+rather than a single `renderView` call. The default `views: 'auto'`
+picks angles by the model's bounding box: flat disks get [Top, Iso]
+(a front elevation of a disk is a thin sliver), tall columns get
+[Front, Right, Iso] (the top of a column is a dot), everything else
+gets [Front, Top, Iso]. Use `views: 'tri'` or `'all'` to force a
+specific composite. A single angle can hide an asymmetric error —
+e.g. a smile curve arching the wrong way.
+
+**Test before commit.** For unfamiliar primitives (revolve axis,
+hull edges, decompose order, any boolean chain), call `runIsolated(code)`
+on a tiny snippet first — it returns stats + a thumbnail without
+mutating the editor or the session. Saves a paint-undo-retry cycle
+when the geometry surprises you.
+
+**Engine choice for paint workflows.** SCAD's `revolve`,
+`linear_extrude`, and `cylinder` produce radial-fan triangle topology
+(every face triangle radiates from the central axis). That topology is
+awkward to paint cleanly — `paintInBox` tends to bleed across the
+adjacent fan wedges. If a task involves precise painting of curved
+features, prefer `manifold-js` from the start. SCAD remains the right
+choice for parametric extrusion-heavy parts where painting is secondary.
+
+```js
+const preview = partwright.paintPreview({ box: { min: [-5, -5, 8], max: [5, 5, 12] } });
+// preview.triangleCount === 0  →  selector matched nothing, widen it
+// preview.triangleCount > 5000 →  too greedy, tighten
+// otherwise: partwright.paintInBox({box: same, color: [1,0,0]})
+```
+
+**Labelled construction (the cleanest paint primitive on
+agent-authored manifold-js).** When you're writing the model code AND
+plan to paint features after, wrap each feature in `api.label(shape, name)`
+at construction time. Painting after is then a pure name lookup — no
+coordinates, no bounding boxes, no fan-bleed. The triangle set comes
+straight from manifold-3d's `runOriginalID` provenance and is exact
+even when shapes overlap.
+
+```js
+// In your model code:
+const head = api.label(api.Manifold.sphere(10), 'head');
+const eyeL = api.label(api.Manifold.sphere(2).translate([-3, 5, 7]), 'eyeL');
+const eyeR = api.label(api.Manifold.sphere(2).translate([ 3, 5, 7]), 'eyeR');
+return head.add(eyeL).add(eyeR);
+
+// After runAndSave, paint by name. For multiple features, BATCH —
+// one tool call paints them all and coalesces the viewport refresh:
+partwright.paintByLabels([
+  { label: 'head', color: [0.4, 0.7, 0.4] },
+  { label: 'eyeL', color: [0,   0,   0  ] },
+  { label: 'eyeR', color: [0,   0,   0  ] },
+]);
+// -> { results: [...], failed: [] }
+// Reach for paintByLabel({label, color}) only when painting a single
+// feature. listLabels() returns what's available; check it if a paint
+// call reports "no label X".
+```
+
+`api.labeledUnion([{name, shape}, ...])` is sugar that labels each
+entry and unions them in one call. Labels are runtime-only state
+(manifold-3d assigns fresh originalIDs every run); region descriptors
+persist the name, and rehydration re-resolves by name on the next
+load — so saved-version round-trips work as long as the code still
+defines the same label names.
+
+Limitations: manifold-js only (SCAD has no equivalent). For
+geometry you didn't author with labels (user-imported, legacy code),
+fall back to `paintComponent` below.
+
+**Paint by feature on unioned models (legacy fallback).** When the
+geometry is a boolean union of distinct pieces but the code didn't
+use `api.label`, the one-call form is `paintComponent(index, color)`
+— it decomposes and paints in a single round trip:
+
+```js
+const { components } = partwright.listComponents();
+// components: [{index, centroid, boundingBox, volume, surfaceArea}, ...]
+// Sort by centroid.y / volume to identify which piece is which, then:
+for (const c of components) {
+  partwright.paintComponent({ index: c.index, color: chooseColor(c.index) });
+}
+```
+
+This avoids guessing world coordinates, survives small parametric
+tweaks to the model, and skips the listComponents → paintInBox pair.
+Prefer `paintByLabel` when you control the code; reach for
+`paintComponent` when you don't.
+
+**Avoiding over-paint.** When `paintInBox` / `paintNear` catches side
+walls or the bottom face by mistake, pass `topOnly: true` — restricts
+to upward-facing triangles (axis +Z within 30°). Equivalent to
+`normalCone: { axis: [0, 0, 1], angleDeg: 30 }` but easier to remember.
+
+**Cheap planning.** `getFeatureCentroids({maxGroups, withinBox?})`
+returns face-group centroids + normals + bbox + area, WITHOUT the
+triangleId arrays that make `getMeshSummary` expensive on complex
+models. Use this when planning paint targets; only escalate to the
+full `getMeshSummary` when you actually need the per-triangle ids.
+
+**Fixing mistakes.** If a paint operation went wrong, prefer the surgical
+tools over `clearColors()`:
+
+- `undoLastPaint()` reverses the single most recent paint. The removed
+  region goes onto a redo stack — `redoLastPaint()` puts it back. This
+  is the right call ~95% of the time when you painted something wrong.
+- `removeRegion(id)` deletes one specific region (id from
+  `listRegions()`). Use when the mistake wasn't the most recent paint.
+- `clearColors()` removes every region. Only call this when the user
+  explicitly asks to start over.
+
+Calling `clearColors()` to fix a single mistake forces you to repaint
+every other region from scratch — multiple round-trips, multiple chances
+to introduce new mistakes. Don't do it.
 
 **How face matching works.** `paintRegion` flood-fills outward from the seed triangle, including any neighbor whose normal is within `tolerance` of the seed's. Pick `point` slightly inside the model surface and pass the outward-pointing `normal` -- the seed resolver looks for the triangle whose plane the point lies on and whose normal aligns with yours.
 
@@ -517,6 +704,37 @@ partwright.paintInBox({
 
 `paintNear` and `paintInBox` ignore mesh edges entirely — they collect triangles by *position* and (optionally) by face-normal direction, so the result is independent of how the boolean union tessellated the surface. Use them for organic geometry; use `paintRegion` for flat plates with crisp 90° edges.
 
+**Paint by visual reasoning (organic / character meshes).** When bounding boxes won't separate the features (a hand from a sleeve at the same Z; an ear from a head), use `probePixel` + `paintConnected`. `probePixel` translates a pixel position in a rendered view back to an exact surface point + normal + triangleId — essentially clicking in your own perception. `paintConnected` then flood-fills from that seed, gated by deviation from the SEED normal, so it stays on the feature without bleeding to side faces with different orientations.
+
+```js
+// 1. Render the angle that shows the feature clearly.
+const img = partwright.renderView({ elevation: 0, azimuth: 0, ortho: true, size: 320 });
+// (the image is forwarded to you as a multimodal block)
+
+// 2. Identify the feature's pixel in the rendered image. Then probe
+//    that exact pixel back into world space — the view spec MUST
+//    match the renderView call above.
+const hit = partwright.probePixel({
+  pixel: [180, 220],
+  view: { elevation: 0, azimuth: 0, ortho: true, size: 320 },
+});
+// hit = { point: [x, y, z], normal: [nx, ny, nz], distance, triangleId } or null
+
+// 3. Flood from the seed, gated by 30° deviation from the seed normal.
+//    paintConnected stays on the feature where paintRegion (bimodal
+//    on smooth meshes) cannot.
+if (hit) {
+  partwright.paintConnected({
+    seed: { point: hit.point, normal: hit.normal },
+    maxDeviationDeg: 30,
+    color: [0.4, 0.7, 0.4],
+    name: 'skin',
+  });
+}
+```
+
+The seed point returned by `probePixel` is *exactly* on the mesh surface (raycast result, not a snap), so paint primitives that need precise seed placement (`paintRegion` in particular) work without seed-tolerance issues. The model's pixel-position estimation has built-in error (~±10-20px on a 320 render); `paintConnected` absorbs that fine since the seed normal anchors the flood. For `paintNear`, pick a radius generous enough for the same.
+
 **Brush + slab + procedural targeting.**
 
 ```js
@@ -563,17 +781,36 @@ partwright.paintSlab({
 });
 ```
 
-**Verifying paint before you commit it.** `paintPreview` accepts the same selectors as `paintInBox` / `paintNear` / `paintFaces` and returns a thumbnail with the candidate triangles tinted bright yellow on top of any existing paint, *without* adding a region. Use it to confirm the shape of a region before committing.
+**Verifying paint before you commit it.** `paintPreview` accepts the same selectors as `paintInBox` / `paintNear` / `paintFaces`, *without* adding a region. Default: count-only (free sanity check). Pass `withImage: true` to also get a thumbnail with the candidate triangles tinted bright yellow on top of any existing paint.
 
 ```js
-const preview = partwright.paintPreview({
+const dry = partwright.paintPreview({
   point: [10.4, 5.2, 67],
   radius: 3,
   normalCone: { axis: [0, -0.89, 0.45], angleDeg: 25 },
+});
+// dry = { triangleCount, bbox, centroid }   // count-only, cheap
+// If dry.triangleCount looks off, opt into the visual:
+const visual = partwright.paintPreview({
+  point: [10.4, 5.2, 67], radius: 3, withImage: true,
   view: { elevation: 0, azimuth: 180, ortho: true, size: 320 }, // optional
 });
-// preview = { thumbnail, triangleCount, bbox, centroid }
-// Display preview.thumbnail (data URL) -- no region created, no editor lock.
+// visual = { triangleCount, bbox, centroid, thumbnail }
+```
+
+**Explaining a region after the fact.** `paintExplain({region: id})`
+returns counts, bbox, centroid, surface area, a normal-distribution
+histogram, and a yellow-highlighted thumbnail of just that region.
+Use when a painted region looks wrong and you need to diagnose *why*
+without re-running the selector:
+
+```js
+partwright.paintExplain({ region: 'mouth' });
+// -> { id, name, color, source, triangleCount, area, bbox, centroid,
+//      normalHistogram: { xPos, xNeg, yPos, yNeg, zPos, zNeg, oblique },
+//      thumbnail }
+// Pass `withImage: false` to skip the WebGL render when you only need
+// the histogram (e.g. "is this region all top-facing or did it wrap?").
 ```
 
 **Asserting paint after you commit it.** `assertPaint` checks a region against expected triangle count and bbox/centroid ranges — same shape as `runAndAssert`, but for color regions. Use this in iterative agent loops to catch regressions when the underlying mesh changes (e.g. after a forkVersion).
@@ -658,11 +895,13 @@ Once any region exists, the editor goes read-only and `runAndSave` is rejected. 
 
 ### Verify before you commit
 
-Use `paintPreview` to see the candidate region tinted bright yellow on a thumbnail before adding a region. Saves the paint → render → undo loop:
+`paintPreview` is count-only by default — call it before any non-trivial paint as a free sanity check on selector geometry. If the count is surprising, opt into the visual:
 
 ```js
-const dry = partwright.paintPreview({ point: [...], radius: 4, view: { ortho: true, size: 240 } });
-// Inspect dry.thumbnail; if happy, call paintNear with the same args to commit.
+const dry = partwright.paintPreview({ point: [...], radius: 4 });
+// dry.triangleCount > 0? if happy, call paintNear with the same args to commit.
+// If the count is wildly off, add withImage: true to see what got selected:
+partwright.paintPreview({ point: [...], radius: 4, withImage: true, view: { ortho: true, size: 240 } });
 ```
 
 Use `assertPaint` to verify regions stayed where you expected after a re-render or version load:

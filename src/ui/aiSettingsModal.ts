@@ -1,7 +1,5 @@
-// AI Settings modal — accessible from the AI chip overflow. Shows key
-// status (last 4 chars + lifetime usage), and exposes Replace key /
-// Disconnect actions for the hosted provider, plus a Local-model section
-// for picking and downloading WebLLM weights.
+// AI Settings modal — provider toggle, per-provider key/model info,
+// auto-compaction, system prompt, local context tuning.
 
 import { deleteKey, getKey } from '../ai/db';
 import { resetClient } from '../ai/anthropic';
@@ -9,137 +7,39 @@ import { formatUsd } from '../ai/cost';
 import { showAiKeyModal } from './aiKeyModal';
 import { showAiLocalModal } from './aiLocalModal';
 import { showSystemPromptModal } from './aiSystemPromptModal';
+import { createModalShell } from './modalShell';
 import { loadSettings, saveSettings, setAutoCompactMode, setLocalContext, setProvider, AUTO_COMPACT_OPTIONS } from '../ai/settings';
-import { isModelLoaded, resolveLocalModel } from '../ai/local';
-
-let modalEl: HTMLElement | null = null;
+import { resolveLocalModel, isModelLoaded } from '../ai/local';
 
 export interface AiSettingsCallbacks {
   onChange: () => void;
 }
 
 export async function showAiSettingsModal(cb: AiSettingsCallbacks): Promise<void> {
-  closeModal();
+  const shell = createModalShell({ title: 'AI Settings' });
+  shell.body.classList.remove('gap-3');
+  shell.body.classList.add('gap-4');
 
-  const overlay = document.createElement('div');
-  overlay.className = 'fixed inset-0 bg-black/60 flex items-center justify-center z-50';
-  overlay.addEventListener('click', e => { if (e.target === overlay) closeModal(); });
-
-  const modal = document.createElement('div');
-  modal.className = 'bg-zinc-800 rounded-xl shadow-2xl border border-zinc-700 w-full max-w-md flex flex-col';
-
-  const header = document.createElement('div');
-  header.className = 'px-5 py-3 border-b border-zinc-700 flex items-center justify-between';
-  const title = document.createElement('h2');
-  title.className = 'text-sm font-semibold text-zinc-100';
-  title.textContent = 'AI Settings';
-  header.appendChild(title);
-  const closeBtn = document.createElement('button');
-  closeBtn.className = 'px-2 py-1 rounded text-zinc-400 hover:text-zinc-200 hover:bg-zinc-700 text-sm';
-  closeBtn.textContent = '✕';
-  closeBtn.addEventListener('click', closeModal);
-  header.appendChild(closeBtn);
-  modal.appendChild(header);
-
-  const body = document.createElement('div');
-  body.className = 'px-5 py-4 flex flex-col gap-4 text-sm text-zinc-200';
-
-  body.appendChild(buildProviderRow(cb));
-  body.appendChild(document.createElement('hr')).className = 'border-zinc-700';
-  const localSection = buildLocalSection(cb);
-  body.appendChild(localSection);
-  body.appendChild(document.createElement('hr')).className = 'border-zinc-700';
-  body.appendChild(buildLocalContextSection(cb));
-  body.appendChild(document.createElement('hr')).className = 'border-zinc-700';
-  body.appendChild(buildAutoCompactSection(cb));
-  body.appendChild(document.createElement('hr')).className = 'border-zinc-700';
-  body.appendChild(buildSystemPromptSection(cb));
-  body.appendChild(document.createElement('hr')).className = 'border-zinc-700';
-
-  const key = await getKey('anthropic');
-  if (!key) {
-    const empty = document.createElement('p');
-    empty.className = 'text-zinc-400';
-    empty.textContent = 'No Anthropic key connected.';
-    body.appendChild(empty);
-    const connectBtn = document.createElement('button');
-    connectBtn.className = 'self-start px-3 py-1.5 rounded text-xs font-medium bg-blue-600 hover:bg-blue-500 text-white';
-    connectBtn.textContent = 'Connect Anthropic API';
-    connectBtn.addEventListener('click', () => {
-      closeModal();
-      void showAiKeyModal({ onConnected: cb.onChange });
-    });
-    body.appendChild(connectBtn);
-  } else {
-    const last4 = key.apiKey.slice(-4);
-    const row = (label: string, value: string) => {
-      const r = document.createElement('div');
-      r.className = 'flex justify-between gap-3';
-      const l = document.createElement('span');
-      l.className = 'text-zinc-400';
-      l.textContent = label;
-      const v = document.createElement('span');
-      v.className = 'text-zinc-100 font-mono text-xs';
-      v.textContent = value;
-      r.appendChild(l);
-      r.appendChild(v);
-      return r;
-    };
-    body.appendChild(row('Provider', 'Anthropic'));
-    body.appendChild(row('Key', `…${last4}`));
-    body.appendChild(row('Connected', new Date(key.createdAt).toLocaleString()));
-    body.appendChild(row('Last used', new Date(key.lastUsed).toLocaleString()));
-    body.appendChild(row('Input tokens', key.totalInputTokens.toLocaleString()));
-    body.appendChild(row('Output tokens', key.totalOutputTokens.toLocaleString()));
-    body.appendChild(row('Spent (estimated)', formatUsd(key.totalCostUsd)));
-
-    const note = document.createElement('p');
-    note.className = 'text-xs text-zinc-500 leading-snug';
-    note.textContent = 'Estimated spend uses public list prices and may differ slightly from your Anthropic invoice.';
-    body.appendChild(note);
-
-    const actions = document.createElement('div');
-    actions.className = 'flex justify-end gap-2 pt-2';
-
-    const replaceBtn = document.createElement('button');
-    replaceBtn.className = 'px-3 py-1.5 rounded text-xs text-zinc-200 bg-zinc-700 hover:bg-zinc-600';
-    replaceBtn.textContent = 'Replace key';
-    replaceBtn.addEventListener('click', () => {
-      closeModal();
-      void showAiKeyModal({ onConnected: cb.onChange });
-    });
-    actions.appendChild(replaceBtn);
-
-    const disconnectBtn = document.createElement('button');
-    disconnectBtn.className = 'px-3 py-1.5 rounded text-xs text-red-300 bg-red-900/40 hover:bg-red-800/60';
-    disconnectBtn.textContent = 'Disconnect';
-    disconnectBtn.addEventListener('click', async () => {
-      if (!confirm('Disconnect Anthropic? Your chat history is kept; only the key is removed.')) return;
-      await deleteKey('anthropic');
-      resetClient();
-      closeModal();
-      cb.onChange();
-    });
-    actions.appendChild(disconnectBtn);
-
-    body.appendChild(actions);
-  }
-
-  modal.appendChild(body);
-  overlay.appendChild(modal);
-  document.body.appendChild(overlay);
-  modalEl = overlay;
-
-  const escHandler = (e: KeyboardEvent) => {
-    if (e.key === 'Escape') {
-      closeModal();
-      document.removeEventListener('keydown', escHandler);
-    }
-  };
-  document.addEventListener('keydown', escHandler);
+  shell.body.appendChild(buildProviderRow(shell.close, cb));
+  shell.body.appendChild(makeDivider());
+  shell.body.appendChild(buildLocalSection(shell.close, cb));
+  shell.body.appendChild(makeDivider());
+  shell.body.appendChild(buildLocalContextSection(cb));
+  shell.body.appendChild(makeDivider());
+  shell.body.appendChild(buildAutoCompactSection(shell.close, cb));
+  shell.body.appendChild(makeDivider());
+  shell.body.appendChild(buildSystemPromptSection(shell.close, cb));
+  shell.body.appendChild(makeDivider());
+  await buildAnthropicSection(shell.close, shell.footer, shell.body, cb);
 }
 
-function buildProviderRow(cb: AiSettingsCallbacks): HTMLElement {
+function makeDivider(): HTMLElement {
+  const hr = document.createElement('hr');
+  hr.className = 'border-zinc-700';
+  return hr;
+}
+
+function buildProviderRow(close: () => void, cb: AiSettingsCallbacks): HTMLElement {
   const wrap = document.createElement('div');
   wrap.className = 'flex flex-col gap-2';
   const label = document.createElement('div');
@@ -161,7 +61,7 @@ function buildProviderRow(cb: AiSettingsCallbacks): HTMLElement {
     b.addEventListener('click', () => {
       saveSettings(setProvider(loadSettings(), id));
       cb.onChange();
-      closeModal();
+      close();
       // Reopen so the modal reflects the new provider's section state.
       void showAiSettingsModal(cb);
     });
@@ -173,7 +73,7 @@ function buildProviderRow(cb: AiSettingsCallbacks): HTMLElement {
   return wrap;
 }
 
-function buildLocalSection(cb: AiSettingsCallbacks): HTMLElement {
+function buildLocalSection(close: () => void, cb: AiSettingsCallbacks): HTMLElement {
   const wrap = document.createElement('div');
   wrap.className = 'flex flex-col gap-2';
   const head = document.createElement('div');
@@ -186,7 +86,7 @@ function buildLocalSection(cb: AiSettingsCallbacks): HTMLElement {
   pick.className = 'px-3 py-1 rounded text-xs text-zinc-200 bg-zinc-700 hover:bg-zinc-600';
   pick.textContent = 'Choose model…';
   pick.addEventListener('click', () => {
-    closeModal();
+    close();
     void showAiLocalModal({ onChange: cb.onChange });
   });
   head.appendChild(pick);
@@ -196,9 +96,13 @@ function buildLocalSection(cb: AiSettingsCallbacks): HTMLElement {
   const status = document.createElement('div');
   status.className = 'text-[11px] text-zinc-400 leading-snug';
   if (settings.toggles.localModel) {
-    const info = resolveLocalModel(settings.toggles.localModel);
-    const resident = isModelLoaded(info.id);
-    status.textContent = `${info.label} · ${(info.vramMB / 1024).toFixed(1)} GB VRAM · ${resident ? 'in GPU memory' : 'not yet loaded'}`;
+    try {
+      const info = resolveLocalModel(settings.toggles.localModel);
+      const resident = isModelLoaded(info.id);
+      status.textContent = `${info.label} · ${(info.vramMB / 1024).toFixed(1)} GB VRAM · ${resident ? 'in GPU memory' : 'not yet loaded'}`;
+    } catch {
+      status.textContent = 'Previously selected model is no longer available. Pick another.';
+    }
   } else {
     status.textContent = 'No local model picked yet. Click “Choose model…” to download one.';
   }
@@ -227,7 +131,6 @@ function buildLocalContextSection(cb: AiSettingsCallbacks): HTMLElement {
 
   const settings = loadSettings();
 
-  // Override input
   const overrideRow = document.createElement('label');
   overrideRow.className = 'flex items-center gap-2 text-xs text-zinc-300';
   overrideRow.innerHTML = '<span>Override window size:</span>';
@@ -253,7 +156,6 @@ function buildLocalContextSection(cb: AiSettingsCallbacks): HTMLElement {
   overrideRow.appendChild(overrideHint);
   wrap.appendChild(overrideRow);
 
-  // Sliding window toggle
   const slidingRow = document.createElement('label');
   slidingRow.className = 'flex items-start gap-2 text-xs text-zinc-300';
   const slidingCheckbox = document.createElement('input');
@@ -271,11 +173,6 @@ function buildLocalContextSection(cb: AiSettingsCallbacks): HTMLElement {
   wrap.appendChild(slidingRow);
 
   if (settings.localContext.sliding) {
-    // The sliding window rolls off TOKENS, not messages. When the window
-    // edge bisects a multi-turn tool call, the model can be left with an
-    // orphan `tool_result` it can't match to a `tool_use` — WebLLM may
-    // throw on the next turn. Auto-compaction sidesteps this entirely by
-    // working at the message level.
     const warn = document.createElement('div');
     warn.className = 'rounded border border-amber-700/40 bg-amber-900/15 px-3 py-2 text-[11px] text-amber-200 leading-snug';
     warn.innerHTML = `<strong>Heads up:</strong> sliding-window mode rolls off tokens without understanding our message structure. If the cut falls between a tool call and its result, the next turn can error. <strong>Auto-compaction</strong> (the section below) avoids this — prefer it for long sessions.`;
@@ -293,7 +190,7 @@ function buildLocalContextSection(cb: AiSettingsCallbacks): HTMLElement {
  *  assistant turn, keeping just the last exchange — ideal for an app like
  *  this where the live editor + version gallery hold the actual state and
  *  the chat is mostly a tool-driving channel. */
-function buildAutoCompactSection(cb: AiSettingsCallbacks): HTMLElement {
+function buildAutoCompactSection(close: () => void, cb: AiSettingsCallbacks): HTMLElement {
   const wrap = document.createElement('div');
   wrap.className = 'flex flex-col gap-2';
   const head = document.createElement('div');
@@ -320,7 +217,7 @@ function buildAutoCompactSection(cb: AiSettingsCallbacks): HTMLElement {
     b.addEventListener('click', () => {
       saveSettings(setAutoCompactMode(loadSettings(), opt.id));
       cb.onChange();
-      closeModal();
+      close();
       void showAiSettingsModal(cb);
     });
     seg.appendChild(b);
@@ -335,7 +232,7 @@ function buildAutoCompactSection(cb: AiSettingsCallbacks): HTMLElement {
   return wrap;
 }
 
-function buildSystemPromptSection(cb: AiSettingsCallbacks): HTMLElement {
+function buildSystemPromptSection(close: () => void, cb: AiSettingsCallbacks): HTMLElement {
   const wrap = document.createElement('div');
   wrap.className = 'flex flex-col gap-2';
   const head = document.createElement('div');
@@ -367,14 +264,87 @@ function buildSystemPromptSection(cb: AiSettingsCallbacks): HTMLElement {
   editBtn.className = 'self-start px-3 py-1 rounded text-xs text-zinc-200 bg-zinc-700 hover:bg-zinc-600';
   editBtn.textContent = override !== null ? 'Edit / reset prompt' : 'View / edit prompt';
   editBtn.addEventListener('click', () => {
-    closeModal();
+    close();
     void showSystemPromptModal(provider, { onChange: cb.onChange });
   });
   wrap.appendChild(editBtn);
   return wrap;
 }
 
-function closeModal(): void {
-  modalEl?.remove();
-  modalEl = null;
+/** Anthropic key + lifetime usage panel. Only renders when a key exists;
+ *  the empty state is owned by the provider toggle's "switch to Anthropic
+ *  then connect a key" flow. */
+async function buildAnthropicSection(close: () => void, footer: HTMLElement, body: HTMLElement, cb: AiSettingsCallbacks): Promise<void> {
+  const wrap = document.createElement('div');
+  wrap.className = 'flex flex-col gap-2';
+  const head = document.createElement('div');
+  head.className = 'text-xs text-zinc-400';
+  head.textContent = 'Anthropic key';
+  wrap.appendChild(head);
+
+  const key = await getKey('anthropic');
+  if (!key) {
+    const empty = document.createElement('p');
+    empty.className = 'text-[11px] text-zinc-400';
+    empty.textContent = 'No Anthropic key connected.';
+    wrap.appendChild(empty);
+    const connectBtn = document.createElement('button');
+    connectBtn.className = 'self-start px-3 py-1.5 rounded text-xs font-medium bg-blue-600 hover:bg-blue-500 text-white';
+    connectBtn.textContent = 'Connect Anthropic API';
+    connectBtn.addEventListener('click', () => {
+      close();
+      void showAiKeyModal({ onConnected: cb.onChange });
+    });
+    wrap.appendChild(connectBtn);
+    body.appendChild(wrap);
+    return;
+  }
+
+  const last4 = key.apiKey.slice(-4);
+  const row = (label: string, value: string) => {
+    const r = document.createElement('div');
+    r.className = 'flex justify-between gap-3 text-xs';
+    const l = document.createElement('span');
+    l.className = 'text-zinc-400';
+    l.textContent = label;
+    const v = document.createElement('span');
+    v.className = 'text-zinc-100 font-mono';
+    v.textContent = value;
+    r.appendChild(l);
+    r.appendChild(v);
+    return r;
+  };
+  wrap.appendChild(row('Key', `…${last4}`));
+  wrap.appendChild(row('Connected', new Date(key.createdAt).toLocaleString()));
+  wrap.appendChild(row('Last used', new Date(key.lastUsed).toLocaleString()));
+  wrap.appendChild(row('Input tokens', key.totalInputTokens.toLocaleString()));
+  wrap.appendChild(row('Output tokens', key.totalOutputTokens.toLocaleString()));
+  wrap.appendChild(row('Spent (estimated)', formatUsd(key.totalCostUsd)));
+
+  const note = document.createElement('p');
+  note.className = 'text-[11px] text-zinc-500 leading-snug';
+  note.textContent = 'Estimated spend uses public list prices and may differ slightly from your Anthropic invoice.';
+  wrap.appendChild(note);
+  body.appendChild(wrap);
+
+  const replaceBtn = document.createElement('button');
+  replaceBtn.className = 'px-3 py-1.5 rounded text-xs text-zinc-200 bg-zinc-700 hover:bg-zinc-600';
+  replaceBtn.textContent = 'Replace key';
+  replaceBtn.addEventListener('click', () => {
+    close();
+    void showAiKeyModal({ onConnected: cb.onChange });
+  });
+  footer.appendChild(replaceBtn);
+
+  const disconnectBtn = document.createElement('button');
+  disconnectBtn.className = 'px-3 py-1.5 rounded text-xs text-red-300 bg-red-900/40 hover:bg-red-800/60';
+  disconnectBtn.textContent = 'Disconnect';
+  disconnectBtn.addEventListener('click', async () => {
+    if (!confirm('Disconnect Anthropic? Your chat history is kept; only the key is removed.')) return;
+    await deleteKey('anthropic');
+    resetClient();
+    close();
+    cb.onChange();
+  });
+  footer.appendChild(disconnectBtn);
 }

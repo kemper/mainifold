@@ -15,7 +15,9 @@ export interface ColorRegion {
 export type RegionDescriptor =
   | { kind: 'coplanar'; seedPoint: [number, number, number]; seedNormal: [number, number, number]; normalTolerance: number }
   | { kind: 'slab'; normal: [number, number, number]; offset: number; thickness: number }
-  | { kind: 'triangles'; ids: number[] };
+  | { kind: 'triangles'; ids: number[] }
+  | { kind: 'byLabel'; label: string }
+  | { kind: 'connectedFromSeed'; seedPoint: [number, number, number]; seedNormal: [number, number, number]; maxDeviationDeg: number };
 
 export interface SerializedColorRegion {
   id: number;
@@ -217,6 +219,37 @@ export function buildTriColors(numTri: number): Uint8Array | null {
 export function isPainted(triColors: Uint8Array, triIndex: number): boolean {
   const painted = (triColors as Uint8Array & { _painted?: Uint8Array })._painted;
   return painted ? painted[triIndex] === 1 : (triColors[triIndex * 3] !== 0 || triColors[triIndex * 3 + 1] !== 0 || triColors[triIndex * 3 + 2] !== 0);
+}
+
+/** Allocate an empty (all-zero) triColors buffer with the `_painted`
+ *  sidecar attached. Use this when you need a paintable buffer but the
+ *  current regions list is empty (so `buildTriColors` returned null). */
+export function createEmptyTriColors(numTri: number): Uint8Array {
+  const buf = new Uint8Array(numTri * 3);
+  (buf as Uint8Array & { _painted?: Uint8Array })._painted = new Uint8Array(numTri);
+  return buf;
+}
+
+/** Overlay a color onto specific triangles in a triColors buffer
+ *  (typically one returned by buildTriColors). Keeps the `_painted`
+ *  sidecar in sync. Used by paintPreview / paintExplain to highlight
+ *  a candidate or committed region in bright yellow over the existing
+ *  paint layer. */
+export function overlayPainted(
+  triColors: Uint8Array,
+  indices: Iterable<number>,
+  color: [number, number, number],
+): void {
+  const painted = (triColors as Uint8Array & { _painted?: Uint8Array })._painted;
+  const r = Math.round(color[0] * 255);
+  const g = Math.round(color[1] * 255);
+  const b = Math.round(color[2] * 255);
+  for (const t of indices) {
+    triColors[t * 3] = r;
+    triColors[t * 3 + 1] = g;
+    triColors[t * 3 + 2] = b;
+    if (painted) painted[t] = 1;
+  }
 }
 
 export function serialize(): SerializedColorRegion[] {

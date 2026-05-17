@@ -7,7 +7,7 @@ import { runTurn, totalCost, totalTokensEstimate, estimateCachedPrefixTokens } f
 import { listMessages, GLOBAL_CHAT_BUCKET, putMessages, deleteMessages, getKey, clearChat } from '../ai/db';
 import { proposeCompaction } from '../ai/compaction';
 import { captureIsoViews, fileToImageSource } from '../ai/images';
-import { loadSettings, saveSettings, setAnthropicModel, setToggles, ANTHROPIC_MODEL_OPTIONS, type AiSettings } from '../ai/settings';
+import { loadSettings, saveSettings, applyPreset, setAnthropicModel, setToggles, ANTHROPIC_MODEL_OPTIONS, PRESET_OPTIONS, MAX_ITERATIONS_OPTIONS, MAX_SPEND_OPTIONS, type AiSettings } from '../ai/settings';
 import { buildLocalSystemPrompt, buildMediumLocalSystemPrompt, buildSystemPrompt, loadAiMd } from '../ai/systemPrompt';
 import { estimateTurnCostUsd, formatUsd } from '../ai/cost';
 import { generateId } from '../storage/db';
@@ -16,9 +16,8 @@ import { showAiSettingsModal } from './aiSettingsModal';
 import { showAiLocalModal } from './aiLocalModal';
 import { showSystemPromptModal } from './aiSystemPromptModal';
 import { showCompactConfirmModal } from './aiCompactModal';
-import { ensureModelLoaded, isModelLoaded } from '../ai/local';
-import { resolveLocalModel } from '../ai/local';
-import { activeModel, type AnthropicModelId, type ChatBlock, type ChatMessage, type ImageSource, type PersistedToolResult } from '../ai/types';
+import { ensureModelLoaded, isModelLoaded, resolveLocalModel } from '../ai/local';
+import { activeModel, type AnthropicModelId, type ChatBlock, type ChatMessage, type ChatToggles, type ImageSource, type PersistedToolResult, type TurnOutcomeReason } from '../ai/types';
 
 interface PanelState {
   open: boolean;
@@ -26,6 +25,9 @@ interface PanelState {
   history: ChatMessage[];
   pendingImages: ImageSource[];
   inFlight: boolean;
+  /** Live for the duration of a turn. Stop button aborts via this. Null
+   *  when no turn is in flight. */
+  inFlightController: AbortController | null;
 }
 
 const state: PanelState = {
@@ -34,23 +36,13 @@ const state: PanelState = {
   history: [],
   pendingImages: [],
   inFlight: false,
+  inFlightController: null,
 };
 
-/** Cached length of `public/ai.md`, populated once on init. We use it to
- *  size the context-meter percentage when the active provider is Anthropic.
- *  Defaults to a reasonable guess so the meter is sensible before the
- *  fetch lands. */
+/** Cached length of `public/ai.md`, populated once on init. Used when the
+ *  active provider is Anthropic. Defaults to a reasonable guess so the
+ *  context meter is sensible before the fetch lands. */
 let cachedAiMdLength = 15_000;
-
-/** Compute the next sequence ordinal for a compaction summary so it sorts
- *  before every kept message. Multiple compactions over a session would
- *  otherwise all share seq=-1 and sort unstably on reload — by stepping
- *  one below the current minimum we keep the order deterministic. */
-function nextCompactedSeq(history: ChatMessage[]): number {
-  const existing = history.map(m => m.seq).filter(n => Number.isFinite(n));
-  const min = existing.length > 0 ? Math.min(...existing) : 0;
-  return min - 1;
-}
 
 /** Effective system-prompt length in characters for the active provider /
  *  model / override combo. Drives the context meter and the auto-compact
@@ -61,7 +53,6 @@ function effectiveSystemPromptChars(): number {
   const override = s.systemPromptOverrides?.[s.toggles.provider] ?? null;
   if (override !== null) return override.length;
   if (s.toggles.provider === 'anthropic') return cachedAiMdLength;
-  // Local: choose by the active model's promptTier.
   if (s.toggles.localModel) {
     try {
       const info = resolveLocalModel(s.toggles.localModel);
@@ -75,6 +66,28 @@ function effectiveSystemPromptChars(): number {
   return buildLocalSystemPrompt().length;
 }
 
+/** Token limit for the active provider/model — drives the % full bar
+ *  on the cost meter and the auto-compaction thresholds. */
+function contextLimitFor(settings: AiSettings): number {
+  if (settings.toggles.provider === 'local') {
+    return settings.localContext.windowSizeOverride ?? 8192;
+  }
+  if (settings.toggles.anthropicModel === 'claude-haiku-4-5') return 200_000;
+  return 1_000_000;
+}
+
+/** Compute the next sequence ordinal for a compaction summary so it sorts
+ *  before every kept message. Multiple compactions over a session would
+ *  otherwise all share seq=-1 and sort unstably on reload — by stepping
+ *  one below the current minimum we keep the order deterministic. */
+function nextCompactedSeq(history: ChatMessage[]): number {
+  const existing = history.map(m => m.seq).filter(n => Number.isFinite(n));
+  const min = existing.length > 0 ? Math.min(...existing) : 0;
+  return min - 1;
+}
+
+let sendBtnRef: HTMLButtonElement | null = null;
+
 let drawerEl: HTMLElement | null = null;
 let transcriptEl: HTMLElement | null = null;
 let inputEl: HTMLTextAreaElement | null = null;
@@ -82,14 +95,28 @@ let pendingImagesEl: HTMLElement | null = null;
 let toggleStripEl: HTMLElement | null = null;
 let costMeterEl: HTMLElement | null = null;
 let panelStatusEl: HTMLElement | null = null;
+let progressEl: HTMLElement | null = null;
+let progressTickerId: number | null = null;
+let navigateToEditorFn: (() => Promise<void> | void) | null = null;
 let modelPickerEl: HTMLElement | null = null;
 let promptChipEl: HTMLElement | null = null;
 
-let onPanelStateChange: ((open: boolean) => void) | null = null;
+/** Set by the watchdog when it abort()s mid-stream so sendMessage knows
+ *  this was a stall recovery (auto-resume), not a user-initiated stop. */
+let stalledByWatchdog = false;
+
+export interface AiPanelOptions {
+  /** main.ts hands in a navigation helper so the panel can move the user
+   *  to the editor before firing a request from another page. Avoids a
+   *  silent-modeling-on-landing-page UX bug where the AI runs code but
+   *  the user can't see the result. */
+  onNavigateToEditor?: () => Promise<void> | void;
+}
 
 /** Mount the drawer once on app start. Idempotent. */
-export async function initAiPanel(): Promise<void> {
+export async function initAiPanel(opts: AiPanelOptions = {}): Promise<void> {
   if (drawerEl) return;
+  navigateToEditorFn = opts.onNavigateToEditor ?? null;
   // Pre-load ai.md so the first turn doesn't pay the fetch latency on top
   // of the API round trip. Also caches its length for the context meter.
   const aiMd = await loadAiMd();
@@ -106,9 +133,20 @@ export async function initAiPanel(): Promise<void> {
   else hideDrawer();
 }
 
-/** Called by main.ts whenever the active session changes (open / close). */
+/** Called by main.ts whenever the active session changes (open / close).
+ *  When the user isn't on /editor (landing, catalog, help, 404), we
+ *  ignore whatever session the session manager is holding and pin the
+ *  chat to the global bucket — prior session chat shouldn't leak across
+ *  navigation. */
 export async function setActiveSession(sessionId: string | null): Promise<void> {
-  state.sessionId = sessionId ?? GLOBAL_CHAT_BUCKET;
+  const onEditor = window.location.pathname === '/editor';
+  const effective = (onEditor && sessionId) ? sessionId : GLOBAL_CHAT_BUCKET;
+  if (state.sessionId === effective && state.history.length > 0) {
+    // Already showing this bucket — skip the IndexedDB round trip and
+    // avoid a transcript re-render that scrolls the user to the bottom.
+    return;
+  }
+  state.sessionId = effective;
   await loadHistoryForCurrentSession();
   renderTranscript();
   renderCostMeter();
@@ -119,21 +157,12 @@ export function toggleAiPanel(): void {
   else showDrawer();
 }
 
-export function isAiPanelOpen(): boolean {
-  return state.open;
-}
-
-export function onAiPanelStateChange(fn: (open: boolean) => void): void {
-  onPanelStateChange = fn;
-}
-
 function showDrawer(): void {
   if (!drawerEl) return;
   state.open = true;
   drawerEl.classList.remove('translate-x-full');
   drawerEl.classList.add('translate-x-0');
   saveSettings({ ...loadSettings(), drawerOpen: true });
-  onPanelStateChange?.(true);
   inputEl?.focus();
 }
 
@@ -143,7 +172,6 @@ function hideDrawer(): void {
   drawerEl.classList.remove('translate-x-0');
   drawerEl.classList.add('translate-x-full');
   saveSettings({ ...loadSettings(), drawerOpen: false });
-  onPanelStateChange?.(false);
 }
 
 async function loadHistoryForCurrentSession(): Promise<void> {
@@ -158,11 +186,7 @@ function buildDrawer(): void {
   root.className = 'fixed top-0 right-0 h-screen w-[420px] bg-zinc-900 border-l border-zinc-700 shadow-2xl z-40 flex flex-col transition-transform duration-200 translate-x-full';
   drawerEl = root;
 
-  // Header — title, model picker (provider-aware), compact, settings, close.
-  // The picker collapses to whichever provider is active: a `<select>` of
-  // Anthropic models when on Anthropic, an active-model chip + "Change…"
-  // button when on Local. The old "Preset" dropdown is gone — users pick
-  // models directly and use the toggle strip for fine-grained controls.
+  // Header — title, model picker, preset picker, close
   const header = document.createElement('div');
   header.className = 'flex items-center gap-2 px-3 py-2 border-b border-zinc-700 shrink-0';
 
@@ -179,6 +203,9 @@ function buildDrawer(): void {
   promptChipEl = document.createElement('span');
   header.appendChild(promptChipEl);
   renderPromptChip();
+
+  const presetSelect = createPresetSelect();
+  header.appendChild(presetSelect);
 
   const compactBtn = createIconButton('Compact', '⤓ Compact');
   compactBtn.title = 'Compact the conversation: summarize older turns and promote insights to session notes.';
@@ -233,6 +260,14 @@ function buildDrawer(): void {
   pendingImagesEl = document.createElement('div');
   pendingImagesEl.className = 'px-3 pb-1.5 flex flex-wrap gap-1.5 shrink-0 hidden';
   root.appendChild(pendingImagesEl);
+
+  // In-progress indicator — shown while a turn is in flight so the user
+  // knows we haven't frozen. Hidden by default; populated by
+  // showProgress() / hideProgress() driven by runTurn's onProgress callback
+  // and the stall watchdog.
+  progressEl = document.createElement('div');
+  progressEl.className = 'px-3 pb-1.5 text-[11px] text-zinc-400 flex items-center gap-2 shrink-0 hidden';
+  root.appendChild(progressEl);
 
   // Input row
   const inputRow = document.createElement('div');
@@ -291,7 +326,16 @@ function buildDrawer(): void {
   const sendBtn = document.createElement('button');
   sendBtn.className = 'shrink-0 px-3 py-1.5 rounded text-xs font-medium bg-blue-600 hover:bg-blue-500 text-white disabled:opacity-50 disabled:cursor-not-allowed';
   sendBtn.textContent = 'Send';
-  sendBtn.addEventListener('click', () => { void sendMessage(); });
+  sendBtn.addEventListener('click', () => {
+    // While a turn is in flight the button is "Stop" — click aborts the
+    // controller, which propagates through runTurn → streamTurn → SDK.
+    if (state.inFlight) {
+      state.inFlightController?.abort();
+      return;
+    }
+    void sendMessage();
+  });
+  sendBtnRef = sendBtn;
   inputRow.appendChild(sendBtn);
 
   root.appendChild(inputRow);
@@ -321,10 +365,61 @@ function createIconButton(_label: string, glyph: string): HTMLButtonElement {
   return btn;
 }
 
-/** Tiny clickable chip showing which system prompt is active. For local
- *  models it specifically calls out "Slim prompt" — the user needs to know
- *  we send a stripped-down wrapper, not the full ai.md, so the model
- *  knowing fewer features makes sense. Clicking opens the editor. */
+/** Provider-aware model picker — on Anthropic it's a native `<select>` of
+ *  Haiku/Sonnet/Opus; on Local it's a chip showing the active local model
+ *  that opens the picker modal when clicked. Renders into `modelPickerEl`
+ *  so toggling provider just calls `renderModelPicker()` again. */
+function renderModelPicker(): void {
+  if (!modelPickerEl) return;
+  modelPickerEl.replaceChildren();
+  const settings = loadSettings();
+
+  if (settings.toggles.provider === 'anthropic') {
+    const sel = document.createElement('select');
+    sel.className = 'px-2 py-1 rounded text-[11px] bg-zinc-800 border border-zinc-700 text-zinc-200 focus:outline-none';
+    sel.title = 'Anthropic model (hosted).';
+    for (const opt of ANTHROPIC_MODEL_OPTIONS) {
+      const o = document.createElement('option');
+      o.value = opt.id;
+      o.textContent = opt.label;
+      sel.appendChild(o);
+    }
+    sel.value = settings.toggles.anthropicModel;
+    sel.addEventListener('change', () => {
+      saveSettings(setAnthropicModel(loadSettings(), sel.value as AnthropicModelId));
+      renderToggleStrip();
+      renderCostMeter();
+    });
+    modelPickerEl.appendChild(sel);
+    return;
+  }
+
+  const chip = document.createElement('button');
+  chip.type = 'button';
+  chip.className = 'px-2 py-1 rounded text-[11px] bg-emerald-900/30 border border-emerald-700/50 text-emerald-200 hover:bg-emerald-900/50';
+  if (settings.toggles.localModel) {
+    try {
+      const info = resolveLocalModel(settings.toggles.localModel);
+      chip.textContent = info.label;
+      chip.title = `Local model: ${info.label}${isModelLoaded(info.id) ? ' (in GPU)' : ' (not loaded)'}`;
+    } catch {
+      chip.textContent = 'Pick local model';
+      chip.title = 'The previously-selected model is no longer available. Click to pick one.';
+    }
+  } else {
+    chip.textContent = 'Pick local model';
+    chip.title = 'No local model is selected. Click to pick one.';
+  }
+  chip.addEventListener('click', () => {
+    void showAiLocalModal({ onChange: () => { renderModelPicker(); renderToggleStrip(); renderCostMeter(); panelStatusUpdate(); } });
+  });
+  modelPickerEl.appendChild(chip);
+}
+
+/** Tiny clickable chip showing which system prompt is active. Local models
+ *  see a stripped-down "slim" or "medium" version of ai.md; Anthropic
+ *  gets the full thing. Calling out the difference up front makes the
+ *  capability gap less surprising. Clicking opens the editor. */
 function renderPromptChip(): void {
   if (!promptChipEl) return;
   const settings = loadSettings();
@@ -358,58 +453,26 @@ function renderPromptChip(): void {
   promptChipEl.replaceChildren(chip);
 }
 
-function renderModelPicker(): void {
-  if (!modelPickerEl) return;
-  modelPickerEl.replaceChildren();
-  const settings = loadSettings();
-
-  if (settings.toggles.provider === 'anthropic') {
-    const sel = document.createElement('select');
-    sel.className = 'px-2 py-1 rounded text-[11px] bg-zinc-800 border border-zinc-700 text-zinc-200 focus:outline-none';
-    sel.title = 'Anthropic model (hosted).';
-    for (const opt of ANTHROPIC_MODEL_OPTIONS) {
-      const o = document.createElement('option');
-      o.value = opt.id;
-      o.textContent = opt.label;
-      sel.appendChild(o);
-    }
-    sel.value = settings.toggles.anthropicModel;
-    sel.addEventListener('change', () => {
-      saveSettings(setAnthropicModel(loadSettings(), sel.value as AnthropicModelId));
-      renderToggleStrip();
-      renderCostMeter();
-    });
-    modelPickerEl.appendChild(sel);
-    return;
+function createPresetSelect(): HTMLSelectElement {
+  const sel = document.createElement('select');
+  sel.className = 'px-2 py-1 rounded text-[11px] bg-zinc-800 border border-zinc-700 text-zinc-200 focus:outline-none';
+  sel.title = 'Preset bundles the model + toggle settings. Picking a preset resets the toggles below to its defaults; manually changing any toggle switches you to "Custom".';
+  for (const opt of PRESET_OPTIONS) {
+    const o = document.createElement('option');
+    o.value = opt.id;
+    o.textContent = opt.label;
+    o.title = opt.hint;
+    sel.appendChild(o);
   }
-
-  // Local provider: show the active model as a chip + "Change…" button.
-  // Native `<select>` doesn't work here because the entries aren't symmetric
-  // — picking a different model triggers a download flow, not a simple
-  // setting change.
-  const chip = document.createElement('button');
-  chip.className = 'px-2 py-1 rounded text-[11px] bg-emerald-900/30 border border-emerald-700/50 text-emerald-200 hover:bg-emerald-900/50';
-  if (settings.toggles.localModel) {
-    // resolveLocalModel can throw if `localModel` points at a custom
-    // entry that was removed in another tab between the settings read
-    // and now. Falling back to "Pick local model" lets the user recover
-    // by re-selecting rather than crashing the drawer header.
-    try {
-      const info = resolveLocalModel(settings.toggles.localModel);
-      chip.textContent = info.label;
-      chip.title = `Local model: ${info.label}${isModelLoaded(info.id) ? ' (in GPU)' : ' (not loaded)'}`;
-    } catch {
-      chip.textContent = 'Pick local model';
-      chip.title = 'The previously-selected model is no longer available. Click to pick one.';
-    }
-  } else {
-    chip.textContent = 'Pick local model';
-    chip.title = 'No local model is selected. Click to pick one.';
-  }
-  chip.addEventListener('click', () => {
-    void showAiLocalModal({ onChange: () => { renderModelPicker(); renderToggleStrip(); renderCostMeter(); panelStatusUpdate(); } });
+  sel.value = loadSettings().preset;
+  sel.addEventListener('change', () => {
+    const next = applyPreset(loadSettings(), sel.value as AiSettings['preset']);
+    saveSettings(next);
+    renderModelPicker();
+    renderToggleStrip();
+    renderCostMeter();
   });
-  modelPickerEl.appendChild(chip);
+  return sel;
 }
 
 // === Toggle strip rendering ===
@@ -420,31 +483,107 @@ function renderToggleStrip(): void {
   const settings = loadSettings();
   const { toggles } = settings;
 
-  toggleStripEl.appendChild(togglePill('👁 Views', toggles.vision.views, () => {
-    saveSettings(setToggles(loadSettings(), { vision: { views: !toggles.vision.views } }));
-    renderToggleStrip();
-    renderCostMeter();
-  }));
-  toggleStripEl.appendChild(togglePill('▶ Run', toggles.scope.runCode, () => {
-    saveSettings(setToggles(loadSettings(), { scope: { runCode: !toggles.scope.runCode } }));
-    renderToggleStrip();
-  }));
-  toggleStripEl.appendChild(togglePill('💾 Save', toggles.scope.saveVersions, () => {
-    saveSettings(setToggles(loadSettings(), { scope: { saveVersions: !toggles.scope.saveVersions } }));
-    renderToggleStrip();
-  }));
-  toggleStripEl.appendChild(togglePill('🎨 Paint', toggles.scope.paintFaces, () => {
-    saveSettings(setToggles(loadSettings(), { scope: { paintFaces: !toggles.scope.paintFaces } }));
-    renderToggleStrip();
-  }));
+  toggleStripEl.appendChild(togglePill(
+    '📸 Auto-render',
+    toggles.vision.views,
+    'Auto-render: lets the model call renderView() to take its own screenshots after paint / geometry changes. Each render ≈ 1500 tokens of input on the next turn — verification is valuable but it adds up. The 📷 Show AI button still works manually when this is OFF.',
+    () => {
+      saveSettings(setToggles(loadSettings(), { vision: { views: !toggles.vision.views } }));
+      renderToggleStrip();
+      renderCostMeter();
+    },
+  ));
+  toggleStripEl.appendChild(togglePill(
+    '▶ Run',
+    toggles.scope.runCode,
+    'Run code: allow the AI to execute geometry code (runCode, runAndSave). OFF makes it suggest code in chat without running.',
+    () => {
+      saveSettings(setToggles(loadSettings(), { scope: { runCode: !toggles.scope.runCode } }));
+      renderToggleStrip();
+    },
+  ));
+  toggleStripEl.appendChild(togglePill(
+    '💾 Save',
+    toggles.scope.saveVersions,
+    'Save versions: allow the AI to commit results to the gallery (runAndSave, loadVersion). OFF keeps the model in run-only / dry-run mode.',
+    () => {
+      saveSettings(setToggles(loadSettings(), { scope: { saveVersions: !toggles.scope.saveVersions } }));
+      renderToggleStrip();
+    },
+  ));
+  toggleStripEl.appendChild(togglePill(
+    '🎨 Paint',
+    toggles.scope.paintFaces,
+    'Paint: allow the AI to set color regions (paintInBox, paintSlab, paintNear, etc.). OFF by default — painting locks the editor and is the easiest place for the AI to over-select.',
+    () => {
+      saveSettings(setToggles(loadSettings(), { scope: { paintFaces: !toggles.scope.paintFaces } }));
+      renderToggleStrip();
+    },
+  ));
+
+  const retry = document.createElement('select');
+  retry.className = 'px-1.5 py-0.5 rounded text-[10px] bg-zinc-800 border border-zinc-700 text-zinc-300 focus:outline-none';
+  retry.title = 'Auto-retry on tool error: how many times to feed the error back before surfacing it.';
+  for (const n of [0, 1, 3]) {
+    const opt = document.createElement('option');
+    opt.value = String(n);
+    opt.textContent = `↻ ${n}`;
+    retry.appendChild(opt);
+  }
+  retry.value = String(toggles.autoRetry);
+  retry.addEventListener('change', () => {
+    saveSettings(setToggles(loadSettings(), { autoRetry: Number(retry.value) as 0 | 1 | 3 }));
+  });
+  toggleStripEl.appendChild(retry);
+
+  // Iteration cap — how many tool round-trips per user turn before the
+  // loop forces a stop. Lower = safer (model can't run away on cost or
+  // time), higher = more autonomous (long paint runs complete in one go).
+  const iterCap = document.createElement('select');
+  iterCap.className = 'px-1.5 py-0.5 rounded text-[10px] bg-zinc-800 border border-zinc-700 text-zinc-300 focus:outline-none';
+  iterCap.title = 'Iteration cap: how many agent loop rounds before the loop forces a stop. Lower = safer (the model can\'t run away on cost or time), higher = more autonomous (long paint runs complete in one go). ∞ relies entirely on the model declaring done or you clicking Stop.';
+  for (const opt of MAX_ITERATIONS_OPTIONS) {
+    const o = document.createElement('option');
+    o.value = opt.id;
+    o.textContent = `⟲ ${opt.label}`;
+    o.title = opt.hint;
+    iterCap.appendChild(o);
+  }
+  iterCap.value = toggles.maxIterations;
+  iterCap.addEventListener('change', () => {
+    saveSettings(setToggles(loadSettings(), { maxIterations: iterCap.value as ChatToggles['maxIterations'] }));
+  });
+  toggleStripEl.appendChild(iterCap);
+
+  // Spend cap — alternative / parallel control to iteration cap. Both
+  // apply; whichever trips first stops the loop. Useful when iteration
+  // count is hard to predict (vision-heavy turns can run a few
+  // iterations but spend $0.50+ each).
+  const spendCap = document.createElement('select');
+  spendCap.className = 'px-1.5 py-0.5 rounded text-[10px] bg-zinc-800 border border-zinc-700 text-zinc-300 focus:outline-none';
+  spendCap.title = 'Spend cap: max USD this turn can cost before the loop forces a stop. Applies alongside the iteration cap — whichever trips first wins. Useful when iteration count is unpredictable (a vision-heavy iteration may spend $0.50). Set ∞ to disable.';
+  for (const opt of MAX_SPEND_OPTIONS) {
+    const o = document.createElement('option');
+    o.value = opt.id;
+    o.textContent = `$ ${opt.label}`;
+    o.title = opt.hint;
+    spendCap.appendChild(o);
+  }
+  spendCap.value = toggles.maxSpend;
+  spendCap.addEventListener('change', () => {
+    saveSettings(setToggles(loadSettings(), { maxSpend: spendCap.value as ChatToggles['maxSpend'] }));
+  });
+  toggleStripEl.appendChild(spendCap);
 }
 
-function togglePill(label: string, on: boolean, onClick: () => void): HTMLButtonElement {
+function togglePill(label: string, on: boolean, tooltip: string, onClick: () => void): HTMLButtonElement {
   const btn = document.createElement('button');
   btn.className = on
     ? 'px-2 py-0.5 rounded text-[10px] bg-emerald-700/40 border border-emerald-700/60 text-emerald-200'
     : 'px-2 py-0.5 rounded text-[10px] bg-zinc-800 border border-zinc-700 text-zinc-500';
   btn.textContent = label;
+  btn.title = `${tooltip}\n\nCurrently: ${on ? 'ON' : 'OFF'} — click to ${on ? 'disable' : 'enable'}.`;
+  btn.setAttribute('aria-pressed', String(on));
   btn.addEventListener('click', onClick);
   return btn;
 }
@@ -457,12 +596,16 @@ function renderCostMeter(): void {
   const tokens = totalTokensEstimate(state.history, effectiveSystemPromptChars());
   const cost = totalCost(state.history);
   const cachedPrefix = estimateCachedPrefixTokens(effectiveSystemPromptChars());
+  // Per-turn estimate covers the user's input + a typical response. Image
+  // tokens (Show AI snapshot + any renderView calls the model makes) are
+  // observed on the post-turn meter rather than predicted here — they're
+  // too variable to estimate up front without lying to the user.
   const model = activeModel(settings.toggles);
-  const turnEst = model ? estimateTurnCostUsd(model, cachedPrefix, 500 + (settings.toggles.vision.views ? 6000 : 0)) : 0;
+  const turnEst = model ? estimateTurnCostUsd(model, cachedPrefix, 500) : 0;
 
   // Color the context bar by % of model context window. Local models cap
-  // at 4096 tokens — the percentage fills up much faster, which is the
-  // honest behavior we want to surface.
+  // around 4-16K tokens so the bar fills much faster than on Anthropic —
+  // that's the honest behavior we want to surface.
   const ctxLimit = contextLimitFor(settings);
   const pct = Math.min(100, Math.round((tokens / ctxLimit) * 100));
   const barColor = pct < 60 ? 'bg-emerald-500' : pct < 85 ? 'bg-amber-500' : 'bg-red-500';
@@ -479,55 +622,23 @@ function renderCostMeter(): void {
   `;
   costMeterEl.appendChild(meter);
 
-  // Conservative auto-compact mode just *nags* — it doesn't fire on its
-  // own. Surface a persistent "Compact now" link on the meter once we're
-  // past 80%, so the hint isn't tucked into a transient toast users miss.
-  if (settings.autoCompactMode === 'conservative' && pct >= 80) {
-    const sepNag = document.createElement('span');
-    sepNag.className = 'text-zinc-700';
-    sepNag.textContent = '·';
-    costMeterEl.appendChild(sepNag);
-    const nag = document.createElement('button');
-    nag.className = 'text-[10px] text-amber-300 hover:text-amber-200 underline';
-    nag.textContent = 'Compact now';
-    nag.title = 'Context is over 80% full. Compact to free space.';
-    nag.addEventListener('click', () => { void runCompact(); });
-    costMeterEl.appendChild(nag);
-  }
-
   const sep = document.createElement('span');
   sep.className = 'text-zinc-700';
   sep.textContent = '·';
   costMeterEl.appendChild(sep);
 
-  // Cost panel: hide the hosted-only "next turn ~" estimate on local since
-  // there's no per-turn dollar cost to predict.
-  if (settings.toggles.provider === 'anthropic') {
-    const session = document.createElement('span');
-    session.textContent = `session: ${formatUsd(cost)}`;
-    costMeterEl.appendChild(session);
+  const session = document.createElement('span');
+  session.textContent = `session: ${formatUsd(cost)}`;
+  costMeterEl.appendChild(session);
 
-    const sep2 = document.createElement('span');
-    sep2.className = 'text-zinc-700';
-    sep2.textContent = '·';
-    costMeterEl.appendChild(sep2);
+  const sep2 = document.createElement('span');
+  sep2.className = 'text-zinc-700';
+  sep2.textContent = '·';
+  costMeterEl.appendChild(sep2);
 
-    const next = document.createElement('span');
-    next.textContent = `next turn ~${formatUsd(turnEst)}`;
-    costMeterEl.appendChild(next);
-  } else {
-    const local = document.createElement('span');
-    local.textContent = settings.toggles.localModel
-      ? `local: ${isModelLoaded(settings.toggles.localModel) ? 'in GPU' : 'cold start'}`
-      : 'local: no model picked';
-    costMeterEl.appendChild(local);
-  }
-}
-
-function contextLimitFor(settings: AiSettings): number {
-  if (settings.toggles.provider === 'local') return 4096;
-  if (settings.toggles.anthropicModel === 'claude-haiku-4-5') return 200_000;
-  return 1_000_000;
+  const next = document.createElement('span');
+  next.textContent = `next turn ~${formatUsd(turnEst)}`;
+  costMeterEl.appendChild(next);
 }
 
 // === Status bar ===
@@ -536,9 +647,6 @@ function panelStatusUpdate(): void {
   if (!panelStatusEl) return;
   const settings = loadSettings();
   if (settings.toggles.provider === 'local') {
-    // Local provider: status hinges on whether a model is selected, not on
-    // an API key. We don't auto-load weights — the user has to opt in via
-    // the modal — so a missing model shows the picker prompt.
     panelStatusEl.replaceChildren();
     if (!settings.toggles.localModel) {
       panelStatusEl.classList.remove('hidden', 'text-emerald-400');
@@ -548,19 +656,14 @@ function panelStatusUpdate(): void {
       link.className = 'underline text-amber-200 hover:text-amber-100';
       link.textContent = 'Choose a model';
       link.addEventListener('click', () => {
-        void showAiLocalModal({ onChange: () => { panelStatusUpdate(); renderToggleStrip(); renderCostMeter(); renderModelPicker(); } });
+        void showAiLocalModal({ onChange: () => { panelStatusUpdate(); renderModelPicker(); renderToggleStrip(); renderCostMeter(); renderPromptChip(); } });
       });
       panelStatusEl.appendChild(link);
     } else if (!isModelLoaded(settings.toggles.localModel)) {
       panelStatusEl.classList.remove('hidden', 'text-emerald-400');
       panelStatusEl.classList.add('text-blue-300');
       let label = 'Model';
-      try {
-        label = resolveLocalModel(settings.toggles.localModel).label;
-      } catch {
-        // The active id was probably forgotten in another tab; let the
-        // user click through to the picker rather than crashing.
-      }
+      try { label = resolveLocalModel(settings.toggles.localModel).label; } catch { /* stale id */ }
       panelStatusEl.appendChild(document.createTextNode(`${label} downloaded — `));
       const link = document.createElement('button');
       link.className = 'underline text-blue-200 hover:text-blue-100';
@@ -586,12 +689,13 @@ function panelStatusUpdate(): void {
       link.addEventListener('click', () => {
         void showAiKeyModal({ onConnected: () => { panelStatusUpdate(); } });
       });
+      panelStatusEl.appendChild(link);
       panelStatusEl.appendChild(document.createTextNode(' or '));
       const local = document.createElement('button');
       local.className = 'underline text-amber-200 hover:text-amber-100';
       local.textContent = 'run a local model';
       local.addEventListener('click', () => {
-        void showAiLocalModal({ onChange: () => { panelStatusUpdate(); renderToggleStrip(); renderCostMeter(); renderModelPicker(); } });
+        void showAiLocalModal({ onChange: () => { panelStatusUpdate(); renderToggleStrip(); renderCostMeter(); renderModelPicker(); renderPromptChip(); } });
       });
       panelStatusEl.appendChild(local);
       panelStatusEl.appendChild(document.createTextNode('.'));
@@ -615,6 +719,33 @@ async function loadLocalModelInline(): Promise<void> {
   } catch (err) {
     setTransientStatus(`Failed to load: ${err instanceof Error ? err.message : String(err)}`);
   }
+}
+
+/** Clear chat history for the current session. Confirms first; refuses to
+ *  fire mid-turn so we don't leave the agent's in-flight writes orphaned. */
+async function clearCurrentChat(): Promise<void> {
+  if (state.inFlight) {
+    setTransientStatus('Wait for the current turn to finish before clearing.');
+    return;
+  }
+  if (state.history.length === 0) {
+    setTransientStatus('Nothing to clear — the chat is already empty.');
+    return;
+  }
+  const scope = state.sessionId === GLOBAL_CHAT_BUCKET
+    ? 'the global chat (before any session was opened)'
+    : 'this session';
+  if (!confirm(`Clear chat for ${scope}? ${state.history.length} message(s) will be deleted from your browser. Saved versions and session notes are untouched.`)) return;
+  try {
+    await clearChat(state.sessionId);
+  } catch (err) {
+    setTransientStatus(`Couldn't clear chat: ${err instanceof Error ? err.message : String(err)}`);
+    return;
+  }
+  state.history = [];
+  renderTranscript();
+  renderCostMeter();
+  setTransientStatus('Chat cleared.');
 }
 
 // === Transcript rendering ===
@@ -641,11 +772,6 @@ function renderMessage(msg: ChatMessage): HTMLElement {
   const wrap = document.createElement('div');
   wrap.className = msg.role === 'user' ? 'flex flex-col items-end gap-1' : 'flex flex-col items-start gap-1';
   wrap.dataset.messageId = msg.id;
-
-  if (msg.errored) {
-    wrap.appendChild(renderErrorBubble(msg));
-    return wrap;
-  }
 
   // Tool results (user role) get rendered as collapsed bubbles
   if (msg.role === 'user' && msg.toolResults && msg.toolResults.length > 0) {
@@ -675,78 +801,40 @@ function renderMessage(msg: ChatMessage): HTMLElement {
     wrap.appendChild(meta);
   }
 
+  if (msg.role === 'assistant' && msg.aborted) {
+    const banner = document.createElement('div');
+    banner.className = 'flex items-center gap-2 text-[10px] text-amber-400';
+    const label = document.createElement('span');
+    label.textContent = '⊘ Stopped by user.';
+    banner.appendChild(label);
+    const discard = document.createElement('button');
+    discard.className = 'underline hover:text-amber-200';
+    discard.textContent = 'Discard partial';
+    discard.title = 'Delete this aborted message so the next turn starts clean.';
+    discard.addEventListener('click', () => { void discardPartial(msg.id); });
+    banner.appendChild(discard);
+    wrap.appendChild(banner);
+  }
+
   return wrap;
 }
 
-/** Rendered for turns that errored mid-flight — visually distinct so the
- *  user can spot the failure point in a long chat, and offers a Retry that
- *  re-sends the immediately preceding user message. */
-function renderErrorBubble(msg: ChatMessage): HTMLElement {
-  const card = document.createElement('div');
-  card.className = 'max-w-[95%] rounded border border-red-700/60 bg-red-900/15 px-3 py-2 flex flex-col gap-2';
-
-  const head = document.createElement('div');
-  head.className = 'flex items-center gap-1.5 text-xs font-medium text-red-200';
-  head.innerHTML = '<span>⚠</span><span>Turn failed</span>';
-  card.appendChild(head);
-
-  const body = document.createElement('div');
-  body.className = 'text-[12px] text-red-100 whitespace-pre-wrap leading-snug';
-  body.textContent = msg.blocks.find(b => b.type === 'text')?.text ?? 'The model didn\'t finish the turn.';
-  card.appendChild(body);
-
-  const actions = document.createElement('div');
-  actions.className = 'flex items-center gap-2 pt-1';
-  const retryBtn = document.createElement('button');
-  retryBtn.className = 'px-2 py-1 rounded text-[11px] text-zinc-100 bg-zinc-700 hover:bg-zinc-600 border border-zinc-600';
-  retryBtn.textContent = '↻ Retry last message';
-  retryBtn.addEventListener('click', () => { void retryLastUserMessage(msg.id); });
-  actions.appendChild(retryBtn);
-
-  const dismissBtn = document.createElement('button');
-  dismissBtn.className = 'px-2 py-1 rounded text-[11px] text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800';
-  dismissBtn.textContent = 'Dismiss';
-  dismissBtn.title = 'Hide this error from the chat (it\'s not stored anyway).';
-  dismissBtn.addEventListener('click', () => {
-    state.history = state.history.filter(m => m.id !== msg.id);
-    renderTranscript();
-  });
-  actions.appendChild(dismissBtn);
-  card.appendChild(actions);
-  return card;
-}
-
-/** Find the most recent user message before this error, dismiss the error
- *  bubble, and replay the user message verbatim. */
-async function retryLastUserMessage(errorMsgId: string): Promise<void> {
-  if (state.inFlight) {
-    setTransientStatus('Wait for the current turn to finish before retrying.');
-    return;
+async function discardPartial(messageId: string): Promise<void> {
+  // Drop the aborted assistant message from both the DB and the in-memory
+  // history so the next turn doesn't see (or have to refer to) it. We also
+  // drop any tool_result message that immediately followed — that pair
+  // only makes sense together.
+  const idx = state.history.findIndex(m => m.id === messageId);
+  if (idx < 0) return;
+  const toDelete = [state.history[idx].id];
+  const next = state.history[idx + 1];
+  if (next && next.role === 'user' && next.toolResults && next.toolResults.length > 0) {
+    toDelete.push(next.id);
   }
-  const errorIdx = state.history.findIndex(m => m.id === errorMsgId);
-  if (errorIdx < 0) return;
-  // Walk back to the last user message that wasn't a pure tool-result.
-  let lastUser: ChatMessage | null = null;
-  for (let i = errorIdx - 1; i >= 0; i--) {
-    const m = state.history[i];
-    if (m.role === 'user' && m.blocks.some(b => b.type === 'text' || b.type === 'image')) {
-      lastUser = m;
-      break;
-    }
-  }
-  if (!lastUser) {
-    setTransientStatus('Nothing to retry — couldn\'t find your last message.');
-    return;
-  }
-  // Drop the error bubble before re-sending so the chat reads cleanly.
-  state.history = state.history.filter(m => m.id !== errorMsgId);
+  await deleteMessages(toDelete);
+  await loadHistoryForCurrentSession();
   renderTranscript();
-  if (!inputEl) return;
-  // Reconstruct the user input and resend through the normal send path.
-  const text = lastUser.blocks.find(b => b.type === 'text')?.text ?? '';
-  state.pendingImages = lastUser.blocks.filter(b => b.type === 'image').map(b => (b as { source: ImageSource }).source);
-  inputEl.value = text;
-  await sendMessage();
+  renderCostMeter();
 }
 
 function renderTextBubble(role: 'user' | 'assistant', text: string, compacted?: boolean): HTMLElement {
@@ -795,9 +883,14 @@ function renderToolCallChip(name: string, input: Record<string, unknown>): HTMLE
 }
 
 function renderToolResultBubble(result: PersistedToolResult): HTMLElement {
+  const wrap = document.createElement('div');
+  wrap.className = 'flex flex-col items-start gap-1 max-w-[90%]';
   const chip = document.createElement('details');
   const tone = result.isError ? 'border-red-700/60 bg-red-900/20 text-red-200' : 'border-emerald-700/40 bg-emerald-900/10 text-emerald-200';
-  chip.className = `max-w-[90%] text-[11px] rounded border ${tone} px-2 py-1`;
+  chip.className = `text-[11px] rounded border ${tone} px-2 py-1`;
+  // If the tool returned an image, default to open so the user can see
+  // it without expanding — that's the whole point of the affordance.
+  if (result.image) chip.open = true;
   const summary = document.createElement('summary');
   summary.className = 'cursor-pointer select-none';
   const head = result.content.split('\n')[0].slice(0, 80);
@@ -807,7 +900,13 @@ function renderToolResultBubble(result: PersistedToolResult): HTMLElement {
   pre.className = 'mt-1 text-[10px] opacity-80 overflow-x-auto whitespace-pre-wrap';
   pre.textContent = result.content;
   chip.appendChild(pre);
-  return chip;
+  wrap.appendChild(chip);
+  // Image bubble — the same render the AI sees, so the human and the
+  // model are looking at literally the same pixels.
+  if (result.image) {
+    wrap.appendChild(renderImageBubble(result.image));
+  }
+  return wrap;
 }
 
 // === Pending images ===
@@ -882,8 +981,7 @@ async function sendMessage(): Promise<void> {
       void showAiLocalModal({ onChange: () => { panelStatusUpdate(); renderModelPicker(); renderToggleStrip(); renderCostMeter(); void sendMessage(); } });
       return;
     }
-    // Auto-load the model into GPU on first message — avoids the user having
-    // to click a separate "load" button.
+    // Auto-load the model into GPU on first message — saves a click.
     if (!isModelLoaded(settings.toggles.localModel)) {
       setTransientStatus('Loading model into GPU (first turn only)...');
       try {
@@ -898,6 +996,30 @@ async function sendMessage(): Promise<void> {
     }
   }
 
+  // The drawer is a fixed overlay on every page (landing, catalog, help),
+  // but the AI's tools (runAndSave, setCode, paint*) target the editor.
+  // If the user fires from anywhere else, navigate to /editor and give
+  // the route handler a beat to mount the editor + engine before runTurn
+  // starts calling window.partwright methods.
+  if (window.location.pathname !== '/editor' && navigateToEditorFn) {
+    setTransientStatus('Switching to editor…');
+    try {
+      await navigateToEditorFn();
+    } catch (err) {
+      setTransientStatus(`Navigation failed: ${err instanceof Error ? err.message : String(err)}`);
+      return;
+    }
+    // Wait for window.partwright to actually be live before proceeding.
+    // The editor mount + engine init is async; polling is simpler than
+    // wiring a dedicated ready event for one caller.
+    const deadline = Date.now() + 5_000;
+    while (Date.now() < deadline) {
+      const w = window as unknown as { partwright?: { run?: unknown } };
+      if (w.partwright?.run) break;
+      await new Promise(r => setTimeout(r, 50));
+    }
+  }
+
   const blocks: ChatBlock[] = [];
   if (text.length > 0) blocks.push({ type: 'text', text });
   // Only attach images the user added if vision is on. Iso views are
@@ -908,232 +1030,311 @@ async function sendMessage(): Promise<void> {
   inputEl.value = '';
   state.pendingImages = [];
   renderPendingImages();
-  state.inFlight = true;
+  progressState.retryCount = 0;
+  stalledByWatchdog = false;
+  await runTurnWithStallRetry(apiKey, settings.toggles, blocks);
+}
 
-  let activeAssistantId: string | null = null;
-  let liveTextEl: HTMLElement | null = null;
+/** Wraps runTurn with: in-progress indicator, stall watchdog, and bounded
+ *  auto-retry. When the watchdog fires we abort and re-issue the same
+ *  conversation; on retry attempts userBlocks is empty because the user
+ *  message is already in history from the first attempt. */
+interface TurnOutcome {
+  totalCostUsd: number;
+  toolCalls: number;
+  reason: TurnOutcomeReason;
+  detail?: string;
+  iterations: number;
+}
 
-  await runTurn({
-    apiKey,
-    toggles: settings.toggles,
-    sessionId: state.sessionId,
-    history: state.history,
-    userBlocks: blocks,
-  }, {
-    onUserPersisted: msg => {
-      state.history.push(msg);
-      renderTranscript();
-    },
-    onAssistantStart: id => {
-      activeAssistantId = id;
-      // Bubble starts with a "Thinking…" pulse so the user knows the model
-      // is running. Especially important for local models, where the first
-      // token can be 5-10s away while the prompt is prefilled. Cleared on
-      // the first real text delta.
-      const placeholder: ChatMessage = {
-        id, sessionId: state.sessionId, role: 'assistant',
-        blocks: [{ type: 'text', text: 'Thinking…' }], createdAt: Date.now(),
-        seq: (state.history[state.history.length - 1]?.seq ?? 0) + 1,
-      };
-      state.history.push(placeholder);
-      renderTranscript();
-      if (transcriptEl) {
-        const wrap = transcriptEl.querySelector(`[data-message-id="${id}"]`) as HTMLElement | null;
-        liveTextEl = wrap?.querySelector('.bg-zinc-800') as HTMLElement | null;
-        if (liveTextEl) {
-          liveTextEl.textContent = 'Thinking…';
-          liveTextEl.classList.add('italic', 'text-zinc-400', 'animate-pulse');
-        }
-      }
-    },
-    onAssistantText: delta => {
-      if (!liveTextEl) return;
-      // First delta: drop the "Thinking…" placeholder and shed the pulse.
-      if (liveTextEl.classList.contains('animate-pulse')) {
-        liveTextEl.textContent = '';
-        liveTextEl.classList.remove('italic', 'text-zinc-400', 'animate-pulse');
-      }
-      liveTextEl.textContent = (liveTextEl.textContent ?? '') + delta;
-      if (transcriptEl) transcriptEl.scrollTop = transcriptEl.scrollHeight;
-    },
-    onAssistantPersisted: msg => {
-      // Replace the placeholder with the persisted message
-      const idx = state.history.findIndex(m => m.id === activeAssistantId);
-      if (idx >= 0) state.history[idx] = msg;
-      activeAssistantId = null;
-      liveTextEl = null;
-      renderTranscript();
-      renderCostMeter();
-    },
-    onToolResult: (_id, _name, result) => {
-      // The user-message that carries the tool result will be rendered when
-      // the loop persists it; nothing to do here in v0 beyond a flash
-      // notification for errors.
-      if (result.isError) setTransientStatus('A tool errored. The agent will retry or surface the issue.');
-    },
-    onError: err => {
-      // Replace the in-memory "Thinking…" placeholder with a visible
-      // error bubble so the user can see what failed. The error bubble
-      // is in-memory only (not persisted) — once `loadHistoryForCurrentSession`
-      // runs in onTurnComplete it'll be replaced by whatever the
-      // turn actually persisted (often nothing, leaving the user free
-      // to retry their last message).
-      if (activeAssistantId) {
-        const idx = state.history.findIndex(m => m.id === activeAssistantId);
-        const errorMsg: ChatMessage = {
-          id: activeAssistantId,
-          sessionId: state.sessionId,
-          role: 'assistant',
-          blocks: [{ type: 'text', text: err.message }],
-          createdAt: Date.now(),
-          seq: idx >= 0 ? state.history[idx].seq : (state.history[state.history.length - 1]?.seq ?? 0) + 1,
-          errored: true,
+function formatTurnOutcome(o: TurnOutcome): string {
+  const cost = formatUsd(o.totalCostUsd);
+  const iters = `${o.iterations} iter`;
+  const tools = o.toolCalls > 0 ? `, ${o.toolCalls} tool call${o.toolCalls === 1 ? '' : 's'}` : '';
+  switch (o.reason) {
+    case 'end_turn':
+      return `✓ done · ${cost} · ${iters}${tools}`;
+    case 'empty_final':
+      return `⚠ model exited without a final message · ${cost} · ${iters}${tools} — last visible content is above`;
+    case 'iteration_cap':
+      return `⚠ stopped at agent iteration cap (${o.iterations}) — try a more focused prompt, click Compact, or raise the ⟲ cap · ${cost}${tools}`;
+    case 'spend_cap':
+      return `⚠ stopped at spend cap${o.detail ? ` (${o.detail})` : ''} — raise the $ cap or click Send to continue · ${cost} · ${iters}${tools}`;
+    case 'max_tokens':
+      return `⚠ hit max_tokens before finishing · ${cost} · ${iters}${tools} — ask the model to continue`;
+    case 'refusal':
+      return `⊘ model refused · ${cost} · ${iters}${tools}`;
+    case 'aborted':
+      return `⊘ stopped · ${cost} · ${iters}${tools}`;
+    case 'error':
+      return `✗ ${o.detail ?? 'error'} · ${cost} · ${iters}${tools}`;
+    default:
+      return `· ended (${o.detail ?? 'other'}) · ${cost} · ${iters}${tools}`;
+  }
+}
+
+async function runTurnWithStallRetry(apiKey: string | undefined, toggles: ChatToggles, userBlocks: ChatBlock[]): Promise<void> {
+  let attempt = 0;
+  let lastTurnOutcome: TurnOutcome | null = null;
+  while (true) {
+    attempt++;
+    const controller = new AbortController();
+    state.inFlight = true;
+    state.inFlightController = controller;
+    setSendButtonMode('stop');
+    showProgress('thinking', 'starting…');
+
+    let activeAssistantId: string | null = null;
+    let liveTextEl: HTMLElement | null = null;
+    const blocksForThisAttempt = attempt === 1 ? userBlocks : [];
+
+    await runTurn({
+      apiKey,
+      toggles,
+      sessionId: state.sessionId,
+      history: state.history,
+      userBlocks: blocksForThisAttempt,
+      signal: controller.signal,
+    }, {
+      onUserPersisted: msg => {
+        state.history.push(msg);
+        renderTranscript();
+      },
+      onAssistantStart: id => {
+        activeAssistantId = id;
+        const placeholder: ChatMessage = {
+          id, sessionId: state.sessionId, role: 'assistant',
+          blocks: [{ type: 'text', text: '' }], createdAt: Date.now(),
+          seq: (state.history[state.history.length - 1]?.seq ?? 0) + 1,
         };
-        if (idx >= 0) state.history[idx] = errorMsg;
-        else state.history.push(errorMsg);
+        state.history.push(placeholder);
+        renderTranscript();
+        if (transcriptEl) {
+          const wrap = transcriptEl.querySelector(`[data-message-id="${id}"]`) as HTMLElement | null;
+          liveTextEl = wrap?.querySelector('.bg-zinc-800') as HTMLElement | null;
+          if (liveTextEl) liveTextEl.textContent = '';
+        }
+      },
+      onAssistantText: delta => {
+        if (liveTextEl) {
+          liveTextEl.textContent = (liveTextEl.textContent ?? '') + delta;
+          if (transcriptEl) transcriptEl.scrollTop = transcriptEl.scrollHeight;
+        }
+      },
+      onProgress: info => showProgress(info.phase, info.detail),
+      onAssistantPersisted: msg => {
+        const idx = state.history.findIndex(m => m.id === activeAssistantId);
+        if (idx >= 0) state.history[idx] = msg;
         activeAssistantId = null;
         liveTextEl = null;
         renderTranscript();
-      } else {
+        renderCostMeter();
+      },
+      onToolResult: (_id, _name, result) => {
+        if (result.isError) setTransientStatus('A tool errored. The agent will retry or surface the issue.');
+      },
+      onError: err => {
+        // Capture as the outcome too so the sticky final-state banner
+        // shows the error instead of disappearing silently. The transient
+        // status still flashes for users watching that strip.
         setTransientStatus(`Error: ${err.message}`);
-      }
-    },
-  });
+        lastTurnOutcome = { totalCostUsd: 0, toolCalls: 0, reason: 'error', detail: err.message, iterations: 0 };
+      },
+      onAborted: () => {
+        // Only show the user-stopped notice if the user actually clicked
+        // Stop — when the watchdog fires, the message is misleading.
+        if (!stalledByWatchdog) {
+          setTransientStatus('Stopped. Type a new message to continue or redirect.');
+          inputEl?.focus();
+        }
+      },
+      onTurnComplete: info => {
+        void loadHistoryForCurrentSession().then(() => {
+          renderTranscript();
+          renderCostMeter();
+        });
+        lastTurnOutcome = info;
+      },
+    });
 
-  // Post-turn cleanup runs after `runTurn` resolves — NOT in
-  // `onTurnComplete`, because that callback is fire-and-forget and
-  // would let `inFlight` drop while we're still editing history during
-  // auto-compaction. Anything that mutates state.history MUST happen
-  // before the `inFlight = false` below or a fast-typing user can
-  // start a second turn over our writes.
-  try {
-    const erroredFromThisTurn = state.history.filter(m => m.errored);
-    await loadHistoryForCurrentSession();
-    for (const m of erroredFromThisTurn) state.history.push(m);
-    renderTranscript();
-    renderCostMeter();
-    if (erroredFromThisTurn.length === 0) {
-      await maybeAutoCompact();
-    }
-  } finally {
     state.inFlight = false;
+    state.inFlightController = null;
+    setSendButtonMode('send');
+
+    // Surface a sticky completion banner so the user knows the turn
+    // actually ended and why — better than a silent hideProgress that
+    // reads as "the model stalled and gave up".
+    if (lastTurnOutcome) {
+      showProgressFinal(formatTurnOutcome(lastTurnOutcome));
+      lastTurnOutcome = null;
+    } else {
+      hideProgress();
+    }
+
+    if (stalledByWatchdog && progressState.retryCount <= MAX_STALL_RETRIES) {
+      // Strip the empty/partial assistant message left by the stalled
+      // attempt so the retry doesn't see (or send back to the model) a
+      // ghost bubble.
+      await stripLastAbortedAssistant();
+      stalledByWatchdog = false;
+      continue;
+    }
+    return;
   }
 }
 
-// === Auto-compaction ===
-
-/** Run after every successful turn. Decides whether the active
- *  autoCompactMode warrants firing the compactor — and if so, does it
- *  silently (no confirm modal). Auto-promoted notes from the proposal
- *  get written to the session log so they survive future compactions. */
-async function maybeAutoCompact(): Promise<void> {
-  const settings = loadSettings();
-  const mode = settings.autoCompactMode;
-  if (mode === 'off') return;
-
-  // Decide whether the current history justifies a compaction. The
-  // threshold is per-mode; aggressive fires every turn it can.
-  const tokens = totalTokensEstimate(state.history, effectiveSystemPromptChars());
-  const ctxLimit = settings.toggles.provider === 'local'
-    ? (settings.localContext.windowSizeOverride ?? 8192)
-    : (settings.toggles.anthropicModel === 'claude-haiku-4-5' ? 200_000 : 1_000_000);
-  const pct = ctxLimit > 0 ? tokens / ctxLimit : 0;
-
-  let keepTail: number;
-  if (mode === 'aggressive') {
-    // Keep just the last user+assistant exchange (2 messages). Compact
-    // anytime there's more than that to compact.
-    keepTail = 2;
-    if (state.history.length <= keepTail + 1) return;
-  } else if (mode === 'standard') {
-    // Compact at 70% full; keep 4 trailing messages.
-    keepTail = 4;
-    if (pct < 0.7) return;
-    if (state.history.length <= keepTail + 1) return;
-  } else if (mode === 'conservative') {
-    // Don't auto-run. The persistent "Compact now" link on the cost
-    // meter (rendered when pct >= 0.8) is the surfaced nag — we don't
-    // need a transient toast on top.
-    return;
-  } else {
-    return;
-  }
-
-  // For local provider we may need to (re)load the model into GPU first
-  // since proposeCompaction calls into it. ensureModelLoaded is a no-op
-  // when the model's already resident.
-  let apiKey: string | undefined;
-  if (settings.toggles.provider === 'anthropic') {
-    const key = await getKey('anthropic');
-    if (!key) return; // silently skip; the next manual run will prompt
-    apiKey = key.apiKey;
-  } else if (!settings.toggles.localModel) {
-    return;
-  }
-
-  let proposal;
-  try {
-    proposal = await proposeCompaction({ toggles: settings.toggles, apiKey }, state.history, keepTail);
-  } catch (err) {
-    // Auto-compaction is opportunistic — don't stop the user's actual
-    // conversation. But DO surface a transient hint so a quietly-broken
-    // auto-compact doesn't leave the user wondering why context keeps
-    // growing. The manual Compact button still works.
-    const msg = err instanceof Error ? err.message : String(err);
-    setTransientStatus(`Auto-compact skipped: ${msg}. Click Compact to retry.`);
-    return;
-  }
-
-  // Promote any proposed notes silently so insights survive.
-  const w = window as unknown as { partwright?: { addSessionNote?: (t: string) => Promise<unknown> } };
-  if (w.partwright?.addSessionNote && state.sessionId !== GLOBAL_CHAT_BUCKET) {
-    for (const note of proposal.proposedNotes) {
-      try { await w.partwright.addSessionNote(note); } catch { /* noop */ }
+/** Find the last assistant message marked `aborted` at the tail of the
+ *  in-memory history, delete it from IndexedDB, and reload. Used to clean
+ *  up after the stall watchdog. */
+async function stripLastAbortedAssistant(): Promise<void> {
+  for (let i = state.history.length - 1; i >= 0; i--) {
+    const m = state.history[i];
+    if (m.role !== 'assistant') continue;
+    if (m.aborted) {
+      await deleteMessages([m.id]);
+      await loadHistoryForCurrentSession();
+      renderTranscript();
+      return;
     }
+    break;
   }
+}
 
-  const summaryMsg: ChatMessage = {
-    id: generateId(),
-    sessionId: state.sessionId,
-    role: 'assistant',
-    blocks: [{ type: 'text', text: `[auto-compacted ${proposal.drop.length} turn(s)]\n${proposal.summary}` }],
-    createdAt: Date.now(),
-    seq: nextCompactedSeq(state.history),
-    compacted: true,
-  };
-  await deleteMessages(proposal.drop.map(m => m.id));
-  await putMessages([summaryMsg]);
-  await loadHistoryForCurrentSession();
-  renderTranscript();
-  renderCostMeter();
+function setSendButtonMode(mode: 'send' | 'stop'): void {
+  if (!sendBtnRef) return;
+  if (mode === 'stop') {
+    sendBtnRef.textContent = 'Stop';
+    sendBtnRef.className = 'shrink-0 px-3 py-1.5 rounded text-xs font-medium bg-red-600 hover:bg-red-500 text-white';
+    sendBtnRef.title = 'Stop the model. Partial output is kept so you can redirect.';
+  } else {
+    sendBtnRef.textContent = 'Send';
+    sendBtnRef.className = 'shrink-0 px-3 py-1.5 rounded text-xs font-medium bg-blue-600 hover:bg-blue-500 text-white disabled:opacity-50 disabled:cursor-not-allowed';
+    sendBtnRef.title = 'Send your message (Enter). Shift+Enter for newline.';
+  }
+}
+
+// === Progress indicator + stall watchdog ===
+
+interface ProgressTracker {
+  phase: 'thinking' | 'streaming' | 'tool' | 'final' | 'idle';
+  detail?: string;
+  lastBeat: number;
+  retryCount: number;
+}
+
+const progressState: ProgressTracker = { phase: 'idle', lastBeat: 0, retryCount: 0 };
+
+/** Wall-clock seconds without a stream beat before we treat the request as
+ *  stalled. Anthropic's adaptive thinking can pause output for tens of
+ *  seconds during deep reasoning, so this threshold needs to be generous —
+ *  smaller numbers cause spurious "auto-resume" loops on Opus 4.7. The
+ *  watchdog beats on every text delta, so this is the gap BETWEEN tokens,
+ *  not total turn time. */
+const STALL_THRESHOLD_MS = 35_000;
+const MAX_STALL_RETRIES = 2;
+/** Phases where a long silence indicates a real stall — not 'tool' (tool
+ *  execution is synchronous JS and may legitimately run for a few seconds
+ *  with no progress events) and not 'idle' (we shouldn't be running). */
+const STALL_PHASES = new Set<ProgressTracker['phase']>(['thinking', 'streaming']);
+
+function showProgress(phase: ProgressTracker['phase'], detail?: string): void {
+  // Per-text-delta calls land here too (the watchdog needs lastBeat fresh
+  // to know the stream is healthy). Skip the DOM rebuild when nothing the
+  // user can see has changed — the 1s ticker keeps the "(15s silent)"
+  // counter accurate, and avoiding replaceChildren() on every token saves
+  // hundreds of DOM rewrites/sec during a streaming response.
+  const visualChanged = progressState.phase !== phase || progressState.detail !== detail;
+  progressState.phase = phase;
+  progressState.detail = detail;
+  progressState.lastBeat = Date.now();
+  if (visualChanged) renderProgress();
+  if (!progressEl) return;
+  progressEl.classList.remove('hidden');
+  if (progressTickerId === null) {
+    // Re-render every second so the "(15s)" elapsed counter updates and
+    // the stall watchdog can fire from the same tick.
+    progressTickerId = window.setInterval(renderProgress, 1000);
+  }
+}
+
+function hideProgress(): void {
+  progressState.phase = 'idle';
+  if (progressEl) progressEl.classList.add('hidden');
+  if (progressTickerId !== null) {
+    clearInterval(progressTickerId);
+    progressTickerId = null;
+  }
+}
+
+function renderProgress(): void {
+  if (!progressEl) return;
+  if (progressState.phase === 'idle') return;
+  const elapsedSec = Math.max(0, Math.round((Date.now() - progressState.lastBeat) / 1000));
+  const silentSuffix = elapsedSec > 3 ? ` (${elapsedSec}s silent)` : '';
+  const label =
+    progressState.phase === 'thinking' ? `🧠 thinking…${silentSuffix}` :
+    progressState.phase === 'streaming' ? `✎ streaming response…${silentSuffix}` :
+    progressState.phase === 'tool' ? `🔧 ${progressState.detail ?? 'running tool'}…` :
+    progressState.phase === 'final' ? (progressState.detail ?? '✓ done') :
+    '';
+  progressEl.replaceChildren();
+  const dot = document.createElement('span');
+  // Final-state dot is static and colored by outcome rather than pulsing.
+  const dotColor =
+    progressState.phase === 'final'
+      ? (label.startsWith('⚠') ? 'bg-amber-400' : label.startsWith('✗') || label.startsWith('⊘') ? 'bg-red-400' : 'bg-emerald-400')
+      : 'bg-blue-400 animate-pulse';
+  dot.className = `inline-block w-2 h-2 rounded-full ${dotColor}`;
+  progressEl.appendChild(dot);
+  const text = document.createElement('span');
+  text.textContent = label;
+  progressEl.appendChild(text);
+  if (
+    state.inFlightController &&
+    STALL_PHASES.has(progressState.phase) &&
+    elapsedSec * 1000 > STALL_THRESHOLD_MS
+  ) {
+    triggerStallRetry();
+  }
+}
+
+/** Display a sticky completion / failure status for ~6s after a turn
+ *  ends. Replaces the silent hideProgress() that left users wondering
+ *  whether the model finished, errored, or just stopped speaking. */
+function showProgressFinal(detail: string): void {
+  if (!progressEl) return;
+  progressState.phase = 'final';
+  progressState.detail = detail;
+  progressState.lastBeat = Date.now();
+  progressEl.classList.remove('hidden');
+  renderProgress();
+  if (progressTickerId !== null) {
+    clearInterval(progressTickerId);
+    progressTickerId = null;
+  }
+  window.setTimeout(() => {
+    if (progressState.phase === 'final' && progressState.detail === detail) {
+      hideProgress();
+    }
+  }, 6000);
+}
+
+function triggerStallRetry(): void {
+  if (progressState.retryCount >= MAX_STALL_RETRIES) {
+    // Hand off to the user — surface that we've given up auto-retrying.
+    setTransientStatus(`Model stalled (no tokens for ${Math.round(STALL_THRESHOLD_MS / 1000)}s) after ${MAX_STALL_RETRIES} retries — stopping.`);
+    state.inFlightController?.abort();
+    return;
+  }
+  // Abort the current attempt with a stall marker so sendMessage knows to
+  // re-issue rather than treat it as a user-initiated stop.
+  progressState.retryCount++;
+  setTransientStatus(`No response for ${Math.round(STALL_THRESHOLD_MS / 1000)}s — auto-resuming (retry ${progressState.retryCount}/${MAX_STALL_RETRIES})...`);
+  stalledByWatchdog = true;
+  state.inFlightController?.abort();
 }
 
 // === Compaction ===
-
-async function clearCurrentChat(): Promise<void> {
-  if (state.inFlight) {
-    setTransientStatus('Wait for the current turn to finish before clearing.');
-    return;
-  }
-  if (state.history.length === 0) {
-    setTransientStatus('Nothing to clear — the chat is already empty.');
-    return;
-  }
-  const scope = state.sessionId === GLOBAL_CHAT_BUCKET
-    ? 'the global chat (before any session was opened)'
-    : 'this session';
-  if (!confirm(`Clear chat for ${scope}? ${state.history.length} message(s) will be deleted from your browser. Saved versions and session notes are untouched.`)) return;
-  try {
-    await clearChat(state.sessionId);
-  } catch (err) {
-    setTransientStatus(`Couldn't clear chat: ${err instanceof Error ? err.message : String(err)}`);
-    return;
-  }
-  state.history = [];
-  renderTranscript();
-  renderCostMeter();
-  setTransientStatus('Chat cleared.');
-}
 
 async function runCompact(): Promise<void> {
   if (state.inFlight) {

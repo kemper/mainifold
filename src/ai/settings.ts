@@ -1,14 +1,15 @@
-// Per-browser AI settings (provider, model, toggles). Persisted to
-// localStorage as one JSON blob — they're sticky across sessions and
+// Per-browser AI settings (provider, preset, model, toggles, caps).
+// Persisted to localStorage as one JSON blob — sticky across sessions and
 // separate from the per-session chat transcripts in IndexedDB.
 
-import type { AnthropicModelId, ChatToggles, ModelId, Provider } from './types';
+import { MAX_ITERATIONS, MAX_SPEND, type AnthropicModelId, type ChatToggles, type ModelId, type Preset, type Provider } from './types';
 import type { LocalModelId } from './localModels';
 import { LOCAL_MODELS } from './localModels';
 
 const STORAGE_KEY = 'partwright-ai-settings-v1';
 
 export interface AiSettings {
+  preset: Preset;
   toggles: ChatToggles;
   /** When `false`, the chat drawer starts collapsed on page load. */
   drawerOpen: boolean;
@@ -32,19 +33,6 @@ export interface AiSettings {
   localContext: LocalContextSettings;
 }
 
-export interface LocalContextSettings {
-  /** Per-origin override of every model's default context window. `null`
-   *  means use whatever the model declares in LocalModelInfo. Setting it
-   *  higher than the model's compiled max throws at reload — we catch
-   *  that and fall back automatically. */
-  windowSizeOverride: number | null;
-  /** When true, the engine is loaded with `sliding_window_size` instead
-   *  of `context_window_size`. Old turns drop off as new ones arrive;
-   *  the conversation never errors with "prompt tokens exceed window",
-   *  but the model loses long-range coherence. */
-  sliding: boolean;
-}
-
 export interface CustomLocalModel {
   /** Stable id — the WebLLM model_id. Must be unique across the user's
    *  custom list and not collide with built-in model_ids. */
@@ -65,15 +53,57 @@ export interface CustomLocalModel {
   addedAt: number;
 }
 
+export interface LocalContextSettings {
+  /** Per-origin override of every model's default context window. `null`
+   *  means use whatever the model declares in LocalModelInfo. Setting it
+   *  higher than the model's compiled max throws at reload — we catch
+   *  that and fall back automatically. */
+  windowSizeOverride: number | null;
+  /** When true, the engine is loaded with `sliding_window_size` instead
+   *  of `context_window_size`. Old turns drop off as new ones arrive;
+   *  the conversation never errors with "prompt tokens exceed window",
+   *  but the model loses long-range coherence. */
+  sliding: boolean;
+}
+
+const DEFAULT_TOGGLES_BY_PRESET: Record<Exclude<Preset, 'custom'>, Omit<ChatToggles, 'provider' | 'anthropicModel' | 'localModel'> & { anthropicModel: AnthropicModelId }> = {
+  minimal: {
+    vision: { views: false },
+    scope: { runCode: true, saveVersions: true, paintFaces: false },
+    autoRetry: 0,
+    maxIterations: 'low',
+    maxSpend: 'cheap',
+    anthropicModel: 'claude-haiku-4-5',
+  },
+  standard: {
+    vision: { views: true },
+    // Paint off by default — color regions lock the editor and are easy
+    // for the model to mis-target. Users who want AI-driven painting
+    // can flip the Paint pill on, or pick the Full preset.
+    scope: { runCode: true, saveVersions: true, paintFaces: false },
+    autoRetry: 1,
+    maxIterations: 'medium',
+    maxSpend: 'medium',
+    anthropicModel: 'claude-sonnet-4-6',
+  },
+  full: {
+    vision: { views: true },
+    scope: { runCode: true, saveVersions: true, paintFaces: true },
+    autoRetry: 3,
+    maxIterations: 'high',
+    maxSpend: 'high',
+    anthropicModel: 'claude-opus-4-7',
+  },
+};
+
 const DEFAULT_TOGGLES: ChatToggles = {
-  vision: { views: true },
-  scope: { runCode: true, saveVersions: true, paintFaces: true },
+  ...DEFAULT_TOGGLES_BY_PRESET.standard,
   provider: 'anthropic',
-  anthropicModel: 'claude-sonnet-4-6',
   localModel: null,
 };
 
 const DEFAULT_SETTINGS: AiSettings = {
+  preset: 'standard',
   toggles: DEFAULT_TOGGLES,
   drawerOpen: false,
   autoCompactMode: 'off',
@@ -112,6 +142,9 @@ function cloneToggles(t: ChatToggles): ChatToggles {
   return {
     vision: { ...t.vision },
     scope: { ...t.scope },
+    autoRetry: t.autoRetry,
+    maxIterations: t.maxIterations,
+    maxSpend: t.maxSpend,
     provider: t.provider,
     anthropicModel: t.anthropicModel,
     localModel: t.localModel,
@@ -134,11 +167,33 @@ export function onSettingsChange(fn: (settings: AiSettings) => void): () => void
   return () => listeners.delete(fn);
 }
 
+export function applyPreset(settings: AiSettings, preset: Preset): AiSettings {
+  if (preset === 'custom') return { ...settings, preset };
+  const p = DEFAULT_TOGGLES_BY_PRESET[preset];
+  return {
+    ...settings,
+    preset,
+    toggles: {
+      vision: { ...p.vision },
+      scope: { ...p.scope },
+      autoRetry: p.autoRetry,
+      maxIterations: p.maxIterations,
+      maxSpend: p.maxSpend,
+      // Presets target Anthropic, but if the user is currently on local,
+      // keep them on local — the preset only adjusts cost/scope/views.
+      provider: settings.toggles.provider,
+      anthropicModel: p.anthropicModel,
+      localModel: settings.toggles.localModel,
+    },
+  };
+}
+
 /** Set the Anthropic-side model. Used when the user picks Haiku/Sonnet/Opus
  *  from the header dropdown while on the Anthropic provider. */
 export function setAnthropicModel(settings: AiSettings, model: AnthropicModelId): AiSettings {
   return {
     ...settings,
+    preset: 'custom',
     toggles: { ...settings.toggles, anthropicModel: model },
   };
 }
@@ -149,6 +204,7 @@ export function setAnthropicModel(settings: AiSettings, model: AnthropicModelId)
 export function setProvider(settings: AiSettings, provider: Provider): AiSettings {
   return {
     ...settings,
+    preset: 'custom',
     toggles: { ...settings.toggles, provider },
   };
 }
@@ -158,6 +214,7 @@ export function setProvider(settings: AiSettings, provider: Provider): AiSetting
 export function setLocalModel(settings: AiSettings, modelId: string | null): AiSettings {
   return {
     ...settings,
+    preset: 'custom',
     toggles: { ...settings.toggles, localModel: modelId },
   };
 }
@@ -166,11 +223,14 @@ export function setToggles(settings: AiSettings, partial: DeepPartial<ChatToggle
   const next: ChatToggles = {
     vision: { ...settings.toggles.vision, ...(partial.vision ?? {}) },
     scope: { ...settings.toggles.scope, ...(partial.scope ?? {}) },
+    autoRetry: partial.autoRetry ?? settings.toggles.autoRetry,
+    maxIterations: partial.maxIterations ?? settings.toggles.maxIterations,
+    maxSpend: partial.maxSpend ?? settings.toggles.maxSpend,
     provider: partial.provider ?? settings.toggles.provider,
     anthropicModel: partial.anthropicModel ?? settings.toggles.anthropicModel,
     localModel: partial.localModel ?? settings.toggles.localModel,
   };
-  return { ...settings, toggles: next };
+  return { ...settings, preset: 'custom', toggles: next };
 }
 
 type DeepPartial<T> = {
@@ -178,13 +238,15 @@ type DeepPartial<T> = {
 };
 
 /** Legacy shape — accepts the pre-provider single `model` field (v1 BYO-key
- *  release) and the v1.1 `preset` field, both of which are now unused but
- *  may still be sitting in users' localStorage. */
+ *  release) so users with old localStorage records don't lose state. */
 interface LegacyAiSettings {
-  preset?: unknown;
+  preset?: Preset;
   autoCompactMode?: AiSettings['autoCompactMode'];
   drawerOpen?: boolean;
   toggles?: Partial<ChatToggles> & { model?: ModelId };
+  systemPromptOverrides?: Partial<AiSettings['systemPromptOverrides']>;
+  customLocalModels?: CustomLocalModel[];
+  localContext?: Partial<LocalContextSettings>;
 }
 
 function mergeWithDefaults(partial: LegacyAiSettings): AiSettings {
@@ -198,13 +260,17 @@ function mergeWithDefaults(partial: LegacyAiSettings): AiSettings {
     ? legacyModel
     : undefined;
 
-  const overrides = (partial as { systemPromptOverrides?: Partial<AiSettings['systemPromptOverrides']> }).systemPromptOverrides ?? {};
+  const overrides = partial.systemPromptOverrides ?? {};
   return {
+    preset: partial.preset ?? DEFAULT_SETTINGS.preset,
     autoCompactMode: partial.autoCompactMode ?? DEFAULT_SETTINGS.autoCompactMode,
     drawerOpen: partial.drawerOpen ?? DEFAULT_SETTINGS.drawerOpen,
     toggles: {
       vision: { ...DEFAULT_SETTINGS.toggles.vision, ...(tgls.vision ?? {}) },
       scope: { ...DEFAULT_SETTINGS.toggles.scope, ...(tgls.scope ?? {}) },
+      autoRetry: tgls.autoRetry ?? DEFAULT_SETTINGS.toggles.autoRetry,
+      maxIterations: tgls.maxIterations ?? DEFAULT_SETTINGS.toggles.maxIterations,
+      maxSpend: tgls.maxSpend ?? DEFAULT_SETTINGS.toggles.maxSpend,
       provider: tgls.provider ?? (legacyIsLocal ? 'local' : DEFAULT_SETTINGS.toggles.provider),
       anthropicModel: tgls.anthropicModel ?? legacyAnthropic ?? DEFAULT_SETTINGS.toggles.anthropicModel,
       localModel: tgls.localModel ?? (legacyIsLocal ? (legacyModel as LocalModelId) : DEFAULT_SETTINGS.toggles.localModel),
@@ -213,10 +279,8 @@ function mergeWithDefaults(partial: LegacyAiSettings): AiSettings {
       anthropic: overrides.anthropic ?? null,
       local: overrides.local ?? null,
     },
-    customLocalModels: Array.isArray((partial as { customLocalModels?: unknown }).customLocalModels)
-      ? ((partial as { customLocalModels: CustomLocalModel[] }).customLocalModels)
-      : [],
-    localContext: normalizeLocalContext((partial as { localContext?: Partial<LocalContextSettings> }).localContext),
+    customLocalModels: Array.isArray(partial.customLocalModels) ? partial.customLocalModels : [],
+    localContext: normalizeLocalContext(partial.localContext),
   };
 }
 
@@ -242,12 +306,17 @@ export function setAutoCompactMode(settings: AiSettings, mode: AiSettings['autoC
   return { ...settings, autoCompactMode: mode };
 }
 
-export const AUTO_COMPACT_OPTIONS: { id: AiSettings['autoCompactMode']; label: string; hint: string }[] = [
-  { id: 'off', label: 'Off', hint: 'Only the Compact button condenses the chat.' },
-  { id: 'conservative', label: 'Hint at 80%', hint: 'Nag you to compact when the context fills up; never runs without your click.' },
-  { id: 'standard', label: 'Auto at 70%', hint: 'Silently compact when 70% full; keep the last 4 turns verbatim.' },
-  { id: 'aggressive', label: 'After every turn', hint: 'Compact after every assistant turn; keep only the last exchange. Best when full history doesn\'t matter — like driving the modeler.' },
-];
+/** Replace or clear the custom system prompt for one provider. Passing
+ *  `null` reverts to the built-in default. */
+export function setSystemPromptOverride(settings: AiSettings, provider: Provider, prompt: string | null): AiSettings {
+  return {
+    ...settings,
+    systemPromptOverrides: {
+      ...settings.systemPromptOverrides,
+      [provider]: prompt && prompt.trim().length > 0 ? prompt : null,
+    },
+  };
+}
 
 /** Error thrown when a custom-model id would shadow a curated entry.
  *  Callers should catch this and show an inline error in the form rather
@@ -287,17 +356,13 @@ export function removeCustomLocalModel(settings: AiSettings, id: string): AiSett
   };
 }
 
-/** Replace or clear the custom system prompt for one provider. Passing
- *  `null` reverts to the built-in default. */
-export function setSystemPromptOverride(settings: AiSettings, provider: Provider, prompt: string | null): AiSettings {
-  return {
-    ...settings,
-    systemPromptOverrides: {
-      ...settings.systemPromptOverrides,
-      [provider]: prompt && prompt.trim().length > 0 ? prompt : null,
-    },
-  };
-}
+export const MAX_ITERATIONS_OPTIONS: { id: ChatToggles['maxIterations']; label: string; hint: string }[] =
+  (Object.entries(MAX_ITERATIONS) as [ChatToggles['maxIterations'], (typeof MAX_ITERATIONS)[keyof typeof MAX_ITERATIONS]][])
+    .map(([id, v]) => ({ id, label: v.label, hint: v.hint }));
+
+export const MAX_SPEND_OPTIONS: { id: ChatToggles['maxSpend']; label: string; hint: string }[] =
+  (Object.entries(MAX_SPEND) as [ChatToggles['maxSpend'], (typeof MAX_SPEND)[keyof typeof MAX_SPEND]][])
+    .map(([id, v]) => ({ id, label: v.label, hint: v.hint }));
 
 export const ANTHROPIC_MODEL_OPTIONS: { id: AnthropicModelId; label: string }[] = [
   { id: 'claude-haiku-4-5', label: 'Haiku 4.5' },
@@ -305,3 +370,16 @@ export const ANTHROPIC_MODEL_OPTIONS: { id: AnthropicModelId; label: string }[] 
   { id: 'claude-opus-4-7', label: 'Opus 4.7' },
 ];
 
+export const PRESET_OPTIONS: { id: Preset; label: string; hint: string }[] = [
+  { id: 'minimal', label: 'Minimal', hint: 'Haiku · code only · no images · no retries' },
+  { id: 'standard', label: 'Standard', hint: 'Sonnet · run + save + views · paint off · 1 retry' },
+  { id: 'full', label: 'Full', hint: 'Opus · every tool incl. paint · views · 3 retries' },
+  { id: 'custom', label: 'Custom', hint: 'whatever you have set with the toggles below' },
+];
+
+export const AUTO_COMPACT_OPTIONS: { id: AiSettings['autoCompactMode']; label: string; hint: string }[] = [
+  { id: 'off', label: 'Off', hint: 'Only the Compact button condenses the chat.' },
+  { id: 'conservative', label: 'Hint at 80%', hint: 'Nag you to compact when the context fills up; never runs without your click.' },
+  { id: 'standard', label: 'Auto at 70%', hint: 'Silently compact when 70% full; keep the last 4 turns verbatim.' },
+  { id: 'aggressive', label: 'After every turn', hint: 'Compact after every assistant turn; keep only the last exchange. Best when full history doesn\'t matter — like driving the modeler.' },
+];
