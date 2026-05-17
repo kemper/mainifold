@@ -85,10 +85,12 @@ import {
 import { setColor as setAnnotateColor, setWidth as setAnnotateWidth, getWidth as getAnnotateWidth } from './annotations/annotateMode';
 import { addTextAnnotationAtAnchor, setFontSize as setAnnotateFontSize, getFontSize as getAnnotateFontSize } from './annotations/textMode';
 import { restoreView as restoreAnnotationViewById } from './annotations/selectMode';
-import { applyTriColors, applyTriColorsIfVisible, hasRegions as hasColorRegions, onChange as onColorRegionsChange, onVisibilityChange as onPaintVisibilityChange, clearRegions, serialize as serializeRegions, addRegion, getRegions, removeRegion, removeLastRegion, redoLastRegion, buildTriColors, createEmptyTriColors, overlayPainted, type SerializedColorRegion } from './color/regions';
+import { applyTriColors, applyTriColorsIfVisible, hasRegions as hasColorRegions, onChange as onColorRegionsChange, onVisibilityChange as onPaintVisibilityChange, clearRegions, serialize as serializeRegions, addRegion, getRegions, removeRegion, removeLastRegion, redoLastRegion, setRegionVisibility, buildTriColors, createEmptyTriColors, overlayPainted, type SerializedColorRegion } from './color/regions';
+import { setBucketTolerance as setPaintBucketTolerance, getBucketTolerance as getPaintBucketTolerance, setBrushRadius as setPaintBrushRadius, getBrushRadius as getPaintBrushRadius } from './color/paintMode';
 import { initEditorLock, syncLockState, setUnlockHandlers } from './color/editorLock';
 import { buildAdjacency, findCoplanarRegion, findConnectedFromSeed, resolveSeed, findNearestTriangle } from './color/adjacency';
 import { findSlabTriangles } from './color/slabPaint';
+import { findBoxTriangles } from './color/boxPaint';
 import { computeFaceGroups } from './color/faceGroups';
 import {
   getSessionIdFromURL,
@@ -551,6 +553,9 @@ function rehydrateColorRegions(geometryData: Record<string, unknown> | null): vo
     } else if (region.descriptor.kind === 'slab') {
       const { normal, offset, thickness } = region.descriptor;
       triangles = findSlabTriangles(mesh, normal, offset, thickness);
+    } else if (region.descriptor.kind === 'box') {
+      const { center, size, quaternion } = region.descriptor;
+      triangles = findBoxTriangles(mesh, { center, size, quaternion });
     } else if (region.descriptor.kind === 'byLabel') {
       // Labels are runtime state — manifold-3d assigns fresh
       // originalIDs on every run, so we re-resolve by name from the
@@ -596,7 +601,7 @@ function rehydrateColorRegions(geometryData: Record<string, unknown> | null): vo
     }
 
     if (triangles.size > 0) {
-      addRegion(region.name, region.color, region.source, region.descriptor, triangles);
+      addRegion(region.name, region.color, region.source, region.descriptor, triangles, region.visible !== false);
     }
   }
 
@@ -3717,6 +3722,7 @@ async function main() {
           source: r.source,
           triangles: r.triangles.size,
           order: r.order,
+          visible: r.visible,
           bbox: stats?.bbox ?? null,
           centroid: stats?.centroid ?? null,
         };
@@ -3846,6 +3852,56 @@ async function main() {
 
       const triangles = collectTrianglesByFilter(currentMeshData, opts.box, cone, null, opts.coverageMode, opts.maxTriangleArea);
       if (triangles.size === 0) return { error: `paintInBox: no triangles matched the box${cone ? ' (with the normalCone' + (opts.topOnly ? '/topOnly' : '') + ' filter)' : ''}${opts.coverageMode === 'fully_inside' ? ' (with coverageMode: fully_inside — try widening the box or dropping the mode)' : ''}${opts.maxTriangleArea !== undefined ? ` (with maxTriangleArea: ${opts.maxTriangleArea} — try raising it)` : ''}. Try widening the box, dropping topOnly/normalCone, or call findFaces() to see what passes each filter individually.` };
+
+      return commitPaintFromSet(triangles, opts.color, opts.name, 'paintbrush');
+    },
+
+    /** Paint every triangle whose centroid lies inside an *oriented* bounding
+     *  box — same selector the UI's Box tool uses, but with explicit
+     *  center/size/quaternion instead of a gizmo. Use this when you need
+     *  arbitrary rotation that an AABB can't express (e.g. painting a tilted
+     *  panel on an oriented part).
+     *
+     *  `quaternion` defaults to identity `[0, 0, 0, 1]` if omitted, which
+     *  reduces to the same selector as `paintInBox` against an AABB centered
+     *  at `center` with the given `size`.
+     *
+     *  ```
+     *  partwright.paintInOrientedBox({
+     *    box: {
+     *      center: [10, 0, 5],
+     *      size: [8, 4, 2],
+     *      quaternion: [0, 0, Math.sin(Math.PI / 8), Math.cos(Math.PI / 8)], // 45° around Z
+     *    },
+     *    color: [0.2, 0.7, 0.9],
+     *  });
+     *  ```
+     *  Returns `{ id, name, triangles }` or `{ error }`. */
+    paintInOrientedBox(opts: {
+      box: {
+        center: [number, number, number];
+        size: [number, number, number];
+        quaternion?: [number, number, number, number];
+      };
+      color: [number, number, number];
+      name?: string;
+    }) {
+      if (!currentMeshData) return { error: 'No geometry loaded' };
+      if (!opts || typeof opts !== 'object') return { error: 'paintInOrientedBox requires { box, color }' };
+      if (!opts.box || typeof opts.box !== 'object') return { error: 'paintInOrientedBox.box must be { center, size, quaternion? }' };
+      const { center, size, quaternion } = opts.box;
+      if (!Array.isArray(center) || center.length !== 3 || !center.every(Number.isFinite)) return { error: 'paintInOrientedBox.box.center must be [x, y, z] of finite numbers' };
+      if (!Array.isArray(size) || size.length !== 3 || !size.every(v => Number.isFinite(v) && v > 0)) return { error: 'paintInOrientedBox.box.size must be [sx, sy, sz] of positive finite numbers' };
+      const q: [number, number, number, number] = quaternion ?? [0, 0, 0, 1];
+      if (!Array.isArray(q) || q.length !== 4 || !q.every(Number.isFinite)) return { error: 'paintInOrientedBox.box.quaternion must be [x, y, z, w] of finite numbers (defaults to identity if omitted)' };
+      if (!Array.isArray(opts.color) || opts.color.length !== 3) return { error: 'color must be [r, g, b] with values 0..1' };
+
+      const triangles = findBoxTriangles(currentMeshData, {
+        center: [center[0], center[1], center[2]],
+        size: [size[0], size[1], size[2]],
+        quaternion: q,
+      });
+      if (triangles.size === 0) return { error: 'paintInOrientedBox: no triangles inside the box. Try a larger size, recheck the center, or use paintPreview to see what the box covers.' };
 
       return commitPaintFromSet(triangles, opts.color, opts.name, 'paintbrush');
     },
@@ -4115,6 +4171,67 @@ async function main() {
       scheduleColorRefresh();
       syncLockState();
       return { removed: true, id };
+    },
+
+    /** Toggle whether a single region is rendered in the viewport. Hidden
+     *  regions still ship in GLB/3MF exports — visibility is a UI-only flag
+     *  meant for previewing the model without a region's overlay. Mirrors the
+     *  eye-icon button in the paint panel's region list. Returns
+     *  `{ id, visible }` on success or `{ error }` if no region matches. */
+    setRegionVisibility(id: number, visible: boolean) {
+      if (!Number.isFinite(id)) return { error: 'setRegionVisibility(id, visible) requires a finite integer id from listRegions()' };
+      if (typeof visible !== 'boolean') return { error: 'setRegionVisibility(id, visible): visible must be a boolean (true | false)' };
+      const ok = setRegionVisibility(id, visible);
+      if (!ok) return { error: `No region with id=${id}. Call listRegions() to see current ids.` };
+      scheduleColorRefresh();
+      return { id, visible };
+    },
+
+    /** Shorthand for `setRegionVisibility(id, false)`. */
+    hideRegion(id: number) {
+      return this.setRegionVisibility(id, false);
+    },
+
+    /** Shorthand for `setRegionVisibility(id, true)`. */
+    showRegion(id: number) {
+      return this.setRegionVisibility(id, true);
+    },
+
+    /** Read or write the bucket-tool tolerance used by the interactive paint
+     *  panel and by `paintRegion` when no `tolerance` argument is passed.
+     *  Value is the cosine of the maximum allowed bend angle (1 = strict
+     *  coplanar, -1 = whole connected component). Use the angle form via
+     *  `paintRegion({tolerance})` if you'd rather think in degrees.
+     *  Returns the previous + new value on set. */
+    getBucketTolerance() {
+      return { tolerance: getPaintBucketTolerance() };
+    },
+    setBucketTolerance(tolerance: number) {
+      if (typeof tolerance !== 'number' || !Number.isFinite(tolerance)) {
+        return { error: 'setBucketTolerance(tolerance): tolerance must be a finite number in [-1, 1] (cosine of max bend angle)' };
+      }
+      const clamped = Math.max(-1, Math.min(1, tolerance));
+      const previous = getPaintBucketTolerance();
+      setPaintBucketTolerance(clamped);
+      return { previous, tolerance: clamped };
+    },
+
+    /** Read or write the brush-tool radius (in mesh units) used by the
+     *  interactive paint panel. `0` means single-triangle (legacy behavior);
+     *  any positive value expands the brush footprint to every triangle whose
+     *  centroid lies within the radius of the click/drag point.
+     *  Programmatic painters should use `paintNear({point, radius})` or
+     *  `paintFaces({triangleIds})` — this setter only changes the UI brush. */
+    getBrushSize() {
+      return { radius: getPaintBrushRadius() };
+    },
+    setBrushSize(radius: number) {
+      if (typeof radius !== 'number' || !Number.isFinite(radius) || radius < 0) {
+        return { error: 'setBrushSize(radius): radius must be a non-negative finite number (mesh units)' };
+      }
+      const previous = getPaintBrushRadius();
+      setPaintBrushRadius(radius);
+      return { previous, radius };
     },
 
     /** Undo the most recent paint operation. The removed region goes onto
@@ -4806,6 +4923,7 @@ async function main() {
         'paintNearestRegion': { signature: 'paintNearestRegion({point, color, searchRadius?, name?, tolerance?}) -- Snap seed to nearest face, then paint coplanar region', docs: '/ai.md#color-regions' },
         'paintNear':       { signature: 'paintNear({point, radius, normalCone?, color, name?}) -- Paint triangles whose centroid is within `radius` of `point`. Predictable, no flood-fill tolerance to tune.', docs: '/ai.md#color-regions' },
         'paintInBox':      { signature: 'paintInBox({box, normalCone?, color, name?}) -- Paint triangles whose centroid is inside an axis-aligned box (and optional normal cone).', docs: '/ai.md#color-regions' },
+        'paintInOrientedBox': { signature: 'paintInOrientedBox({box: {center, size, quaternion?}, color, name?}) -- Paint triangles whose centroid is inside a rotated oriented box. Same selector as the UI Box tool.', docs: '/ai.md#color-regions' },
         'paintFaces':      { signature: 'paintFaces({triangleIds, color, name?}) -- Paint specific triangle indices', docs: '/ai.md#color-regions' },
         'paintSlab':       { signature: 'paintSlab({axis|normal, offset, thickness, color, name?}) -- Paint planar slab range', docs: '/ai.md#color-regions' },
         'paintPreview':    { signature: 'paintPreview({box?|point+radius?|triangleIds?, normalCone?, withImage?, view?}) -- DRY-RUN -> {triangleCount, bbox, centroid, [thumbnail]}. Default count-only; pass withImage:true for the yellow-highlighted thumbnail.', docs: '/ai.md#color-regions' },
@@ -4824,8 +4942,15 @@ async function main() {
         'paintConnected':  { signature: 'paintConnected({seed: {point, normal?}, maxDeviationDeg?, color, name?}) -- BFS-flood from a surface seed, gated by deviation from SEED normal (not adjacent). Pairs with probePixel for "paint everything contiguous and facing this way".', docs: '/ai.md#color-regions' },
         'getFeatureCentroids': { signature: 'getFeatureCentroids({maxGroups?, withinBox?}?) -- Token-cheap: face-group centroids + normals + bbox, no triangleIds. Use to plan paint targets.', docs: '/ai.md#color-regions' },
         'removeRegion':    { signature: 'removeRegion(id) -- Remove ONE color region by id from listRegions(). Use this to fix a single mistake without nuking the rest.', docs: '/ai.md#color-regions' },
+        'setRegionVisibility': { signature: 'setRegionVisibility(id, visible) -- Show/hide ONE region in the viewport. Hidden regions still export.', docs: '/ai.md#color-regions' },
+        'hideRegion':      { signature: 'hideRegion(id) -- Shorthand for setRegionVisibility(id, false).', docs: '/ai.md#color-regions' },
+        'showRegion':      { signature: 'showRegion(id) -- Shorthand for setRegionVisibility(id, true).', docs: '/ai.md#color-regions' },
         'undoLastPaint':   { signature: 'undoLastPaint() -- Undo the most recent paint op. Removed region goes on a redo stack.', docs: '/ai.md#color-regions' },
         'redoLastPaint':   { signature: 'redoLastPaint() -- Reapply the most recently undone paint op.', docs: '/ai.md#color-regions' },
+        'getBucketTolerance': { signature: 'getBucketTolerance() -- Read the bucket flood-fill tolerance (cosine of max bend angle).', docs: '/ai.md#color-regions' },
+        'setBucketTolerance': { signature: 'setBucketTolerance(tolerance) -- Set the bucket flood-fill tolerance (-1..1). Affects the UI bucket tool and the default for paintRegion.', docs: '/ai.md#color-regions' },
+        'getBrushSize':    { signature: 'getBrushSize() -- Read the UI brush radius (mesh units). 0 = single triangle.', docs: '/ai.md#color-regions' },
+        'setBrushSize':    { signature: 'setBrushSize(radius) -- Set the UI brush radius (mesh units, >= 0). Affects only the interactive brush tool; programmatic painting uses paintNear / paintFaces.', docs: '/ai.md#color-regions' },
         // Annotations
         'listAnnotations':    { signature: 'listAnnotations() -- List freehand strokes -> [{id, color, width, points}]', docs: '/ai.md#annotations' },
         'listTextAnnotations':{ signature: 'listTextAnnotations() -- List pinned text labels -> [{id, text, color, fontSizePx, anchor}]', docs: '/ai.md#annotations' },
