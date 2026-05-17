@@ -479,7 +479,7 @@ export async function streamLocalTurn(spec: LocalRequestSpec, callbacks: StreamC
   // across two delta emissions and leak the prefix to the UI.
   const MAX_OPEN_LEN = Math.max(TOOL_CALL_OPEN.length, THINK_OPEN.length);
 
-  for await (const chunk of stream as AsyncIterable<any>) {
+  try { for await (const chunk of stream as AsyncIterable<any>) {
     const choice = chunk?.choices?.[0];
     if (choice?.delta?.content) {
       const delta = choice.delta.content as string;
@@ -548,6 +548,13 @@ export async function streamLocalTurn(spec: LocalRequestSpec, callbacks: StreamC
       usage.inputTokens = chunk.usage.prompt_tokens ?? usage.inputTokens;
       usage.outputTokens = chunk.usage.completion_tokens ?? usage.outputTokens;
     }
+  } } catch (err: any) {
+    // WebLLM throws ToolCallOutputParseError when a native function-calling
+    // model (Hermes 3) responds with plain text instead of a JSON tool call.
+    // The content deltas were already streamed into rawText, so we can treat
+    // this as a normal end-of-turn by resetting stopReason to 'stop'.
+    if (err?.name !== 'ToolCallOutputParseError') throw err;
+    stopReason = 'stop';
   }
 
   // Final flush: anything still unemitted outside a suppressed block goes
