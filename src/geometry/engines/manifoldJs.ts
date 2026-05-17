@@ -95,6 +95,24 @@ export const manifoldJsEngine: Engine = {
       labeledUnion,
     };
 
+    // Catch the common misconception that paint tools can be called
+    // from inside model code. Paint operations are tool calls (run on
+    // window.partwright after the model executes); inside model code,
+    // `partwright` is undefined and the user gets a generic
+    // ReferenceError that doesn't explain the boundary. The agent's
+    // instinct to batch paint calls inside runCode/runAndSave to save
+    // round-trips is reasonable but wrong; this gives them an
+    // actionable error the first time they try.
+    if (/\bpartwright\s*\./.test(jsCode)) {
+      const error = 'Model code (runCode / runAndSave / runIsolated) cannot call paint tools like partwright.paintByLabel or partwright.paintInBox. Paint operations are separate tool calls — invoke them between code runs, not inside the code. For batch painting, use partwright.paintByLabels([...]) as a single tool call after runAndSave.';
+      return {
+        mesh: null,
+        manifold: null,
+        error,
+        diagnostics: runtimeDiagnostic(error, 'Remove the partwright.* call from the model code and invoke paint tools separately.', 'JavaScript'),
+      };
+    }
+
     let result: InstanceType<typeof Manifold> | null = null;
     try {
       const fn = new Function('api', `"use strict";\n${jsCode}`);

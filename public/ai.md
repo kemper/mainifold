@@ -161,7 +161,7 @@ partwright.downloadRecentExport(id)
 partwright.clearRecentExports()
 
 // Isolated execution -- test code without changing editor/viewport state
-await partwright.runIsolated(code)       // -> {geometryData, thumbnail}
+await partwright.runIsolated(code, view?)  // -> {geometryData, thumbnail}. Default thumbnail is 4-iso composite; pass `view` ({elevation, azimuth, ortho, size}) for a single-angle preview.
 await partwright.runAndAssert(code, assertions) // -> {passed, failures?, stats}
 await partwright.runAndExplain(code)     // -> {stats, components[], hints[]} (debug disconnects)
 await partwright.modifyAndTest(patchFn, assertions?) // Modify current code + test in isolation
@@ -184,7 +184,7 @@ await partwright.runAndSave(code, label?, assertions?) // Assert+save in one cal
 await partwright.createSessionWithVersions(name, [{code, label},...]) // Batch create
 await partwright.saveVersion(label?)     // Save current state as version
 await partwright.listVersions()          // -> [{id, index, label, timestamp, status}]
-await partwright.loadVersion({index} | {id})  // Load version into editor -> {id, index, label, code, geometryData} or {error}
+await partwright.loadVersion({index} | {id})  // Load version into editor -> {id, index, label, code, geometryData, labelsAvailable, labelCount} or {error}
 await partwright.forkVersion({index} | {id}, transformFn, label?, assertions?) // Load + modify + validate + save in one call
 partwright.getGalleryUrl()               // -> URL for gallery view (human review)
 partwright.getSessionUrl()               // -> URL for this session
@@ -212,6 +212,7 @@ partwright.listComponents()              // -> {count, components: [{index, cent
 partwright.paintComponent({index, color, name?, topOnly?}) // One-call: paint the Nth boolean-distinct piece
 partwright.listLabels()                  // -> {count, labels: [{name, triangleCount, bbox, centroid}]} -- labels registered via api.label(shape, name) in the current run
 partwright.paintByLabel({label, color, name?}) // Paint a labelled feature by name. Exact, survives boolean ops. manifold-js only.
+partwright.paintByLabels([{label, color, name?}, ...]) // Batch sibling. N features in one call -> {results, failed}. Coalesces viewport refresh under one rAF.
 partwright.getFeatureCentroids({maxGroups?, withinBox?}?)  // Lightweight planning: centroids + normals + bbox per face group, NO triangleIds
 partwright.paintPreview({box?|point+radius?|triangleIds?, normalCone?, coverageMode?, maxTriangleArea?, withImage?, view?}) // DRY-RUN -> {triangleCount, bbox, centroid, totalArea, largestTriangleArea, [thumbnail]}
 partwright.undoLastPaint()               // Reverse the SINGLE most recent paint op -> {undone, id, ...}
@@ -557,11 +558,17 @@ const eyeL = api.label(api.Manifold.sphere(2).translate([-3, 5, 7]), 'eyeL');
 const eyeR = api.label(api.Manifold.sphere(2).translate([ 3, 5, 7]), 'eyeR');
 return head.add(eyeL).add(eyeR);
 
-// After runAndSave, paint by name:
-partwright.paintByLabel({ label: 'eyeL', color: [0, 0, 1] });
-partwright.paintByLabel({ label: 'eyeR', color: [0, 0, 1] });
-// listLabels() returns what's available; check it if a paintByLabel
-// returns "no label X".
+// After runAndSave, paint by name. For multiple features, BATCH —
+// one tool call paints them all and coalesces the viewport refresh:
+partwright.paintByLabels([
+  { label: 'head', color: [0.4, 0.7, 0.4] },
+  { label: 'eyeL', color: [0,   0,   0  ] },
+  { label: 'eyeR', color: [0,   0,   0  ] },
+]);
+// -> { results: [...], failed: [] }
+// Reach for paintByLabel({label, color}) only when painting a single
+// feature. listLabels() returns what's available; check it if a paint
+// call reports "no label X".
 ```
 
 `api.labeledUnion([{name, shape}, ...])` is sugar that labels each
