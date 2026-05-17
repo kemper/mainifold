@@ -165,14 +165,25 @@ partwright.clearRecentExports()
 
 // Isolated execution -- test code without changing editor/viewport state
 await partwright.runIsolated(code, view?)  // -> {geometryData, thumbnail}. Default thumbnail is 4-iso composite; pass `view` ({elevation, azimuth, ortho, size}) for a single-angle preview.
+await partwright.previewExpression(expr, view?) // -> {geometryData, thumbnail}. Append `;return (expr);` to current editor code and run in isolation. Use to inspect ONE sub-piece (e.g. makeWing(1)) without re-rendering the whole assembly.
 await partwright.runAndAssert(code, assertions) // -> {passed, failures?, stats}
 await partwright.runAndExplain(code)     // -> {stats, components[], hints[]} (debug disconnects)
 await partwright.modifyAndTest(patchFn, assertions?) // Modify current code + test in isolation
 partwright.query({sliceAt?, decompose?, boundingBox?}) // Multi-query current geometry in one call
-partwright.renderView({elevation?, azimuth?, ortho?, size?})  // Render ONE angle -> data URL
-await partwright.renderViews({views?: 'auto'|'tri'|'all', size?})  // multi-angle labeled composite -> data URL; 'auto' (default) picks angles by aspect ratio; prefer for verification
+await partwright.renderView({elevation?, azimuth?, ortho?, size?, referenceImageId?, referenceOpacity?, showSkeleton?})  // Render ONE angle -> data URL. referenceImageId composites an attached photo over the model.
+await partwright.renderViews({views?: 'auto'|'tri'|'all', size?, referenceImageId?, referenceOpacity?, showSkeleton?})  // multi-angle labeled composite -> data URL; 'auto' (default) picks angles by aspect ratio; prefer for verification
 partwright.sliceAtZVisual(z)            // Cross-section SVG at height z -> {svg, area, contours}
 partwright.isRunning()                   // -> boolean (is code executing?)
+await partwright.probeImage({pixel: [x,y], imageId}) // -> {normalized:[u,v], pixel, image}. Map a pixel in an attached reference photo to a normalized [0..1] coordinate.
+
+// Skeleton / wire preview -- ephemeral scaffolding (not saved into versions)
+partwright.previewSkeleton({nodes:[{point,radius?,color?,label?}], edges?:[[i,j],...]}) // colored spheres + lines in viewport AND in subsequent renderView/renderViews output
+partwright.clearSkeleton()               // remove the scaffold
+partwright.setSkeletonVisible(on?)       // hide/show without clearing (omit to toggle)
+partwright.isSkeletonVisible()           // -> boolean
+
+// 2D profile from SVG path
+partwright.crossSectionFromSVG(d, {curveSegments?, arcSegments?, scale?, flipY?, fillRule?}?) // parse an SVG path "d" attribute -> CrossSection ready for .extrude/.revolve
 
 // Images -- attach photos to compare model against
 partwright.setImages([{src, label?}, ...])  // replace all; src is data URL or http(s) URL; label is an optional caption
@@ -309,6 +320,13 @@ Manifold: cube, sphere, cylinder, tetrahedron, extrude, revolve,
           union, difference, intersection, hull, compose, smooth, levelSet, ofMesh
 CrossSection: square, circle, ofPolygons (CCW outer, CW holes),
               compose, union, difference, intersection, hull
+
+api helpers (sandbox only -- inside model code):
+  api.crossSectionFromSVG(d, opts?) -- parse SVG path "d" into CrossSection
+  api.previewSkeleton({nodes, edges?}) -- wire/sphere scaffold (also visible in renders)
+  api.label(shape, name), api.labeledUnion(parts) -- name features for paint-by-label
+  api.imports[i] -- imported STL meshes; use with Manifold.ofMesh(api.imports[i])
+  api.renderMesh(meshData) -- wrap raw triangle data as a render-only proxy
 ```
 
 ### Manifold instance methods
@@ -1073,6 +1091,45 @@ Switch to Elevations tab and compare model silhouette against the attached image
 Add features in order of visual impact: roof -> porch -> windows/doors -> trim details.
 After each addition, verify the relevant elevation matches the attached image.
 
+## Sketch-first 2D profile workflow
+
+Many shapes are fundamentally a 2D profile that gets extruded or revolved
+-- a wing planform, a fin outline, a fuselage cross-section, a gear
+tooth. Trying to approximate these with 3D hull operations is harder
+than necessary; describe them as a profile, then sweep.
+
+`crossSectionFromSVG` parses an SVG path "d" attribute into a
+`CrossSection`. Available both as a console tool and as
+`api.crossSectionFromSVG(...)` inside model code:
+
+```js
+// Console — get a CrossSection back for inspection
+const cs = partwright.crossSectionFromSVG("M 0 0 L 40 0 C 40 5 35 8 0 12 Z");
+
+// Inside model code (runAndSave / runIsolated)
+await partwright.runAndSave(`
+  // Shuttle wing planform: leading edge straight, trailing curved back
+  const wing = api.crossSectionFromSVG(
+    "M 0 0 L 60 0 C 65 8 50 30 20 28 L 0 12 Z",
+    { curveSegments: 32, scale: 1, flipY: true }
+  );
+  return wing.extrude(2).rotate([90, 0, 0]);
+`, 'v1 — wing planform from SVG path');
+```
+
+Options:
+- `curveSegments` — samples per cubic/quadratic Bezier (default 24)
+- `arcSegments` — samples per quarter-turn of an arc (default 16)
+- `scale` — uniform scale (default 1)
+- `flipY` — flip y axis so y-down SVG → y-up CAD (default true)
+- `fillRule` — 'EvenOdd' (default) / 'NonZero' / 'Positive' / 'Negative'
+
+Multiple subpaths (anything starting with `M`) become multiple
+contours; the fill rule decides which are outers and which are holes.
+For a profile with an interior hole, draw the outer subpath first, then
+the hole subpath with opposite winding -- or just let the default
+`EvenOdd` rule handle it.
+
 ## Iteration workflow
 
 ### Testing without side effects
@@ -1083,6 +1140,25 @@ const r = await partwright.runIsolated(code);
 // r.geometryData = full stats (same schema as #geometry-data)
 // r.thumbnail = data:image/png base64 string (4 isometric views)
 ```
+
+To isolate a single sub-expression of the current editor code -- say
+you have a working assembly but one sub-piece is wrong -- use
+`previewExpression`. It appends `; return <expression>;` to the current
+editor code and runs the whole thing in isolation:
+
+```js
+// Editor currently defines makeWing, makeFin, makeFuselage and assembles
+// them. You want to see ONLY the wing, no assembly:
+const r = await partwright.previewExpression('makeWing(1)');
+// r.thumbnail = 4-iso composite of just the wing
+// r.geometryData = stats for just the wing
+
+// Same shape view spec as renderView:
+await partwright.previewExpression('makeFin().rotate([90,0,0])',
+                                   { elevation: 0, azimuth: 90, ortho: true });
+```
+
+No editor change, no version save -- pure inspection.
 
 ### Assertions -- structured validation
 
@@ -1270,10 +1346,73 @@ structural change:
    isometric views can hide.
 2. **Use `renderView()` for specific angles:**
 ```js
-partwright.renderView({ elevation: 0, azimuth: 0, ortho: true })   // front elevation
-partwright.renderView({ elevation: 0, azimuth: 90, ortho: true })  // right side elevation
-partwright.renderView({ elevation: 90, ortho: true })               // top-down plan view
-partwright.renderView({ elevation: 30, azimuth: 315 })              // isometric (default)
+await partwright.renderView({ elevation: 0, azimuth: 0, ortho: true })   // front elevation
+await partwright.renderView({ elevation: 0, azimuth: 90, ortho: true })  // right side elevation
+await partwright.renderView({ elevation: 90, ortho: true })               // top-down plan view
+await partwright.renderView({ elevation: 30, azimuth: 315 })              // isometric (default)
+```
+
+### Skeleton preview -- verify scaffolds before booleans
+
+For hull-of-spheres / wire-scaffold workflows: place the joint positions
+as colored spheres + lines first, **then** commit the hull. The skeleton
+appears in the live viewport and in every `renderView`/`renderViews`
+output, so you can confirm placement visually before paying for a
+boolean.
+
+```js
+partwright.previewSkeleton({
+  nodes: [
+    {point: [0, 0, 0],   radius: 0.4, color: 'red',    label: 'nose'},
+    {point: [4, 0, 0.5], radius: 0.5, color: 'orange', label: 'shoulder'},
+    {point: [8, 0, 0],   radius: 0.3, color: 'yellow', label: 'tail'},
+  ],
+  edges: [[0, 1], [1, 2]],
+});
+
+// Now render -- the scaffold shows on top of any existing geometry,
+// so divergences are obvious.
+const png = await partwright.renderView({ elevation: 10, azimuth: 0 });
+
+// Iterate freely; previewSkeleton replaces any prior scaffold.
+// Once happy, build the hull:
+await partwright.runAndSave(`
+  const pts = ${JSON.stringify(...)};
+  return Manifold.hull(...pts.map(p => Manifold.sphere(p.r).translate(p.point)));
+`, 'v3 - hulled fuselage skeleton');
+
+partwright.clearSkeleton();              // remove from viewport + future renders
+partwright.setSkeletonVisible(false);    // hide without clearing
+```
+
+The scaffold is ephemeral -- it's not saved into versions. Users can
+toggle it on/off in the viewport overlay strip.
+
+### Reference image overlay
+
+When modeling from a reference photo, attach the photo via `setImages`
+and pass `referenceImageId` to `renderView`/`renderViews` to composite
+it at configurable opacity:
+
+```js
+const [imgRef] = partwright.setImages([{src: photoDataUrl, label: 'Front'}]);
+
+// Render the model from the same angle the photo was taken,
+// with the photo overlaid at 30% opacity to spot divergences.
+const png = await partwright.renderView({
+  elevation: 0, azimuth: 0, ortho: true,
+  referenceImageId: imgRef.id,
+  referenceOpacity: 0.3,
+});
+```
+
+`probeImage` turns "the fin tip is at this pixel in the photo" into
+normalized `[u, v]` you can multiply by the intended model bounds:
+
+```js
+const tip = await partwright.probeImage({pixel: [820, 410], imageId: imgRef.id});
+// tip = {normalized: [0.73, 0.41], pixel: [820, 410], image: {width, height, id}}
+// Multiply by intended dimensions to get a world-space target.
 ```
 3. **Use `sliceAtZVisual(z)` for cross-section thumbnails:**
 ```js

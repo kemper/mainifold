@@ -2,6 +2,8 @@ import type { Engine, MeshResult, ValidateResult } from './types';
 import { javaScriptSyntaxDiagnostics, runtimeDiagnostic } from '../sourceDiagnostics';
 import { getDefaultCircularSegments } from '../qualitySettings';
 import { getActiveImports } from '../../import/importedMesh';
+import { parseSVGPathWithOptions } from '../svgPath';
+import { setSkeleton, validateSkeletonOptions } from '../../renderer/skeletonOverlay';
 
 /** Marker the sandbox attaches to render-only proxies (see `renderMesh` below).
  *  The engine looks for it on the user-returned object to decide whether the
@@ -131,6 +133,17 @@ export const manifoldJsEngine: Engine = {
       triVerts: m.triVerts,
     }));
 
+    const crossSectionFromSVG = (d: unknown, options?: unknown) => {
+      const { contours, fillRule } = parseSVGPathWithOptions(d, options, 'api.crossSectionFromSVG(d, options)');
+      return CrossSection.ofPolygons(contours, fillRule);
+    };
+
+    const previewSkeleton = (opts: unknown) => {
+      const skeleton = validateSkeletonOptions(opts, 'api.previewSkeleton(opts)');
+      setSkeleton(skeleton);
+      return { nodeCount: skeleton.nodes.length, edgeCount: skeleton.edges?.length ?? 0 };
+    };
+
     const api = {
       Manifold,
       CrossSection,
@@ -141,6 +154,8 @@ export const manifoldJsEngine: Engine = {
       labeledUnion,
       imports,
       renderMesh,
+      crossSectionFromSVG,
+      previewSkeleton,
     };
 
     // Catch the common misconception that paint tools can be called

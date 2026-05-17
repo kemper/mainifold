@@ -3,6 +3,7 @@ import { createWhiteMaterial, createBlackWireframeMaterial } from './materials';
 import type { MeshData } from '../geometry/types';
 import { buildStrokesGroup, disposeStrokesGroup } from '../annotations/annotationOverlay';
 import { presetIndex } from '../storage/db';
+import { buildTransientSkeleton, disposeTransientSkeleton, getCurrentSkeleton, isSkeletonVisible } from './skeletonOverlay';
 
 /** Composite-render angle sets accepted by `partwright.renderViews`.
  *  Single source of truth shared by the API surface (main.ts), the AI
@@ -637,6 +638,17 @@ export function renderSingleView(meshData: MeshData, options: {
   azimuth?: number;
   ortho?: boolean;
   size?: number;
+  /** Reference photo composited over the rendered model at the given
+   *  opacity. Used for photo-aligned modeling. */
+  referenceImage?: HTMLImageElement | null;
+  referenceOpacity?: number;
+  /** Whether to include the current skeleton scaffold. Defaults to
+   *  isSkeletonVisible(). Ignored when `skeletonGroup` is provided. */
+  showSkeleton?: boolean;
+  /** Pre-built skeleton group to add to the scene (multiview-internal:
+   *  lets renderViews build the group once and share across tiles
+   *  instead of re-allocating per call). Caller owns lifecycle. */
+  skeletonGroup?: THREE.Group | null;
 } = {}): string {
   const viewSize = options.size ?? 500;
 
@@ -648,6 +660,18 @@ export function renderSingleView(meshData: MeshData, options: {
   const annotations = buildStrokesGroup(new THREE.Vector2(viewSize, viewSize));
   if (annotations) scene.add(annotations);
 
+  let ownedSkeleton: THREE.Group | null = null;
+  let sceneSkeleton: THREE.Group | null = options.skeletonGroup ?? null;
+  if (!sceneSkeleton) {
+    const includeSkeleton = options.showSkeleton ?? isSkeletonVisible();
+    const skel = includeSkeleton ? getCurrentSkeleton() : null;
+    if (skel) {
+      ownedSkeleton = buildTransientSkeleton(skel);
+      sceneSkeleton = ownedSkeleton;
+    }
+  }
+  if (sceneSkeleton) scene.add(sceneSkeleton);
+
   renderer.render(scene, camera);
 
   const canvas = document.createElement('canvas');
@@ -656,6 +680,22 @@ export function renderSingleView(meshData: MeshData, options: {
   const ctx = canvas.getContext('2d')!;
   ctx.drawImage(renderer.domElement, 0, 0);
 
+  // Reference overlay is a final 2D layer over the WebGL capture, so it
+  // doesn't participate in lighting/depth.
+  if (options.referenceImage) {
+    const prevAlpha = ctx.globalAlpha;
+    ctx.globalAlpha = clamp01(options.referenceOpacity ?? 0.3);
+    try {
+      ctx.drawImage(options.referenceImage, 0, 0, viewSize, viewSize);
+    } catch {
+      // Image still loading or tainted — skip rather than crash; the
+      // agent gets the model without the overlay.
+    }
+    ctx.globalAlpha = prevAlpha;
+  }
+
+  if (sceneSkeleton) scene.remove(sceneSkeleton);
+  if (ownedSkeleton) disposeTransientSkeleton(ownedSkeleton);
   if (annotations) {
     scene.remove(annotations);
     disposeStrokesGroup(annotations);
@@ -663,6 +703,12 @@ export function renderSingleView(meshData: MeshData, options: {
   disposeScene(scene);
   geometry.dispose();
   return canvas.toDataURL('image/png');
+}
+
+function clamp01(v: number): number {
+  if (v < 0) return 0;
+  if (v > 1) return 1;
+  return v;
 }
 
 /** Render a cross-section at a given Z height as an SVG string */

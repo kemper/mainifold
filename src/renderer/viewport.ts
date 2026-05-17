@@ -4,6 +4,7 @@ import type { MeshData } from '../geometry/types';
 import { createDefaultMaterial, createWireframeMaterial } from './materials';
 import { initPhantomGroup } from './phantomGeometry';
 import { initMeasureOverlay } from './measureOverlay';
+import { initSkeletonOverlay } from './skeletonOverlay';
 import { initOrientationGizmo, renderGizmo, updateGizmo, disposeGizmo, isGizmoAnimating } from './orientationGizmo';
 import { initDimensionLines, updateDimensionLines, disposeDimensionLines } from './dimensionLines';
 import { initAnnotationOverlay, setLiveResolution as setAnnotationResolution } from '../annotations/annotationOverlay';
@@ -115,6 +116,11 @@ export function initViewport(container: HTMLElement): {
 
   // Measure overlay group
   initMeasureOverlay(scene, camera, renderer);
+
+  // Skeleton overlay group (wire-and-spheres preview for hull-of-spheres
+  // workflows). Lives alongside measure/phantom and toggles via the
+  // viewport overlay strip.
+  initSkeletonOverlay(scene);
 
   // Orientation gizmo (XYZ axes indicator)
   initOrientationGizmo(camera, canvas, controls);

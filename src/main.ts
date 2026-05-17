@@ -1,8 +1,11 @@
 import './style.css';
 import { initEngine, executeCode, executeCodeAsync, validateCodeAsync, ensureEngineReady, getModule, getActiveLanguage, setActiveLanguage, type Language } from './geometry/engine';
+import { parseSVGPathWithOptions } from './geometry/svgPath';
+import type { FillRule } from 'manifold-3d';
 import { onQualitySettingsChange } from './geometry/qualitySettings';
 import { sliceAtZ, getBoundingBox } from './geometry/crossSection';
 import { initViewport, updateMesh, setClipping, setClipZ, getClipState, getCameraState, getCanvas, getMeshGroup, getCamera, setMeasureLock, setUserOrbitLock, isUserOrbitLocked, onUserOrbitLockChange, setDimensionsVisible, isDimensionsVisible, setGridVisible, isGridVisible } from './renderer/viewport';
+import { setSkeleton, clearSkeleton, isSkeletonVisible, setSkeletonVisible, onSkeletonVisibilityChange, hasSkeleton, validateSkeletonOptions, getCurrentSkeleton, buildTransientSkeleton, disposeTransientSkeleton } from './renderer/skeletonOverlay';
 import { renderCompositeCanvas, renderElevationsToContainer, renderSingleView, renderSliceSVG, setImages as _setImages, clearImages as _clearImages, getImages as _getImages, buildViewCamera, RENDER_VIEW_MODES, STANDARD_VIEWS, type AttachedImage, type RenderViewMode } from './renderer/multiview';
 import { generateId } from './storage/db';
 import { setPhantom, clearPhantom, hasPhantom, type PhantomOptions } from './renderer/phantomGeometry';
@@ -1697,6 +1700,7 @@ async function main() {
   // Wire up viewport overlay buttons
   initGridToggle(clipControls);
   initDimensionsToggle(clipControls);
+  initSkeletonToggle(clipControls);
   initAnnotateUI(clipControls);
   initPaintUI(clipControls);
   // Declared before initMeasureToggle is called so the assignment inside it
@@ -2280,6 +2284,75 @@ async function main() {
       return isUserOrbitLocked();
     },
 
+    // === Skeleton preview API ===
+
+    /** Wire-and-spheres scaffold in the viewport and in renderView/renderViews
+     *  output. Ephemeral — not persisted to versions. clearSkeleton() to
+     *  remove; setSkeletonVisible(false) to hide without losing the data. */
+    previewSkeleton(opts: {
+      nodes: Array<{ point: [number, number, number]; radius?: number; color?: number | string; label?: string }>;
+      edges?: Array<[number, number]>;
+      lineColor?: number | string;
+      lineWidth?: number;
+      defaultRadius?: number;
+      defaultColor?: number | string;
+    }): { nodeCount: number; edgeCount: number } {
+      const skeleton = validateSkeletonOptions(opts, 'previewSkeleton(opts)');
+      setSkeleton(skeleton);
+      // A prior clearSkeleton() may have left visibility off; the user
+      // just asked for a new scaffold, so show it.
+      if (!isSkeletonVisible()) setSkeletonVisible(true);
+      return { nodeCount: skeleton.nodes.length, edgeCount: skeleton.edges?.length ?? 0 };
+    },
+
+    /** Remove the current skeleton scaffold from the viewport and any
+     *  subsequent renders. */
+    clearSkeleton(): void {
+      clearSkeleton();
+    },
+
+    /** Show or hide the skeleton scaffold without removing it. Pass a
+     *  boolean to set, omit to toggle. Returns the new visibility. */
+    setSkeletonVisible(visible?: boolean): boolean {
+      assertBoolean(visible, 'setSkeletonVisible(visible)', { optional: true });
+      const on = visible ?? !isSkeletonVisible();
+      setSkeletonVisible(on);
+      return isSkeletonVisible();
+    },
+
+    /** Whether the skeleton scaffold is currently visible (false if no
+     *  skeleton has been set, or if visibility was toggled off). */
+    isSkeletonVisible(): boolean {
+      return isSkeletonVisible() && hasSkeleton();
+    },
+
+    // === SVG path → CrossSection ===
+
+    /** Parse an SVG path "d" attribute and return a manifold-3d
+     *  CrossSection. Lets the agent describe a 2D profile as a path
+     *  string instead of hand-computing every polygon vertex.
+     *
+     *  Returns the CrossSection directly so the caller can chain
+     *  .extrude(...), .revolve(...), or boolean ops. The y axis is
+     *  flipped by default (SVG draws y-down; CAD expects y-up). Pass
+     *  `{flipY: false}` to disable. Cubic / quadratic / arc segments
+     *  are sampled into polylines at configurable resolution. */
+    crossSectionFromSVG(d: string, options?: {
+      curveSegments?: number;
+      arcSegments?: number;
+      scale?: number;
+      flipY?: boolean;
+      minVertices?: number;
+      fillRule?: FillRule;
+    }) {
+      const { contours, fillRule } = parseSVGPathWithOptions(d, options, 'crossSectionFromSVG(d, options)');
+      const mod = getModule();
+      if (!mod || !mod.CrossSection) {
+        throw new Error('crossSectionFromSVG: manifold-3d engine not ready');
+      }
+      return mod.CrossSection.ofPolygons(contours, fillRule);
+    },
+
     // === Theme API ===
 
     /** Set the color theme. */
@@ -2312,17 +2385,47 @@ async function main() {
      *  elevation: degrees, 0 = horizon, 90 = top-down. Default 30.
      *  azimuth: degrees, 0 = front (-Y), 90 = right (+X). Default 315.
      *  ortho: true for orthographic projection. Default false. */
-    renderView(options?: { elevation?: number; azimuth?: number; ortho?: boolean; size?: number }): string | null {
+    async renderView(options?: {
+      elevation?: number;
+      azimuth?: number;
+      ortho?: boolean;
+      size?: number;
+      referenceImageId?: string;
+      referenceOpacity?: number;
+      showSkeleton?: boolean;
+    }): Promise<string | null> {
+      let referenceImageId: string | undefined;
+      let refOpacity: number | undefined;
+      let showSkeleton: boolean | undefined;
       if (options !== undefined) {
         const o = assertObject(options, 'renderView(options)')!;
-        assertNoUnknownKeys(o, ['elevation', 'azimuth', 'ortho', 'size'], 'renderView(options)');
+        assertNoUnknownKeys(o, ['elevation', 'azimuth', 'ortho', 'size', 'referenceImageId', 'referenceOpacity', 'showSkeleton'], 'renderView(options)');
         assertNumber(o.elevation, 'renderView(options).elevation', { optional: true, min: -90, max: 90 });
         assertNumber(o.azimuth, 'renderView(options).azimuth', { optional: true });
         assertBoolean(o.ortho, 'renderView(options).ortho', { optional: true });
         assertNumber(o.size, 'renderView(options).size', { optional: true, min: 1, integer: true });
+        assertString(o.referenceImageId, 'renderView(options).referenceImageId', { optional: true, allowEmpty: false });
+        assertNumber(o.referenceOpacity, 'renderView(options).referenceOpacity', { optional: true, min: 0, max: 1 });
+        assertBoolean(o.showSkeleton, 'renderView(options).showSkeleton', { optional: true });
+        referenceImageId = o.referenceImageId as string | undefined;
+        refOpacity = o.referenceOpacity as number | undefined;
+        showSkeleton = o.showSkeleton as boolean | undefined;
       }
       if (!currentMeshData) return null;
-      return renderSingleView(applyTriColorsIfVisible(currentMeshData), options ?? {});
+      let refImg: HTMLImageElement | null = null;
+      if (referenceImageId !== undefined) {
+        refImg = await loadAttachedImage(referenceImageId);
+        if (!refImg) throw new Error(`renderView(options).referenceImageId: no attached image with id "${referenceImageId}"`);
+      }
+      return renderSingleView(applyTriColorsIfVisible(currentMeshData), {
+        elevation: options?.elevation,
+        azimuth: options?.azimuth,
+        ortho: options?.ortho,
+        size: options?.size,
+        referenceImage: refImg,
+        referenceOpacity: refOpacity,
+        showSkeleton,
+      });
     },
 
     /** Render multiple angles of the current model laid out in a single
@@ -2335,14 +2438,34 @@ async function main() {
      *  everything else gets [Front, Top, Iso]. `views: 'tri'` forces the
      *  front/top/iso composite regardless of shape; `views: 'all'` is the
      *  classic 4-view iso grid (front/right/top/iso). */
-    async renderViews(options?: { views?: RenderViewMode; size?: number }): Promise<string | null> {
+    async renderViews(options?: {
+      views?: RenderViewMode;
+      size?: number;
+      referenceImageId?: string;
+      referenceOpacity?: number;
+      showSkeleton?: boolean;
+    }): Promise<string | null> {
+      let referenceImageId: string | undefined;
+      let refOpacity: number | undefined;
+      let showSkeleton: boolean | undefined;
       if (options !== undefined) {
         const o = assertObject(options, 'renderViews(options)')!;
-        assertNoUnknownKeys(o, ['views', 'size'], 'renderViews(options)');
+        assertNoUnknownKeys(o, ['views', 'size', 'referenceImageId', 'referenceOpacity', 'showSkeleton'], 'renderViews(options)');
         if (o.views !== undefined) assertEnum(o.views, RENDER_VIEW_MODES, 'renderViews(options).views');
         assertNumber(o.size, 'renderViews(options).size', { optional: true, min: 1, integer: true });
+        assertString(o.referenceImageId, 'renderViews(options).referenceImageId', { optional: true, allowEmpty: false });
+        assertNumber(o.referenceOpacity, 'renderViews(options).referenceOpacity', { optional: true, min: 0, max: 1 });
+        assertBoolean(o.showSkeleton, 'renderViews(options).showSkeleton', { optional: true });
+        referenceImageId = o.referenceImageId as string | undefined;
+        refOpacity = o.referenceOpacity as number | undefined;
+        showSkeleton = o.showSkeleton as boolean | undefined;
       }
       if (!currentMeshData) return null;
+      let refImg: HTMLImageElement | null = null;
+      if (referenceImageId !== undefined) {
+        refImg = await loadAttachedImage(referenceImageId);
+        if (!refImg) throw new Error(`renderViews(options).referenceImageId: no attached image with id "${referenceImageId}"`);
+      }
       const which = options?.views ?? 'auto';
       const tileSize = options?.size ?? 320;
       const colored = applyTriColorsIfVisible(currentMeshData);
@@ -2360,16 +2483,33 @@ async function main() {
       ctx.fillStyle = '#f4f4f5';
       ctx.fillRect(0, 0, composite.width, composite.height);
 
-      // Render each angle to a data URL via renderSingleView (each call
-      // reuses the same offscreen WebGLRenderer), decode each to an
-      // HTMLImageElement, then stamp into the composite grid.
-      for (let i = 0; i < angles.length; i++) {
-        const { label, opts } = angles[i];
-        const dataUrl = renderSingleView(colored, { ...opts, size: tileSize });
-        if (!dataUrl) continue;
-        const img = await loadImageFromDataUrl(dataUrl);
-        if (!img) continue;
-        drawCell(ctx, img, i, tileSize, cellHeight, label, cols);
+      // Build the transient skeleton once and share it across all tiles —
+      // SphereGeometry / LineSegments allocation is the most expensive part
+      // of the per-tile overlay, and the skeleton is identical for every
+      // angle. renderSingleView accepts a pre-built group via skeletonGroup.
+      const includeSkeleton = showSkeleton ?? isSkeletonVisible();
+      const sharedSkeleton = includeSkeleton ? getCurrentSkeleton() : null;
+      const sharedSkeletonGroup = sharedSkeleton ? buildTransientSkeleton(sharedSkeleton) : null;
+      try {
+        for (let i = 0; i < angles.length; i++) {
+          const { label, opts } = angles[i];
+          const dataUrl = renderSingleView(colored, {
+            ...opts,
+            size: tileSize,
+            referenceImage: refImg,
+            referenceOpacity: refOpacity,
+            // showSkeleton:false to suppress the per-call lookup +
+            // rebuild; we pass the prebuilt group via skeletonGroup.
+            showSkeleton: false,
+            skeletonGroup: sharedSkeletonGroup,
+          });
+          if (!dataUrl) continue;
+          const img = await loadImageFromDataUrl(dataUrl);
+          if (!img) continue;
+          drawCell(ctx, img, i, tileSize, cellHeight, label, cols);
+        }
+      } finally {
+        if (sharedSkeletonGroup) disposeTransientSkeleton(sharedSkeletonGroup);
       }
       return composite.toDataURL('image/png');
     },
@@ -2901,44 +3041,35 @@ async function main() {
     /** Run code without mutating editor, viewport, or session state.
      *  Returns geometry stats + thumbnail. By default the thumbnail is
      *  the standard 4-iso composite; pass `view` to render a single
-     *  named angle instead — useful when the feature you're verifying
-     *  (a smile on a face, a logo on a flat panel) only reads from one
-     *  specific direction. Same shape `renderView` accepts. */
+     *  named angle instead. Same shape `renderView` accepts. */
     async runIsolated(code: string, view?: { elevation?: number; azimuth?: number; ortho?: boolean; size?: number }) {
       const check = guard(() => {
         assertString(code, 'runIsolated(code)', { allowEmpty: false });
-        if (view !== undefined) {
-          const v = assertObject(view, 'runIsolated(code, view)')!;
-          assertNoUnknownKeys(v, ['elevation', 'azimuth', 'ortho', 'size'], 'runIsolated(code, view)');
-          assertNumber(v.elevation, 'runIsolated(code, view).elevation', { optional: true, min: -90, max: 90 });
-          assertNumber(v.azimuth, 'runIsolated(code, view).azimuth', { optional: true });
-          assertBoolean(v.ortho, 'runIsolated(code, view).ortho', { optional: true });
-          assertNumber(v.size, 'runIsolated(code, view).size', { optional: true, min: 1, integer: true });
-        }
+        validateViewSpec(view, 'runIsolated(code, view)');
         return true;
       });
       if (typeof check === 'object' && check !== null && 'error' in check) {
         return { geometryData: { status: 'error', error: check.error }, thumbnail: null };
       }
-      const { geometryData, meshData, manifold } = await executeIsolated(code);
+      return runIsolatedAndRender(code, view);
+    },
 
-      let thumbnail: string | null = null;
-      if (meshData) {
-        try {
-          if (view) {
-            thumbnail = renderSingleView(meshData, view);
-          } else {
-            const canvas = renderCompositeCanvas(meshData);
-            thumbnail = canvas.toDataURL('image/png');
-          }
-        } catch { /* ignore */ }
+    /** Render one sub-expression from the current editor code in isolation,
+     *  no version save. Appends `; return (<expression>);` to the editor
+     *  source, with prior top-level `return` lines stripped so the new
+     *  return wins. The expression must reference values in scope at the
+     *  end of the editor code. Same return shape as runIsolated. */
+    async previewExpression(expression: string, view?: { elevation?: number; azimuth?: number; ortho?: boolean; size?: number }) {
+      const check = guard(() => {
+        assertString(expression, 'previewExpression(expression)', { allowEmpty: false });
+        validateViewSpec(view, 'previewExpression(expression, view)');
+        return true;
+      });
+      if (typeof check === 'object' && check !== null && 'error' in check) {
+        return { geometryData: { status: 'error', error: check.error }, thumbnail: null };
       }
-
-      // Clean up manifold to prevent memory leaks
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      try { (manifold as any)?.delete?.(); } catch { /* ignore */ }
-
-      return { geometryData, thumbnail };
+      const previewCode = `${stripTopLevelReturn(getValue())}\n;return (${expression});\n`;
+      return runIsolatedAndRender(previewCode, view);
     },
 
     /** Run code and check geometry against assertions. Does not mutate global state. */
@@ -3307,6 +3438,42 @@ async function main() {
       }
       const camera = buildViewCamera(currentMeshData, opts.view);
       return probePixel(currentMeshData, camera, [px, py], size);
+    },
+
+    /** Translate a pixel in an attached reference photo into a
+     *  normalized [u, v] coordinate, so the agent can map "the fin tip
+     *  is at this pixel in the reference" → "the fin tip is at 73% along
+     *  length, 12% up height" → world-space target after multiplying by
+     *  the intended model bounding box. Returns null if the image hasn't
+     *  loaded yet or the id isn't attached.
+     *
+     *  Use with `getImages()` to discover attached image ids:
+     *  ```
+     *  const refs = partwright.getImages();
+     *  const tip = await partwright.probeImage({pixel: [820, 410], imageId: refs[0].id});
+     *  // tip = {normalized: [0.73, 0.41], image: {width: 1124, height: 1000, ...}}
+     *  ``` */
+    async probeImage(opts: { pixel: [number, number]; imageId: string }): Promise<{
+      normalized: [number, number];
+      pixel: [number, number];
+      image: { id: string; width: number; height: number };
+    } | null> {
+      const o = assertObject(opts, 'probeImage(opts)')!;
+      assertNoUnknownKeys(o, ['pixel', 'imageId'], 'probeImage(opts)');
+      const pt = assertNumberTuple(o.pixel, 2, 'probeImage(opts).pixel');
+      assertString(o.imageId, 'probeImage(opts).imageId', { allowEmpty: false });
+      const img = await loadAttachedImage(o.imageId as string);
+      if (!img) return null;
+      const w = img.naturalWidth || img.width;
+      const h = img.naturalHeight || img.height;
+      if (w === 0 || h === 0) return null;
+      const u = pt[0] / w;
+      const v = pt[1] / h;
+      return {
+        normalized: [u, v],
+        pixel: [pt[0], pt[1]],
+        image: { id: o.imageId as string, width: w, height: h },
+      };
     },
 
     /** Paint a connected patch starting from a seed point on the
@@ -4879,11 +5046,18 @@ async function main() {
         // Inspection
         'sliceAtZ':        { signature: 'sliceAtZ(z) -- Cross-section at height -> {polygons, svg, area}', docs: '/ai.md#console-api--windowpartwright' },
         'getBoundingBox':  { signature: 'getBoundingBox() -- -> {min, max}', docs: '/ai.md#console-api--windowpartwright' },
-        'renderView':      { signature: 'renderView({elevation?, azimuth?, ortho?, size?}) -- Render from any angle -> data URL', docs: '/ai.md#visual-verification' },
-        'renderViews':     { signature: 'await renderViews({views?: "tri"|"all", size?}) -- 3- or 4-angle labeled composite -> data URL. Use for verification when one angle could hide errors.', docs: '/ai.md#visual-verification' },
+        'renderView':      { signature: 'await renderView({elevation?, azimuth?, ortho?, size?, referenceImageId?, referenceOpacity?, showSkeleton?}) -- Render from any angle -> data URL. Pass referenceImageId to composite an attached photo as overlay.', docs: '/ai.md#visual-verification' },
+        'renderViews':     { signature: 'await renderViews({views?: "tri"|"all", size?, referenceImageId?, referenceOpacity?, showSkeleton?}) -- 3- or 4-angle labeled composite -> data URL. Same reference-overlay options as renderView.', docs: '/ai.md#visual-verification' },
         'analyzeProfile':  { signature: 'analyzeProfile(sampleCount?) -- Z-profile feature summary', docs: '/ai.md#console-api--windowpartwright' },
         'measureAt':       { signature: 'measureAt([x,y]) -- Ray-cast probe at XY -> {hits, thickness, topZ, bottomZ}', docs: '/ai.md#console-api--windowpartwright' },
         'probePixel':      { signature: 'probePixel({pixel: [x,y], view}) -- Translate a pixel in a rendered view back to a surface hit: {point, normal, distance, triangleId}. The view spec must match the renderView call. null when the pixel is background.', docs: '/ai.md#console-api--windowpartwright' },
+        'probeImage':      { signature: 'await probeImage({pixel: [x,y], imageId}) -- Translate a pixel in an attached reference photo into normalized [u, v] coordinates -> {normalized, pixel, image}. Use to bridge "what I see in the photo" to "what coordinates I should use."', docs: '/ai.md#visual-verification' },
+        'previewSkeleton': { signature: 'previewSkeleton({nodes: [{point, radius?, color?, label?}], edges?: [[i,j],...], lineColor?, lineWidth?}) -- Render wire-and-spheres scaffold in viewport and renders, without committing geometry. Built for hull-of-spheres workflows.', docs: '/ai.md#visual-verification' },
+        'clearSkeleton':   { signature: 'clearSkeleton() -- Remove the wire-and-spheres preview scaffold', docs: '/ai.md#visual-verification' },
+        'setSkeletonVisible': { signature: 'setSkeletonVisible(on?) -- Show/hide skeleton scaffold without clearing it (omit to toggle) -> boolean', docs: '/ai.md#visual-verification' },
+        'isSkeletonVisible': { signature: 'isSkeletonVisible() -- Whether the skeleton scaffold is currently visible', docs: '/ai.md#visual-verification' },
+        'previewExpression': { signature: 'await previewExpression(expression, view?) -- Render just one sub-expression from the current editor code, no save -> {geometryData, thumbnail}. Use to isolate "let me see what makeWing(1) looks like by itself."', docs: '/ai.md#testing-without-side-effects' },
+        'crossSectionFromSVG': { signature: 'crossSectionFromSVG(d, {curveSegments?, arcSegments?, scale?, flipY?, fillRule?}?) -> CrossSection. Parse an SVG path "d" attribute into a 2D profile ready for .extrude/.revolve.', docs: '/ai.md#sketch-first-2d-profile-workflow' },
         // Viewport controls
         'setGridVisible':       { signature: 'setGridVisible(on?) -- Show/hide grid plane (omit to toggle) -> boolean', docs: '/ai.md#viewport-controls' },
         'isGridVisible':        { signature: 'isGridVisible() -- Whether grid plane is visible', docs: '/ai.md#viewport-controls' },
@@ -5161,6 +5335,58 @@ async function main() {
       img.onerror = () => resolve(null);
       img.src = dataUrl;
     });
+  }
+
+  /** Look up an attached reference image by id and return it as a fully
+   *  loaded HTMLImageElement. Returns null when the id isn't in the
+   *  current attached-images list, or when the src failed to decode. */
+  async function loadAttachedImage(id: string): Promise<HTMLImageElement | null> {
+    const item = _getImages().find(i => i.id === id);
+    if (!item) return null;
+    return loadImageFromDataUrl(item.src);
+  }
+
+  /** Remove any top-level `return` statements from JS source so the
+   *  caller can append its own return without short-circuiting on the
+   *  original one. Returns inside functions are left alone because the
+   *  regex matches only on lines that start with `return` at column 0
+   *  (modulo whitespace). Used by previewExpression. */
+  function stripTopLevelReturn(src: string): string {
+    return src.replace(/^[ \t]*return\b[^\n]*;?\s*$/gm, '');
+  }
+
+  /** Validate a {elevation?, azimuth?, ortho?, size?} object the same
+   *  way every render-shaped API does. Shared so runIsolated and
+   *  previewExpression's view validation can't drift apart. */
+  function validateViewSpec(view: unknown, paramName: string): void {
+    if (view === undefined) return;
+    const v = assertObject(view, paramName)!;
+    assertNoUnknownKeys(v, ['elevation', 'azimuth', 'ortho', 'size'], paramName);
+    assertNumber(v.elevation, `${paramName}.elevation`, { optional: true, min: -90, max: 90 });
+    assertNumber(v.azimuth, `${paramName}.azimuth`, { optional: true });
+    assertBoolean(v.ortho, `${paramName}.ortho`, { optional: true });
+    assertNumber(v.size, `${paramName}.size`, { optional: true, min: 1, integer: true });
+  }
+
+  /** Shared body of runIsolated and previewExpression: execute code in
+   *  isolation, render a thumbnail (single view or 4-iso composite),
+   *  release the manifold. Returns the same shape both callers do. */
+  async function runIsolatedAndRender(code: string, view?: { elevation?: number; azimuth?: number; ortho?: boolean; size?: number }) {
+    const { geometryData, meshData, manifold } = await executeIsolated(code);
+    let thumbnail: string | null = null;
+    if (meshData) {
+      try {
+        if (view) {
+          thumbnail = renderSingleView(meshData, view);
+        } else {
+          const canvas = renderCompositeCanvas(meshData);
+          thumbnail = canvas.toDataURL('image/png');
+        }
+      } catch { /* ignore */ }
+    }
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    try { (manifold as any)?.delete?.(); } catch { /* ignore */ }
+    return { geometryData, thumbnail };
   }
 
   /** Axis-aligned bounding-box intersection test. Inclusive on both ends
@@ -5701,6 +5927,36 @@ async function main() {
       dimBtn.className = nowVisible ? activeClass : inactiveClass;
       dimBtn.title = nowVisible ? 'Hide bounding box dimensions' : 'Show bounding box dimensions';
     });
+  }
+
+  function initSkeletonToggle(container: HTMLElement) {
+    const skelBtn = container.querySelector('#skeleton-toggle') as HTMLButtonElement;
+    if (!skelBtn) return;
+
+    const inactiveClass = 'px-3 py-2 md:px-2 md:py-1 rounded text-sm md:text-xs bg-zinc-800/80 backdrop-blur text-zinc-400 [@media(hover:hover)]:hover:text-zinc-200 [@media(hover:hover)]:hover:bg-zinc-700/80 transition-colors border border-zinc-600/50';
+    const activeClass = 'px-3 py-2 md:px-2 md:py-1 rounded text-sm md:text-xs bg-cyan-500/20 backdrop-blur text-cyan-400 [@media(hover:hover)]:hover:bg-cyan-500/30 transition-colors border border-cyan-500/30';
+
+    function reflect() {
+      const present = hasSkeleton();
+      if (!present) {
+        skelBtn.classList.add('hidden');
+        return;
+      }
+      skelBtn.classList.remove('hidden');
+      const on = isSkeletonVisible();
+      skelBtn.className = on ? activeClass : inactiveClass;
+      skelBtn.title = on ? 'Hide skeleton overlay' : 'Show skeleton overlay';
+    }
+
+    skelBtn.addEventListener('click', () => {
+      setSkeletonVisible(!isSkeletonVisible());
+    });
+
+    // Reflect state changes from the API (setSkeleton, clearSkeleton) and
+    // from visibility toggles (programmatic or user click).
+    onSkeletonVisibilityChange(reflect);
+    window.addEventListener('skeleton-changed', reflect);
+    reflect();
   }
 
   function initOrbitLockToggle(container: HTMLElement) {

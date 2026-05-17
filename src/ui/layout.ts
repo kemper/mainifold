@@ -403,6 +403,17 @@ function createClipControls(): HTMLElement {
   dimBtn.title = 'Toggle bounding box dimensions';
   container.appendChild(dimBtn);
 
+  // Skeleton-preview toggle. Hidden until a skeleton has been set via
+  // partwright.previewSkeleton() so the strip doesn't show a button that
+  // does nothing 99% of the time. Activated by previewSkeleton(); the
+  // user can then hide/show the scaffold without clearing it.
+  const skelBtn = document.createElement('button');
+  skelBtn.id = 'skeleton-toggle';
+  skelBtn.className = 'hidden px-3 py-2 md:px-2 md:py-1 rounded text-sm md:text-xs bg-cyan-500/20 backdrop-blur text-cyan-400 [@media(hover:hover)]:hover:bg-cyan-500/30 transition-colors border border-cyan-500/30';
+  skelBtn.textContent = '\u25C6\u2014\u25C6';
+  skelBtn.title = 'Hide skeleton overlay';
+  container.appendChild(skelBtn);
+
   // Orbit lock toggle
   const lockBtn = document.createElement('button');
   lockBtn.id = 'orbit-lock-toggle';
