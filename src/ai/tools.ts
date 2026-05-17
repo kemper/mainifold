@@ -84,12 +84,39 @@ const ALL_TOOLS: ToolDefinition[] = [
   },
   {
     name: 'runAndSave',
-    description: 'Run code and commit the result as a new gallery version in the current session. The preferred way to make progress — leaves a versioned record. Returns geometry stats and the saved version number.',
+    description: 'Run code and commit the result as a new gallery version in the current session. The preferred way to make progress — leaves a versioned record. Returns geometry stats and the saved version number. Optionally pass `assertions` to validate before saving — the version is NOT saved if assertions fail.',
     input_schema: {
       type: 'object',
       properties: {
         code: { type: 'string', description: 'Code to run (overwrites the editor with the run-passing variant).' },
         label: { type: 'string', description: 'Short label for the gallery (e.g. "tapered legs"). Defaults to v<index>.' },
+        assertions: {
+          type: 'object',
+          description: 'Optional geometry assertions. Version is NOT saved if any assertion fails.',
+          properties: {
+            isManifold: { type: 'boolean', description: 'Must be a valid manifold.' },
+            maxComponents: { type: 'integer', description: 'Max component count.' },
+            minVolume: { type: 'number', description: 'Minimum volume.' },
+            maxVolume: { type: 'number', description: 'Maximum volume.' },
+            genus: { type: 'integer', description: 'Exact genus.' },
+            minGenus: { type: 'integer', description: 'Minimum genus.' },
+            maxGenus: { type: 'integer', description: 'Maximum genus.' },
+            minBounds: { type: 'array', items: { type: 'number' }, minItems: 3, maxItems: 3, description: 'Minimum bounding box dimensions [x,y,z].' },
+            maxBounds: { type: 'array', items: { type: 'number' }, minItems: 3, maxItems: 3, description: 'Maximum bounding box dimensions [x,y,z].' },
+            minTriangles: { type: 'integer', description: 'Minimum triangle count.' },
+            maxTriangles: { type: 'integer', description: 'Maximum triangle count.' },
+            boundsRatio: {
+              type: 'object',
+              description: 'Proportion assertions.',
+              properties: {
+                widthToDepth: { type: 'array', items: { type: 'number' }, minItems: 2, maxItems: 2, description: '[min, max] ratio of width to depth.' },
+                widthToHeight: { type: 'array', items: { type: 'number' }, minItems: 2, maxItems: 2, description: '[min, max] ratio of width to height.' },
+                depthToHeight: { type: 'array', items: { type: 'number' }, minItems: 2, maxItems: 2, description: '[min, max] ratio of depth to height.' },
+              },
+            },
+            notes: { type: 'string', description: 'Optional note text attached to the saved version.' },
+          },
+        },
       },
       required: ['code'],
     },
@@ -476,6 +503,211 @@ const ALL_TOOLS: ToolDefinition[] = [
     description: 'Remove ALL color regions from the current version. Destructive — only use when you want a completely clean slate. To fix a single mistake, call undoLastPaint or removeRegion(id) instead.',
     input_schema: { type: 'object', properties: {} },
   },
+  {
+    name: 'forkVersion',
+    description: 'Fork a prior version: load version N, replace its code with the provided code, validate against optional assertions, and save as a new version — all atomically. Use this to branch off a known-good version without the fragile loadVersion → getCode → modify → runAndSave chain. Returns {parent, version, geometry, diff, galleryUrl} on success, or {error} / {passed: false, failures} on failure.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        index: { type: 'integer', description: '1-based version index to fork from (from listVersions).' },
+        code: { type: 'string', description: 'The new code for the forked version (complete program).' },
+        label: { type: 'string', description: 'Short label for the new version.' },
+        assertions: {
+          type: 'object',
+          description: 'Optional geometry assertions. Version is NOT saved if any assertion fails.',
+          properties: {
+            isManifold: { type: 'boolean' },
+            maxComponents: { type: 'integer' },
+            minVolume: { type: 'number' },
+            maxVolume: { type: 'number' },
+            genus: { type: 'integer' },
+            minGenus: { type: 'integer' },
+            maxGenus: { type: 'integer' },
+            minBounds: { type: 'array', items: { type: 'number' }, minItems: 3, maxItems: 3 },
+            maxBounds: { type: 'array', items: { type: 'number' }, minItems: 3, maxItems: 3 },
+            minTriangles: { type: 'integer' },
+            maxTriangles: { type: 'integer' },
+            boundsRatio: {
+              type: 'object',
+              properties: {
+                widthToDepth: { type: 'array', items: { type: 'number' }, minItems: 2, maxItems: 2 },
+                widthToHeight: { type: 'array', items: { type: 'number' }, minItems: 2, maxItems: 2 },
+                depthToHeight: { type: 'array', items: { type: 'number' }, minItems: 2, maxItems: 2 },
+              },
+            },
+            notes: { type: 'string' },
+          },
+        },
+      },
+      required: ['index', 'code'],
+    },
+  },
+  {
+    name: 'runAndAssert',
+    description: 'Run code and check geometry assertions WITHOUT saving a version. Returns {passed, failures?, stats}. Use for "does this code produce valid geometry?" checks before committing with runAndSave.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        code: { type: 'string', description: 'Code to run.' },
+        assertions: {
+          type: 'object',
+          description: 'Geometry assertions to check.',
+          properties: {
+            isManifold: { type: 'boolean' },
+            maxComponents: { type: 'integer' },
+            minVolume: { type: 'number' },
+            maxVolume: { type: 'number' },
+            genus: { type: 'integer' },
+            minGenus: { type: 'integer' },
+            maxGenus: { type: 'integer' },
+            minBounds: { type: 'array', items: { type: 'number' }, minItems: 3, maxItems: 3 },
+            maxBounds: { type: 'array', items: { type: 'number' }, minItems: 3, maxItems: 3 },
+            minTriangles: { type: 'integer' },
+            maxTriangles: { type: 'integer' },
+            boundsRatio: {
+              type: 'object',
+              properties: {
+                widthToDepth: { type: 'array', items: { type: 'number' }, minItems: 2, maxItems: 2 },
+                widthToHeight: { type: 'array', items: { type: 'number' }, minItems: 2, maxItems: 2 },
+                depthToHeight: { type: 'array', items: { type: 'number' }, minItems: 2, maxItems: 2 },
+              },
+            },
+            notes: { type: 'string' },
+          },
+        },
+      },
+      required: ['code', 'assertions'],
+    },
+  },
+  {
+    name: 'query',
+    description: 'Multi-query the current geometry in one call. Pass any combination of sliceAt (cross-section areas at given Z heights), decompose (component breakdown), boundingBox. Returns only the keys you asked for. Cheaper than separate calls.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        sliceAt: { type: 'array', items: { type: 'number' }, description: 'Z heights to slice at.' },
+        decompose: { type: 'boolean', description: 'Include component breakdown.' },
+        boundingBox: { type: 'boolean', description: 'Include bounding box.' },
+      },
+    },
+  },
+  {
+    name: 'modifyAndTest',
+    description: 'Apply a string substitution to the current editor code, run the result, and return stats — WITHOUT saving a version or changing the editor. Use to test a small tweak (e.g. change a dimension) before committing. Returns {modifiedCode, stats, passed?, failures?}.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        find: { type: 'string', description: 'Exact string to find in current code.' },
+        replace: { type: 'string', description: 'Replacement string.' },
+        assertions: {
+          type: 'object',
+          description: 'Optional geometry assertions.',
+          properties: {
+            isManifold: { type: 'boolean' },
+            maxComponents: { type: 'integer' },
+            minVolume: { type: 'number' },
+            maxVolume: { type: 'number' },
+            genus: { type: 'integer' },
+            minGenus: { type: 'integer' },
+            maxGenus: { type: 'integer' },
+            minBounds: { type: 'array', items: { type: 'number' }, minItems: 3, maxItems: 3 },
+            maxBounds: { type: 'array', items: { type: 'number' }, minItems: 3, maxItems: 3 },
+            minTriangles: { type: 'integer' },
+            maxTriangles: { type: 'integer' },
+            boundsRatio: {
+              type: 'object',
+              properties: {
+                widthToDepth: { type: 'array', items: { type: 'number' }, minItems: 2, maxItems: 2 },
+                widthToHeight: { type: 'array', items: { type: 'number' }, minItems: 2, maxItems: 2 },
+                depthToHeight: { type: 'array', items: { type: 'number' }, minItems: 2, maxItems: 2 },
+              },
+            },
+            notes: { type: 'string' },
+          },
+        },
+      },
+      required: ['find', 'replace'],
+    },
+  },
+  {
+    name: 'probeRay',
+    description: 'Cast a ray from `origin` in `direction` and return mesh intersection hits: [{point, normal, distance, triangleId}]. Use to find exact surface coordinates and normals when you know the ray but not the pixel. Pairs well with paintRegion (feed hit.point + hit.normal as seed).',
+    input_schema: {
+      type: 'object',
+      properties: {
+        origin: { type: 'array', items: { type: 'number' }, minItems: 3, maxItems: 3, description: 'Ray origin in world space [x,y,z].' },
+        direction: { type: 'array', items: { type: 'number' }, minItems: 3, maxItems: 3, description: 'Ray direction (need not be normalized).' },
+      },
+      required: ['origin', 'direction'],
+    },
+  },
+  {
+    name: 'createSession',
+    description: 'Create a new named session and make it active. Returns {id, url, galleryUrl}. Call before runAndSave when there is no active session, or when starting a new design.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        name: { type: 'string', description: 'Session name (e.g. "Castle v2").' },
+      },
+    },
+  },
+  {
+    name: 'listSessions',
+    description: 'List all sessions saved in this browser. Returns [{id, name, updated}] newest first. Use to find a session to open, or to check what work exists.',
+    input_schema: { type: 'object', properties: {} },
+  },
+  {
+    name: 'openSession',
+    description: 'Open an existing session by id (from listSessions). Makes it the active session. Always call getSessionContext() after opening to read notes and version history.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        id: { type: 'string', description: 'Session id from listSessions().' },
+      },
+      required: ['id'],
+    },
+  },
+  {
+    name: 'assertPaint',
+    description: 'Verify a painted region matches expected geometry. Returns {passed, failures?}. Use after painting to catch regressions when the mesh changes. `region` is the region id (integer) or name (string) from listRegions().',
+    input_schema: {
+      type: 'object',
+      properties: {
+        region: { description: 'Region id (integer) or name (string) from listRegions().' },
+        expectedTriangleCount: { description: 'Exact integer or {min?, max?} object.' },
+        expectedBoundingBox: {
+          type: 'object',
+          description: 'Object with any subset of axis keys {x?, y?, z?} each [min, max].',
+          properties: {
+            x: { type: 'array', items: { type: 'number' }, minItems: 2, maxItems: 2 },
+            y: { type: 'array', items: { type: 'number' }, minItems: 2, maxItems: 2 },
+            z: { type: 'array', items: { type: 'number' }, minItems: 2, maxItems: 2 },
+          },
+        },
+        expectedCentroid: {
+          type: 'object',
+          description: 'Object with any subset of axis keys {x?, y?, z?} each [min, max].',
+          properties: {
+            x: { type: 'array', items: { type: 'number' }, minItems: 2, maxItems: 2 },
+            y: { type: 'array', items: { type: 'number' }, minItems: 2, maxItems: 2 },
+            z: { type: 'array', items: { type: 'number' }, minItems: 2, maxItems: 2 },
+          },
+        },
+      },
+      required: ['region'],
+    },
+  },
+  {
+    name: 'sliceAtZVisual',
+    description: 'Cross-section at height z. Returns {svg, area, contours} — area is the cross-sectional area, contours is the count of closed loops (1 = solid, >1 = hollow or multi-piece), svg is the SVG markup of the profile. Use to inspect wall thickness, hollow interiors, or layer profiles.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        z: { type: 'number', description: 'Height at which to slice.' },
+      },
+      required: ['z'],
+    },
+  },
 ];
 
 const ALWAYS_AVAILABLE = new Set([
@@ -497,6 +729,16 @@ const ALWAYS_AVAILABLE = new Set([
   'probePixel',
   'paintPreview',
   'paintExplain',
+  'forkVersion',
+  'runAndAssert',
+  'query',
+  'modifyAndTest',
+  'probeRay',
+  'createSession',
+  'listSessions',
+  'openSession',
+  'assertPaint',
+  'sliceAtZVisual',
 ]);
 
 const RUN_GATED = new Set(['runCode']);
@@ -640,11 +882,11 @@ async function dispatch(api: PartwrightAPI, name: string, input: Record<string, 
     case 'runCode':
       return api.run(input.code as string | undefined);
     case 'runAndSave':
-      return api.runAndSave(input.code as string, input.label as string | undefined);
+      return api.runAndSave(input.code as string, input.label as string | undefined, input.assertions as Record<string, unknown> | undefined);
     case 'getGeometryData':
       return api.getGeometryData();
     case 'getMeshSummary':
-      return api.getMeshSummary();
+      return api.getMeshSummary(input);
     case 'getSessionContext':
       return api.getSessionContext();
     case 'listVersions':
@@ -740,6 +982,26 @@ async function dispatch(api: PartwrightAPI, name: string, input: Record<string, 
       return api.removeRegion(input.id as number);
     case 'clearColors':
       return api.clearColors();
+    case 'forkVersion':
+      return api.forkVersion({ index: input.index }, () => input.code, input.label as string | undefined, input.assertions as Record<string, unknown> | undefined);
+    case 'runAndAssert':
+      return api.runAndAssert(input.code, input.assertions);
+    case 'query':
+      return api.query(input);
+    case 'modifyAndTest':
+      return api.modifyAndTest((code: unknown) => (code as string).replace(input.find as string, input.replace as string), input.assertions as Record<string, unknown> | undefined);
+    case 'probeRay':
+      return api.probeRay(input.origin, input.direction);
+    case 'createSession':
+      return api.createSession(input.name as string | undefined);
+    case 'listSessions':
+      return api.listSessions();
+    case 'openSession':
+      return api.openSession(input.id as string);
+    case 'assertPaint':
+      return api.assertPaint(input);
+    case 'sliceAtZVisual':
+      return api.sliceAtZVisual(input.z as number);
     default:
       throw new Error(`Unknown tool: ${name}`);
   }
