@@ -63,6 +63,11 @@ import { initSculptUI, setOnApply as setSculptApply } from './ui/sculptUI';
 import {
   updateSculptBaseMesh,
   setOnMeshChange as setSculptOnMeshChange,
+  subdivideToLevel as sculptSubdivideToLevel,
+  ensureWorkingMesh as ensureSculptWorkingMesh,
+  applyBrushSampleToWorkingMesh as applySculptBrushSample,
+  discardPending as discardSculptPending,
+  getWorkingMesh as getSculptWorkingMesh,
 } from './sculpt/sculptMode';
 import {
   hasStrokes as hasSculptStrokes,
@@ -71,7 +76,9 @@ import {
   deserialize as deserializeStrokes,
   clearStrokes as clearSculptStrokes,
   onChange as onSculptStrokesChange,
+  addStroke as addSculptStroke,
 } from './sculpt/strokes';
+import type { BrushKind as SculptBrushKind, StrokePoint as SculptStrokePoint } from './sculpt/types';
 import { replayStrokes } from './sculpt/replay';
 import type { SerializedStroke } from './sculpt/types';
 import { getManifoldModule } from './geometry/engines/manifoldJs';
@@ -835,6 +842,57 @@ function validateAssertionsShape(assertions: unknown, paramName: string): void {
   }
 }
 
+/** Validate a {x,y,z} point/normal shape (NOT an [x,y,z] tuple — the
+ *  sculpt brush API takes object-shaped points so the AI's JSON looks
+ *  natural). Returns the parsed {x,y,z} or { error } so callers can
+ *  bubble validation errors back to the model without throwing. */
+function validatePoint(
+  val: unknown,
+  paramName: string,
+): { x: number; y: number; z: number } | { error: string } {
+  if (!val || typeof val !== 'object' || Array.isArray(val)) {
+    return { error: `${paramName} must be an object {x, y, z} with finite numbers` };
+  }
+  const v = val as Record<string, unknown>;
+  for (const k of ['x', 'y', 'z'] as const) {
+    if (typeof v[k] !== 'number' || !Number.isFinite(v[k])) {
+      return { error: `${paramName}.${k} must be a finite number, got ${describeValue(v[k])}` };
+    }
+  }
+  return { x: v.x as number, y: v.y as number, z: v.z as number };
+}
+
+/** Shared validation for the brush + radius + strength fields common to
+ *  applyBrushDab and applyBrushStroke. */
+function validateBrushSampleInputs(
+  opts: Record<string, unknown> | undefined,
+  caller: 'applyBrushDab' | 'applyBrushStroke',
+): { brush: SculptBrushKind; radius: number; strength: number } | { error: string } {
+  if (!opts || typeof opts !== 'object' || Array.isArray(opts)) {
+    return { error: `${caller}(opts) must be an object` };
+  }
+  if (opts.brush !== 'push' && opts.brush !== 'smooth') {
+    return { error: `${caller}(opts).brush must be "push" or "smooth"` };
+  }
+  if (typeof opts.radius !== 'number' || !Number.isFinite(opts.radius) || opts.radius <= 0) {
+    return { error: `${caller}(opts).radius must be a finite number > 0` };
+  }
+  if (typeof opts.strength !== 'number' || !Number.isFinite(opts.strength) || opts.strength < 0 || opts.strength > 1) {
+    return { error: `${caller}(opts).strength must be a finite number in [0, 1]` };
+  }
+  return { brush: opts.brush as SculptBrushKind, radius: opts.radius, strength: opts.strength };
+}
+
+/** Snapshot the working mesh's vertex positions so applyBrushStroke can
+ *  compute how many vertices each sample actually moved (the union
+ *  across samples is the returned `affectedVertices`). Returns null if
+ *  the sculpt module has no working mesh. */
+function workingMeshVertSnapshot(): Float32Array | null {
+  const m = getSculptWorkingMesh();
+  if (!m) return null;
+  return new Float32Array(m.vertProperties);
+}
+
 // ===========================================================================
 
 /** Validate a { index } | { id } version-target arg. Returns a parsed descriptor
@@ -1574,22 +1632,30 @@ async function main() {
     updateMultiView(mesh);
     renderElevationsToContainer(elevationsContainer, mesh);
   });
-  // Apply pending sculpt strokes to the current version.
-  setSculptApply(async () => {
+  // Apply pending sculpt strokes to the current version. Shared between
+  // the UI Apply button and the AI `partwright.saveSculptedVersion()`
+  // call so the persistence/validation path lives in one place.
+  // Returns a structured result on success or `{ error }` on failure
+  // (instead of throwing) so the AI dispatcher can forward it back to
+  // the model unchanged.
+  async function applySculptStrokesToCurrentVersion(
+    label?: string,
+  ): Promise<
+    | { id: string; index: number; label: string; strokeCount: number; subdivisionLevel: number }
+    | { error: string }
+  > {
     if (!getState().session) {
-      setStatus(statusBar, 'error', 'Sculpt apply: no active session');
-      return;
+      return { error: 'No active session. Call createSession() or openSession(id) first.' };
     }
     if (!hasSculptStrokes()) {
-      setStatus(statusBar, 'error', 'Sculpt apply: no strokes to apply');
-      return;
+      return { error: 'No pending sculpt strokes to save. Apply a brush dab/stroke first.' };
     }
     const baseMesh = currentMeshData;
     if (!baseMesh) {
-      setStatus(statusBar, 'error', 'Sculpt apply: no current mesh');
-      return;
+      return { error: 'No current mesh to apply strokes to.' };
     }
-    const sculpted = replayStrokes(baseMesh, getSculptStrokes());
+    const strokesSnapshot = getSculptStrokes();
+    const sculpted = replayStrokes(baseMesh, strokesSnapshot);
     // Validate manifoldness — failures (self-intersection, edge holes)
     // are logged but don't block persistence; the mesh is renderable
     // and exports may degrade gracefully.
@@ -1612,7 +1678,8 @@ async function main() {
     const code = getValue();
     const geoData = enrichGeometryDataWithColors(getGeometryDataObj() ?? {});
     const thumbnail = await captureThumbnail();
-    await saveVersion(code, geoData, thumbnail, 'sculpted', undefined, { force: true });
+    const versionLabel = label ?? 'sculpted';
+    const version = await saveVersion(code, geoData, thumbnail, versionLabel, undefined, { force: true });
     // After saving, treat the sculpted mesh as the current one so
     // viewport/exports/paint stay aligned.
     currentMeshData = sculpted;
@@ -1624,6 +1691,24 @@ async function main() {
     // the post-sculpt vertex/triangle counts and bbox.
     updateGeometryData();
     syncLockState();
+    if (!version) {
+      // saveVersion's force:true path should always return a version;
+      // if it doesn't, something deeper has gone wrong.
+      return { error: 'Sculpt apply: saveVersion returned no version' };
+    }
+    return {
+      id: version.id,
+      index: version.index,
+      label: version.label,
+      strokeCount: strokesSnapshot.length,
+      subdivisionLevel: strokesSnapshot[0]?.subdivisionLevel ?? 0,
+    };
+  }
+  setSculptApply(async () => {
+    const result = await applySculptStrokesToCurrentVersion();
+    if ('error' in result) {
+      setStatus(statusBar, 'error', `Sculpt apply: ${result.error}`);
+    }
   });
   // Declared before initMeasureToggle is called so the assignment inside it
   // doesn't hit a let-TDZ error (the same `let` lower in this function is
@@ -3320,6 +3405,165 @@ async function main() {
       syncLockState();
       const stats = regionTriangleStats(triangles, mesh);
       return { id: region.id, name: region.name, triangles: triangles.size, bbox: stats.bbox, centroid: stats.centroid, seedTriangle: nearest.triIndex };
+    },
+
+    // === Sculpt: brush-based organic mesh modeling ============
+    //
+    // Sculpt strokes deform a working copy of the code-generated mesh
+    // by pushing or smoothing vertices within a brush radius. The human
+    // UI records strokes from a mouse drag; these AI tools let the
+    // agent emit them programmatically.
+    //
+    // Workflow (single dab):
+    //   1. renderView + probePixel to find a {point, normal} on the surface.
+    //   2. applyBrushDab({point, normal, brush, radius, strength}).
+    //   3. saveSculptedVersion({label}) to persist as a new locked version.
+    //
+    // Pending state (subdivision level + accumulated strokes) lives in
+    // a module-level singleton (src/sculpt/strokes.ts) — there is one
+    // pending queue per page. saveSculptedVersion commits it; the queue
+    // stays "pending" through reloads only if it was saved. discard via
+    // cancelPendingStrokes resets the working mesh to the base.
+
+    /** Apply N midpoint-subdivision passes to the working mesh. Each
+     *  level quadruples triangle count. Required before brushing on
+     *  coarse code-generated meshes (a default cube has only 12 tris;
+     *  brushes there are blocky). Levels 1–3 are typical; 4 is slow. */
+    subdivideMesh(opts: { levels: number }): { triangleCount: number; vertexCount: number; currentSubdivisionLevel: number } | { error: string } {
+      const check = guard(() => {
+        assertObject(opts, 'subdivideMesh(opts)');
+        assertNoUnknownKeys(opts as Record<string, unknown>, ['levels'], 'subdivideMesh(opts)');
+        assertNumber((opts as Record<string, unknown>).levels, 'subdivideMesh(opts).levels', { min: 1, max: 4, integer: true });
+      });
+      if (typeof check === 'object' && check !== null && 'error' in check) return check;
+      if (!currentMeshData) return { error: 'No geometry loaded — run code first.' };
+      const result = sculptSubdivideToLevel(opts.levels);
+      if ('error' in result) return result;
+      return {
+        triangleCount: result.mesh.numTri,
+        vertexCount: result.mesh.numVert,
+        currentSubdivisionLevel: result.level,
+      };
+    },
+
+    /** Apply a single brush sample at a point on the mesh. One click,
+     *  no drag. Use probePixel first to find {point, normal}. Records
+     *  a 1-sample stroke in the pending queue but does NOT save —
+     *  call saveSculptedVersion when done. */
+    applyBrushDab(opts: {
+      point: { x: number; y: number; z: number };
+      normal: { x: number; y: number; z: number };
+      brush: SculptBrushKind;
+      radius: number;
+      strength: number;
+    }): { affectedVertices: number; pendingStrokeCount: number } | { error: string } {
+      const validated = validateBrushSampleInputs(opts as Record<string, unknown>, 'applyBrushDab');
+      if ('error' in validated) return validated;
+      const { brush, radius, strength } = validated;
+      const sample = validatePoint((opts as Record<string, unknown>).point, 'applyBrushDab(opts).point');
+      if ('error' in sample) return sample;
+      const normal = validatePoint((opts as Record<string, unknown>).normal, 'applyBrushDab(opts).normal');
+      if ('error' in normal) return normal;
+      if (!currentMeshData) return { error: 'No geometry loaded — run code first.' };
+      if (!ensureSculptWorkingMesh()) return { error: 'No working mesh available for sculpt.' };
+      const pt: [number, number, number] = [sample.x, sample.y, sample.z];
+      const nm: [number, number, number] = [normal.x, normal.y, normal.z];
+      const affected = applySculptBrushSample(brush, pt, nm, radius, strength);
+      const strokePoints: SculptStrokePoint[] = [{
+        x: pt[0], y: pt[1], z: pt[2],
+        nx: nm[0], ny: nm[1], nz: nm[2],
+      }];
+      addSculptStroke(brush, strokePoints, radius, strength);
+      return { affectedVertices: affected, pendingStrokeCount: getSculptStrokes().length };
+    },
+
+    /** Apply a multi-sample brush stroke (equivalent to a human drag).
+     *  Samples are applied in order; each one moves vertices within the
+     *  brush radius. Use for sweep effects (e.g. a ridge along a curved
+     *  path). Records exactly one stroke in the pending queue. */
+    applyBrushStroke(opts: {
+      samples: Array<{ point: { x: number; y: number; z: number }; normal: { x: number; y: number; z: number } }>;
+      brush: SculptBrushKind;
+      radius: number;
+      strength: number;
+    }): { affectedVertices: number; pendingStrokeCount: number } | { error: string } {
+      const validated = validateBrushSampleInputs(opts as Record<string, unknown>, 'applyBrushStroke');
+      if ('error' in validated) return validated;
+      const { brush, radius, strength } = validated;
+      const samplesRaw = (opts as Record<string, unknown>).samples;
+      if (!Array.isArray(samplesRaw) || samplesRaw.length === 0) {
+        return { error: 'applyBrushStroke(opts).samples must be a non-empty array of {point, normal}' };
+      }
+      const samples: Array<{ pt: [number, number, number]; nm: [number, number, number] }> = [];
+      for (let i = 0; i < samplesRaw.length; i++) {
+        const s = samplesRaw[i] as Record<string, unknown> | undefined;
+        if (!s || typeof s !== 'object') {
+          return { error: `applyBrushStroke(opts).samples[${i}] must be an object with {point, normal}` };
+        }
+        const pt = validatePoint(s.point, `applyBrushStroke(opts).samples[${i}].point`);
+        if ('error' in pt) return pt;
+        const nm = validatePoint(s.normal, `applyBrushStroke(opts).samples[${i}].normal`);
+        if ('error' in nm) return nm;
+        samples.push({ pt: [pt.x, pt.y, pt.z], nm: [nm.x, nm.y, nm.z] });
+      }
+      if (!currentMeshData) return { error: 'No geometry loaded — run code first.' };
+      if (!ensureSculptWorkingMesh()) return { error: 'No working mesh available for sculpt.' };
+      // Track unique affected vertex indices across all samples so the
+      // returned count is the union, not the sum (matching the doc).
+      const affectedSet = new Set<number>();
+      const strokePoints: SculptStrokePoint[] = [];
+      for (const { pt, nm } of samples) {
+        const before = workingMeshVertSnapshot();
+        applySculptBrushSample(brush, pt, nm, radius, strength);
+        const after = workingMeshVertSnapshot();
+        if (before && after) {
+          for (let i = 0; i < after.length; i++) {
+            if (before[i] !== after[i]) affectedSet.add(i);
+          }
+        }
+        strokePoints.push({
+          x: pt[0], y: pt[1], z: pt[2],
+          nx: nm[0], ny: nm[1], nz: nm[2],
+        });
+      }
+      addSculptStroke(brush, strokePoints, radius, strength);
+      return { affectedVertices: affectedSet.size, pendingStrokeCount: getSculptStrokes().length };
+    },
+
+    /** Persist all pending sculpt strokes (and any subdivision applied)
+     *  as a new locked version. After this, further edits require
+     *  forking via the unlock flow (same as paint regions). */
+    async saveSculptedVersion(opts?: { label?: string }): Promise<
+      | { versionId: string; strokeCount: number; subdivisionLevel: number }
+      | { error: string }
+    > {
+      const check = guard(() => {
+        if (opts !== undefined) {
+          assertObject(opts, 'saveSculptedVersion(opts)');
+          assertNoUnknownKeys(opts as Record<string, unknown>, ['label'], 'saveSculptedVersion(opts)');
+          assertString((opts as Record<string, unknown>).label, 'saveSculptedVersion(opts).label', { optional: true, allowEmpty: false });
+        }
+      });
+      if (typeof check === 'object' && check !== null && 'error' in check) return check;
+      const result = await applySculptStrokesToCurrentVersion(opts?.label);
+      if ('error' in result) return result;
+      return {
+        versionId: result.id,
+        strokeCount: result.strokeCount,
+        subdivisionLevel: result.subdivisionLevel,
+      };
+    },
+
+    /** Discard all pending strokes (and any subdivision-in-progress)
+     *  without saving. Resets the working mesh to the version's saved
+     *  state. Useful if a stroke went wrong before save. */
+    cancelPendingStrokes(): { ok: true } | { error: string } {
+      // Clear strokes first so discardSculptPending's rebuild sees an
+      // empty stroke list (matches the UI Discard button order).
+      clearSculptStrokes();
+      discardSculptPending();
+      syncLockState();
+      return { ok: true };
     },
 
     /** Check if any component is fully contained inside another (invisible geometry) */

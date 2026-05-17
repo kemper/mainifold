@@ -206,6 +206,91 @@ const ALL_TOOLS: ToolDefinition[] = [
     },
   },
   {
+    name: 'subdivideMesh',
+    description: 'Apply midpoint subdivision to the current working mesh. Each level multiplies triangle count by 4. Required before sculpt strokes if the mesh is coarse (default code-generated cube has only 12 triangles; sculpt strokes on it will be blocky). Levels 1–3 are typical; level 4+ is sluggish. Pins the level for all subsequent strokes in this pending queue — set BEFORE any applyBrushDab / applyBrushStroke calls.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        levels: { type: 'integer', description: 'Number of subdivision passes (1..4). Each pass quadruples triangle count.' },
+      },
+      required: ['levels'],
+    },
+  },
+  {
+    name: 'applyBrushDab',
+    description: 'Apply a single brush sample at a point on the mesh. Equivalent to one click with no drag. Use probePixel first to find {point, normal}. Does NOT save a new version on its own — accumulates in the pending stroke queue; call saveSculptedVersion when done iterating. Brushes on un-subdivided meshes are blocky — call subdivideMesh({levels: 2}) first on cube/coarse meshes.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        point: {
+          type: 'object',
+          description: 'Surface point {x, y, z}. Typically the `point` field from a probePixel hit.',
+          properties: { x: { type: 'number' }, y: { type: 'number' }, z: { type: 'number' } },
+          required: ['x', 'y', 'z'],
+        },
+        normal: {
+          type: 'object',
+          description: 'Surface normal {x, y, z}. The push brush moves vertices along this direction; smooth ignores it. Typically the `normal` field from a probePixel hit.',
+          properties: { x: { type: 'number' }, y: { type: 'number' }, z: { type: 'number' } },
+          required: ['x', 'y', 'z'],
+        },
+        brush: { type: 'string', enum: ['push', 'smooth'], description: 'push = offset vertices along the normal (clay add/subtract via positive/negative strength); smooth = average neighboring vertex positions (relax bumps).' },
+        radius: { type: 'number', description: 'World-space brush radius. Vertices within this distance of the point are affected. > 0.' },
+        strength: { type: 'number', description: 'Falloff amplitude in [0, 1]. 0.5 is a typical clay-style displacement.' },
+      },
+      required: ['point', 'normal', 'brush', 'radius', 'strength'],
+    },
+  },
+  {
+    name: 'applyBrushStroke',
+    description: 'Apply a multi-sample brush stroke — equivalent to a human dragging across the surface. Samples are applied in order; each one moves vertices within the brush radius. Use this when you want a sweep effect (e.g. a ridge along a curved path). All samples share the same brush/radius/strength. Records exactly ONE stroke in the pending queue regardless of sample count.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        samples: {
+          type: 'array',
+          description: 'Ordered list of {point, normal} samples — each one is treated as one click of the brush at that location. Length >= 1.',
+          items: {
+            type: 'object',
+            properties: {
+              point: {
+                type: 'object',
+                properties: { x: { type: 'number' }, y: { type: 'number' }, z: { type: 'number' } },
+                required: ['x', 'y', 'z'],
+              },
+              normal: {
+                type: 'object',
+                properties: { x: { type: 'number' }, y: { type: 'number' }, z: { type: 'number' } },
+                required: ['x', 'y', 'z'],
+              },
+            },
+            required: ['point', 'normal'],
+          },
+          minItems: 1,
+        },
+        brush: { type: 'string', enum: ['push', 'smooth'] },
+        radius: { type: 'number', description: 'World-space brush radius, > 0.' },
+        strength: { type: 'number', description: 'Falloff amplitude in [0, 1].' },
+      },
+      required: ['samples', 'brush', 'radius', 'strength'],
+    },
+  },
+  {
+    name: 'saveSculptedVersion',
+    description: 'Persist all pending sculpt strokes (and any subdivision applied) as a new locked version. After saving, further edits require forking via the unlock flow (same as paint regions). Errors if there are no pending strokes — call applyBrushDab / applyBrushStroke first.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        label: { type: 'string', description: 'Optional human-readable label for the gallery (e.g. "carved smile"). Defaults to "sculpted".' },
+      },
+    },
+  },
+  {
+    name: 'cancelPendingStrokes',
+    description: 'Discard all pending strokes (and any subdivision-in-progress) without saving. Resets the working mesh to the version\'s saved state. Useful if a stroke went wrong before save.',
+    input_schema: { type: 'object', properties: {} },
+  },
+  {
     name: 'getFeatureCentroids',
     description: 'Token-cheap planning aid: returns coplanar face groups with just centroid + normal + bbox + area (NO triangle IDs). Use this when planning where to paint without committing yet — cheaper than getMeshSummary because the triangleIds payload is omitted. Optional `withinBox` scopes to one feature.',
     input_schema: {
@@ -491,6 +576,11 @@ const ALWAYS_AVAILABLE = new Set([
 const RUN_GATED = new Set(['runCode']);
 const SAVE_GATED = new Set(['runAndSave', 'loadVersion']);
 const PAINT_GATED = new Set(['paintRegion', 'paintFaces', 'paintNear', 'paintInBox', 'paintSlab', 'paintNearestRegion', 'paintComponent', 'paintByLabel', 'paintByLabels', 'paintConnected', 'undoLastPaint', 'redoLastPaint', 'removeRegion', 'clearColors']);
+/** Sculpt tools are gated by saveVersions because the whole workflow
+ *  exists to persist a deformed mesh as a new locked version. Without
+ *  saveVersions there's no way to commit and the pending state would
+ *  just leak. */
+const SCULPT_GATED = new Set(['subdivideMesh', 'applyBrushDab', 'applyBrushStroke', 'saveSculptedVersion', 'cancelPendingStrokes']);
 /** Tools that ship a PNG back to the model via a multimodal content
  *  block. Gated by the Views vision toggle so the user can disable
  *  vision spend in one place — when off, the agent has to reason from
@@ -508,6 +598,7 @@ export function buildToolList(toggles: ChatToggles): ToolDefinition[] {
       return t.name === 'loadVersion' ? toggles.scope.saveVersions : (toggles.scope.runCode && toggles.scope.saveVersions);
     }
     if (PAINT_GATED.has(t.name)) return toggles.scope.paintFaces;
+    if (SCULPT_GATED.has(t.name)) return toggles.scope.saveVersions;
     if (VIEWS_GATED.has(t.name)) return toggles.vision.views;
     return false;
   });
@@ -672,6 +763,16 @@ async function dispatch(api: PartwrightAPI, name: string, input: Record<string, 
       return api.probePixel(input);
     case 'paintConnected':
       return api.paintConnected(input);
+    case 'subdivideMesh':
+      return api.subdivideMesh(input);
+    case 'applyBrushDab':
+      return api.applyBrushDab(input);
+    case 'applyBrushStroke':
+      return api.applyBrushStroke(input);
+    case 'saveSculptedVersion':
+      return await api.saveSculptedVersion(input);
+    case 'cancelPendingStrokes':
+      return api.cancelPendingStrokes();
     case 'getFeatureCentroids':
       return api.getFeatureCentroids(input);
     case 'paintExplain': {
