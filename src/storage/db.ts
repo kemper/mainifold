@@ -56,6 +56,19 @@ export interface Version {
    *  this version was saved. Shape matches `SerializedAnnotation[]` from the
    *  annotations module — kept as `unknown[]` here to preserve db-layer isolation. */
   annotations?: unknown[];
+  /** Defines what `code` vs `meshBlob` mean for this version:
+   *  - `'code'` (default, omit on save): `code` is executable source and the
+   *     mesh is regenerated on load. This is the historical behavior.
+   *  - `'mesh'`: `meshBlob` is the source of truth — a serialized MeshData
+   *     produced by the free-mesh prototype (STL import, sculpt push). `code`
+   *     may be empty or a non-executable note. Loaders that see `source ===
+   *     'mesh'` skip code execution and reconstruct via `Manifold.ofMesh()`.
+   *  Persisted as a string for forward compatibility (future sources like
+   *  `'stroke-history'` would extend the union). */
+  source?: 'code' | 'mesh';
+  /** Serialized {@link MeshData} blob — only present when `source === 'mesh'`.
+   *  Format is defined by `src/sculpt/meshIO.ts` (`serializeMeshData`). */
+  meshBlob?: ArrayBuffer;
 }
 
 export interface SessionNote {
@@ -386,6 +399,10 @@ export async function saveVersion(
   timestamp?: number,
   /** Snapshot of annotations at save time (opaque to the db layer). */
   annotations?: unknown[],
+  /** Free-mesh extension: when present, marks this version as `source: 'mesh'`
+   *  and stores the serialized MeshData blob. Omit for normal code-driven
+   *  versions (the default). */
+  meshBlob?: ArrayBuffer,
 ): Promise<Version> {
   const versions = await listVersions(sessionId);
   const nextIndex = versions.length > 0 ? Math.max(...versions.map(v => v.index)) + 1 : 1;
@@ -401,6 +418,7 @@ export async function saveVersion(
     timestamp: timestamp ?? Date.now(),
     ...(notes ? { notes } : {}),
     ...(annotations && annotations.length > 0 ? { annotations } : {}),
+    ...(meshBlob ? { source: 'mesh' as const, meshBlob } : {}),
   };
 
   const store = await tx('versions', 'readwrite');
@@ -411,6 +429,52 @@ export async function saveVersion(
   await updateSession(sessionId, { updated: timestamp ?? Date.now() });
 
   return version;
+}
+
+/** Overwrite an existing frozen-mesh version in place — used by the free
+ *  sculpt prototype where edits replace the stored mesh blob (no new version
+ *  per edit). Updates `meshBlob`, optionally refreshes the thumbnail and
+ *  geometryData, and bumps `session.updated`. Throws if the version doesn't
+ *  exist or isn't a frozen-mesh version. */
+export async function updateMeshVersion(
+  versionId: string,
+  meshBlob: ArrayBuffer,
+  geometryData?: Record<string, unknown> | null,
+  thumbnail?: Blob | null,
+): Promise<Version> {
+  // Two-transaction split avoids IDB auto-commit between awaits: a readwrite
+  // transaction will auto-commit when its task queue empties, which happens
+  // between `await reqToPromise(...)` calls. Splitting into a small read txn
+  // followed by a focused write txn keeps each transaction's lifetime
+  // entirely inside the IDB event loop window.
+  const db = await openDB();
+  const readTxn = db.transaction(['versions'], 'readonly');
+  const existing = await reqToPromise(readTxn.objectStore('versions').get(versionId)) as Version | undefined;
+  await txComplete(readTxn);
+  if (!existing) {
+    throw new Error(`updateMeshVersion: version ${versionId} not found`);
+  }
+  if (existing.source !== 'mesh') {
+    throw new Error(`updateMeshVersion: version ${versionId} is not a frozen-mesh version`);
+  }
+  const now = Date.now();
+  const next: Version = {
+    ...existing,
+    meshBlob,
+    ...(geometryData !== undefined ? { geometryData } : {}),
+    ...(thumbnail !== undefined ? { thumbnail } : {}),
+    timestamp: now,
+  };
+  const writeTxn = db.transaction(['versions', 'sessions'], 'readwrite');
+  writeTxn.objectStore('versions').put(next);
+  const sessionStore = writeTxn.objectStore('sessions');
+  const session = await reqToPromise(sessionStore.get(existing.sessionId)) as Session | undefined;
+  if (session) {
+    session.updated = now;
+    sessionStore.put(session);
+  }
+  await txComplete(writeTxn);
+  return next;
 }
 
 export async function listVersions(sessionId: string): Promise<Version[]> {

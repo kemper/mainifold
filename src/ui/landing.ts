@@ -19,6 +19,8 @@ export interface LandingCallbacks {
   onOpenHelp: () => void;
   onOpenCatalog: () => void;
   onOpenSession: (sessionId: string) => void;
+  /** Free-mesh prototype: import a binary STL as a new frozen-mesh session. */
+  onImportSTL?: (file: File) => void | Promise<void>;
 }
 
 interface CatalogManifestEntry {
@@ -120,6 +122,28 @@ function buildHero(callbacks: LandingCallbacks): HTMLElement {
   help.textContent = 'How does this work?';
   help.addEventListener('click', callbacks.onOpenHelp);
   ctas.appendChild(help);
+
+  if (callbacks.onImportSTL) {
+    const importStl = document.createElement('button');
+    importStl.id = 'btn-import-stl';
+    importStl.className = 'px-3 py-2.5 rounded-lg bg-transparent hover:bg-zinc-800 text-zinc-500 text-xs font-medium transition-colors border border-zinc-800';
+    importStl.textContent = 'Import STL…';
+    importStl.title = 'Open a binary STL file as a frozen-mesh session';
+    const hiddenInput = document.createElement('input');
+    hiddenInput.type = 'file';
+    hiddenInput.accept = '.stl,application/sla';
+    hiddenInput.style.display = 'none';
+    hiddenInput.addEventListener('change', () => {
+      const file = hiddenInput.files?.[0];
+      if (file && callbacks.onImportSTL) {
+        void callbacks.onImportSTL(file);
+        hiddenInput.value = '';
+      }
+    });
+    importStl.addEventListener('click', () => hiddenInput.click());
+    importStl.appendChild(hiddenInput);
+    ctas.appendChild(importStl);
+  }
 
   hero.appendChild(ctas);
 
