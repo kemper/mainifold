@@ -3,6 +3,33 @@ import { javaScriptSyntaxDiagnostics, runtimeDiagnostic } from '../sourceDiagnos
 import { getDefaultCircularSegments } from '../qualitySettings';
 import { getActiveImports } from '../../import/importedMesh';
 
+/** Marker the sandbox attaches to render-only proxies (see `renderMesh` below).
+ *  The engine looks for it on the user-returned object to decide whether the
+ *  result should be treated as a real Manifold (with volume, boolean ops, etc.)
+ *  or just rendered as-is with manifold-dependent features disabled. */
+const RENDER_ONLY_MARKER = '__partwrightRenderOnly';
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function renderMesh(meshData: any) {
+  if (!meshData || !meshData.vertProperties || !meshData.triVerts) {
+    throw new Error('api.renderMesh: expected an object with vertProperties (Float32Array) and triVerts (Uint32Array).');
+  }
+  const numProp = meshData.numProp ?? 3;
+  return {
+    [RENDER_ONLY_MARKER]: true,
+    getMesh() {
+      return {
+        vertProperties: meshData.vertProperties,
+        triVerts: meshData.triVerts,
+        numVert: meshData.numVert ?? meshData.vertProperties.length / numProp,
+        numTri: meshData.numTri ?? meshData.triVerts.length / 3,
+        numProp,
+      };
+    },
+    delete() { /* no native resource to release */ },
+  };
+}
+
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 let manifoldModule: any = null;
 
@@ -113,6 +140,7 @@ export const manifoldJsEngine: Engine = {
       label,
       labeledUnion,
       imports,
+      renderMesh,
     };
 
     // Catch the common misconception that paint tools can be called
@@ -150,6 +178,10 @@ export const manifoldJsEngine: Engine = {
 
       const mesh = result.getMesh();
       const labelMap = resolveLabelMap(mesh, labelRegistry);
+      // Render-only proxies (from `api.renderMesh`) carry the marker so we can
+      // signal downstream "this isn't a real Manifold — skip volume/genus/slice".
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const renderOnly = (result as any)[RENDER_ONLY_MARKER] === true;
       return {
         mesh: {
           vertProperties: mesh.vertProperties,
@@ -162,7 +194,7 @@ export const manifoldJsEngine: Engine = {
           runIndex: mesh.runIndex,
           runOriginalID: mesh.runOriginalID,
         },
-        manifold: result,
+        manifold: renderOnly ? null : result,
         error: null,
         labelMap,
       };

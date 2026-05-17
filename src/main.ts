@@ -263,16 +263,38 @@ function clearEditorErrorPanel(panel: HTMLElement): void {
 }
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
+/** Bounding box scanned directly from a MeshData's vertex buffer. Used when no
+ *  Manifold is available (e.g. render-only STL imports) so the rest of the
+ *  stats pipeline still has a bbox to work with. */
+function bboxFromMesh(mesh: MeshData): { min: [number, number, number]; max: [number, number, number] } | null {
+  if (mesh.numVert === 0) return null;
+  const v = mesh.vertProperties;
+  const n = mesh.numProp;
+  let minX = Infinity, minY = Infinity, minZ = Infinity;
+  let maxX = -Infinity, maxY = -Infinity, maxZ = -Infinity;
+  for (let i = 0; i < mesh.numVert; i++) {
+    const x = v[i * n], y = v[i * n + 1], z = v[i * n + 2];
+    if (x < minX) minX = x; if (x > maxX) maxX = x;
+    if (y < minY) minY = y; if (y > maxY) maxY = y;
+    if (z < minZ) minZ = z; if (z > maxZ) maxZ = z;
+  }
+  return { min: [minX, minY, minZ], max: [maxX, maxY, maxZ] };
+}
+
 function computeGeometryStats(manifold: any, meshData: MeshData, executionTimeMs?: number, sourceCode?: string): Record<string, unknown> {
-  const bbox = getBoundingBox(manifold);
+  // Bounding box: prefer the manifold's own, but fall back to scanning the mesh
+  // verts so render-only imports (manifold==null) still get usable bbox/dims/slices.
+  const bbox = (manifold && getBoundingBox(manifold)) || bboxFromMesh(meshData);
 
   let volume = 0;
   let surfaceArea = 0;
-  try {
-    volume = manifold.volume();
-    surfaceArea = manifold.surfaceArea();
-  } catch {
-    // fallback if methods unavailable
+  if (manifold) {
+    try {
+      volume = manifold.volume();
+      surfaceArea = manifold.surfaceArea();
+    } catch {
+      // fallback if methods unavailable
+    }
   }
 
   const centroid = bbox
@@ -284,29 +306,34 @@ function computeGeometryStats(manifold: any, meshData: MeshData, executionTimeMs
     : null;
 
   let componentCount = 1;
-  try {
-    const parts = manifold.decompose();
-    componentCount = parts.length;
-    for (const p of parts) p.delete();
-  } catch {
-    // fallback
+  if (manifold) {
+    try {
+      const parts = manifold.decompose();
+      componentCount = parts.length;
+      for (const p of parts) p.delete();
+    } catch {
+      // fallback
+    }
   }
 
-  let isManifold = true;
-  let manifoldStatus: string | null = null;
-  try {
-    const s = manifold.status();
-    isManifold = s === 0 || s === 'NoError';
-    if (!isManifold) {
-      // Surface the actual status for diagnostics
-      manifoldStatus = String(s);
+  // Render-only imports lack a manifold; surface that fact in stats so the
+  // status panel can show "not manifold" instead of a misleading default.
+  let isManifold = manifold !== null;
+  let manifoldStatus: string | null = manifold === null ? 'render-only (not manifold)' : null;
+  if (manifold) {
+    try {
+      const s = manifold.status();
+      isManifold = s === 0 || s === 'NoError';
+      if (!isManifold) {
+        manifoldStatus = String(s);
+      }
+    } catch {
+      // fallback
     }
-  } catch {
-    // fallback
   }
 
   const quartileSlices: Record<string, { z: number; area: number; contours: number }> = {};
-  if (bbox) {
+  if (bbox && manifold) {
     const zRange = bbox.max[2] - bbox.min[2];
     for (const pct of [25, 50, 75]) {
       const z = bbox.min[2] + zRange * (pct / 100);
@@ -330,7 +357,7 @@ function computeGeometryStats(manifold: any, meshData: MeshData, executionTimeMs
     centroid,
     volume,
     surfaceArea,
-    genus: (() => { try { return manifold.genus(); } catch { return null; } })(),
+    genus: manifold ? (() => { try { return manifold.genus(); } catch { return null; } })() : null,
     isManifold,
     ...(manifoldStatus ? { manifoldStatus } : {}),
     componentCount,
@@ -452,11 +479,13 @@ function checkAssertions(stats: Record<string, unknown>, assertions: GeometryAss
 }
 
 function updateGeometryData(executionTimeMs?: number, sourceCode?: string) {
-  if (!currentManifold || !currentMeshData) {
+  if (!currentMeshData) {
     geometryDataEl.textContent = JSON.stringify({ status: 'error', error: 'No geometry' });
     return;
   }
 
+  // currentManifold may be null for render-only imports (sculpted STLs that
+  // can't form a watertight manifold). computeGeometryStats degrades gracefully.
   const data = computeGeometryStats(currentManifold, currentMeshData, executionTimeMs, sourceCode);
   // Surface session URLs in geometry-data so they're accessible even when getGalleryUrl() is sandbox-blocked
   const state = getState();
@@ -927,16 +956,17 @@ async function main() {
   // so the imports survive a reload and so future saveVersion calls (which
   // carry forward `importedMeshes` from the prior version) have something to
   // build on.
-  async function importMeshPayload(mesh: ImportedMesh, sessionName: string): Promise<{ sessionId: string }> {
+  async function importMeshPayload(mesh: ImportedMesh, sessionName: string, opts: { manifold: boolean } = { manifold: true }): Promise<{ sessionId: string }> {
     if (getActiveLanguage() !== 'manifold-js') await switchLanguage('manifold-js');
     const session = await createSession(sessionName, 'manifold-js');
     setActiveImports([mesh]);
-    const code = generateImportCode([mesh]);
+    const code = generateImportCode([mesh], { manifold: opts.manifold });
     setValue(code);
     await runCodeSync(code);
     const thumbnail = await captureThumbnail();
     const geometryData = getGeometryDataObj();
-    await saveVersion(code, geometryData, thumbnail, 'imported', undefined, {
+    const label = opts.manifold ? 'imported' : 'imported (render-only)';
+    await saveVersion(code, geometryData, thumbnail, label, undefined, {
       force: true,
       importedMeshes: [mesh],
     });
@@ -999,10 +1029,10 @@ async function main() {
         await importCodePayload(code, lang, sessionName);
         committed = true;
       } else if (source === 'STL') {
-        const mesh = await parseSTLFile(file);
-        if (mesh) {
+        const parsed = await parseSTLFile(file);
+        if (parsed) {
           const sessionName = file.name.replace(/\.stl$/i, '');
-          await importMeshPayload(mesh, sessionName);
+          await importMeshPayload(parsed.mesh, sessionName, { manifold: parsed.isManifold });
           committed = true;
         }
       }
@@ -1014,12 +1044,19 @@ async function main() {
     }
   }
 
+  interface ParsedSTL {
+    mesh: ImportedMesh;
+    /** True if Manifold.ofMesh() succeeded — supports boolean ops, paint, slicing.
+     *  False if the user chose to import render-only after manifold construction failed. */
+    isManifold: boolean;
+  }
+
   /** Read an STL file, parse it, and verify Manifold.ofMesh() accepts the result.
-   *  Tries progressively looser weld tolerances to absorb float-precision noise
-   *  in real-world CAD exports. Reports a useful error and returns null if the
-   *  mesh can't be made manifold at any tolerance — caller is then responsible
-   *  for leaving session state untouched. */
-  async function parseSTLFile(file: File): Promise<ImportedMesh | null> {
+   *  Tries progressively looser weld tolerances to absorb float-precision noise.
+   *  If the mesh still won't form a manifold (common for sculpted/scanned models
+   *  with self-intersections or open edges), prompts the user to import as
+   *  render-only — visible and exportable, but no booleans/paint/slice. */
+  async function parseSTLFile(file: File): Promise<ParsedSTL | null> {
     const bytes = new Uint8Array(await file.arrayBuffer());
 
     // Sanity-check that the file parses to *something* before doing the more
@@ -1033,49 +1070,54 @@ async function main() {
     // Scale-aware fallback tolerance: 5 ppm of the mesh's bounding-box diagonal
     // catches imports that ship in unusual units (μm or m) where 1e-3 absolute
     // is either way too tight or way too loose.
-    const diag = boundingBoxDiagonal(probe);
+    const bbox = bboxFromMesh(probe);
+    const diag = bbox
+      ? Math.hypot(bbox.max[0] - bbox.min[0], bbox.max[1] - bbox.min[1], bbox.max[2] - bbox.min[2])
+      : 0;
     const scaleTolerance = Math.max(diag * 5e-6, 1e-6);
 
     const tolerances = [1e-5, 1e-4, 1e-3, scaleTolerance];
-    let lastMesh = probe;
-    let lastTolerance = 1e-5;
+    let bestMesh = probe;
+    let maxTried = 0;
     let manifoldError: string | null = null;
     for (const tol of tolerances) {
       const mesh = parseSTL(bytes, { weldTolerance: tol });
       if (!mesh || mesh.numTri === 0) continue;
       const trial = tryConstructManifold(mesh);
       if (trial.ok) {
-        lastMesh = mesh;
-        lastTolerance = tol;
-        manifoldError = null;
-        break;
+        return { mesh: toImportedMesh(file.name, mesh), isManifold: true };
       }
       manifoldError = trial.error;
-      lastMesh = mesh;
-      lastTolerance = tol;
+      if (tol > maxTried) maxTried = tol;
+      bestMesh = mesh;
     }
 
-    if (manifoldError) {
-      alert(
-        `"${file.name}" couldn't be imported as a manifold.\n\n` +
-        `${probe.numTri.toLocaleString()} triangles, ${probe.numVert.toLocaleString()} vertices. ` +
-        `Tried weld tolerances up to ${lastTolerance.toExponential(1)} — ` +
-        `Manifold reports: ${manifoldError}\n\n` +
-        `This usually means the STL has open edges, T-junctions, or duplicated faces. ` +
-        `Repair the mesh in MeshLab or Blender (Edit → Mesh → Clean Up) and try again.`
-      );
-      return null;
-    }
+    // All tolerances failed. Offer render-only fallback — most users importing
+    // a Baby Yoda / Eiffel Tower scan just want to look at it, not boolean-op it.
+    const accepted = await showInlineConfirm(
+      editorUI,
+      `"${file.name}" can't be imported as a manifold.\n\n` +
+      `${probe.numTri.toLocaleString()} triangles, ${probe.numVert.toLocaleString()} vertices. ` +
+      `Tried weld tolerances up to ${maxTried.toExponential(1)}; Manifold reports "${manifoldError}". ` +
+      `This is typical for sculpted or scanned models (self-intersections, open edges, T-junctions).\n\n` +
+      `Import as render-only? You'll see and export the mesh, but boolean operations, paint, and cross-sections won't work. ` +
+      `For full editing, repair the mesh first in MeshLab or Blender.`
+    );
+    if (!accepted) return null;
 
+    return { mesh: toImportedMesh(file.name, bestMesh), isManifold: false };
+  }
+
+  function toImportedMesh(filename: string, mesh: MeshData): ImportedMesh {
     return {
       id: generateId(),
-      filename: file.name,
+      filename,
       format: 'stl',
-      vertProperties: lastMesh.vertProperties,
-      triVerts: lastMesh.triVerts,
-      numVert: lastMesh.numVert,
-      numTri: lastMesh.numTri,
-      numProp: lastMesh.numProp,
+      vertProperties: mesh.vertProperties,
+      triVerts: mesh.triVerts,
+      numVert: mesh.numVert,
+      numTri: mesh.numTri,
+      numProp: mesh.numProp,
     };
   }
 
@@ -1103,21 +1145,6 @@ async function main() {
     }
   }
 
-  function boundingBoxDiagonal(mesh: MeshData): number {
-    const v = mesh.vertProperties;
-    const n = mesh.numProp;
-    if (mesh.numVert === 0) return 0;
-    let minX = Infinity, minY = Infinity, minZ = Infinity;
-    let maxX = -Infinity, maxY = -Infinity, maxZ = -Infinity;
-    for (let i = 0; i < mesh.numVert; i++) {
-      const x = v[i * n], y = v[i * n + 1], z = v[i * n + 2];
-      if (x < minX) minX = x; if (x > maxX) maxX = x;
-      if (y < minY) minY = y; if (y > maxY) maxY = y;
-      if (z < minZ) minZ = z; if (z > maxZ) maxZ = z;
-    }
-    const dx = maxX - minX, dy = maxY - minY, dz = maxZ - minZ;
-    return Math.sqrt(dx * dx + dy * dy + dz * dz);
-  }
 
   // Re-import an entry from the Recent Imports inbox. Reuses the same flow as
   // a fresh file import, including the JSON preview modal — it is still a
@@ -1139,10 +1166,10 @@ async function main() {
       }
       if (entry.source === 'STL') {
         const file = new File([entry.blob], entry.filename, { type: entry.blob.type });
-        const mesh = await parseSTLFile(file);
-        if (mesh) {
+        const parsed = await parseSTLFile(file);
+        if (parsed) {
           const sessionName = entry.filename.replace(/\.stl$/i, '');
-          await importMeshPayload(mesh, sessionName);
+          await importMeshPayload(parsed.mesh, sessionName, { manifold: parsed.isManifold });
         }
         return;
       }
