@@ -20,7 +20,7 @@
 // throughout that API are pure and live in the validation module above.
 
 import './style.css';
-import { initEngine, executeCode, executeCodeAsync, validateCodeAsync, ensureEngineReady, getModule, getActiveLanguage, setActiveLanguage, type Language } from './geometry/engine';
+import { initEngine, executeCode, executeCodeAsync, validateCodeAsync, ensureEngineReady, getModule, getActiveLanguage, setActiveLanguage, buildResultFromMesh, type Language } from './geometry/engine';
 import { onQualitySettingsChange } from './geometry/qualitySettings';
 import { sliceAtZ, getBoundingBox } from './geometry/crossSection';
 import { initViewport, updateMesh, setClipping, setClipZ, getClipState, getCameraState, getCanvas, getMeshGroup, getCamera, setMeasureLock, setUserOrbitLock, isUserOrbitLocked, onUserOrbitLockChange, setDimensionsVisible, isDimensionsVisible, setGridVisible, isGridVisible } from './renderer/viewport';
@@ -109,6 +109,12 @@ import { restoreView as restoreAnnotationViewById } from './annotations/selectMo
 import { applyTriColors, applyTriColorsIfVisible, hasRegions as hasColorRegions, onChange as onColorRegionsChange, onVisibilityChange as onPaintVisibilityChange, clearRegions, serialize as serializeRegions, addRegion, getRegions, removeRegion, removeLastRegion, redoLastRegion, setRegionVisibility, buildTriColors, createEmptyTriColors, overlayPainted, type SerializedColorRegion } from './color/regions';
 import { setBucketTolerance as setPaintBucketTolerance, getBucketTolerance as getPaintBucketTolerance, setBrushRadius as setPaintBrushRadius, getBrushRadius as getPaintBrushRadius } from './color/paintMode';
 import { initEditorLock, syncLockState, setUnlockHandlers } from './color/editorLock';
+import { parseBinarySTLToMeshGL } from './geometry/engines/scadToManifold';
+import { serializeMeshData, deserializeMeshData } from './sculpt/meshIO';
+import { saveMeshVersion, updateMeshVersion } from './storage/sessionManager';
+import { initFreeMeshUI, setFreeMeshNotice, isFreeMeshActive } from './sculpt/freeMeshUI';
+import { configure as configureFreeSculpt, programmaticPush, undoFreePush as undoFreePushInternal, redoFreePush as redoFreePushInternal, canUndoFreePush, canRedoFreePush, clearFreeMeshHistory } from './sculpt/freeSculpt';
+import { initFreeSculptUI, setSculptEnabled, forceDeactivateSculpt } from './sculpt/freeSculptUI';
 import { buildAdjacency, findCoplanarRegion, findConnectedFromSeed, resolveSeed, findNearestTriangle } from './color/adjacency';
 import { findSlabTriangles } from './color/slabPaint';
 import { findBoxTriangles } from './color/boxPaint';
@@ -831,6 +837,33 @@ async function main() {
     }
   }
 
+  // Import a binary STL file as a new session containing a single frozen-mesh
+  // version. Used by drag-drop and the landing-page "Import STL" button.
+  async function handleImportSTL(file: File): Promise<boolean> {
+    try {
+      const bytes = new Uint8Array(await file.arrayBuffer());
+      const mesh = parseBinarySTLToMeshGL(bytes);
+      if (!mesh || mesh.numTri === 0) {
+        alert(`"${file.name}" doesn't look like a valid binary STL file.`);
+        return false;
+      }
+      const sessionName = file.name.replace(/\.stl$/i, '') || 'Imported mesh';
+      const sid = await createFrozenMeshSession(mesh, sessionName);
+      if (!sid) return false;
+      // Push history + render the editor like other imports do.
+      updateAppHistory(`/editor?session=${sid}`, 'push');
+      transitionToEditor();
+      await ensureEditorReady();
+      const version = getState().currentVersion;
+      if (version) await loadVersionIntoEditor(version);
+      updateDocumentTitle({ page: 'editor' });
+      return true;
+    } catch (e) {
+      alert(`Failed to import "${file.name}": ${(e as Error).message}`);
+      return false;
+    }
+  }
+
   // Document-level drag-and-drop import. The editor UI is initialized once
   // per page load and never torn down, so these document listeners live for
   // the lifetime of the document — no cleanup needed. If editor teardown is
@@ -852,7 +885,11 @@ async function main() {
     const first = Array.from(files).find(isImportableFile);
     if (!first) return;
     e.preventDefault();
-    await handleImportFile(first);
+    if (first.name.toLowerCase().endsWith('.stl')) {
+      await handleImportSTL(first);
+    } else {
+      await handleImportFile(first);
+    }
   });
 
   // Create toolbar
@@ -939,13 +976,20 @@ async function main() {
       thumbnail: await captureThumbnail(),
     }),
     onLoadVersion: async (code: string) => {
+      const loadedVersion = getState().currentVersion;
+      if (loadedVersion?.source === 'mesh' && loadedVersion.meshBlob) {
+        // Frozen-mesh path: bypass the code string entirely.
+        await loadVersionIntoEditor(loadedVersion);
+        return;
+      }
       setValue(code);
       await runCodeSync(code);
-      const loadedVersion = getState().currentVersion;
       if (loadedVersion) {
         rehydrateColorRegions(loadedVersion.geometryData);
       }
       applyVersionAnnotations(loadedVersion);
+      setFreeMeshNotice(null);
+      setSculptEnabled(false);
     },
     onOpenSessionList: () => showSessionList(),
     onNewSession: () => {
@@ -964,14 +1008,20 @@ async function main() {
 
   // Init gallery
   createGalleryView(galleryContainer, async (code: string) => {
+    const loadedVersion = getState().currentVersion;
+    if (loadedVersion?.source === 'mesh' && loadedVersion.meshBlob) {
+      await loadVersionIntoEditor(loadedVersion);
+      switchTab('interactive');
+      return;
+    }
     setValue(code);
     await runCodeSync(code);
-    // Rehydrate color regions and annotations from the loaded version
-    const loadedVersion = getState().currentVersion;
     if (loadedVersion) {
       rehydrateColorRegions(loadedVersion.geometryData);
     }
     applyVersionAnnotations(loadedVersion);
+    setFreeMeshNotice(null);
+    setSculptEnabled(false);
     switchTab('interactive');
   });
 
@@ -1056,9 +1106,24 @@ async function main() {
     if (sessionLang !== getActiveLanguage()) {
       await switchLanguage(sessionLang);
     }
-    setActiveImports((version.importedMeshes ?? []) as ImportedMesh[]);
-    setValue(version.code);
-    await runCodeSync(version.code);
+    clearFreeMeshHistory(); // version navigation clears the push undo/redo stacks
+    if (version.source === 'mesh' && version.meshBlob) {
+      // Frozen-mesh path: skip code execution, rebuild via Manifold.ofMesh.
+      // Editor shows a placeholder string (read-only) and a notice banner.
+      // Set the notice flag FIRST so the autorun debounce on setValue sees
+      // we're in frozen-mesh mode and skips execution of the placeholder.
+      setFreeMeshNotice(version.timestamp);
+      setSculptEnabled(true);
+      setValue('// Frozen mesh — source code is not available for this version.\n');
+      await loadFrozenMeshIntoViewport(version.meshBlob);
+    } else {
+      setFreeMeshNotice(null);
+      setSculptEnabled(false);
+      forceDeactivateSculpt();
+      setActiveImports((version.importedMeshes ?? []) as ImportedMesh[]);
+      setValue(version.code);
+      await runCodeSync(version.code);
+    }
     rehydrateColorRegions(version.geometryData);
     applyVersionAnnotations(version);
     const sessionImages = await getImagesFromSession();
@@ -1067,6 +1132,76 @@ async function main() {
     } else {
       _clearImages();
     }
+  }
+
+  // Load a serialized MeshData blob into the live viewport / stats pipeline
+  // *without* executing any code. Used when a Version has source: 'mesh'.
+  async function loadFrozenMeshIntoViewport(blob: ArrayBuffer | Uint8Array): Promise<void> {
+    setStatus(statusBar, 'running', 'Loading mesh...');
+    const t0 = performance.now();
+    try {
+      const meshData = deserializeMeshData(blob);
+      const result = buildResultFromMesh(meshData);
+      if (result.error || !result.mesh) {
+        setStatus(statusBar, 'error', result.error ?? 'Failed to load mesh');
+        return;
+      }
+      currentMeshData = result.mesh;
+      if (currentManifold && currentManifold !== result.manifold && typeof currentManifold.delete === 'function') {
+        try { currentManifold.delete(); } catch { /* already deleted */ }
+      }
+      currentManifold = result.manifold;
+      currentLabelMap = null;
+
+      const displayMesh = hasColorRegions() ? applyTriColorsIfVisible(result.mesh) : result.mesh;
+      updateMesh(displayMesh);
+      updateMultiView(displayMesh);
+      renderElevationsToContainer(elevationsContainer, displayMesh);
+      updatePaintMesh(result.mesh);
+
+      const elapsed = Math.round(performance.now() - t0);
+      updateGeometryData(elapsed, '');
+      syncClipSliderBounds();
+      setStatus(statusBar, 'ready', 'Ready (frozen mesh)');
+    } catch (e) {
+      setStatus(statusBar, 'error', `Mesh load failed: ${e instanceof Error ? e.message : String(e)}`);
+    }
+  }
+
+  // Create a new session containing a single frozen-mesh version from a parsed
+  // MeshData. Used by the STL import path. Returns the session id on success.
+  async function createFrozenMeshSession(mesh: MeshData, sessionName: string): Promise<string | null> {
+    if (getActiveLanguage() !== 'manifold-js') await switchLanguage('manifold-js');
+    // Validate via Manifold.ofMesh first so we don't persist a blob that
+    // can't be loaded back. Stash the resulting stats for the version too.
+    const result = buildResultFromMesh(mesh);
+    if (result.error || !result.mesh || !result.manifold) {
+      alert(`Failed to import mesh: ${result.error ?? 'unknown error'}`);
+      return null;
+    }
+    const canonicalMesh = result.mesh;
+    const blob = serializeMeshData(canonicalMesh);
+
+    const session = await createSession(sessionName, 'manifold-js');
+    // Stage the mesh in the viewport so captureThumbnail() has something to render.
+    currentMeshData = canonicalMesh;
+    if (currentManifold && currentManifold !== result.manifold && typeof currentManifold.delete === 'function') {
+      try { currentManifold.delete(); } catch { /* already deleted */ }
+    }
+    currentManifold = result.manifold;
+    currentLabelMap = null;
+    updateMesh(canonicalMesh);
+    updateMultiView(canonicalMesh);
+    renderElevationsToContainer(elevationsContainer, canonicalMesh);
+    updatePaintMesh(canonicalMesh);
+    updateGeometryData(0, '');
+    syncClipSliderBounds();
+
+    const stats = computeGeometryStats(result.manifold, canonicalMesh, 0, '');
+    const thumb = await captureThumbnail();
+    await saveMeshVersion(blob, stats, thumb, 'imported mesh');
+    setStatus(statusBar, 'ready', 'Ready (frozen mesh)');
+    return session.id;
   }
 
   async function openEditorFromLanding() {
@@ -1106,6 +1241,7 @@ async function main() {
         onOpenHelp: () => showHelp(),
         onOpenCatalog: () => { void showCatalogPage(); },
         onOpenSession: openSessionFromLanding,
+        onImportSTL: (file) => { void handleImportSTL(file); },
       });
     }
     return landingEl;
@@ -1326,9 +1462,14 @@ async function main() {
   // Init measure tool
   initMeasureTool(getCanvas(), getCamera(), getMeshGroup(), viewportPane);
 
-  // Init editor — only auto-run if auto-run is enabled
+  // Init editor — only auto-run if auto-run is enabled. Skip when the
+  // current version is a frozen mesh: writes to the editor in that mode are
+  // just the "no source available" placeholder, and re-running them as code
+  // would clobber the loaded mesh with a syntax error.
   initEditor(editorContainer, defaultCode, (code: string) => {
-    if (isAutoRun()) runCode(code);
+    if (!isAutoRun()) return;
+    if (isFreeMeshActive()) return;
+    runCode(code);
   });
 
   // When the user changes the modeling-quality preset, re-render the
@@ -1353,6 +1494,68 @@ async function main() {
 
   // Initialize editor lock
   initEditorLock(editorContainer);
+
+  // Initialize free-mesh UI (notice banner + sculpt toolbar button) — these
+  // sit on top of the existing editor + viewport overlay and only activate
+  // when the current version is `source: 'mesh'`.
+  initFreeMeshUI(editorContainer);
+  initFreeSculptUI(clipControls);
+  // Keyboard undo/redo for free-mesh push operations (Ctrl/Cmd+Z / Ctrl+Y).
+  // Only fires when the current version is a frozen-mesh version and the
+  // respective stack is non-empty — falls through otherwise.
+  document.addEventListener('keydown', (e: KeyboardEvent) => {
+    const meta = e.ctrlKey || e.metaKey;
+    if (!meta) return;
+    if (!isFreeMeshActive()) return;
+    const isUndo = e.key === 'z' && !e.shiftKey;
+    const isRedo = (e.key === 'z' && e.shiftKey) || e.key === 'y';
+    if (!isUndo && !isRedo) return;
+    if (isUndo && !canUndoFreePush()) return;
+    if (isRedo && !canRedoFreePush()) return;
+    e.preventDefault();
+    if (isUndo) undoFreePushInternal();
+    else redoFreePushInternal();
+  });
+
+  configureFreeSculpt({
+    getMesh: () => currentMeshData,
+    onPush: async (newMesh: MeshData) => {
+      const result = buildResultFromMesh(newMesh);
+      if (result.error || !result.mesh || !result.manifold) {
+        // Silently reject the push if the result isn't a valid manifold
+        // — surfaces the failure as a status flash so the user knows.
+        setStatus(statusBar, 'error', `Push rejected: ${result.error ?? 'invalid mesh'}`);
+        setTimeout(() => setStatus(statusBar, 'ready', 'Ready (frozen mesh)'), 2500);
+        return;
+      }
+      // Adopt the canonical mesh that ofMesh produced so subsequent pushes
+      // operate on its (potentially normalized) vertex set.
+      currentMeshData = result.mesh;
+      if (currentManifold && currentManifold !== result.manifold && typeof currentManifold.delete === 'function') {
+        try { currentManifold.delete(); } catch { /* already deleted */ }
+      }
+      currentManifold = result.manifold;
+      const displayMesh = hasColorRegions() ? applyTriColorsIfVisible(result.mesh) : result.mesh;
+      updateMesh(displayMesh, { skipAutoFrame: true });
+      updateMultiView(displayMesh);
+      renderElevationsToContainer(elevationsContainer, displayMesh);
+      updatePaintMesh(result.mesh);
+      updateGeometryData(0, '');
+      // Overwrite the meshBlob in place — no new version. The blob IS the
+      // source of truth for free-mesh versions.
+      const current = getState().currentVersion;
+      if (current && current.source === 'mesh') {
+        const newBlob = serializeMeshData(result.mesh);
+        const stats = computeGeometryStats(result.manifold, result.mesh, 0, '');
+        const thumb = await captureThumbnail();
+        try {
+          await updateMeshVersion(current.id, newBlob, stats, thumb);
+        } catch (e) {
+          console.error('updateMeshVersion failed:', e);
+        }
+      }
+    },
+  });
 
   // Set up unlock handlers
   setUnlockHandlers(
@@ -2226,10 +2429,7 @@ async function main() {
         const kind = parsed.kind;
         return { error: `No version found with ${kind} "${parsed.value}" in the active session. Use listVersions() to see valid ${kind}s.` };
       }
-      setValue(version.code);
-      await runCodeSync(version.code);
-      rehydrateColorRegions(version.geometryData);
-      applyVersionAnnotations(version);
+      await loadVersionIntoEditor(version);
       // Labels are runtime state from the just-executed code. Surface
       // whether any were registered so callers can decide between
       // paintByLabel (when available) and paintComponent / paintInBox
@@ -2252,10 +2452,7 @@ async function main() {
       if (typeof check === 'object' && check !== null && 'error' in check) return check;
       const version = await navigateVersion(direction);
       if (version) {
-        setValue(version.code);
-        await runCodeSync(version.code);
-        rehydrateColorRegions(version.geometryData);
-        applyVersionAnnotations(version);
+        await loadVersionIntoEditor(version);
       }
       return version ? { id: version.id, index: version.index, label: version.label } : null;
     },
@@ -3034,6 +3231,52 @@ async function main() {
       syncLockState();
       const stats = regionTriangleStats(triangles, mesh);
       return { id: region.id, name: region.name, triangles: triangles.size, bbox: stats.bbox, centroid: stats.centroid, seedTriangle: nearest.triIndex };
+    },
+
+    /** Push the vertex of a triangle closest to a hit point along a surface
+     *  normal. Only valid when the current version is a frozen-mesh version
+     *  (`source: 'mesh'`). Obtain triangleIndex, hitPoint, and normal from
+     *  probePixel. Returns {ok: true} on success, {error} otherwise. */
+    applyFreePush(opts: {
+      triangleIndex: number;
+      hitPoint: [number, number, number];
+      normal: [number, number, number];
+      stepScale?: number;
+    }): { ok: true } | { error: string } {
+      if (!currentMeshData || getState().currentVersion?.source !== 'mesh') {
+        return { error: 'applyFreePush: no active frozen-mesh version' };
+      }
+      const check = guard(() => {
+        assertObject(opts, 'applyFreePush(opts)');
+        assertNoUnknownKeys(opts as Record<string, unknown>, ['triangleIndex', 'hitPoint', 'normal', 'stepScale'], 'applyFreePush(opts)');
+        assertNumber((opts as Record<string, unknown>).triangleIndex, 'applyFreePush(opts).triangleIndex', { integer: true, min: 0 });
+        assertNumber((opts as Record<string, unknown>).stepScale, 'applyFreePush(opts).stepScale', { optional: true });
+        return true;
+      });
+      if (typeof check === 'object' && check !== null && 'error' in check) return check as { error: string };
+      const ok = programmaticPush(
+        opts.triangleIndex,
+        opts.hitPoint,
+        opts.normal,
+        opts.stepScale !== undefined ? opts.stepScale : undefined,
+      );
+      return ok ? { ok: true } : { error: 'applyFreePush: push failed (check mesh is loaded)' };
+    },
+
+    /** Undo the most recent free-mesh push. Returns {error} if there is
+     *  nothing to undo. The undone push goes onto a redo stack. */
+    undoFreePush(): { ok: true } | { error: string } {
+      if (!canUndoFreePush()) return { error: 'Nothing to undo — no pushes recorded yet' };
+      const result = undoFreePushInternal();
+      return result ? { ok: true } : { error: 'Undo failed (no active frozen-mesh version)' };
+    },
+
+    /** Redo the most recently undone free-mesh push. Returns {error} if the
+     *  redo stack is empty. */
+    redoFreePush(): { ok: true } | { error: string } {
+      if (!canRedoFreePush()) return { error: 'Nothing to redo — call undoFreePush first' };
+      const result = redoFreePushInternal();
+      return result ? { ok: true } : { error: 'Redo failed (no active frozen-mesh version)' };
     },
 
     /** Check if any component is fully contained inside another (invisible geometry) */

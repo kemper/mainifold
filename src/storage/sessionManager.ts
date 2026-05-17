@@ -6,6 +6,7 @@ import {
   listSessions as dbListSessions,
   deleteSession as dbDeleteSession,
   saveVersion as dbSaveVersion,
+  updateMeshVersion as dbUpdateMeshVersion,
   listVersions as dbListVersions,
   getLatestVersion,
   getVersionByIndex,
@@ -387,6 +388,7 @@ export async function saveVersion(
     notes,
     undefined,
     annotationSnapshot,
+    undefined,
     nextImports.length > 0 ? nextImports : undefined,
   );
 
@@ -399,6 +401,62 @@ export async function saveVersion(
   updateURL();
   notify();
   return version;
+}
+
+/** Create a new "frozen mesh" version in the current session. The mesh blob
+ *  is the source of truth — `code` is set to an empty string and `source` is
+ *  marked `'mesh'` so loaders skip code execution and rebuild via
+ *  `Manifold.ofMesh()`. Used by STL import. */
+export async function saveMeshVersion(
+  meshBlob: ArrayBuffer,
+  geometryData: Record<string, unknown> | null,
+  thumbnail: Blob | null,
+  label?: string,
+  notes?: string,
+): Promise<Version | null> {
+  if (!currentState.session) return null;
+
+  const annotationSnapshot = serializeAnnotations();
+
+  const version = await dbSaveVersion(
+    currentState.session.id,
+    '',
+    geometryData,
+    thumbnail,
+    label,
+    notes,
+    undefined,
+    annotationSnapshot,
+    meshBlob,
+  );
+
+  currentState = {
+    ...currentState,
+    currentVersion: version,
+    versionCount: currentState.versionCount + 1,
+  };
+  updateURL();
+  notify();
+  return version;
+}
+
+/** Overwrite the mesh blob of an existing frozen-mesh version in place.
+ *  Used by the free sculpt prototype where edits *replace* the stored mesh
+ *  rather than creating a new version — the mesh blob is the source of
+ *  truth, no replay needed. Throws if the target isn't a frozen-mesh
+ *  version. */
+export async function updateMeshVersion(
+  versionId: string,
+  meshBlob: ArrayBuffer,
+  geometryData?: Record<string, unknown> | null,
+  thumbnail?: Blob | null,
+): Promise<Version> {
+  const updated = await dbUpdateMeshVersion(versionId, meshBlob, geometryData, thumbnail);
+  if (currentState.currentVersion?.id === versionId) {
+    currentState = { ...currentState, currentVersion: updated };
+    notify();
+  }
+  return updated;
 }
 
 export async function navigateVersion(direction: 'prev' | 'next'): Promise<Version | null> {

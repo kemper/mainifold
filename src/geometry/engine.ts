@@ -1,4 +1,4 @@
-import type { MeshResult } from './types';
+import type { MeshData, MeshResult } from './types';
 import type { Engine, Language, ValidateResult } from './engines/types';
 import { DEFAULT_LANGUAGE, isLanguage } from './engines/types';
 import { manifoldJsEngine, getManifoldModule } from './engines/manifoldJs';
@@ -106,4 +106,42 @@ export async function validateCodeAsync(source: string, lang?: Language): Promis
 
 export function isEngineReady(lang: Language): boolean {
   return engines[lang].isReady();
+}
+
+/** Build a {@link MeshResult} from a raw MeshData blob (no code execution).
+ *  Used by the free-mesh prototype to load a stored mesh as if it had been
+ *  produced by user code. Errors here surface the same way runtime errors
+ *  from the engine do: caller sees `{ mesh: null, manifold: null, error }`.
+ *  manifold-js must already be initialized (callers should `await initEngine()` first). */
+export function buildResultFromMesh(mesh: MeshData): MeshResult {
+  const module = getManifoldModule();
+  if (!module) {
+    return { mesh: null, manifold: null, error: 'manifold-js engine not initialized' };
+  }
+  try {
+    const manifold = module.Manifold.ofMesh(mesh);
+    if (!manifold) {
+      return { mesh: null, manifold: null, error: 'Manifold.ofMesh returned null' };
+    }
+    // Get the canonical mesh back so we have a consistent run-time view
+    // (merge vectors, normalized indexing) for downstream rendering / export.
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const canonical = (manifold as any).getMesh();
+    return {
+      mesh: {
+        vertProperties: canonical.vertProperties,
+        triVerts: canonical.triVerts,
+        numVert: canonical.numVert,
+        numTri: canonical.numTri,
+        numProp: canonical.numProp,
+        mergeFromVert: canonical.mergeFromVert,
+        mergeToVert: canonical.mergeToVert,
+      },
+      manifold,
+      error: null,
+    };
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    return { mesh: null, manifold: null, error: `Manifold.ofMesh failed: ${msg}` };
+  }
 }
