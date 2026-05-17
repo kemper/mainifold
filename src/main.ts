@@ -83,7 +83,26 @@ import { setColor as setAnnotateColor, setWidth as setAnnotateWidth, getWidth as
 import { addTextAnnotationAtAnchor, setFontSize as setAnnotateFontSize, getFontSize as getAnnotateFontSize } from './annotations/textMode';
 import { restoreView as restoreAnnotationViewById } from './annotations/selectMode';
 import { applyTriColors, applyTriColorsIfVisible, hasRegions as hasColorRegions, onChange as onColorRegionsChange, onVisibilityChange as onPaintVisibilityChange, clearRegions, serialize as serializeRegions, addRegion, getRegions, removeRegion, removeLastRegion, redoLastRegion, buildTriColors, createEmptyTriColors, overlayPainted, type SerializedColorRegion } from './color/regions';
-import { initEditorLock, syncLockState, setUnlockHandlers } from './color/editorLock';
+import { initEditorLock, syncLockState, setUnlockHandlers, registerExternalLockProbe, setLockBannerMessageProvider } from './color/editorLock';
+import { initSculptUI, setSculptApplyHandler } from './ui/sculptUI';
+import {
+  updateSculptMesh,
+  getCurrentSelection as getSculptSelection,
+  getKind as getSculptKind,
+  getInflateDistance,
+  getSmoothIterations,
+  clearSelection as clearSculptSelection,
+} from './sculpt/sculptMode';
+import {
+  getDeformers,
+  hasDeformers,
+  addDeformer,
+  clearDeformers,
+  serialize as serializeDeformers,
+  deserialize as deserializeDeformers,
+} from './sculpt/deformerStore';
+import { applyInflate, applySmooth } from './sculpt/deformers';
+import type { SerializedDeformer, DeformerCoplanarRegion, DeformerKind, DeformerParams as DeformerParamsAny } from './sculpt/types';
 import { buildAdjacency, findCoplanarRegion, findConnectedFromSeed, resolveSeed, findNearestTriangle } from './color/adjacency';
 import { findSlabTriangles } from './color/slabPaint';
 import { computeFaceGroups } from './color/faceGroups';
@@ -586,6 +605,107 @@ function enrichGeometryDataWithColors(geoData: Record<string, unknown> | null): 
   return geoData;
 }
 
+/** Resolve a single deformer's region descriptor against the current mesh +
+ *  adjacency, returning the triangle ids. Empty set when the seed no longer
+ *  hits — caller decides whether to skip silently. */
+function resolveDeformerRegion(
+  descriptor: DeformerCoplanarRegion,
+  mesh: MeshData,
+  adjacency: ReturnType<typeof buildAdjacency>,
+): Set<number> {
+  const { seedPoint, seedNormal, normalTolerance } = descriptor;
+  const seedTri = resolveSeed(seedPoint, seedNormal, mesh, adjacency, normalTolerance);
+  if (seedTri < 0) return new Set();
+  return findCoplanarRegion(seedTri, adjacency, normalTolerance);
+}
+
+/** Run a single deformer against a mesh. Returns the deformed mesh, or
+ *  null if the region resolved to empty. */
+function runDeformer(deformer: SerializedDeformer, mesh: MeshData): MeshData | null {
+  const adjacency = buildAdjacency(mesh);
+  const triangles = resolveDeformerRegion(deformer.regionDescriptor, mesh, adjacency);
+  if (triangles.size === 0) return null;
+  if (deformer.kind === 'inflate') {
+    const { distance } = deformer.params as { distance: number };
+    return applyInflate(mesh, triangles, distance);
+  }
+  if (deformer.kind === 'smooth') {
+    const { iterations } = deformer.params as { iterations: number };
+    return applySmooth(mesh, triangles, iterations);
+  }
+  return null;
+}
+
+/** Replay all deformers in order against a base mesh. Returns the new mesh.
+ *  Validates each step via Manifold.ofMesh so a deformer that produces
+ *  non-manifold output skips silently (preserves the pre-deformer mesh and
+ *  logs a warning) rather than corrupting later steps. */
+function replayDeformers(baseMesh: MeshData, deformers: readonly SerializedDeformer[]): MeshData {
+  if (deformers.length === 0) return baseMesh;
+  let mesh = baseMesh;
+  const sorted = [...deformers].sort((a, b) => a.order - b.order);
+  for (const d of sorted) {
+    const next = runDeformer(d, mesh);
+    if (!next) {
+      console.warn(`Sculpt: deformer ${d.id} (${d.kind}) skipped — region did not resolve.`);
+      continue;
+    }
+    if (!validateMeshAsManifold(next)) {
+      console.warn(`Sculpt: deformer ${d.id} (${d.kind}) skipped — result was not manifold.`);
+      continue;
+    }
+    mesh = next;
+  }
+  return mesh;
+}
+
+/** Try to round-trip a MeshData through Manifold.ofMesh as a manifold check.
+ *  Returns true if Manifold accepts it. Catches any throw — the WASM module
+ *  rejects non-manifold input. */
+function validateMeshAsManifold(mesh: MeshData): boolean {
+  const module = getModule();
+  if (!module) {
+    // No manifold module available — assume valid so we can still render
+    // (the engine probably hasn't initialized yet, in which case nothing
+    // useful is happening anyway).
+    return true;
+  }
+  let result: unknown = null;
+  try {
+    result = module.Manifold.ofMesh({
+      vertProperties: mesh.vertProperties,
+      triVerts: mesh.triVerts,
+      numProp: mesh.numProp,
+    });
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const m = result as any;
+    if (m && typeof m.numTri === 'function') {
+      const ok = m.numTri() > 0;
+      if (typeof m.delete === 'function') {
+        try { m.delete(); } catch { /* already deleted */ }
+      }
+      return ok;
+    }
+    return true;
+  } catch {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const m = result as any;
+    if (m && typeof m.delete === 'function') {
+      try { m.delete(); } catch { /* already deleted */ }
+    }
+    return false;
+  }
+}
+
+/** Include deformer state in geometry data for saving. */
+function enrichGeometryDataWithDeformers(geoData: Record<string, unknown> | null): Record<string, unknown> | null {
+  if (!geoData) return geoData;
+  if (hasDeformers()) {
+    geoData.deformers = serializeDeformers();
+  }
+  return geoData;
+}
+
 // === Argument validation helpers ==========================================
 //
 // Runtime type/shape validation for the window.partwright API. The public API
@@ -699,6 +819,24 @@ function assertEnum<T extends string>(val: unknown, allowed: readonly T[], param
     throw new ValidationError(`${paramName} must be one of: ${allowed.map(a => `"${a}"`).join(' | ')}. Got ${describeValue(val)}. See /ai.md#argument-validation`);
   }
   return val as T;
+}
+
+/** Validate an `{x, y, z}` object of finite numbers. Throws ValidationError
+ *  with a chatty pointer. Used by the AI-facing applyDeformer tool, where
+ *  the model passes coordinates as objects rather than tuples. */
+function assertXYZ(val: unknown, paramName: string): { x: number; y: number; z: number } {
+  if (val === undefined || val === null || typeof val !== 'object' || Array.isArray(val)) {
+    throw new ValidationError(`${paramName} must be an {x, y, z} object of finite numbers, got ${describeValue(val)}. See /ai.md#argument-validation`);
+  }
+  const obj = val as Record<string, unknown>;
+  assertNoUnknownKeys(obj, ['x', 'y', 'z'], paramName);
+  for (const k of ['x', 'y', 'z'] as const) {
+    const c = obj[k];
+    if (typeof c !== 'number' || !Number.isFinite(c)) {
+      throw new ValidationError(`${paramName}.${k} must be a finite number, got ${describeValue(c)}. See /ai.md#argument-validation`);
+    }
+  }
+  return { x: obj.x as number, y: obj.y as number, z: obj.z as number };
 }
 
 /** Validate a fixed-length tuple of numbers (e.g. [x,y,z]). */
@@ -1090,7 +1228,7 @@ async function main() {
   createSessionBar(editorUI, {
     onSaveVersion: async () => ({
       code: getValue(),
-      geometryData: enrichGeometryDataWithColors(getGeometryDataObj()),
+      geometryData: enrichGeometryDataWithDeformers(enrichGeometryDataWithColors(getGeometryDataObj())),
       thumbnail: await captureThumbnail(),
     }),
     onLoadVersion: async (code: string) => {
@@ -1212,15 +1350,29 @@ async function main() {
       await switchLanguage(sessionLang);
     }
     setValue(version.code);
+    // Preload deformers BEFORE running the code — runCodeSync replays them
+    // automatically when they're already in the store.
+    preloadDeformersForVersion(version.geometryData);
     await runCodeSync(version.code);
     rehydrateColorRegions(version.geometryData);
     applyVersionAnnotations(version);
+    // Surface the lock if deformers loaded (color path already syncs via
+    // rehydrateColorRegions, but a deformer-only version needs an explicit nudge).
+    syncLockState();
     const sessionImages = await getImagesFromSession();
     if (sessionImages) {
       _setImages(sessionImages);
     } else {
       _clearImages();
     }
+  }
+
+  function preloadDeformersForVersion(geometryData: Record<string, unknown> | null): void {
+    clearDeformers();
+    if (!geometryData) return;
+    const raw = geometryData.deformers as SerializedDeformer[] | undefined;
+    if (!raw || raw.length === 0) return;
+    deserializeDeformers(raw);
   }
 
   async function openEditorFromLanding() {
@@ -1497,6 +1649,7 @@ async function main() {
   initDimensionsToggle(clipControls);
   initAnnotateUI(clipControls);
   initPaintUI(clipControls);
+  initSculptUI(clipControls);
   // Declared before initMeasureToggle is called so the assignment inside it
   // doesn't hit a let-TDZ error (the same `let` lower in this function is
   // hoisted to a binding, but only initialized when execution reaches it).
@@ -1508,32 +1661,57 @@ async function main() {
   // Initialize editor lock
   initEditorLock(editorContainer);
 
+  // Deformers participate in the editor lock too. We register a probe so the
+  // lock module doesn't need to import sculpt state directly, and provide a
+  // banner-message override so the wording reflects which subsystem is active.
+  registerExternalLockProbe(hasDeformers);
+  setLockBannerMessageProvider(() => {
+    if (hasColorRegions() && hasDeformers()) return '🔒 This version has color regions and deformers applied.';
+    if (hasDeformers()) return '🔒 This version has deformers applied.';
+    return null; // fall back to default
+  });
+
   // Set up unlock handlers
   setUnlockHandlers(
-    // Fork: save the colored version (if needed), then create a new uncolored version
+    // Fork: save the colored/sculpted version (if needed), then create a new clean version
     async (colorData) => {
       if (getState().session && currentMeshData) {
         const code = getValue();
 
-        // 1. Only save the colored version if it doesn't already have colorRegions persisted
-        const currentVersion = getState().currentVersion;
-        const alreadyPersisted = currentVersion?.geometryData &&
-          Array.isArray((currentVersion.geometryData as Record<string, unknown>).colorRegions);
+        // Snapshot deformers BEFORE the unlock-modal cleared them (it only
+        // clears color regions; deformers are cleared here).
+        const sculptData = serializeDeformers();
+        const hadDeformers = sculptData.length > 0;
+        clearDeformers();
 
-        if (!alreadyPersisted) {
+        // 1. Only save the colored/sculpted version if it isn't already persisted with the data.
+        const currentVersion = getState().currentVersion;
+        const persistedGeo = currentVersion?.geometryData as Record<string, unknown> | null | undefined;
+        const colorsAlreadyPersisted = persistedGeo && Array.isArray(persistedGeo.colorRegions);
+        const deformersAlreadyPersisted = persistedGeo && Array.isArray(persistedGeo.deformers);
+
+        const needsSavedSnapshot = (colorData.length > 0 && !colorsAlreadyPersisted)
+          || (hadDeformers && !deformersAlreadyPersisted);
+
+        if (needsSavedSnapshot) {
           const thumbnail = await captureThumbnail();
-          const coloredGeoData = getGeometryDataObj() ?? {};
-          coloredGeoData.colorRegions = colorData;
-          await saveVersion(code, coloredGeoData, thumbnail, 'colored', undefined, { force: true });
+          const snapshotGeo = getGeometryDataObj() ?? {};
+          if (colorData.length > 0) snapshotGeo.colorRegions = colorData;
+          if (hadDeformers) snapshotGeo.deformers = sculptData;
+          const label = hadDeformers && colorData.length > 0
+            ? 'colored+sculpted'
+            : hadDeformers ? 'sculpted' : 'colored';
+          await saveVersion(code, snapshotGeo, thumbnail, label, undefined, { force: true });
         }
 
-        // 2. Re-render without colors, then save an uncolored sibling
-        updateMesh(currentMeshData, { skipAutoFrame: true });
-        updateMultiView(currentMeshData);
-        renderElevationsToContainer(elevationsContainer, currentMeshData);
+        // 2. Re-execute the bare code so currentMeshData is the un-deformed mesh again,
+        //    then save an unmodified sibling. Re-running is the only reliable way to
+        //    drop a deformer — the in-memory currentMeshData reflects the deformed state.
+        await runCodeSync(code);
 
         const cleanGeoData = getGeometryDataObj() ?? {};
         delete cleanGeoData.colorRegions;
+        delete cleanGeoData.deformers;
         const cleanThumb = await captureThumbnail();
         await saveVersion(code, cleanGeoData, cleanThumb, undefined, undefined, { force: true });
       } else {
@@ -1545,13 +1723,12 @@ async function main() {
         }
       }
     },
-    // Clear: just re-render without colors (clearRegions already called)
+    // Clear: discard deformers + colors, re-run from bare code so the viewport
+    // reflects the undeformed state.
     () => {
-      if (currentMeshData) {
-        updateMesh(currentMeshData, { skipAutoFrame: true });
-        updateMultiView(currentMeshData);
-        renderElevationsToContainer(elevationsContainer, currentMeshData);
-      }
+      clearDeformers();
+      const code = getValue();
+      void runCodeSync(code);
     },
   );
 
@@ -1585,6 +1762,137 @@ async function main() {
     updateMultiView(colored);
     renderElevationsToContainer(elevationsContainer, colored);
   });
+
+  // Sculpt: apply the current deformer to the selected region. Saves a new
+  // version and locks the editor (same lifecycle as paint).
+  setSculptApplyHandler(async () => {
+    const selection = getSculptSelection();
+    if (!selection || selection.triangles.size === 0) return;
+
+    const kind = getSculptKind();
+    const params: DeformerParamsAny = kind === 'inflate'
+      ? { distance: getInflateDistance() }
+      : { iterations: getSmoothIterations() };
+
+    const result = await applyDeformerAndSave({
+      kind,
+      regionDescriptor: {
+        kind: 'coplanar',
+        seedPoint: selection.seedPoint,
+        seedNormal: selection.seedNormal,
+        normalTolerance: selection.tolerance,
+      },
+      params,
+      label: 'sculpted',
+    });
+
+    if ('error' in result) {
+      console.warn('Sculpt: applyDeformerAndSave failed —', result.error);
+      window.alert(`Sculpt: ${result.error}`);
+    }
+
+    clearSculptSelection();
+    syncLockState();
+  });
+
+  /** Shared apply path used by both the UI Sculpt button and the AI
+   *  `applyDeformer` tool. Resolves the region descriptor against the
+   *  current mesh, runs the named deformer, validates the result with
+   *  Manifold.ofMesh, persists the descriptor on the deformerStore, updates
+   *  the live mesh + paint/sculpt adjacency, and saves a new version.
+   *
+   *  Returns `{ error }` on any validation failure or non-manifold result —
+   *  callers should not throw the error to the user. */
+  async function applyDeformerAndSave(opts: {
+    kind: DeformerKind;
+    regionDescriptor: DeformerCoplanarRegion;
+    params: DeformerParamsAny;
+    label?: string;
+  }): Promise<
+    | { error: string }
+    | {
+        versionId: string | null;
+        affectedTriangles: number;
+        deformer: { id: number; kind: DeformerKind; params: DeformerParamsAny; regionDescriptor: DeformerCoplanarRegion };
+      }
+  > {
+    if (!currentMeshData) return { error: 'No geometry loaded. Run code first.' };
+
+    const baseMesh = currentMeshData;
+    const adjacency = buildAdjacency(baseMesh);
+    const triangles = resolveDeformerRegion(opts.regionDescriptor, baseMesh, adjacency);
+    if (triangles.size === 0) {
+      return { error: 'Region selection found zero triangles — seedPoint/seedNormal did not raycast onto the mesh, or the bucket tolerance was too tight.' };
+    }
+
+    let trial: MeshData;
+    try {
+      if (opts.kind === 'inflate') {
+        trial = applyInflate(baseMesh, triangles, (opts.params as { distance: number }).distance);
+      } else if (opts.kind === 'smooth') {
+        trial = applySmooth(baseMesh, triangles, (opts.params as { iterations: number }).iterations);
+      } else {
+        return { error: `Unknown deformer kind: ${String(opts.kind)}` };
+      }
+    } catch (e) {
+      return { error: e instanceof Error ? e.message : String(e) };
+    }
+
+    if (!validateMeshAsManifold(trial)) {
+      return { error: 'Deformer produced a non-manifold mesh. Try a smaller distance / fewer iterations, or pick a different region.' };
+    }
+
+    // Persist the deformer descriptor on the store.
+    const stored = addDeformer({
+      kind: opts.kind,
+      regionDescriptor: opts.regionDescriptor,
+      params: opts.params,
+    });
+
+    // Update in-memory mesh to the deformed result so paint/picks/exports
+    // all see the new geometry. Adjacency is rebuilt on next updateSculptMesh.
+    currentMeshData = trial;
+    const displayMesh = hasColorRegions() ? applyTriColorsIfVisible(trial) : trial;
+    updateMesh(displayMesh, { skipAutoFrame: true });
+    updateMultiView(displayMesh);
+    renderElevationsToContainer(elevationsContainer, displayMesh);
+    updatePaintMesh(trial);
+    updateSculptMesh(trial);
+
+    // Save a new version with the deformer baked into geometryData.deformers.
+    let savedId: string | null = null;
+    if (getState().session) {
+      const thumbnail = await captureThumbnail();
+      const geoData = enrichGeometryDataWithDeformers(enrichGeometryDataWithColors(getGeometryDataObj()));
+      const savedLabel = opts.label ?? autoDeformerLabel(opts.kind, opts.params);
+      const saved = await saveVersion(getValue(), geoData, thumbnail, savedLabel, undefined, { force: true });
+      savedId = saved?.id ?? null;
+    }
+
+    return {
+      versionId: savedId,
+      affectedTriangles: triangles.size,
+      deformer: {
+        id: stored.id,
+        kind: stored.kind,
+        params: stored.params as DeformerParamsAny,
+        regionDescriptor: stored.regionDescriptor as DeformerCoplanarRegion,
+      },
+    };
+  }
+
+  function autoDeformerLabel(kind: DeformerKind, params: DeformerParamsAny): string {
+    if (kind === 'inflate') {
+      const d = (params as { distance: number }).distance;
+      const sign = d >= 0 ? '+' : '';
+      return `inflate ${sign}${d.toFixed(2)}`;
+    }
+    if (kind === 'smooth') {
+      const n = (params as { iterations: number }).iterations;
+      return `smooth ×${n}`;
+    }
+    return 'sculpted';
+  }
 
   // When annotations change (stroke added/removed/cleared) or are toggled,
   // refresh the offscreen-rendered panes (multiview + elevations) so they
@@ -2347,7 +2655,7 @@ async function main() {
         return { error: 'No active session. Call createSession() or openSession(id) first.' };
       }
       const thumbnail = await captureThumbnail();
-      const version = await saveVersion(getValue(), enrichGeometryDataWithColors(getGeometryDataObj()), thumbnail, label);
+      const version = await saveVersion(getValue(), enrichGeometryDataWithDeformers(enrichGeometryDataWithColors(getGeometryDataObj())), thumbnail, label);
       if (version) return { id: version.id, index: version.index, label: version.label };
       return {
         skipped: true,
@@ -2450,7 +2758,7 @@ async function main() {
       await runCodeSync(code);
       const newGeoData = JSON.parse(geometryDataEl.textContent || '{}');
       const thumbnail = await captureThumbnail();
-      const version = await saveVersion(code, enrichGeometryDataWithColors(getGeometryDataObj()), thumbnail, label, assertions?.notes);
+      const version = await saveVersion(code, enrichGeometryDataWithDeformers(enrichGeometryDataWithColors(getGeometryDataObj())), thumbnail, label, assertions?.notes);
 
       let diff = null;
       if (prevGeoData && prevGeoData.status === 'ok' && newGeoData.status === 'ok') {
@@ -3188,6 +3496,90 @@ async function main() {
       syncLockState();
       const stats = regionTriangleStats(triangles, mesh);
       return { id: region.id, name: region.name, triangles: triangles.size, bbox: stats.bbox, centroid: stats.centroid, seedTriangle: nearest.triIndex };
+    },
+
+    /** Apply a procedural deformer (Inflate / Smooth) to a coplanar region
+     *  of the current mesh. The region is selected by raycasting from a
+     *  seed point along a seed normal — pair with `probePixel` to find a
+     *  surface hit visually, then hand the `{point, normal}` straight in.
+     *
+     *  Saves a new locked version automatically. To iterate, call
+     *  applyDeformer again — each call stacks on the previous result and
+     *  creates a new version. Use forkVersion to escape the lock and edit
+     *  the source code.
+     *
+     *  ```
+     *  const hit = partwright.probePixel({ pixel: [100, 100], view: {elevation: 90, ortho: true, size: 200} });
+     *  await partwright.applyDeformer({
+     *    seedPoint: hit.point,
+     *    seedNormal: hit.normal,
+     *    deformer: 'inflate',
+     *    distance: 2,
+     *  });
+     *  ``` */
+    async applyDeformer(opts: {
+      seedPoint: { x: number; y: number; z: number };
+      seedNormal: { x: number; y: number; z: number };
+      deformer: 'inflate' | 'smooth';
+      distance?: number;
+      iterations?: number;
+      tolerance?: number;
+      label?: string;
+    }) {
+      if (!opts || typeof opts !== 'object') return { error: 'applyDeformer requires { seedPoint, seedNormal, deformer, ... }' };
+      const check = guard(() => {
+        assertNoUnknownKeys(
+          opts as unknown as Record<string, unknown>,
+          ['seedPoint', 'seedNormal', 'deformer', 'distance', 'iterations', 'tolerance', 'label'],
+          'applyDeformer(opts)',
+        );
+        assertXYZ(opts.seedPoint, 'applyDeformer(opts).seedPoint');
+        assertXYZ(opts.seedNormal, 'applyDeformer(opts).seedNormal');
+        assertEnum(opts.deformer, ['inflate', 'smooth'] as const, 'applyDeformer(opts).deformer');
+        assertNumber(opts.distance, 'applyDeformer(opts).distance', { optional: true, min: -1000, max: 1000 });
+        assertNumber(opts.iterations, 'applyDeformer(opts).iterations', { optional: true, integer: true, min: 1, max: 100 });
+        assertNumber(opts.tolerance, 'applyDeformer(opts).tolerance', { optional: true, min: 0, max: 1 });
+        assertString(opts.label, 'applyDeformer(opts).label', { optional: true });
+        return true;
+      });
+      if (typeof check === 'object' && check !== null && 'error' in check) return check;
+
+      const tolerance = opts.tolerance ?? 0.9995;
+      const seedPoint: [number, number, number] = [opts.seedPoint.x, opts.seedPoint.y, opts.seedPoint.z];
+      const seedNormal: [number, number, number] = [opts.seedNormal.x, opts.seedNormal.y, opts.seedNormal.z];
+
+      let params: DeformerParamsAny;
+      if (opts.deformer === 'inflate') {
+        const distance = opts.distance ?? 1;
+        params = { distance };
+      } else {
+        const iterations = opts.iterations ?? 3;
+        params = { iterations };
+      }
+
+      const result = await applyDeformerAndSave({
+        kind: opts.deformer,
+        regionDescriptor: { kind: 'coplanar', seedPoint, seedNormal, normalTolerance: tolerance },
+        params,
+        label: opts.label,
+      });
+      return result;
+    },
+
+    /** Returns the deformers applied to the currently loaded version, in
+     *  application order. Useful for verifying state before chaining another
+     *  applyDeformer call. */
+    listAppliedDeformers(): { deformers: { id: number; kind: DeformerKind; params: DeformerParamsAny; regionDescriptor: DeformerCoplanarRegion; order: number }[] } {
+      const list = serializeDeformers();
+      return {
+        deformers: list.map(d => ({
+          id: d.id,
+          kind: d.kind,
+          params: d.params as DeformerParamsAny,
+          regionDescriptor: d.regionDescriptor as DeformerCoplanarRegion,
+          order: d.order,
+        })),
+      };
     },
 
     /** Check if any component is fully contained inside another (invisible geometry) */
@@ -4625,6 +5017,9 @@ async function main() {
         'paintByLabel':    { signature: 'paintByLabel({label, color, name?}) -- Paint a labelled feature by name. Pair with api.label/labeledUnion in your code. No coordinate guessing.', docs: '/ai.md#color-regions' },
         'paintByLabels':   { signature: 'paintByLabels([{label, color, name?}, ...]) -- Batch sibling. N features painted in one call -> {results, failed}. Use for any multi-feature paint job.', docs: '/ai.md#color-regions' },
         'paintConnected':  { signature: 'paintConnected({seed: {point, normal?}, maxDeviationDeg?, color, name?}) -- BFS-flood from a surface seed, gated by deviation from SEED normal (not adjacent). Pairs with probePixel for "paint everything contiguous and facing this way".', docs: '/ai.md#color-regions' },
+        // Sculpt deformers
+        'applyDeformer':   { signature: 'await applyDeformer({seedPoint:{x,y,z}, seedNormal:{x,y,z}, deformer:"inflate"|"smooth", distance?, iterations?, tolerance?, label?}) -- Apply a procedural deformer to a coplanar region. Saves a new locked version. Pair with probePixel for surface picks.', docs: '/ai.md#sculpt-deformers' },
+        'listAppliedDeformers': { signature: 'listAppliedDeformers() -> {deformers: [{id, kind, params, regionDescriptor, order}]} -- Deformers applied to the current version, in apply order.', docs: '/ai.md#sculpt-deformers' },
         'getFeatureCentroids': { signature: 'getFeatureCentroids({maxGroups?, withinBox?}?) -- Token-cheap: face-group centroids + normals + bbox, no triangleIds. Use to plan paint targets.', docs: '/ai.md#color-regions' },
         'removeRegion':    { signature: 'removeRegion(id) -- Remove ONE color region by id from listRegions(). Use this to fix a single mistake without nuking the rest.', docs: '/ai.md#color-regions' },
         'undoLastPaint':   { signature: 'undoLastPaint() -- Undo the most recent paint op. Removed region goes on a redo stack.', docs: '/ai.md#color-regions' },
@@ -4696,6 +5091,29 @@ async function main() {
   const apiWindow = window as unknown as Record<string, unknown>;
   apiWindow.partwright = partwrightAPI;
   apiWindow.mainifold = partwrightAPI;
+
+  // Internal test bridge for the sculpt deformer tests. Exposed at boot so
+  // tests don't need to dynamic-import internal modules — that's racy with
+  // Vite's module discovery on cold start.
+  apiWindow.__sculptTest = {
+    addDeformer,
+    clearDeformers,
+    getDeformers,
+    hasDeformers,
+    syncLockState,
+    rerunCurrentCode: () => runCodeSync(getValue()),
+    getRenderedMeshMaxZ(): number {
+      const group = getMeshGroup();
+      const solid = group.children[0] as unknown as { geometry?: { attributes?: { position?: { array: Float32Array } } } };
+      const pos = solid?.geometry?.attributes?.position?.array;
+      if (!pos) return NaN;
+      let maxZ = -Infinity;
+      for (let i = 2; i < pos.length; i += 3) {
+        if (pos[i] > maxZ) maxZ = pos[i];
+      }
+      return maxZ;
+    },
+  };
 
   // Log API availability for AI agents
   console.info('Partwright: AI agents should use window.partwright -- start with partwright.help(). window.mainifold remains as a legacy alias. See /llms.txt');
@@ -5215,7 +5633,6 @@ async function main() {
     if (result.mesh) {
       clearEditorDiagnostics();
       clearEditorErrorPanel(editorErrorPanel);
-      currentMeshData = result.mesh;
       // Release the previous Manifold's WASM-heap memory before overwriting.
       // Manifold objects live outside the JS heap and require manual .delete().
       if (currentManifold && currentManifold !== result.manifold && typeof currentManifold.delete === 'function') {
@@ -5227,12 +5644,18 @@ async function main() {
       // saved version re-runs the code first, which rebuilds the map.
       currentLabelMap = result.labelMap ?? null;
 
+      // Replay any rehydrated sculpt deformers on top of the freshly-executed
+      // mesh. When no deformers are loaded this is a no-op.
+      const sculptedMesh = hasDeformers() ? replayDeformers(result.mesh, getDeformers()) : result.mesh;
+      currentMeshData = sculptedMesh;
+
       // Apply any existing color regions to the mesh
-      const displayMesh = hasColorRegions() ? applyTriColorsIfVisible(result.mesh) : result.mesh;
+      const displayMesh = hasColorRegions() ? applyTriColorsIfVisible(sculptedMesh) : sculptedMesh;
       updateMesh(displayMesh);
       updateMultiView(displayMesh);
       renderElevationsToContainer(elevationsContainer, displayMesh);
-      updatePaintMesh(result.mesh); // always pass uncolored mesh for adjacency
+      updatePaintMesh(sculptedMesh); // always pass uncolored mesh for adjacency
+      updateSculptMesh(sculptedMesh);
 
       updateGeometryData(elapsed, src);
       syncClipSliderBounds();
