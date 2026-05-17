@@ -299,13 +299,16 @@ function onMouseLeave(): void {
 }
 
 /** Public helper: render a hover-style highlight over a triangle set.
- *  Used by the slab UI for live preview. Returns a teardown function. */
-export function previewTriangles(triangles: Set<number>): () => void {
-  showHighlight(triangles);
+ *  Used by the slab UI for live preview and by the region list for
+ *  hover-to-locate. Optional `color` overrides the active paint color
+ *  (defaults to whatever `setColor` last received). Returns a teardown
+ *  function. */
+export function previewTriangles(triangles: Set<number>, color?: [number, number, number]): () => void {
+  showHighlight(triangles, color);
   return () => clearHighlight();
 }
 
-function showHighlight(triangles: Set<number>): void {
+function showHighlight(triangles: Set<number>, colorOverride?: [number, number, number]): void {
   clearHighlight();
   if (!currentMesh) return;
   if (triangles.size === 0) return;
@@ -331,8 +334,9 @@ function showHighlight(triangles: Set<number>): void {
   geo.setAttribute('position', new THREE.BufferAttribute(positions, 3));
   geo.computeVertexNormals();
 
+  const c = colorOverride ?? currentColor;
   const mat = new THREE.MeshBasicMaterial({
-    color: new THREE.Color(currentColor[0], currentColor[1], currentColor[2]),
+    color: new THREE.Color(c[0], c[1], c[2]),
     transparent: true,
     opacity: 0.4,
     side: THREE.DoubleSide,

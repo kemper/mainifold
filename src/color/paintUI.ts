@@ -14,6 +14,7 @@ import {
   getBrushRadius,
   setSlabAxis,
   getSlabAxis,
+  previewTriangles,
   type PaintTool,
 } from './paintMode';
 import {
@@ -538,8 +539,22 @@ function updateRegionList(container: HTMLElement): void {
 
   for (const region of regions) {
     const row = document.createElement('div');
-    row.className = 'flex items-center gap-1.5 py-0.5 group';
+    row.className = 'flex items-center gap-1.5 py-0.5 group rounded px-1 -mx-1 hover:bg-zinc-700/40 transition-colors cursor-default';
     row.dataset.regionId = String(region.id);
+
+    // Hover-to-locate: tint the painted triangles with the region's own color
+    // so the user can see at a glance where in the viewport this row lives.
+    // Uses the same translucent overlay the brush/bucket tools draw under the
+    // cursor — mirrored on the panel side. Teardown fires on mouseleave so a
+    // stale highlight never sticks.
+    let releaseHover: (() => void) | null = null;
+    row.addEventListener('mouseenter', () => {
+      if (region.triangles.size === 0) return;
+      releaseHover = previewTriangles(region.triangles, region.color);
+    });
+    row.addEventListener('mouseleave', () => {
+      if (releaseHover) { releaseHover(); releaseHover = null; }
+    });
 
     const dot = document.createElement('span');
     dot.className = 'w-3 h-3 rounded-sm shrink-0';
