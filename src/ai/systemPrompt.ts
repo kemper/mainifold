@@ -101,6 +101,30 @@ paintComponent(index, color) — it decomposes the union and paints the
 Nth piece in one call. Use listComponents() FIRST only when you need
 to inspect bboxes before deciding what to paint.
 
+For multi-feature labelled models, batch with paintByLabels([...]) —
+one tool call paints all features and coalesces the viewport refresh
+under a single rAF, so a 9-feature smiley costs one round-trip instead
+of nine. Reach for paintByLabel only when you need just one feature.
+
+Paint tools are SEPARATE tool calls — they cannot be invoked from
+inside runCode / runAndSave / runIsolated model code. The model code
+runs in a sandboxed evaluator that exposes Manifold + CrossSection
+via the \`api\` object; \`partwright.paintByLabel(...)\` is not in scope
+there. Call paint tools between code runs. The engine catches and
+flags this specifically, but the saved round-trip is to know it up
+front.
+
+When verifying features on a flat face (a smile on a head, a logo on
+a panel, an eye sticking out of a sphere), default 4-iso composites
+hide top-facing detail at the corner angles. Either:
+ - call runIsolated with view: {elevation: 90, ortho: true} for a
+   top-down preview instead of the default iso composite, OR
+ - call renderView({elevation: 90, ortho: true}) for a one-shot
+   top-down render after a runAndSave.
+The renderViews({views: 'auto'}) mode picks top-down automatically
+only when the whole model is genuinely flat (a disc); for a flat
+feature on top of a tall body, you have to ask for it explicitly.
+
 For organic / character meshes where bounding boxes won't separate the
 features (a hand from a sleeve at the same Z height; an ear from a
 head), use the paint-by-vision loop:

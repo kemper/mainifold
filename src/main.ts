@@ -2383,12 +2383,19 @@ async function main() {
       await runCodeSync(version.code);
       rehydrateColorRegions(version.geometryData);
       applyVersionAnnotations(version);
+      // Labels are runtime state from the just-executed code. Surface
+      // whether any were registered so callers can decide between
+      // paintByLabel (when available) and paintComponent / paintInBox
+      // (when not) without a follow-up listLabels() round-trip.
+      const labelCount = currentLabelMap?.size ?? 0;
       return {
         id: version.id,
         index: version.index,
         label: version.label,
         code: version.code,
         geometryData: version.geometryData,
+        labelsAvailable: labelCount > 0,
+        labelCount,
       };
     },
 
@@ -2688,9 +2695,25 @@ async function main() {
       return _running;
     },
 
-    /** Run code without mutating editor, viewport, or session state. Returns geometry stats + thumbnail. */
-    async runIsolated(code: string) {
-      const check = guard(() => assertString(code, 'runIsolated(code)', { allowEmpty: false }));
+    /** Run code without mutating editor, viewport, or session state.
+     *  Returns geometry stats + thumbnail. By default the thumbnail is
+     *  the standard 4-iso composite; pass `view` to render a single
+     *  named angle instead — useful when the feature you're verifying
+     *  (a smile on a face, a logo on a flat panel) only reads from one
+     *  specific direction. Same shape `renderView` accepts. */
+    async runIsolated(code: string, view?: { elevation?: number; azimuth?: number; ortho?: boolean; size?: number }) {
+      const check = guard(() => {
+        assertString(code, 'runIsolated(code)', { allowEmpty: false });
+        if (view !== undefined) {
+          const v = assertObject(view, 'runIsolated(code, view)')!;
+          assertNoUnknownKeys(v, ['elevation', 'azimuth', 'ortho', 'size'], 'runIsolated(code, view)');
+          assertNumber(v.elevation, 'runIsolated(code, view).elevation', { optional: true, min: -90, max: 90 });
+          assertNumber(v.azimuth, 'runIsolated(code, view).azimuth', { optional: true });
+          assertBoolean(v.ortho, 'runIsolated(code, view).ortho', { optional: true });
+          assertNumber(v.size, 'runIsolated(code, view).size', { optional: true, min: 1, integer: true });
+        }
+        return true;
+      });
       if (typeof check === 'object' && check !== null && 'error' in check) {
         return { geometryData: { status: 'error', error: check.error }, thumbnail: null };
       }
@@ -2699,8 +2722,12 @@ async function main() {
       let thumbnail: string | null = null;
       if (meshData) {
         try {
-          const canvas = renderCompositeCanvas(meshData);
-          thumbnail = canvas.toDataURL('image/png');
+          if (view) {
+            thumbnail = renderSingleView(meshData, view);
+          } else {
+            const canvas = renderCompositeCanvas(meshData);
+            thumbnail = canvas.toDataURL('image/png');
+          }
         } catch { /* ignore */ }
       }
 
@@ -4286,6 +4313,50 @@ async function main() {
       return { id: region.id, name: region.name, triangles: triangles.size, bbox: stats.bbox, centroid: stats.centroid };
     },
 
+    /** Batch sibling of `paintByLabel`. Paints N labelled features in
+     *  one call, collapsing what would otherwise be N round-trips into
+     *  a single tool invocation. The viewport refresh fires once (the
+     *  existing `scheduleColorRefresh` rAF coalescing absorbs the
+     *  individual commits), so a 9-feature smiley paints in one frame
+     *  instead of nine.
+     *
+     *  Returns `{ results: [...], failed: [{label, error}] }`. Each
+     *  entry in `results` is the same shape `paintByLabel` returns; an
+     *  empty `failed` array means every label resolved.
+     *
+     *  ```
+     *  partwright.paintByLabels([
+     *    { label: 'head',  color: [0.4, 0.7, 0.4] },
+     *    { label: 'eyeL',  color: [0,   0,   0  ] },
+     *    { label: 'eyeR',  color: [0,   0,   0  ] },
+     *    { label: 'mouth', color: [0.8, 0.2, 0.2] },
+     *  ]);
+     *  ``` */
+    paintByLabels(items: Array<{ label: string; color: [number, number, number]; name?: string }>) {
+      if (!Array.isArray(items)) return { error: 'paintByLabels requires an array of { label, color, name? }' };
+      if (items.length === 0) return { results: [], failed: [] };
+      if (!currentMeshData) return { error: 'No geometry loaded — run code first.' };
+      if (!currentLabelMap || currentLabelMap.size === 0) {
+        return { error: 'No labels registered in the current run. Wrap features with api.label(shape, "name") in your code, then runAndSave, then call paintByLabels.' };
+      }
+      const results: Array<Record<string, unknown>> = [];
+      const failed: Array<{ label: string; error: string }> = [];
+      for (let i = 0; i < items.length; i++) {
+        const item = items[i];
+        if (!item || typeof item !== 'object') {
+          failed.push({ label: `(item ${i})`, error: 'each entry must be { label, color, name? }' });
+          continue;
+        }
+        const r = partwrightAPI.paintByLabel(item) as Record<string, unknown>;
+        if (r && typeof r === 'object' && 'error' in r) {
+          failed.push({ label: typeof item.label === 'string' ? item.label : `(item ${i})`, error: String(r.error) });
+        } else {
+          results.push(r);
+        }
+      }
+      return { results, failed };
+    },
+
     // === Annotations API ===
 
     /** List all freehand annotation strokes drawn on the model surface.
@@ -4551,6 +4622,7 @@ async function main() {
         'paintComponent':  { signature: 'paintComponent({index, color, name?, topOnly?}) -- One-call shortcut: listComponents + paintInBox for the Nth piece.', docs: '/ai.md#color-regions' },
         'listLabels':      { signature: 'listLabels() -> {count, labels: [{name, triangleCount, bbox, centroid}]} -- Labels registered in the current run via api.label(shape, name). Survives boolean ops; the cleanest paint primitive on agent-authored geometry.', docs: '/ai.md#color-regions' },
         'paintByLabel':    { signature: 'paintByLabel({label, color, name?}) -- Paint a labelled feature by name. Pair with api.label/labeledUnion in your code. No coordinate guessing.', docs: '/ai.md#color-regions' },
+        'paintByLabels':   { signature: 'paintByLabels([{label, color, name?}, ...]) -- Batch sibling. N features painted in one call -> {results, failed}. Use for any multi-feature paint job.', docs: '/ai.md#color-regions' },
         'paintConnected':  { signature: 'paintConnected({seed: {point, normal?}, maxDeviationDeg?, color, name?}) -- BFS-flood from a surface seed, gated by deviation from SEED normal (not adjacent). Pairs with probePixel for "paint everything contiguous and facing this way".', docs: '/ai.md#color-regions' },
         'getFeatureCentroids': { signature: 'getFeatureCentroids({maxGroups?, withinBox?}?) -- Token-cheap: face-group centroids + normals + bbox, no triangleIds. Use to plan paint targets.', docs: '/ai.md#color-regions' },
         'removeRegion':    { signature: 'removeRegion(id) -- Remove ONE color region by id from listRegions(). Use this to fix a single mistake without nuking the rest.', docs: '/ai.md#color-regions' },

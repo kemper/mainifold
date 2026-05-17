@@ -128,7 +128,7 @@ const ALL_TOOLS: ToolDefinition[] = [
   },
   {
     name: 'paintByLabel',
-    description: 'Paint a labelled feature by name. The label must have been registered in the current run via api.label(shape, name) or api.labeledUnion. This is the bullseye for "describe how to make and paint a model" workflows: write the geometry with labels, then paint by name — no coordinate guessing, no bounding-box estimation, no fan-bleed. Survives boolean ops because manifold-3d propagates originalID through runOriginalID on the result mesh. Only works for manifold-js (SCAD has no equivalent); falls back to paintComponent / paintInBox there.',
+    description: 'Paint a labelled feature by name. The label must have been registered in the current run via api.label(shape, name) or api.labeledUnion. This is the bullseye for "describe how to make and paint a model" workflows: write the geometry with labels, then paint by name — no coordinate guessing, no bounding-box estimation, no fan-bleed. Survives boolean ops because manifold-3d propagates originalID through runOriginalID on the result mesh. Only works for manifold-js (SCAD has no equivalent); falls back to paintComponent / paintInBox there. For multi-feature models, batch with paintByLabels in one round-trip instead of N sequential paintByLabel calls.',
     input_schema: {
       type: 'object',
       properties: {
@@ -137,6 +137,29 @@ const ALL_TOOLS: ToolDefinition[] = [
         name: { type: 'string', description: 'Optional region name; defaults to the label.' },
       },
       required: ['label', 'color'],
+    },
+  },
+  {
+    name: 'paintByLabels',
+    description: 'Batch sibling of paintByLabel. Paint N labelled features in one tool call. Use this for any multi-feature paint job — a 9-feature smiley paints in 1 round-trip instead of 9. The viewport refresh coalesces under rAF so total cost is one frame regardless of batch size. Returns {results: [...], failed: [{label, error}]} — partial failures are reported per-label and do not abort the batch.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        items: {
+          type: 'array',
+          description: 'Array of paint specs, each {label, color, name?} — same shape as a single paintByLabel call.',
+          items: {
+            type: 'object',
+            properties: {
+              label: { type: 'string' },
+              color: { type: 'array', items: { type: 'number' }, minItems: 3, maxItems: 3 },
+              name: { type: 'string' },
+            },
+            required: ['label', 'color'],
+          },
+        },
+      },
+      required: ['items'],
     },
   },
   {
@@ -219,11 +242,21 @@ const ALL_TOOLS: ToolDefinition[] = [
   },
   {
     name: 'runIsolated',
-    description: 'Run code WITHOUT side effects — does not modify the editor, does not save a version, does not affect currentMeshData. Returns {geometryData, thumbnail}; the thumbnail is forwarded back to you as a multimodal image so you can see the result. Use to TEST unfamiliar primitives (revolve axis behavior, hull edge cases, decompose ordering) on a 3-line snippet before committing a full runAndSave. Much cheaper than running, undoing, and retrying.',
+    description: 'Run code WITHOUT side effects — does not modify the editor, does not save a version, does not affect currentMeshData. Returns {geometryData, thumbnail}; the thumbnail is forwarded back to you as a multimodal image so you can see the result. Use to TEST unfamiliar primitives (revolve axis behavior, hull edge cases, decompose ordering) on a 3-line snippet before committing a full runAndSave. Default thumbnail is a 4-iso composite; pass `view` for a single named angle — top-down (elevation: 90) is the right choice when verifying a feature on a flat face (a smile on a head, a logo on a panel) since iso angles hide top-facing geometry.',
     input_schema: {
       type: 'object',
       properties: {
         code: { type: 'string', description: 'Code to run in the active language. Must return a Manifold (manifold-js) or evaluate to one (SCAD).' },
+        view: {
+          type: 'object',
+          description: 'Optional view spec for a single-angle thumbnail. Same shape as renderView (elevation/azimuth/ortho/size). Omit for the default 4-iso composite.',
+          properties: {
+            elevation: { type: 'number' },
+            azimuth: { type: 'number' },
+            ortho: { type: 'boolean' },
+            size: { type: 'integer' },
+          },
+        },
       },
       required: ['code'],
     },
@@ -457,7 +490,7 @@ const ALWAYS_AVAILABLE = new Set([
 
 const RUN_GATED = new Set(['runCode']);
 const SAVE_GATED = new Set(['runAndSave', 'loadVersion']);
-const PAINT_GATED = new Set(['paintRegion', 'paintFaces', 'paintNear', 'paintInBox', 'paintSlab', 'paintNearestRegion', 'paintComponent', 'paintByLabel', 'paintConnected', 'undoLastPaint', 'redoLastPaint', 'removeRegion', 'clearColors']);
+const PAINT_GATED = new Set(['paintRegion', 'paintFaces', 'paintNear', 'paintInBox', 'paintSlab', 'paintNearestRegion', 'paintComponent', 'paintByLabel', 'paintByLabels', 'paintConnected', 'undoLastPaint', 'redoLastPaint', 'removeRegion', 'clearColors']);
 /** Tools that ship a PNG back to the model via a multimodal content
  *  block. Gated by the Views vision toggle so the user can disable
  *  vision spend in one place — when off, the agent has to reason from
@@ -540,7 +573,8 @@ async function executeRenderViews(api: PartwrightAPI, input: Record<string, unkn
 
 async function executeRunIsolated(api: PartwrightAPI, input: Record<string, unknown>): Promise<ToolExecResult> {
   const code = input.code as string;
-  const result = await api.runIsolated(code) as { geometryData?: unknown; thumbnail?: string | null; error?: string } | undefined;
+  const view = input.view as Record<string, unknown> | undefined;
+  const result = await api.runIsolated(code, view) as { geometryData?: unknown; thumbnail?: string | null; error?: string } | undefined;
   if (!result || typeof result !== 'object') return { content: 'runIsolated returned no result', isError: true };
   if ('error' in result && typeof result.error === 'string') return { content: result.error, isError: true };
   const stats = result.geometryData ?? {};
@@ -632,6 +666,8 @@ async function dispatch(api: PartwrightAPI, name: string, input: Record<string, 
       return api.listLabels();
     case 'paintByLabel':
       return api.paintByLabel(input);
+    case 'paintByLabels':
+      return api.paintByLabels(input.items as unknown[]);
     case 'probePixel':
       return api.probePixel(input);
     case 'paintConnected':
