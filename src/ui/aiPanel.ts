@@ -7,7 +7,7 @@ import { runTurn, totalCost, totalTokensEstimate, estimateCachedPrefixTokens } f
 import { listMessages, GLOBAL_CHAT_BUCKET, putMessages, deleteMessages, getKey, clearChat } from '../ai/db';
 import { proposeCompaction } from '../ai/compaction';
 import { captureIsoViews, fileToImageSource } from '../ai/images';
-import { loadSettings, saveSettings, applyPreset, setAnthropicModel, setToggles, ANTHROPIC_MODEL_OPTIONS, PRESET_OPTIONS, MAX_ITERATIONS_OPTIONS, MAX_SPEND_OPTIONS, type AiSettings } from '../ai/settings';
+import { loadSettings, saveSettings, setAnthropicModel, setToggles, ANTHROPIC_MODEL_OPTIONS, MAX_ITERATIONS_OPTIONS, MAX_SPEND_OPTIONS, type AiSettings } from '../ai/settings';
 import { buildLocalSystemPrompt, buildMediumLocalSystemPrompt, buildSystemPrompt, loadAiMd } from '../ai/systemPrompt';
 import { estimateTurnCostUsd, formatUsd } from '../ai/cost';
 import { generateId } from '../storage/db';
@@ -134,6 +134,7 @@ let progressTickerId: number | null = null;
 let navigateToEditorFn: (() => Promise<void> | void) | null = null;
 let modelPickerEl: HTMLElement | null = null;
 let promptChipEl: HTMLElement | null = null;
+let panelWidth = 420;
 
 /** Set by the watchdog when it abort()s mid-stream so sendMessage knows
  *  this was a stall recovery (auto-resume), not a user-initiated stop. */
@@ -157,6 +158,7 @@ export async function initAiPanel(opts: AiPanelOptions = {}): Promise<void> {
   cachedAiMdLength = buildSystemPrompt(aiMd).length;
 
   const settings = loadSettings();
+  panelWidth = settings.aiPanelWidth;
   state.open = settings.drawerOpen;
 
   buildDrawer();
@@ -206,6 +208,12 @@ function showDrawer(): void {
   state.open = true;
   drawerEl.classList.remove('translate-x-full');
   drawerEl.classList.add('translate-x-0');
+  // Only push content on desktop — mobile layout is stacked, not side-by-side.
+  if (window.matchMedia('(min-width: 768px)').matches) {
+    const app = document.getElementById('app');
+    if (app) app.style.paddingRight = `${panelWidth}px`;
+  }
+  window.dispatchEvent(new Event('resize'));
   saveSettings({ ...loadSettings(), drawerOpen: true });
   inputEl?.focus();
 }
@@ -215,6 +223,9 @@ function hideDrawer(): void {
   state.open = false;
   drawerEl.classList.remove('translate-x-0');
   drawerEl.classList.add('translate-x-full');
+  const app = document.getElementById('app');
+  if (app) app.style.paddingRight = '0';
+  window.dispatchEvent(new Event('resize'));
   saveSettings({ ...loadSettings(), drawerOpen: false });
 }
 
@@ -228,29 +239,43 @@ async function loadHistoryForCurrentSession(): Promise<void> {
 function buildDrawer(): void {
   const root = document.createElement('div');
   root.id = 'ai-panel';
-  root.className = 'fixed top-0 right-0 h-screen w-[420px] bg-zinc-900 border-l border-zinc-700 shadow-2xl z-40 flex flex-col transition-transform duration-200 translate-x-full';
+  root.className = 'fixed top-0 right-0 h-screen bg-zinc-900 border-l border-zinc-700 shadow-2xl z-40 flex flex-col transition-transform duration-200 translate-x-full';
+  root.style.width = `${panelWidth}px`;
   drawerEl = root;
 
-  // Header — title, model picker, preset picker, close
+  const app = document.getElementById('app');
+  if (app) app.style.transition = 'padding-right 200ms ease';
+
+  // Left-edge drag handle for resizing panel width.
+  // w-5 (20px) gives a finger-friendly touch target; the visible stripe stays
+  // 1px wide so it doesn't look like a thick border.
+  const panelResizeHandle = document.createElement('div');
+  panelResizeHandle.className = 'absolute top-0 left-0 h-full w-5 -translate-x-1/2 cursor-col-resize z-10 touch-none group';
+  const panelResizeStripe = document.createElement('div');
+  panelResizeStripe.className = 'absolute inset-y-0 left-1/2 w-px bg-zinc-700 group-hover:bg-blue-500 group-[.is-dragging]:bg-blue-500 transition-colors';
+  panelResizeHandle.appendChild(panelResizeStripe);
+  initPanelResizer(panelResizeHandle);
+  root.appendChild(panelResizeHandle);
+
+  // Header — single row that wraps gracefully when the panel is narrow.
+  // flex-wrap prevents overlap; items truncate or wrap rather than collide.
   const header = document.createElement('div');
-  header.className = 'flex items-center gap-2 px-3 py-2 border-b border-zinc-700 shrink-0';
+  header.className = 'flex items-center flex-wrap gap-1.5 px-3 py-1.5 border-b border-zinc-700 shrink-0';
 
   const titleEl = document.createElement('div');
-  titleEl.className = 'text-sm font-semibold text-zinc-100 mr-1';
+  titleEl.className = 'text-sm font-semibold text-zinc-100 shrink-0';
   titleEl.textContent = 'AI';
   header.appendChild(titleEl);
 
   modelPickerEl = document.createElement('div');
-  modelPickerEl.className = 'flex items-center gap-1';
+  modelPickerEl.className = 'flex items-center gap-1 shrink-0';
   header.appendChild(modelPickerEl);
   renderModelPicker();
 
   promptChipEl = document.createElement('span');
+  promptChipEl.className = 'shrink-0';
   header.appendChild(promptChipEl);
   renderPromptChip();
-
-  const presetSelect = createPresetSelect();
-  header.appendChild(presetSelect);
 
   const compactBtn = createIconButton('Compact', '⤓ Compact');
   compactBtn.title = 'Compact the conversation: summarize older turns and promote insights to session notes.';
@@ -269,13 +294,14 @@ function buildDrawer(): void {
   });
   header.appendChild(settingsBtn);
 
-  const spacer = document.createElement('div');
-  spacer.className = 'flex-1';
-  header.appendChild(spacer);
+  const headerSpacer = document.createElement('div');
+  headerSpacer.className = 'flex-1';
+  header.appendChild(headerSpacer);
 
   const closeBtn = document.createElement('button');
-  closeBtn.className = 'px-2 py-1 rounded text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800 text-sm';
+  closeBtn.className = 'shrink-0 px-2 py-1 rounded text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800 text-sm';
   closeBtn.textContent = '✕';
+  closeBtn.title = 'Close AI panel';
   closeBtn.addEventListener('click', hideDrawer);
   header.appendChild(closeBtn);
 
@@ -291,45 +317,37 @@ function buildDrawer(): void {
   transcriptEl.className = 'flex-1 overflow-y-auto px-3 py-3 flex flex-col gap-3';
   root.appendChild(transcriptEl);
 
-  // Rewind / fast-forward row — sits just above the controls so it's
-  // near the input and clearly associated with conversation history.
-  const rewindRow = document.createElement('div');
-  rewindRow.className = 'px-3 pt-1.5 pb-0.5 flex gap-2 shrink-0 border-t border-zinc-800';
+  // Vertical drag handle for resizing input area.
+  // h-5 (20px) gives a finger-friendly touch target; the visible stripe stays
+  // 1px tall centered in the hit area.
+  const inputResizeHandle = document.createElement('div');
+  inputResizeHandle.className = 'shrink-0 h-5 cursor-row-resize touch-none group relative';
+  const inputResizeStripe = document.createElement('div');
+  inputResizeStripe.className = 'absolute inset-x-0 top-1/2 h-px -translate-y-1/2 bg-zinc-700 group-hover:bg-blue-500 group-[.is-dragging]:bg-blue-500 transition-colors';
+  inputResizeHandle.appendChild(inputResizeStripe);
+  root.appendChild(inputResizeHandle);
 
-  const rewindBtn = document.createElement('button');
-  rewindBtn.className = 'flex-1 flex items-center justify-center gap-1.5 px-3 py-1.5 rounded text-sm font-medium text-zinc-300 bg-zinc-800 hover:bg-zinc-700 hover:text-white border border-zinc-700 hover:border-zinc-500 disabled:opacity-30 disabled:cursor-not-allowed transition-all';
-  rewindBtn.innerHTML = '↩ Undo turn';
-  rewindBtn.title = 'Remove the last turn from history. Use ↪ Redo to restore it.';
-  rewindBtn.disabled = true;
-  rewindBtn.addEventListener('click', () => { void rewindTurn(); });
-  rewindBtnRef = rewindBtn;
-  rewindRow.appendChild(rewindBtn);
+  // Bottom section — rewind, toggles, cost, input
+  const bottomSection = document.createElement('div');
+  bottomSection.className = 'flex flex-col shrink-0 overflow-hidden';
+  bottomSection.style.height = '220px';
+  initInputResizer(inputResizeHandle, bottomSection);
 
-  const forwardBtn = document.createElement('button');
-  forwardBtn.className = 'flex-1 flex items-center justify-center gap-1.5 px-3 py-1.5 rounded text-sm font-medium text-zinc-300 bg-zinc-800 hover:bg-zinc-700 hover:text-white border border-zinc-700 hover:border-zinc-500 disabled:opacity-30 disabled:cursor-not-allowed transition-all';
-  forwardBtn.innerHTML = '↪ Redo turn';
-  forwardBtn.title = 'Restore the last undone turn. Cleared when you send a new message.';
-  forwardBtn.disabled = true;
-  forwardBtn.addEventListener('click', () => { void fastForwardTurn(); });
-  forwardBtnRef = forwardBtn;
-  rewindRow.appendChild(forwardBtn);
-
-  root.appendChild(rewindRow);
 
   // Toggle strip
   toggleStripEl = document.createElement('div');
   toggleStripEl.className = 'px-3 py-1.5 border-t border-zinc-800 flex flex-wrap items-center gap-1.5 shrink-0';
-  root.appendChild(toggleStripEl);
+  bottomSection.appendChild(toggleStripEl);
 
   // Cost meter
   costMeterEl = document.createElement('div');
   costMeterEl.className = 'px-3 pb-1.5 text-[10px] text-zinc-500 flex items-center gap-2 shrink-0';
-  root.appendChild(costMeterEl);
+  bottomSection.appendChild(costMeterEl);
 
   // Pending image attachments row (hidden until something is pending)
   pendingImagesEl = document.createElement('div');
   pendingImagesEl.className = 'px-3 pb-1.5 flex flex-wrap gap-1.5 shrink-0 hidden';
-  root.appendChild(pendingImagesEl);
+  bottomSection.appendChild(pendingImagesEl);
 
   // In-progress indicator — shown while a turn is in flight so the user
   // knows we haven't frozen. Hidden by default; populated by
@@ -337,7 +355,7 @@ function buildDrawer(): void {
   // and the stall watchdog.
   progressEl = document.createElement('div');
   progressEl.className = 'px-3 pb-1.5 text-[11px] text-zinc-400 flex items-center gap-2 shrink-0 hidden';
-  root.appendChild(progressEl);
+  bottomSection.appendChild(progressEl);
 
   // Queued-message badge — shown when the human has typed a follow-up
   // mid-run. Sits just above the input row so the user can see at a glance
@@ -345,36 +363,17 @@ function buildDrawer(): void {
   queuedBadgeRef = document.createElement('div');
   queuedBadgeRef.id = 'queued-message-badge';
   queuedBadgeRef.className = 'px-3 pb-1.5 text-[11px] text-amber-300 flex items-center gap-2 shrink-0 hidden';
-  root.appendChild(queuedBadgeRef);
+  bottomSection.appendChild(queuedBadgeRef);
 
-  // Input row
+  // Input area — column layout: textarea fills available height, buttons
+  // sit in a row below so the textarea gets the full pane width.
   const inputRow = document.createElement('div');
-  inputRow.className = 'px-3 py-2 border-t border-zinc-700 flex items-end gap-2 shrink-0';
-
-  const showAiBtn = document.createElement('button');
-  showAiBtn.className = 'shrink-0 px-2 py-1 rounded text-[11px] text-zinc-300 bg-zinc-800 hover:bg-zinc-700 border border-zinc-700';
-  showAiBtn.textContent = '📷 Show AI';
-  showAiBtn.title = 'Snapshot the 4 iso views and attach to your next message.';
-  showAiBtn.addEventListener('click', () => { void attachIsoViews(); });
-  inputRow.appendChild(showAiBtn);
-
-  const fileBtn = document.createElement('button');
-  fileBtn.className = 'shrink-0 px-2 py-1 rounded text-[11px] text-zinc-300 bg-zinc-800 hover:bg-zinc-700 border border-zinc-700';
-  fileBtn.textContent = '📎';
-  fileBtn.title = 'Attach an image — pick from recent files or upload a new one.';
-  fileBtn.addEventListener('click', () => {
-    showAttachmentModal({
-      onAttach: images => {
-        for (const img of images) attachImageSource(img);
-      },
-    });
-  });
-  inputRow.appendChild(fileBtn);
+  inputRow.className = 'px-3 pt-2 pb-2 border-t border-zinc-700 flex flex-col gap-2 flex-1 min-h-0';
 
   const ta = document.createElement('textarea');
   ta.placeholder = 'Ask the AI to model something...';
   ta.rows = 2;
-  ta.className = 'flex-1 px-2 py-1 rounded bg-zinc-800 border border-zinc-600 text-zinc-100 text-sm placeholder:text-zinc-500 focus:outline-none focus:border-blue-500 resize-none';
+  ta.className = 'w-full flex-1 min-h-0 px-2 py-1.5 rounded bg-zinc-800 border border-zinc-600 text-zinc-100 text-sm placeholder:text-zinc-500 focus:outline-none focus:border-blue-500 resize-none';
   ta.addEventListener('keydown', e => {
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault();
@@ -396,6 +395,53 @@ function buildDrawer(): void {
   inputEl = ta;
   inputRow.appendChild(ta);
 
+  // Button row — attachment buttons on the left, stop/send on the right.
+  const inputBtnRow = document.createElement('div');
+  inputBtnRow.className = 'flex items-center gap-2 shrink-0';
+
+  const showAiBtn = document.createElement('button');
+  showAiBtn.className = 'shrink-0 px-2 py-1 rounded text-[11px] text-zinc-300 bg-zinc-800 hover:bg-zinc-700 border border-zinc-700';
+  showAiBtn.textContent = '📷 Show AI';
+  showAiBtn.title = 'Snapshot the 4 iso views and attach to your next message.';
+  showAiBtn.addEventListener('click', () => { void attachIsoViews(); });
+  inputBtnRow.appendChild(showAiBtn);
+
+  const fileBtn = document.createElement('button');
+  fileBtn.className = 'shrink-0 px-2 py-1 rounded text-[11px] text-zinc-300 bg-zinc-800 hover:bg-zinc-700 border border-zinc-700';
+  fileBtn.textContent = '📎';
+  fileBtn.title = 'Attach an image — pick from recent files or upload a new one.';
+  fileBtn.addEventListener('click', () => {
+    showAttachmentModal({
+      onAttach: images => {
+        for (const img of images) attachImageSource(img);
+      },
+    });
+  });
+  inputBtnRow.appendChild(fileBtn);
+
+  const inputBtnSpacer = document.createElement('div');
+  inputBtnSpacer.className = 'flex-1';
+  inputBtnRow.appendChild(inputBtnSpacer);
+
+  // Rewind / fast-forward — compact icon buttons tucked before Stop/Send.
+  const rewindBtn = document.createElement('button');
+  rewindBtn.className = 'shrink-0 px-2 py-1.5 rounded text-xs text-zinc-400 hover:text-zinc-100 hover:bg-zinc-700 disabled:opacity-30 disabled:cursor-not-allowed transition-colors';
+  rewindBtn.textContent = '↩';
+  rewindBtn.title = 'Rewind: remove the last turn from history. Use ↪ to restore it.';
+  rewindBtn.disabled = true;
+  rewindBtn.addEventListener('click', () => { void rewindTurn(); });
+  rewindBtnRef = rewindBtn;
+  inputBtnRow.appendChild(rewindBtn);
+
+  const forwardBtn = document.createElement('button');
+  forwardBtn.className = 'shrink-0 px-2 py-1.5 rounded text-xs text-zinc-400 hover:text-zinc-100 hover:bg-zinc-700 disabled:opacity-30 disabled:cursor-not-allowed transition-colors';
+  forwardBtn.textContent = '↪';
+  forwardBtn.title = 'Fast-forward: restore the last rewound turn. Cleared when you send a new message.';
+  forwardBtn.disabled = true;
+  forwardBtn.addEventListener('click', () => { void fastForwardTurn(); });
+  forwardBtnRef = forwardBtn;
+  inputBtnRow.appendChild(forwardBtn);
+
   // Stop button — separate from Send so the human can queue follow-ups
   // mid-run (clicking Send) without losing the ability to actually halt
   // the agent. Hidden until a turn is in flight.
@@ -412,7 +458,7 @@ function buildDrawer(): void {
     void interruptLocal();
   });
   stopBtnRef = stopBtn;
-  inputRow.appendChild(stopBtn);
+  inputBtnRow.appendChild(stopBtn);
 
   const sendBtn = document.createElement('button');
   sendBtn.className = 'shrink-0 px-3 py-1.5 rounded text-xs font-medium bg-blue-600 hover:bg-blue-500 text-white disabled:opacity-50 disabled:cursor-not-allowed';
@@ -429,9 +475,11 @@ function buildDrawer(): void {
     void sendMessage();
   });
   sendBtnRef = sendBtn;
-  inputRow.appendChild(sendBtn);
+  inputBtnRow.appendChild(sendBtn);
 
-  root.appendChild(inputRow);
+  inputRow.appendChild(inputBtnRow);
+  bottomSection.appendChild(inputRow);
+  root.appendChild(bottomSection);
 
   // Drag-drop image handling
   root.addEventListener('dragover', e => { e.preventDefault(); root.classList.add('ring-2', 'ring-blue-500'); });
@@ -451,9 +499,86 @@ function buildDrawer(): void {
   panelStatusUpdate();
 }
 
+function initPanelResizer(handle: HTMLElement): void {
+  let startX = 0;
+  let startWidth = 0;
+
+  handle.addEventListener('pointerdown', (e) => {
+    if (e.button !== 0 && e.pointerType === 'mouse') return;
+    e.preventDefault();
+    startX = e.clientX;
+    startWidth = drawerEl!.getBoundingClientRect().width;
+    handle.setPointerCapture(e.pointerId);
+    handle.classList.add('is-dragging');
+    document.body.style.cursor = 'col-resize';
+    document.body.style.userSelect = 'none';
+  });
+
+  handle.addEventListener('pointermove', (e) => {
+    if (!handle.hasPointerCapture(e.pointerId)) return;
+    const delta = startX - e.clientX;
+    const minW = 280;
+    const maxW = Math.min(900, window.innerWidth - 200);
+    panelWidth = Math.max(minW, Math.min(maxW, startWidth + delta));
+    if (drawerEl) drawerEl.style.width = `${panelWidth}px`;
+    if (state.open && window.matchMedia('(min-width: 768px)').matches) {
+      const app = document.getElementById('app');
+      if (app) app.style.paddingRight = `${panelWidth}px`;
+    }
+    window.dispatchEvent(new Event('resize'));
+  });
+
+  const onPanelResizeEnd = (e: PointerEvent) => {
+    if (!handle.hasPointerCapture(e.pointerId)) return;
+    handle.releasePointerCapture(e.pointerId);
+    handle.classList.remove('is-dragging');
+    document.body.style.cursor = '';
+    document.body.style.userSelect = '';
+    saveSettings({ ...loadSettings(), aiPanelWidth: panelWidth });
+  };
+
+  handle.addEventListener('pointerup', onPanelResizeEnd);
+  handle.addEventListener('pointercancel', onPanelResizeEnd);
+}
+
+function initInputResizer(handle: HTMLElement, bottomSection: HTMLElement): void {
+  let startY = 0;
+  let startHeight = 0;
+
+  handle.addEventListener('pointerdown', (e) => {
+    if (e.button !== 0 && e.pointerType === 'mouse') return;
+    e.preventDefault();
+    startY = e.clientY;
+    startHeight = bottomSection.getBoundingClientRect().height;
+    handle.setPointerCapture(e.pointerId);
+    handle.classList.add('is-dragging');
+    document.body.style.cursor = 'row-resize';
+    document.body.style.userSelect = 'none';
+  });
+
+  handle.addEventListener('pointermove', (e) => {
+    if (!handle.hasPointerCapture(e.pointerId)) return;
+    const delta = startY - e.clientY;
+    const minH = 100;
+    const maxH = 520;
+    bottomSection.style.height = `${Math.max(minH, Math.min(maxH, startHeight + delta))}px`;
+  });
+
+  const onInputResizeEnd = (e: PointerEvent) => {
+    if (!handle.hasPointerCapture(e.pointerId)) return;
+    handle.releasePointerCapture(e.pointerId);
+    handle.classList.remove('is-dragging');
+    document.body.style.cursor = '';
+    document.body.style.userSelect = '';
+  };
+
+  handle.addEventListener('pointerup', onInputResizeEnd);
+  handle.addEventListener('pointercancel', onInputResizeEnd);
+}
+
 function createIconButton(_label: string, glyph: string): HTMLButtonElement {
   const btn = document.createElement('button');
-  btn.className = 'px-2 py-1 rounded text-[11px] text-zinc-300 hover:bg-zinc-800 border border-transparent hover:border-zinc-700';
+  btn.className = 'shrink-0 h-6 px-2 inline-flex items-center rounded text-[11px] text-zinc-300 hover:bg-zinc-800 border border-transparent hover:border-zinc-700';
   btn.textContent = glyph;
   return btn;
 }
@@ -469,7 +594,7 @@ function renderModelPicker(): void {
 
   if (settings.toggles.provider === 'anthropic') {
     const sel = document.createElement('select');
-    sel.className = 'px-2 py-1 rounded text-[11px] bg-zinc-800 border border-zinc-700 text-zinc-200 focus:outline-none';
+    sel.className = 'h-6 px-2 rounded text-[11px] bg-zinc-800 border border-zinc-700 text-zinc-200 focus:outline-none';
     sel.title = 'Anthropic model (hosted).';
     for (const opt of ANTHROPIC_MODEL_OPTIONS) {
       const o = document.createElement('option');
@@ -489,7 +614,7 @@ function renderModelPicker(): void {
 
   const chip = document.createElement('button');
   chip.type = 'button';
-  chip.className = 'px-2 py-1 rounded text-[11px] bg-emerald-900/30 border border-emerald-700/50 text-emerald-200 hover:bg-emerald-900/50';
+  chip.className = 'h-6 px-2 inline-flex items-center rounded text-[11px] bg-emerald-900/30 border border-emerald-700/50 text-emerald-200 hover:bg-emerald-900/50';
   if (settings.toggles.localModel) {
     try {
       const info = resolveLocalModel(settings.toggles.localModel);
@@ -526,7 +651,7 @@ function renderPromptChip(): void {
   let title: string;
   if (override !== null) {
     label = '✎ Custom prompt';
-    cls = 'px-1.5 py-0.5 rounded text-[10px] bg-amber-900/40 text-amber-200 border border-amber-800/60 hover:bg-amber-900/60';
+    cls = 'h-6 px-1.5 inline-flex items-center rounded text-[10px] bg-amber-900/40 text-amber-200 border border-amber-800/60 hover:bg-amber-900/60';
     title = 'A custom system prompt is in use. Click to view or edit.';
   } else if (provider === 'local') {
     const tier = settings.toggles.localModel
@@ -535,11 +660,11 @@ function renderPromptChip(): void {
     const tierLabel = tier === 'medium' ? 'Medium' : 'Slim';
     const tierSize = tier === 'medium' ? '~1.1K tokens' : '~700 tokens';
     label = `· ${tierLabel} prompt`;
-    cls = 'px-1.5 py-0.5 rounded text-[10px] bg-zinc-800 text-zinc-400 border border-zinc-700 hover:bg-zinc-700';
+    cls = 'h-6 px-1.5 inline-flex items-center rounded text-[10px] bg-zinc-800 text-zinc-400 border border-zinc-700 hover:bg-zinc-700';
     title = `Local models use a compact built-in prompt (${tierSize}) and pull subdoc detail on demand via the readDoc tool. Click to view or pin a different tier.`;
   } else {
     label = '· Full ai.md';
-    cls = 'px-1.5 py-0.5 rounded text-[10px] bg-zinc-800 text-zinc-400 border border-zinc-700 hover:bg-zinc-700';
+    cls = 'h-6 px-1.5 inline-flex items-center rounded text-[10px] bg-zinc-800 text-zinc-400 border border-zinc-700 hover:bg-zinc-700';
     title = 'Anthropic gets the full ai.md (~15K tokens) cached on the API. Click to view or edit.';
   }
   chip.className = cls;
@@ -549,28 +674,6 @@ function renderPromptChip(): void {
     void showSystemPromptModal(provider, { onChange: () => renderPromptChip() });
   });
   promptChipEl.replaceChildren(chip);
-}
-
-function createPresetSelect(): HTMLSelectElement {
-  const sel = document.createElement('select');
-  sel.className = 'px-2 py-1 rounded text-[11px] bg-zinc-800 border border-zinc-700 text-zinc-200 focus:outline-none';
-  sel.title = 'Preset bundles the model + toggle settings. Picking a preset resets the toggles below to its defaults; manually changing any toggle switches you to "Custom".';
-  for (const opt of PRESET_OPTIONS) {
-    const o = document.createElement('option');
-    o.value = opt.id;
-    o.textContent = opt.label;
-    o.title = opt.hint;
-    sel.appendChild(o);
-  }
-  sel.value = loadSettings().preset;
-  sel.addEventListener('change', () => {
-    const next = applyPreset(loadSettings(), sel.value as AiSettings['preset']);
-    saveSettings(next);
-    renderModelPicker();
-    renderToggleStrip();
-    renderCostMeter();
-  });
-  return sel;
 }
 
 // === Toggle strip rendering ===
