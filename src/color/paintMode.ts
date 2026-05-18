@@ -30,9 +30,10 @@ let currentMesh: MeshData | null = null;
 let highlightMesh: THREE.Mesh | null = null;
 let hoveredTriangles: Set<number> | null = null;
 
-// Brush ring indicator — circle outline showing the brush radius in world space
+// Brush ring indicator — outline showing the brush footprint in world space
 let brushRingMesh: THREE.LineLoop | null = null;
 let brushRingBuiltRadius = -1;
+let brushRingBuiltShape: BrushShape | '' = '';
 
 // Brush drag state
 let brushPainting = false;
@@ -303,25 +304,46 @@ function addBrushFootprint(seedTri: number, seedPoint: [number, number, number],
 // Brush ring indicator
 // ---------------------------------------------------------------------------
 
+function buildRingPoints(shape: BrushShape, r: number): THREE.Vector3[] {
+  if (shape === 'square') {
+    return [
+      new THREE.Vector3(-r, -r, 0),
+      new THREE.Vector3( r, -r, 0),
+      new THREE.Vector3( r,  r, 0),
+      new THREE.Vector3(-r,  r, 0),
+    ];
+  }
+  if (shape === 'diamond') {
+    return [
+      new THREE.Vector3( 0, -r, 0),
+      new THREE.Vector3( r,  0, 0),
+      new THREE.Vector3( 0,  r, 0),
+      new THREE.Vector3(-r,  0, 0),
+    ];
+  }
+  // circle — LineLoop auto-closes, so stop before 2π
+  const pts: THREE.Vector3[] = [];
+  const segments = 48;
+  for (let i = 0; i < segments; i++) {
+    const a = (i / segments) * Math.PI * 2;
+    pts.push(new THREE.Vector3(Math.cos(a) * r, Math.sin(a) * r, 0));
+  }
+  return pts;
+}
+
 function showBrushRing(point: [number, number, number], normal: [number, number, number]): void {
   if (brushRadius <= 0) { clearBrushRing(); return; }
 
-  // Rebuild only when radius changes (avoids per-frame allocation).
-  if (!brushRingMesh || brushRingBuiltRadius !== brushRadius) {
+  // Rebuild when radius or shape changes.
+  if (!brushRingMesh || brushRingBuiltRadius !== brushRadius || brushRingBuiltShape !== brushShape) {
     clearBrushRing();
     brushRingBuiltRadius = brushRadius;
-    const segments = 48;
-    const pts: THREE.Vector3[] = [];
-    for (let i = 0; i <= segments; i++) {
-      const a = (i / segments) * Math.PI * 2;
-      pts.push(new THREE.Vector3(Math.cos(a) * brushRadius, Math.sin(a) * brushRadius, 0));
-    }
-    const geo = new THREE.BufferGeometry().setFromPoints(pts);
+    brushRingBuiltShape = brushShape;
+    const geo = new THREE.BufferGeometry().setFromPoints(buildRingPoints(brushShape, brushRadius));
     const mat = new THREE.LineBasicMaterial({ color: 0xffffff, opacity: 0.75, transparent: true, depthTest: false });
     brushRingMesh = new THREE.LineLoop(geo, mat);
     brushRingMesh.name = 'brush-ring';
     brushRingMesh.renderOrder = 1001;
-    // Use scene (not meshGroup) so updateMesh() clearing meshGroup doesn't remove it.
     getScene().add(brushRingMesh);
   }
 
@@ -337,6 +359,7 @@ function clearBrushRing(): void {
     (brushRingMesh.material as THREE.Material).dispose();
     brushRingMesh = null;
     brushRingBuiltRadius = -1;
+    brushRingBuiltShape = '';
   }
 }
 
