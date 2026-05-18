@@ -127,9 +127,9 @@ async function rerender(body: HTMLElement, cb: AiLocalModalCallbacks): Promise<v
 
   // Group models by tier so the picker reads like a curated shopping list
   // rather than a flat dump. Order: recommended → smaller → larger →
-  // flagship → vision → custom. Each group gets a heading + one-line hint
+  // flagship → custom. Each group gets a heading + one-line hint
   // so the user knows whether the section is for their hardware.
-  const groupOrder: LocalSizeGroup[] = ['recommended', 'smaller', 'larger', 'flagship', 'vision'];
+  const groupOrder: LocalSizeGroup[] = ['recommended', 'smaller', 'larger', 'flagship'];
   for (const group of groupOrder) {
     const models = LOCAL_MODELS.filter(m => m.group === group);
     if (models.length === 0) continue;
