@@ -346,30 +346,6 @@ function buildDrawer(): void {
   bottomSection.style.height = '220px';
   initInputResizer(inputResizeHandle, bottomSection);
 
-  // Rewind / fast-forward row — sits just above the controls so it's
-  // near the input and clearly associated with conversation history.
-  const rewindRow = document.createElement('div');
-  rewindRow.className = 'px-3 pt-1.5 pb-0.5 flex gap-2 shrink-0 border-t border-zinc-800';
-
-  const rewindBtn = document.createElement('button');
-  rewindBtn.className = 'flex-1 flex items-center justify-center gap-1.5 px-3 py-1.5 rounded text-sm font-medium text-zinc-300 bg-zinc-800 hover:bg-zinc-700 hover:text-white border border-zinc-700 hover:border-zinc-500 disabled:opacity-30 disabled:cursor-not-allowed transition-all';
-  rewindBtn.innerHTML = '↩ Undo turn';
-  rewindBtn.title = 'Remove the last turn from history. Use ↪ Redo to restore it.';
-  rewindBtn.disabled = true;
-  rewindBtn.addEventListener('click', () => { void rewindTurn(); });
-  rewindBtnRef = rewindBtn;
-  rewindRow.appendChild(rewindBtn);
-
-  const forwardBtn = document.createElement('button');
-  forwardBtn.className = 'flex-1 flex items-center justify-center gap-1.5 px-3 py-1.5 rounded text-sm font-medium text-zinc-300 bg-zinc-800 hover:bg-zinc-700 hover:text-white border border-zinc-700 hover:border-zinc-500 disabled:opacity-30 disabled:cursor-not-allowed transition-all';
-  forwardBtn.innerHTML = '↪ Redo turn';
-  forwardBtn.title = 'Restore the last undone turn. Cleared when you send a new message.';
-  forwardBtn.disabled = true;
-  forwardBtn.addEventListener('click', () => { void fastForwardTurn(); });
-  forwardBtnRef = forwardBtn;
-  rewindRow.appendChild(forwardBtn);
-
-  bottomSection.appendChild(rewindRow);
 
   // Toggle strip
   toggleStripEl = document.createElement('div');
@@ -459,6 +435,25 @@ function buildDrawer(): void {
   const inputBtnSpacer = document.createElement('div');
   inputBtnSpacer.className = 'flex-1';
   inputBtnRow.appendChild(inputBtnSpacer);
+
+  // Rewind / fast-forward — compact icon buttons tucked before Stop/Send.
+  const rewindBtn = document.createElement('button');
+  rewindBtn.className = 'shrink-0 px-2 py-1.5 rounded text-xs text-zinc-400 hover:text-zinc-100 hover:bg-zinc-700 disabled:opacity-30 disabled:cursor-not-allowed transition-colors';
+  rewindBtn.textContent = '↩';
+  rewindBtn.title = 'Rewind: remove the last turn from history. Use ↪ to restore it.';
+  rewindBtn.disabled = true;
+  rewindBtn.addEventListener('click', () => { void rewindTurn(); });
+  rewindBtnRef = rewindBtn;
+  inputBtnRow.appendChild(rewindBtn);
+
+  const forwardBtn = document.createElement('button');
+  forwardBtn.className = 'shrink-0 px-2 py-1.5 rounded text-xs text-zinc-400 hover:text-zinc-100 hover:bg-zinc-700 disabled:opacity-30 disabled:cursor-not-allowed transition-colors';
+  forwardBtn.textContent = '↪';
+  forwardBtn.title = 'Fast-forward: restore the last rewound turn. Cleared when you send a new message.';
+  forwardBtn.disabled = true;
+  forwardBtn.addEventListener('click', () => { void fastForwardTurn(); });
+  forwardBtnRef = forwardBtn;
+  inputBtnRow.appendChild(forwardBtn);
 
   // Stop button — separate from Send so the human can queue follow-ups
   // mid-run (clicking Send) without losing the ability to actually halt
