@@ -1592,7 +1592,9 @@ async function main() {
 
     /** Get current geometry stats without re-running */
     getGeometryData(): Record<string, unknown> {
-      return JSON.parse(geometryDataEl.textContent || '{}');
+      const geo = JSON.parse(geometryDataEl.textContent || '{}');
+      const warnings = geometryWarnings(geo);
+      return warnings.length > 0 ? { ...geo, warnings } : geo;
     },
 
     /** Get current editor code */
@@ -2303,12 +2305,14 @@ async function main() {
         diff = computeStatDiff(prevGeoData, newGeoData);
       }
 
+      const warnings = geometryWarnings(newGeoData);
       return {
         ...(assertions ? { passed: true } : {}),
         geometry: newGeoData,
         version: version ? { id: version.id, index: version.index, label: version.label } : null,
         diff,
         galleryUrl: getGalleryUrl(),
+        ...(warnings.length > 0 ? { warnings } : {}),
       };
     },
 
@@ -2383,6 +2387,7 @@ async function main() {
         diff = computeStatDiff(prevGeoData, newGeoData);
       }
 
+      const forkWarnings = geometryWarnings(newGeoData);
       return {
         ...(assertions ? { passed: true } : {}),
         parent: { id: parent.id, index: parent.index, label: parent.label },
@@ -2390,6 +2395,7 @@ async function main() {
         version: version ? { id: version.id, index: version.index, label: version.label } : null,
         diff,
         galleryUrl: getGalleryUrl(),
+        ...(forkWarnings.length > 0 ? { warnings: forkWarnings } : {}),
       };
     },
 
@@ -2452,9 +2458,13 @@ async function main() {
     async getSessionContext() {
       const ctx = await getSessionContext();
       if (!ctx) return { error: 'No active session' };
-      // Include the code currently in the editor so agents resuming after a
-      // stop don't need a separate getCode() call to know where things stand.
-      return { ...ctx, currentCode: getValue() };
+      const geo = JSON.parse(geometryDataEl.textContent || '{}');
+      const warnings = geometryWarnings(geo);
+      return {
+        ...ctx,
+        currentCode: getValue(),
+        ...(warnings.length > 0 ? { geometryWarnings: warnings } : {}),
+      };
     },
 
     /** Export a session as JSON (defaults to current session) */
@@ -5221,6 +5231,30 @@ async function main() {
       result.add(t);
     }
     return result;
+  }
+
+  /** Produce advisory warnings for geometry that was saved or queried.
+   *  Returns an empty array when the geometry is clean.
+   *  These are non-blocking — the save has already happened. */
+  function geometryWarnings(geo: Record<string, unknown>): string[] {
+    if (!geo || geo.status !== 'ok') return [];
+    const warnings: string[] = [];
+    if (geo.isManifold === false) {
+      warnings.push(
+        'isManifold: false — the mesh has non-manifold edges or gaps. ' +
+        'Export and slicing will fail with most tools. Fix the geometry ' +
+        'before finalizing: ensure boolean operands overlap by ≥ 0.5 units, ' +
+        'avoid zero-thickness walls, and check for duplicate faces.',
+      );
+    }
+    if (typeof geo.componentCount === 'number' && geo.componentCount > 1) {
+      warnings.push(
+        `componentCount: ${geo.componentCount} — model has ${geo.componentCount} disconnected pieces. ` +
+        'If unintentional, check that boolean union shapes overlap by ≥ 0.5 units. ' +
+        'If intentional (separate printable parts), ignore this warning.',
+      );
+    }
+    return warnings;
   }
 
   /** Commit a triangle set as a region and refresh the viewport — shared by
