@@ -113,6 +113,12 @@ export async function setActiveSession(sessionId: string | null): Promise<void> 
     return;
   }
   state.sessionId = effective;
+  // If a turn is in flight the session change was triggered by the model
+  // calling createSession mid-turn. Don't reload/re-render now — the
+  // callbacks (onUserPersisted etc.) are keeping state.history current
+  // for the running turn. Reloading here would wipe the user's message
+  // from the transcript. The reload happens after the turn completes.
+  if (state.inFlight) return;
   // Drop any queued follow-ups — they were aimed at the prior chat bucket
   // and the human's instructions almost never make sense out of context.
   state.queuedBlocks = [];
@@ -188,26 +194,6 @@ function buildDrawer(): void {
   spacer.className = 'flex-1';
   header.appendChild(spacer);
 
-  const rewindBtn = document.createElement('button');
-  rewindBtn.className = 'px-2 py-1 rounded text-zinc-500 hover:text-zinc-300 hover:bg-zinc-800 text-sm disabled:cursor-not-allowed transition-opacity';
-  rewindBtn.textContent = '←';
-  rewindBtn.title = 'Rewind: remove the last turn from history (use → to restore it)';
-  rewindBtn.disabled = true;
-  rewindBtn.classList.add('opacity-30');
-  rewindBtn.addEventListener('click', () => { void rewindTurn(); });
-  rewindBtnRef = rewindBtn;
-  header.appendChild(rewindBtn);
-
-  const forwardBtn = document.createElement('button');
-  forwardBtn.className = 'px-2 py-1 rounded text-zinc-500 hover:text-zinc-300 hover:bg-zinc-800 text-sm disabled:cursor-not-allowed transition-opacity';
-  forwardBtn.textContent = '→';
-  forwardBtn.title = 'Fast-forward: restore the last rewound turn (cleared when you send a new message)';
-  forwardBtn.disabled = true;
-  forwardBtn.classList.add('opacity-30');
-  forwardBtn.addEventListener('click', () => { void fastForwardTurn(); });
-  forwardBtnRef = forwardBtn;
-  header.appendChild(forwardBtn);
-
   const closeBtn = document.createElement('button');
   closeBtn.className = 'px-2 py-1 rounded text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800 text-sm';
   closeBtn.textContent = '✕';
@@ -225,6 +211,31 @@ function buildDrawer(): void {
   transcriptEl = document.createElement('div');
   transcriptEl.className = 'flex-1 overflow-y-auto px-3 py-3 flex flex-col gap-3';
   root.appendChild(transcriptEl);
+
+  // Rewind / fast-forward row — sits just above the controls so it's
+  // near the input and clearly associated with conversation history.
+  const rewindRow = document.createElement('div');
+  rewindRow.className = 'px-3 pt-1.5 pb-0.5 flex gap-2 shrink-0 border-t border-zinc-800';
+
+  const rewindBtn = document.createElement('button');
+  rewindBtn.className = 'flex-1 flex items-center justify-center gap-1.5 px-3 py-1.5 rounded text-sm font-medium text-zinc-300 bg-zinc-800 hover:bg-zinc-700 hover:text-white border border-zinc-700 hover:border-zinc-500 disabled:opacity-30 disabled:cursor-not-allowed transition-all';
+  rewindBtn.innerHTML = '↩ Undo turn';
+  rewindBtn.title = 'Remove the last turn from history. Use ↪ Redo to restore it.';
+  rewindBtn.disabled = true;
+  rewindBtn.addEventListener('click', () => { void rewindTurn(); });
+  rewindBtnRef = rewindBtn;
+  rewindRow.appendChild(rewindBtn);
+
+  const forwardBtn = document.createElement('button');
+  forwardBtn.className = 'flex-1 flex items-center justify-center gap-1.5 px-3 py-1.5 rounded text-sm font-medium text-zinc-300 bg-zinc-800 hover:bg-zinc-700 hover:text-white border border-zinc-700 hover:border-zinc-500 disabled:opacity-30 disabled:cursor-not-allowed transition-all';
+  forwardBtn.innerHTML = '↪ Redo turn';
+  forwardBtn.title = 'Restore the last undone turn. Cleared when you send a new message.';
+  forwardBtn.disabled = true;
+  forwardBtn.addEventListener('click', () => { void fastForwardTurn(); });
+  forwardBtnRef = forwardBtn;
+  rewindRow.appendChild(forwardBtn);
+
+  root.appendChild(rewindRow);
 
   // Toggle strip
   toggleStripEl = document.createElement('div');
@@ -971,14 +982,8 @@ function updateRewindButtons(): void {
   const canRewind = !state.inFlight &&
     state.history.some(m => m.role === 'user' && m.blocks.length > 0);
   const canForward = !state.inFlight && state.rewindStack.length > 0;
-  if (rewindBtnRef) {
-    rewindBtnRef.disabled = !canRewind;
-    rewindBtnRef.classList.toggle('opacity-30', !canRewind);
-  }
-  if (forwardBtnRef) {
-    forwardBtnRef.disabled = !canForward;
-    forwardBtnRef.classList.toggle('opacity-30', !canForward);
-  }
+  if (rewindBtnRef) rewindBtnRef.disabled = !canRewind;
+  if (forwardBtnRef) forwardBtnRef.disabled = !canForward;
 }
 
 // === Send message ===
@@ -1197,7 +1202,6 @@ async function runTurnWithStallRetry(apiKey: string, toggles: ChatToggles, userB
         // flash and vanish from the transcript.
         renderTranscript();
         renderCostMeter();
-        updateRewindButtons();
         lastTurnOutcome = info;
       },
     });
@@ -1205,6 +1209,7 @@ async function runTurnWithStallRetry(apiKey: string, toggles: ChatToggles, userB
     state.inFlight = false;
     state.inFlightController = null;
     setSendButtonMode('send');
+    updateRewindButtons();
 
     // Surface a sticky completion banner so the user knows the turn
     // actually ended and why — better than a silent hideProgress that
