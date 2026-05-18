@@ -40,7 +40,7 @@ import {
 import { forceDeactivate as forceDeactivateAnnotate } from '../annotations/annotateUI';
 import { forceDeactivate as forceDeactivateAnnotateText } from '../annotations/textMode';
 import { forceDeactivate as forceDeactivateAnnotateSelect } from '../annotations/selectMode';
-import { setBoxMode, getBoxMode, setBox, commitBox, onBoxChange, setShapeType, getShapeType, type BoxMode, type ShapeType } from './boxDrag';
+import { setBoxMode, getBoxMode, setBox, commitBox, onBoxChange, setShapeType, getShapeType, getShapeVisible, setShapeVisible, onShapeVisibilityChange, type BoxMode, type ShapeType } from './boxDrag';
 
 const PRESET_COLORS: [number, number, number][] = [
   // Warm
@@ -633,12 +633,15 @@ function createBoxControls(): HTMLElement {
   });
   wrap.appendChild(grid);
 
-  // Action: paint inside the current shape.
+  // Action: paint inside the current shape + eye toggle.
   const actionRow = document.createElement('div');
   actionRow.className = 'mt-2 flex flex-col gap-1';
 
+  const paintAndEyeRow = document.createElement('div');
+  paintAndEyeRow.className = 'flex items-center gap-1';
+
   paintShapeBtn = document.createElement('button');
-  paintShapeBtn.className = 'w-full px-2 py-1.5 rounded text-[11px] bg-blue-500/30 text-blue-200 hover:bg-blue-500/50 border border-blue-500/50 transition-colors font-medium';
+  paintShapeBtn.className = 'flex-1 px-2 py-1.5 rounded text-[11px] bg-blue-500/30 text-blue-200 hover:bg-blue-500/50 border border-blue-500/50 transition-colors font-medium';
   updatePaintShapeButton();
   paintShapeBtn.addEventListener('click', () => {
     const painted = commitBox();
@@ -647,11 +650,30 @@ function createBoxControls(): HTMLElement {
       window.setTimeout(() => { if (paintShapeBtn) updatePaintShapeButton(); }, 1200);
     }
   });
-  actionRow.appendChild(paintShapeBtn);
+  paintAndEyeRow.appendChild(paintShapeBtn);
+
+  const eyeToggleBtn = document.createElement('button');
+  eyeToggleBtn.className = 'shrink-0 w-7 h-7 flex items-center justify-center rounded bg-zinc-700/60 text-zinc-300 hover:bg-zinc-600/60 border border-zinc-600/40 transition-colors';
+  eyeToggleBtn.title = 'Hide/show the shape in the viewport';
+  eyeToggleBtn.innerHTML = eyeIconSVG();
+  eyeToggleBtn.addEventListener('click', () => {
+    setShapeVisible(!getShapeVisible());
+  });
+  paintAndEyeRow.appendChild(eyeToggleBtn);
+
+  actionRow.appendChild(paintAndEyeRow);
+
+  // Keep the eye button in sync with visibility state.
+  onShapeVisibilityChange(() => {
+    const vis = getShapeVisible();
+    eyeToggleBtn.innerHTML = vis ? eyeIconSVG() : eyeOffIconSVG();
+    eyeToggleBtn.title = vis ? 'Hide shape' : 'Show shape';
+    eyeToggleBtn.classList.toggle('opacity-50', !vis);
+  });
 
   const help = document.createElement('div');
   help.className = 'text-[10px] text-zinc-500 leading-relaxed';
-  help.textContent = 'Drag the gizmo handles in the viewport, or edit values above. The shape is rendered in the active paint color. It fades after painting and brightens when you interact with it again.';
+  help.textContent = 'Drag the gizmo handles in the viewport, or edit values above. The shape fades after painting and brightens when you interact with it again.';
   actionRow.appendChild(help);
 
   wrap.appendChild(actionRow);

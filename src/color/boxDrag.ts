@@ -22,6 +22,7 @@ let active = false;
 let mode: BoxMode = 'translate';
 let shapeType: ShapeType = 'box';
 let boxCommitted = false; // true after a paint — dims the shape until next interaction
+let shapeVisible = true;
 
 let proxy: THREE.Object3D | null = null; // invisible — TransformControls attaches here
 let shapeMesh: THREE.Mesh | null = null; // translucent shape rendered in the viewport
@@ -30,6 +31,7 @@ let gizmo: TransformControls | null = null;
 let gizmoHelper: THREE.Object3D | null = null;
 
 const changeListeners: Array<(box: OrientedBox) => void> = [];
+const visibilityListeners: Array<() => void> = [];
 
 export function isBoxActive(): boolean { return active; }
 
@@ -41,9 +43,31 @@ export function onBoxChange(fn: (box: OrientedBox) => void): () => void {
   };
 }
 
+export function onShapeVisibilityChange(fn: () => void): () => void {
+  visibilityListeners.push(fn);
+  return () => {
+    const i = visibilityListeners.indexOf(fn);
+    if (i >= 0) visibilityListeners.splice(i, 1);
+  };
+}
+
 function notifyChange(): void {
   const box = getBox();
   for (const fn of changeListeners) fn(box);
+}
+
+function notifyVisibility(): void {
+  for (const fn of visibilityListeners) fn();
+}
+
+export function getShapeVisible(): boolean { return shapeVisible; }
+
+export function setShapeVisible(v: boolean): void {
+  if (shapeVisible === v) return;
+  shapeVisible = v;
+  if (proxy) proxy.visible = v;
+  if (gizmoHelper) gizmoHelper.visible = v;
+  notifyVisibility();
 }
 
 export function setBoxMode(m: BoxMode): void {
@@ -87,9 +111,11 @@ export function setBox(box: Partial<OrientedBox>): void {
 export function activate(): void {
   if (active) return;
   active = true;
+  shapeVisible = true;
   buildShape();
   buildGizmo();
   notifyChange();
+  notifyVisibility();
 }
 
 export function deactivate(): void {
@@ -99,6 +125,7 @@ export function deactivate(): void {
   disposeGizmo();
   disposeShape();
   boxCommitted = false;
+  shapeVisible = true;
 }
 
 export function onMeshChanged(): void {
