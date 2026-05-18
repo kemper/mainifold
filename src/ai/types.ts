@@ -4,10 +4,22 @@
 // future provider (OpenAI, Gemini, Ollama) can adapt to it without changing
 // the storage layer.
 
-export type Provider = 'anthropic';
+import type { LocalModelId } from './localModels';
 
-export type ModelId = 'claude-haiku-4-5' | 'claude-sonnet-4-6' | 'claude-opus-4-7';
+/** Anthropic = hosted Claude (BYO API key). Local = WebLLM running on the
+ *  user's GPU. Only one is active per chat at a time; switching is a UI
+ *  affordance, not a per-turn decision. */
+export type Provider = 'anthropic' | 'local';
 
+export type AnthropicModelId = 'claude-haiku-4-5' | 'claude-sonnet-4-6' | 'claude-opus-4-7';
+
+/** Either an Anthropic model name or a WebLLM model_id. The shape is the
+ *  same at the type level (a string) so callers can treat it opaquely. */
+export type ModelId = AnthropicModelId | LocalModelId;
+
+/** Named bundles of toggle settings the user can flip between with a
+ *  single click. 'custom' means none of the named bundles match — the
+ *  user has tweaked individual toggles. */
 export type Preset = 'minimal' | 'standard' | 'full' | 'custom';
 
 /** Per-session knobs the user can flip in the toggle strip above the chat
@@ -39,9 +51,20 @@ export interface ChatToggles {
    *  cap" banner when this iteration would push the session total over,
    *  and the panel blocks further sends once the cap has been reached
    *  until the user raises it. Both this and maxIterations apply —
-   *  whichever trips first stops the turn. 'infinity' disables the cap. */
+   *  whichever trips first stops the turn. 'infinity' disables the cap.
+   *  Local turns are billed at $0, so the cap only matters when the
+   *  active provider is Anthropic. */
   maxSpend: 'cheap' | 'low' | 'medium' | 'medHigh' | 'high' | 'veryHigh' | 'infinity';
-  model: ModelId;
+  /** Which backend the chat is talking to right now. */
+  provider: Provider;
+  /** Anthropic model for cloud chats. Always present so the user can switch
+   *  back to Anthropic without re-picking a model. */
+  anthropicModel: AnthropicModelId;
+  /** WebLLM model for local chats. Stored as a plain string so user-added
+   *  custom model ids (which aren't in the curated `LocalModelId` union)
+   *  fit too. Present from the first time the user picks one in the
+   *  local-model modal. */
+  localModel: string | null;
 }
 
 /** Source of truth for the iteration-cap dropdown. The toggle pill,
@@ -113,6 +136,11 @@ export interface ChatMessage {
   compacted?: boolean;
   /** When the user hit Stop mid-stream and we preserved the partial. */
   aborted?: boolean;
+  /** Marks a synthetic assistant message representing a turn that errored
+   *  out (e.g. the model crashed or hit the iteration cap). Rendered with
+   *  a red border so it stands out from a normal reply, and offers a
+   *  Retry button next to it. Not persisted to IndexedDB. */
+  errored?: boolean;
 }
 
 export type ChatBlock =
@@ -160,4 +188,12 @@ export interface KeyRecord {
   totalInputTokens: number;
   totalOutputTokens: number;
   totalCostUsd: number;
+}
+
+/** Returns the active model id given a settings object. Centralized so the
+ *  cost meter, the request builder, and the toolbar chip all agree on which
+ *  model is in play for the next turn. */
+export function activeModel(toggles: ChatToggles): ModelId | string | null {
+  if (toggles.provider === 'anthropic') return toggles.anthropicModel;
+  return toggles.localModel;
 }

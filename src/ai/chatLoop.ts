@@ -1,13 +1,21 @@
 // Main agent loop: assembles the request, streams the response, executes
 // tools, persists everything, and loops until the model hits end_turn.
+//
+// Dispatch by provider:
+//   anthropic → src/ai/anthropic.ts   (hosted Claude over HTTPS)
+//   local     → src/ai/local.ts       (WebLLM, in-browser WebGPU)
+// Both providers return the same `StreamResult` shape; chatLoop is
+// otherwise agnostic to which one is in play.
 
 import { generateId } from '../storage/db';
-import { streamTurn, buildApiMessages, type StreamCallbacks } from './anthropic';
+import { streamTurn, buildApiMessages, type StreamCallbacks as AnthropicStreamCallbacks } from './anthropic';
+import { streamLocalTurn, resolveLocalModel, type StreamCallbacks as LocalStreamCallbacks } from './local';
 import { recordUsage, putMessages } from './db';
 import { buildToolList, executeTool } from './tools';
-import { buildSystemPrompt, loadAiMd, toggleSuffix } from './systemPrompt';
+import { buildLocalSystemPrompt, buildMediumLocalSystemPrompt, buildSystemPrompt, loadAiMd, toggleSuffix } from './systemPrompt';
+import { loadSettings } from './settings';
 import { turnCostUsd } from './cost';
-import { ITERATION_CAP, SPEND_CAP_USD, type ChatBlock, type ChatMessage, type ChatToggles, type PersistedToolCall, type PersistedToolResult, type TurnOutcomeReason } from './types';
+import { activeModel, ITERATION_CAP, SPEND_CAP_USD, type ChatBlock, type ChatMessage, type ChatToggles, type PersistedToolCall, type PersistedToolResult, type TurnOutcomeReason } from './types';
 
 /** Yield to the browser between heavy synchronous work blocks so the
  *  page stays responsive. requestAnimationFrame lets the browser paint
@@ -26,7 +34,8 @@ function yieldToBrowser(): Promise<void> {
 const SLOW_TOOL_MS = 250;
 
 export interface RunTurnInput {
-  apiKey: string;
+  /** Hosted-provider API key. Required only when toggles.provider === 'anthropic'. */
+  apiKey?: string;
   toggles: ChatToggles;
   /** sessionId for the current chat bucket. */
   sessionId: string;
@@ -93,8 +102,33 @@ export interface RunTurnCallbacks {
 export async function runTurn(input: RunTurnInput, callbacks: RunTurnCallbacks = {}): Promise<ChatMessage[]> {
   const { apiKey, toggles, sessionId, history, userBlocks, signal } = input;
   const tools = buildToolList(toggles);
-  const aiMd = await loadAiMd();
-  const systemPrompt = buildSystemPrompt(aiMd);
+
+  // The full ai.md is ~12.5K tokens — fine for hosted Claude with prompt
+  // caching. Most local models have 32K context so it technically fits
+  // there too, but smaller models do better with the hand-tuned
+  // slim/medium prompts (which leave more room for tool docs +
+  // conversation + the reply) and call readDoc to pull subdocs on demand.
+  // Either path honors the per-provider user override if one is set in
+  // AI settings.
+  const settings = loadSettings();
+  const override = settings.systemPromptOverrides?.[toggles.provider] ?? null;
+  let systemPrompt: string;
+  if (override !== null) {
+    systemPrompt = override;
+  } else if (toggles.provider === 'local' && toggles.localModel) {
+    try {
+      const info = resolveLocalModel(toggles.localModel);
+      systemPrompt = info.promptTier === 'medium'
+        ? buildMediumLocalSystemPrompt()
+        : buildLocalSystemPrompt();
+    } catch {
+      systemPrompt = buildLocalSystemPrompt();
+    }
+  } else if (toggles.provider === 'local') {
+    systemPrompt = buildLocalSystemPrompt();
+  } else {
+    systemPrompt = buildSystemPrompt(await loadAiMd());
+  }
 
   const seqStart = nextSeq(history);
 
@@ -119,16 +153,22 @@ export async function runTurn(input: RunTurnInput, callbacks: RunTurnCallbacks =
   // not when this single turn would exceed the whole cap on its own.
   const priorSessionCost = totalCost(history);
 
+  const model = activeModel(toggles);
+  if (model === null) {
+    callbacks.onError?.(new Error('No model is active. Open AI settings and choose a provider + model.'));
+    callbacks.onTurnComplete?.({ totalCostUsd: 0, toolCalls: 0, reason: 'error', iterations: 0 });
+    return workingHistory;
+  }
+
   for (let iter = 0; Number.isFinite(maxIter) ? iter < maxIter : true; iter++) {
     // Give the browser a frame between iterations so an agent running
     // many tool round-trips doesn't lock up the page.
     if (iter > 0) await yieldToBrowser();
-    const apiMessages = buildApiMessages(workingHistory);
     const assistantId = generateId();
     callbacks.onAssistantStart?.(assistantId);
 
     callbacks.onProgress?.({ phase: 'thinking', detail: 'Waiting for first token...' });
-    const streamCallbacks: StreamCallbacks = {
+    const streamCallbacks: AnthropicStreamCallbacks & LocalStreamCallbacks = {
       onText: delta => {
         // Beat on EVERY delta so the stall watchdog sees a healthy stream
         // and the elapsed-seconds counter doesn't keep climbing while text
@@ -146,20 +186,39 @@ export async function runTurn(input: RunTurnInput, callbacks: RunTurnCallbacks =
 
     let result;
     try {
-      result = await streamTurn({
-        apiKey,
-        model: toggles.model,
-        systemPrompt,
-        systemSuffix: toggleSuffix(toggles),
-        apiMessages,
-        tools,
-      }, streamCallbacks, signal);
+      if (toggles.provider === 'anthropic') {
+        if (!apiKey) throw new Error('Anthropic API key is required.');
+        const apiMessages = buildApiMessages(workingHistory);
+        result = await streamTurn({
+          apiKey,
+          model: toggles.anthropicModel,
+          systemPrompt,
+          systemSuffix: toggleSuffix(toggles),
+          apiMessages,
+          tools,
+        }, streamCallbacks, signal);
+      } else {
+        if (!toggles.localModel) throw new Error('No local model is selected. Open AI settings → Local model.');
+        // Local provider doesn't accept AbortSignal yet — the user's Stop
+        // click takes effect at the next iteration / tool boundary.
+        result = await streamLocalTurn({
+          modelId: toggles.localModel,
+          systemPrompt,
+          systemSuffix: toggleSuffix(toggles),
+          history: workingHistory,
+          tools,
+        }, streamCallbacks);
+      }
     } catch (err) {
+      // Surface the error to the caller; runTurn returns normally and the
+      // caller's awaited post-cleanup runs the history reload. The
+      // in-memory "Thinking…" placeholder gets wiped there.
       callbacks.onError?.(err instanceof Error ? err : new Error(String(err)));
+      callbacks.onTurnComplete?.({ totalCostUsd, toolCalls: totalToolCalls, reason: 'error', iterations: iter + 1 });
       return workingHistory;
     }
 
-    const turnCost = turnCostUsd(toggles.model, result.usage);
+    const turnCost = turnCostUsd(model, result.usage);
     totalCostUsd += turnCost;
 
     const aborted = result.stopReason === 'aborted' || signal?.aborted === true;
@@ -180,7 +239,18 @@ export async function runTurn(input: RunTurnInput, callbacks: RunTurnCallbacks =
     workingHistory = [...workingHistory, assistantMsg];
     callbacks.onAssistantPersisted?.(assistantMsg);
 
-    void recordUsage('anthropic', result.usage.inputTokens + result.usage.cacheReadInputTokens + result.usage.cacheCreationInputTokens, result.usage.outputTokens, turnCost);
+    if (toggles.provider === 'anthropic') {
+      void recordUsage('anthropic', result.usage.inputTokens + result.usage.cacheReadInputTokens + result.usage.cacheCreationInputTokens, result.usage.outputTokens, turnCost);
+    }
+
+    // Local-provider truncation: max_tokens or unclosed tool-call. We
+    // don't fire `onError` here — that would race with `onTurnComplete`
+    // below and stomp the outcome. Instead we flag a synthetic stopReason
+    // so the outcome formatter in the panel surfaces a useful hint.
+    const localTruncated = toggles.provider === 'local' && (result as { truncated?: boolean }).truncated;
+    if (localTruncated && result.stopReason !== 'tool_use') {
+      result = { ...result, stopReason: 'max_tokens' };
+    }
 
     if (aborted) {
       callbacks.onAborted?.();

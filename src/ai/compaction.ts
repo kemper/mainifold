@@ -6,7 +6,8 @@
 // window.partwright.addSessionNote so they survive future compactions.
 
 import { summarize } from './anthropic';
-import type { ChatMessage } from './types';
+import { summarizeLocal } from './local';
+import type { ChatMessage, ChatToggles } from './types';
 
 export interface CompactionProposal {
   /** Plain-text summary of the conversation up to the kept tail. */
@@ -25,7 +26,7 @@ export interface CompactionProposal {
   usage: { inputTokens: number; outputTokens: number };
 }
 
-const KEEP_TAIL = 4;
+const DEFAULT_KEEP_TAIL = 4;
 
 const COMPACTION_SYSTEM = `You are condensing a Partwright modeling-session transcript so the
 follow-up conversation pays less for context. Output ONLY a JSON object,
@@ -54,34 +55,80 @@ Rules for notes:
 
 Return strictly the JSON. No markdown fences, no commentary.`;
 
+export interface CompactionContext {
+  /** Provider-aware so we don't bill the user when local is active. */
+  toggles: ChatToggles;
+  /** Required when toggles.provider === 'anthropic'. */
+  apiKey?: string;
+}
+
 export async function proposeCompaction(
-  apiKey: string,
+  ctx: CompactionContext,
   history: ChatMessage[],
+  /** Number of most-recent messages to keep verbatim. Aggressive auto-compaction
+   *  passes a small number (2); manual compaction uses the larger default. */
+  keepTail: number = DEFAULT_KEEP_TAIL,
 ): Promise<CompactionProposal> {
-  if (history.length <= KEEP_TAIL) {
+  if (history.length <= keepTail) {
     throw new Error('Not enough history to compact yet — chat for a few more turns first.');
   }
-  const keep = history.slice(-KEEP_TAIL);
-  const drop = history.slice(0, history.length - KEEP_TAIL);
+  // Pick the keep/drop boundary so the first KEPT message is never a
+  // user message carrying `toolResults` — those reference a
+  // `tool_use_id` from a preceding `assistant.tool_calls` message which
+  // would be in the dropped slice. Both Anthropic and WebLLM reject an
+  // orphan tool_result block. We walk forward past every such message;
+  // the summary captures what the tool round accomplished.
+  let keepStart = history.length - keepTail;
+  while (keepStart < history.length && isOrphanToolResultHead(history[keepStart])) {
+    keepStart++;
+  }
+  const keep = history.slice(keepStart);
+  const drop = history.slice(0, keepStart);
+  if (drop.length === 0) {
+    throw new Error('Not enough history to compact yet — chat for a few more turns first.');
+  }
   const transcript = drop.map(formatForSummary).join('\n\n');
+  const prompt = `Compact this transcript:\n\n${transcript}`;
 
-  const { text, usage } = await summarize(
-    apiKey,
-    'claude-haiku-4-5',
-    COMPACTION_SYSTEM,
-    `Compact this transcript:\n\n${transcript}`,
-  );
+  let text: string;
+  let usage: { inputTokens: number; outputTokens: number };
+  let costUsd: number;
+
+  if (ctx.toggles.provider === 'anthropic') {
+    if (!ctx.apiKey) throw new Error('Anthropic API key required for compaction.');
+    const r = await summarize(ctx.apiKey, 'claude-haiku-4-5', COMPACTION_SYSTEM, prompt);
+    text = r.text;
+    usage = { inputTokens: r.usage.inputTokens, outputTokens: r.usage.outputTokens };
+    costUsd = (usage.inputTokens * 1.0 + usage.outputTokens * 5.0) / 1_000_000;
+  } else {
+    if (!ctx.toggles.localModel) throw new Error('Local model required for compaction.');
+    const r = await summarizeLocal(ctx.toggles.localModel, COMPACTION_SYSTEM, prompt);
+    text = r.text;
+    usage = { inputTokens: r.usage.inputTokens, outputTokens: r.usage.outputTokens };
+    costUsd = 0;
+  }
 
   const parsed = parseProposal(text);
-  const costUsd = (usage.inputTokens * 1.0 + usage.outputTokens * 5.0) / 1_000_000;
   return {
     summary: parsed.summary,
     proposedNotes: parsed.notes,
     keep,
     drop,
     costUsd,
-    usage: { inputTokens: usage.inputTokens, outputTokens: usage.outputTokens },
+    usage,
   };
+}
+
+/** True for any `user` message carrying `toolResults`. Those blocks
+ *  reference a `tool_use_id` from a preceding `assistant.tool_calls`
+ *  message; if that assistant message is in the dropped slice (almost
+ *  always the case at the boundary) the kept tool_result is orphaned
+ *  and the next API turn fails. We accept losing any mixed text/image
+ *  content on these messages — in practice the chat loop never produces
+ *  mixed tool-result + text messages anyway, and the summary covers what
+ *  the tool round accomplished. */
+function isOrphanToolResultHead(msg: ChatMessage): boolean {
+  return msg.role === 'user' && !!msg.toolResults && msg.toolResults.length > 0;
 }
 
 function formatForSummary(msg: ChatMessage): string {

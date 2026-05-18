@@ -385,6 +385,21 @@ const ALL_TOOLS: ToolDefinition[] = [
     input_schema: { type: 'object', properties: {} },
   },
   {
+    name: 'readDoc',
+    description: 'Fetch one of the topic-specific docs from /ai/<name>.md. Use this when the core ai.md points you at a subdoc and you need its full content before writing code. Names: curves, bosl2, colors, print-safety, reference-images, file-io, annotations.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        name: {
+          type: 'string',
+          enum: ['curves', 'bosl2', 'colors', 'print-safety', 'reference-images', 'file-io', 'annotations'],
+          description: 'Subdoc name without the .md extension.',
+        },
+      },
+      required: ['name'],
+    },
+  },
+  {
     name: 'paintRegion',
     description: 'Paint the coplanar region containing a point with the given color. Best paint primitive when you know exactly where to click.',
     input_schema: {
@@ -441,6 +456,28 @@ const ALL_TOOLS: ToolDefinition[] = [
         topOnly: { type: 'boolean', description: 'Shortcut for normalCone: {axis: [0,0,1], angleDeg: 30}. Common case: paint the top face of a feature without catching its sides.' },
         coverageMode: { type: 'string', enum: ['centroid', 'fully_inside', 'any_vertex_inside'], description: 'Triangle containment test. Default "centroid". "fully_inside" requires all 3 vertices inside the box — defangs fan-bleed.' },
         maxTriangleArea: { type: 'number', description: 'Skip triangles larger than this. Use to filter out the long radial triangles that cylinder/revolve produce.' },
+        color: { type: 'array', items: { type: 'number' }, minItems: 3, maxItems: 3 },
+        name: { type: 'string' },
+      },
+      required: ['box', 'color'],
+    },
+  },
+  {
+    name: 'paintInOrientedBox',
+    description: 'Paint every triangle whose centroid lies inside a rotated oriented bounding box (OBB). Same selector as the UI Box paint tool. Reach for this when paintInBox catches the wrong faces because the feature is at an angle to the world axes — diagonal handles, tilted lids, rotated wings, etc. Defaults to the identity quaternion (no rotation) when `quaternion` is omitted, making it equivalent to paintInBox with the same center+size.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        box: {
+          type: 'object',
+          description: '{center: [x,y,z], size: [sx,sy,sz], quaternion?: [x,y,z,w]} — size is the full extent along each box-local axis, not half-extent. Quaternion defaults to identity [0,0,0,1] if omitted.',
+          properties: {
+            center: { type: 'array', items: { type: 'number' }, minItems: 3, maxItems: 3 },
+            size: { type: 'array', items: { type: 'number' }, minItems: 3, maxItems: 3 },
+            quaternion: { type: 'array', items: { type: 'number' }, minItems: 4, maxItems: 4 },
+          },
+          required: ['center', 'size'],
+        },
         color: { type: 'array', items: { type: 'number' }, minItems: 3, maxItems: 3 },
         name: { type: 'string' },
       },
@@ -802,9 +839,11 @@ const ALWAYS_AVAILABLE = new Set([
   'getFeatureCentroids',
   'getSessionContext',
   'listVersions',
-  'loadVersion',
+  // loadVersion is intentionally NOT here — it's listed in SAVE_GATED so
+  // the model can't rewind state when the user has paused commits.
   'addSessionNote',
   'listSessionNotes',
+  'readDoc',
   'findFaces',
   'listComponents',
   'listLabels',
@@ -826,7 +865,7 @@ const ALWAYS_AVAILABLE = new Set([
 
 const RUN_GATED = new Set(['runCode']);
 const SAVE_GATED = new Set(['runAndSave', 'loadVersion']);
-const PAINT_GATED = new Set(['paintRegion', 'paintFaces', 'paintNear', 'paintInBox', 'paintSlab', 'paintNearestRegion', 'paintComponent', 'paintByLabel', 'paintByLabels', 'paintConnected', 'undoLastPaint', 'redoLastPaint', 'removeRegion', 'clearColors']);
+const PAINT_GATED = new Set(['paintRegion', 'paintFaces', 'paintNear', 'paintInBox', 'paintInOrientedBox', 'paintSlab', 'paintNearestRegion', 'paintComponent', 'paintByLabel', 'paintByLabels', 'paintConnected', 'undoLastPaint', 'redoLastPaint', 'removeRegion', 'clearColors']);
 /** Tools that ship a PNG back to the model via a multimodal content
  *  block. Gated by the Views vision toggle so the user can disable
  *  vision spend in one place — when off, the agent has to reason from
@@ -866,6 +905,17 @@ function getApi(): PartwrightAPI {
  *  ToolExecResult directly. */
 export async function executeTool(name: string, input: Record<string, unknown>): Promise<ToolExecResult> {
   try {
+    // Pre-flight: code-writing tools must match the active session
+    // language. The agent loop will retry with the corrected language
+    // when this errors, which is faster and clearer than letting the
+    // wrong-language code reach the engine and fail with a parse error.
+    if (name === 'setCode' || name === 'runAndSave' || name === 'runCode') {
+      const code = typeof input.code === 'string' ? input.code : '';
+      if (code.length > 0) {
+        const mismatch = detectLanguageMismatch(code);
+        if (mismatch) return { content: mismatch, isError: true };
+      }
+    }
     const api = getApi();
     // Tools that ship images back to the model bypass the generic JSON
     // dispatch — they need the data-URL → multimodal-image wrapping.
@@ -887,6 +937,65 @@ export async function executeTool(name: string, input: Record<string, unknown>):
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     return { content: msg, isError: true };
+  }
+}
+
+/** Returns an error message when the supplied code clearly doesn't match
+ *  the active session language, or null when it looks plausible. The
+ *  detector is intentionally conservative — false positives bounce the
+ *  model into a wasted retry, so we only flag patterns we're highly
+ *  confident about (`Manifold.` API calls in a SCAD session, `module ` /
+ *  trailing `;` blocks with no `return` in a JS session). */
+function detectLanguageMismatch(code: string): string | null {
+  const lang = readActiveLanguage();
+  if (lang === null) return null;
+  if (lang === 'scad') {
+    // Strong JS markers in a SCAD session — manifold-3d API calls and
+    // explicit `return` statements (SCAD has no return keyword).
+    if (/\bManifold\s*\./.test(code) || /\bCrossSection\s*\./.test(code) || /^\s*return\s+/m.test(code) || /\bconst\s*\{\s*Manifold\b/.test(code)) {
+      return 'Language mismatch: this session is OpenSCAD (.scad) but the code looks like manifold-js (JavaScript). Rewrite using SCAD syntax: `cube([w,d,h], center=true);`, `cylinder(h=…, r1=…, r2=…, $fn=64);`, `translate([x,y,z]) <child>;`, `union() { ... }`, etc. No `return`, no `Manifold.` calls.';
+    }
+  } else {
+    // Strong SCAD markers in a JS session — `module name() {}` /
+    // `function foo() = …` / `$fn = …;` are SCAD-only constructs.
+    if (/^\s*module\s+\w+\s*\(/m.test(code) || /^\s*\$fn\s*=/m.test(code) || /^\s*function\s+\w+\s*\([^)]*\)\s*=/m.test(code)) {
+      return 'Language mismatch: this session is manifold-js (JavaScript) but the code uses OpenSCAD-only syntax (`module`, `$fn`, or function-equals). Rewrite using the manifold-js API: `const { Manifold, CrossSection } = api;`, `Manifold.cube(...)`, `.translate(...)`, ending with `return manifold;`.';
+    }
+  }
+  return null;
+}
+
+/** Read the live engine language without forcing every consumer of
+ *  `tools.ts` to import the engine module statically. The function lives
+ *  in `src/geometry/engine.ts` and is already loaded by the app shell at
+ *  startup, so a require-style lookup via `window.partwright` is safe. */
+const SUBDOC_NAMES = new Set(['curves', 'bosl2', 'colors', 'print-safety', 'reference-images', 'file-io', 'annotations']);
+
+/** Fetch a topic subdoc by short name. Same fetch path for Anthropic and
+ *  local providers — both run inside the user's browser tab, so this is
+ *  served by the dev server / Cloudflare Pages alongside the rest of the
+ *  static site. The model gets the raw markdown back as the tool result. */
+async function readSubdoc(name: string): Promise<{ content: string; isError: boolean }> {
+  if (!SUBDOC_NAMES.has(name)) {
+    return { content: `Unknown subdoc "${name}". Valid names: ${Array.from(SUBDOC_NAMES).join(', ')}.`, isError: true };
+  }
+  try {
+    const res = await fetch(`/ai/${name}.md`, { cache: 'force-cache' });
+    if (!res.ok) return { content: `Failed to fetch /ai/${name}.md: ${res.status} ${res.statusText}`, isError: true };
+    const text = await res.text();
+    return { content: text, isError: false };
+  } catch (err) {
+    return { content: `Failed to fetch /ai/${name}.md: ${err instanceof Error ? err.message : String(err)}`, isError: true };
+  }
+}
+
+function readActiveLanguage(): 'manifold-js' | 'scad' | null {
+  try {
+    const w = window as unknown as { partwright?: { getActiveLanguage?: () => 'manifold-js' | 'scad' } };
+    const lang = w.partwright?.getActiveLanguage?.();
+    return lang === 'manifold-js' || lang === 'scad' ? lang : null;
+  } catch {
+    return null;
   }
 }
 
@@ -1021,6 +1130,8 @@ async function dispatch(api: PartwrightAPI, name: string, input: Record<string, 
       return api.addSessionNote(input.text as string);
     case 'listSessionNotes':
       return api.listSessionNotes();
+    case 'readDoc':
+      return readSubdoc(input.name as string);
     case 'paintRegion':
       return api.paintRegion(input);
     case 'paintFaces':
@@ -1029,6 +1140,8 @@ async function dispatch(api: PartwrightAPI, name: string, input: Record<string, 
       return api.paintNear(input);
     case 'paintInBox':
       return api.paintInBox(input);
+    case 'paintInOrientedBox':
+      return api.paintInOrientedBox(input);
     case 'paintSlab':
       return api.paintSlab(input);
     case 'paintNearestRegion':
