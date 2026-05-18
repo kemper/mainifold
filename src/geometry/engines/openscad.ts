@@ -2,6 +2,7 @@ import type { Engine, MeshResult, ValidateResult } from './types';
 import { parseBinarySTLToMeshGL } from './scadToManifold';
 import { getManifoldModule, manifoldJsEngine } from './manifoldJs';
 import { scadDiagnostics } from '../sourceDiagnostics';
+import { ensureBosl2InMemfs, sourceUsesBosl2 } from '../bosl2Loader';
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type CreateOpenSCAD = (opts: any) => Promise<any>;
@@ -120,6 +121,14 @@ export async function runScadAsync(source: string): Promise<MeshResult> {
   }
 
   try {
+    if (sourceUsesBosl2(source)) {
+      try {
+        await ensureBosl2InMemfs(instance);
+      } catch (e) {
+        const error = `Failed to load BOSL2 library: ${e instanceof Error ? e.message : String(e)}`;
+        return { mesh: null, manifold: null, error, diagnostics: scadDiagnostics(source, error) };
+      }
+    }
     instance.FS.writeFile('/in.scad', source);
 
     const exitCode = instance.callMain([
@@ -225,6 +234,14 @@ export async function validateScadAsync(source: string): Promise<ValidateResult>
   }
 
   try {
+    if (sourceUsesBosl2(source)) {
+      try {
+        await ensureBosl2InMemfs(instance);
+      } catch (e) {
+        const error = `Failed to load BOSL2 library: ${e instanceof Error ? e.message : String(e)}`;
+        return { valid: false, error, diagnostics: scadDiagnostics(source, error) };
+      }
+    }
     instance.FS.writeFile('/v.scad', source);
     const code = instance.callMain([
       '--export-format=ast',
