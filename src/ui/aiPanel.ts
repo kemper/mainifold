@@ -402,38 +402,15 @@ function buildDrawer(): void {
   queuedBadgeRef.className = 'px-3 pb-1.5 text-[11px] text-amber-300 flex items-center gap-2 shrink-0 hidden';
   bottomSection.appendChild(queuedBadgeRef);
 
-  // Input row — flex-1 so it absorbs any extra height when the user drags
-  // the resize handle above the bottom section upward.
+  // Input area — column layout: textarea fills available height, buttons
+  // sit in a row below so the textarea gets the full pane width.
   const inputRow = document.createElement('div');
-  inputRow.className = 'px-3 py-2 border-t border-zinc-700 flex items-end gap-2 flex-1 min-h-0';
-
-  const showAiBtn = document.createElement('button');
-  showAiBtn.className = 'shrink-0 px-2 py-1 rounded text-[11px] text-zinc-300 bg-zinc-800 hover:bg-zinc-700 border border-zinc-700';
-  showAiBtn.textContent = '📷 Show AI';
-  showAiBtn.title = 'Snapshot the 4 iso views and attach to your next message.';
-  showAiBtn.addEventListener('click', () => { void attachIsoViews(); });
-  inputRow.appendChild(showAiBtn);
-
-  const fileBtn = document.createElement('button');
-  fileBtn.className = 'shrink-0 px-2 py-1 rounded text-[11px] text-zinc-300 bg-zinc-800 hover:bg-zinc-700 border border-zinc-700';
-  fileBtn.textContent = '📎';
-  fileBtn.title = 'Attach an image — pick from recent files or upload a new one.';
-  fileBtn.addEventListener('click', () => {
-    showAttachmentModal({
-      onAttach: images => {
-        for (const img of images) attachImageSource(img);
-      },
-    });
-  });
-  inputRow.appendChild(fileBtn);
+  inputRow.className = 'px-3 pt-2 pb-2 border-t border-zinc-700 flex flex-col gap-2 flex-1 min-h-0';
 
   const ta = document.createElement('textarea');
   ta.placeholder = 'Ask the AI to model something...';
   ta.rows = 2;
-  // self-stretch overrides the items-end alignment for this element only,
-  // letting the textarea fill the full height of inputRow while buttons
-  // remain bottom-aligned.
-  ta.className = 'flex-1 self-stretch px-2 py-1 rounded bg-zinc-800 border border-zinc-600 text-zinc-100 text-sm placeholder:text-zinc-500 focus:outline-none focus:border-blue-500 resize-none';
+  ta.className = 'w-full flex-1 min-h-0 px-2 py-1.5 rounded bg-zinc-800 border border-zinc-600 text-zinc-100 text-sm placeholder:text-zinc-500 focus:outline-none focus:border-blue-500 resize-none';
   ta.addEventListener('keydown', e => {
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault();
@@ -455,6 +432,34 @@ function buildDrawer(): void {
   inputEl = ta;
   inputRow.appendChild(ta);
 
+  // Button row — attachment buttons on the left, stop/send on the right.
+  const inputBtnRow = document.createElement('div');
+  inputBtnRow.className = 'flex items-center gap-2 shrink-0';
+
+  const showAiBtn = document.createElement('button');
+  showAiBtn.className = 'shrink-0 px-2 py-1 rounded text-[11px] text-zinc-300 bg-zinc-800 hover:bg-zinc-700 border border-zinc-700';
+  showAiBtn.textContent = '📷 Show AI';
+  showAiBtn.title = 'Snapshot the 4 iso views and attach to your next message.';
+  showAiBtn.addEventListener('click', () => { void attachIsoViews(); });
+  inputBtnRow.appendChild(showAiBtn);
+
+  const fileBtn = document.createElement('button');
+  fileBtn.className = 'shrink-0 px-2 py-1 rounded text-[11px] text-zinc-300 bg-zinc-800 hover:bg-zinc-700 border border-zinc-700';
+  fileBtn.textContent = '📎';
+  fileBtn.title = 'Attach an image — pick from recent files or upload a new one.';
+  fileBtn.addEventListener('click', () => {
+    showAttachmentModal({
+      onAttach: images => {
+        for (const img of images) attachImageSource(img);
+      },
+    });
+  });
+  inputBtnRow.appendChild(fileBtn);
+
+  const inputBtnSpacer = document.createElement('div');
+  inputBtnSpacer.className = 'flex-1';
+  inputBtnRow.appendChild(inputBtnSpacer);
+
   // Stop button — separate from Send so the human can queue follow-ups
   // mid-run (clicking Send) without losing the ability to actually halt
   // the agent. Hidden until a turn is in flight.
@@ -471,7 +476,7 @@ function buildDrawer(): void {
     void interruptLocal();
   });
   stopBtnRef = stopBtn;
-  inputRow.appendChild(stopBtn);
+  inputBtnRow.appendChild(stopBtn);
 
   const sendBtn = document.createElement('button');
   sendBtn.className = 'shrink-0 px-3 py-1.5 rounded text-xs font-medium bg-blue-600 hover:bg-blue-500 text-white disabled:opacity-50 disabled:cursor-not-allowed';
@@ -488,8 +493,9 @@ function buildDrawer(): void {
     void sendMessage();
   });
   sendBtnRef = sendBtn;
-  inputRow.appendChild(sendBtn);
+  inputBtnRow.appendChild(sendBtn);
 
+  inputRow.appendChild(inputBtnRow);
   bottomSection.appendChild(inputRow);
   root.appendChild(bottomSection);
 
