@@ -77,14 +77,14 @@ function resolveCustomContextWindow(modelId: string): number | null {
  *  `appendPromptToolDocs` if you change those. */
 function computeAttentionSink(info: LocalModelInfo): number {
   const promptBudget = info.promptTier === 'medium' ? 1300 : 600;
-  // Native function-callers get the OpenAI `tools` field, not a `<tool_call>`
-  // instruction block in the prompt, so they need less sink budget. Other
-  // models append a ~400-token tool documentation block.
-  const toolsBudget = info.officialToolCalling ? 100 : 500;
+  // Native callers use the `tools` API field, not a system-prompt block.
+  // Hermes-style tool docs include full JSON schema (~1–4 K tokens).
+  // Compact markdown lists are ~400 tokens.
+  const toolsBudget = info.officialToolCalling ? 100
+    : info.toolPromptStyle === 'hermes' ? 3500
+    : 500;
   const safetyMargin = 200;
-  // Cap at half the smallest plausible window so we never accidentally
-  // freeze the entire context as sink.
-  return Math.min(2048, promptBudget + toolsBudget + safetyMargin);
+  return Math.min(8192, promptBudget + toolsBudget + safetyMargin);
 }
 
 function buildCustomModelEntries(webllm: typeof import('@mlc-ai/web-llm')): import('@mlc-ai/web-llm').ModelRecord[] {
@@ -480,9 +480,10 @@ export async function streamLocalTurn(spec: LocalRequestSpec, callbacks: StreamC
   const maxTokens = spec.maxTokens ?? 768;
   const native = await supportsNativeToolCalls(spec.modelId);
 
+  const toolStyle = info.toolPromptStyle ?? 'compact';
   const systemSuffix = native
     ? spec.systemSuffix
-    : appendPromptToolDocs(spec.systemSuffix, spec.tools);
+    : appendPromptToolDocs(spec.systemSuffix, spec.tools, toolStyle);
   const messages = buildLocalApiMessages(spec.systemPrompt, systemSuffix, spec.history, info, native);
 
   const baseReq: Record<string, unknown> = {
@@ -742,15 +743,16 @@ function stripThinkBlocks(text: string): string {
 }
 
 /** Build a tool-use instruction block to append to the system prompt for
- *  models that don't accept the OpenAI `tools` request field. Kept terse —
- *  local models share their context window with the whole conversation,
- *  and the 70B is capped at 4K, so every token counts. We summarize each
- *  tool as one line:
- *      name(arg1: type[, ...]) — short description.
- *  Detailed JSON schema is omitted; the few tools whose arguments need
- *  call-time structure (paint, find) get a single-line example. */
-function appendPromptToolDocs(existingSuffix: string, tools: ToolDefinition[]): string {
+ *  models that don't accept the OpenAI `tools` request field.
+ *
+ *  'compact' (default) — terse markdown signature list. Kept small so the
+ *  70B's 4K context window isn't dominated by tool docs.
+ *  'hermes' — full JSON schema inside <tools>…</tools> XML, matching the
+ *  NousResearch training format that Hermes-2-Pro expects. Without it the
+ *  model hallucinates completions rather than emitting <tool_call> blocks. */
+function appendPromptToolDocs(existingSuffix: string, tools: ToolDefinition[], style: 'compact' | 'hermes' = 'compact'): string {
   if (tools.length === 0) return existingSuffix;
+  if (style === 'hermes') return buildHermesToolDocs(existingSuffix, tools);
   const lines: string[] = [];
   if (existingSuffix.trim().length > 0) lines.push(existingSuffix);
   lines.push('');
@@ -762,6 +764,30 @@ function appendPromptToolDocs(existingSuffix: string, tools: ToolDefinition[]): 
   lines.push('');
   lines.push('Available tools:');
   for (const t of tools) lines.push(`- ${compactToolSignature(t)}`);
+  return lines.join('\n');
+}
+
+/** Hermes-2-Pro tool injection: full JSON schema wrapped in <tools> XML.
+ *  Matches the NousResearch training format so the model reliably emits
+ *  <tool_call> blocks rather than narrating what it would do. */
+function buildHermesToolDocs(existingSuffix: string, tools: ToolDefinition[]): string {
+  const defs = tools.map(t => ({
+    type: 'function',
+    function: { name: t.name, description: t.description, parameters: t.input_schema },
+  }));
+  const lines: string[] = [];
+  if (existingSuffix.trim().length > 0) lines.push(existingSuffix);
+  lines.push('');
+  lines.push('You have access to the following tools:');
+  lines.push('<tools>');
+  lines.push(JSON.stringify(defs));
+  lines.push('</tools>');
+  lines.push('');
+  lines.push('To call a tool, emit exactly:');
+  lines.push('<tool_call>');
+  lines.push('{"name": "function_name", "arguments": {arg_dict}}');
+  lines.push('</tool_call>');
+  lines.push('Stop after </tool_call> and wait for the result. Multiple calls per turn are allowed.');
   return lines.join('\n');
 }
 

@@ -67,6 +67,14 @@ export interface LocalModelInfo {
    *  and Hermes-3 / other models don't get schema injection at all. Every
    *  curated model uses our prompt-engineered `<tool_call>` path instead. */
   officialToolCalling: boolean;
+  /** How tools are injected into the system prompt on the prompt-engineered
+   *  path. 'compact' (default) emits a terse markdown signature list that
+   *  fits in tight context windows. 'hermes' emits the full JSON schema
+   *  inside <tools>…</tools> XML — the format Hermes-2-Pro was trained on
+   *  by NousResearch; without it the model hallucinates completions instead
+   *  of emitting <tool_call> blocks. Only set this on models with large
+   *  enough context windows (≥ 16K) to absorb the extra tokens. */
+  toolPromptStyle?: 'compact' | 'hermes';
   /** Subjective quality rating for *this app's* use case (driving Partwright
    *  with tool calls), 1-3 stars. Not a generic LLM benchmark. */
   qualityStars: 1 | 2 | 3;
@@ -96,7 +104,7 @@ export const LOCAL_MODELS: LocalModelInfo[] = [
     id: 'Hermes-2-Pro-Llama-3-8B-q4f16_1-MLC',
     group: 'recommended',
     label: 'Hermes 2 Pro 8B',
-    blurb: 'NousResearch\'s function-call–tuned Llama 3 8B. Reliable at the prompt-engineered <tool_call> format and strong at multi-step reasoning. Start here.',
+    blurb: 'NousResearch\'s function-call–tuned Llama 3 8B. Reliable at tool calling and strong at multi-step reasoning. Start here.',
     downloadGB: 4.5,
     vramMB: 4976,
     // Llama 3 8B: 32 layers × 8 KV heads × 128 head_dim × 4 bytes × 1000 / 1024² ≈ 128 MB/1K
@@ -104,6 +112,7 @@ export const LOCAL_MODELS: LocalModelInfo[] = [
     recommendedSystem: 'Discrete GPU with 8+ GB VRAM, or Apple Silicon with 16+ GB unified RAM.',
     supportsVision: false,
     officialToolCalling: false,
+    toolPromptStyle: 'hermes',
     qualityStars: 3,
     promptTier: 'medium',
     contextWindowSize: 32768,

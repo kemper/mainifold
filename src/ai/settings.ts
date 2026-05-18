@@ -66,6 +66,10 @@ export interface LocalContextSettings {
    *  the conversation never errors with "prompt tokens exceed window",
    *  but the model loses long-range coherence. */
   sliding: boolean;
+  /** Seconds without a new token before the stall watchdog fires and
+   *  auto-retries the request. Default 35. Increase for slow models on
+   *  modest hardware (e.g. a large quant on CPU-assisted inference). */
+  stallTimeoutSec: number;
 }
 
 const DEFAULT_TOGGLES_BY_PRESET: Record<Exclude<Preset, 'custom'>, Omit<ChatToggles, 'provider' | 'anthropicModel' | 'localModel'> & { anthropicModel: AnthropicModelId }> = {
@@ -111,7 +115,7 @@ const DEFAULT_SETTINGS: AiSettings = {
   autoCompactMode: 'off',
   systemPromptOverrides: { anthropic: null, local: null },
   customLocalModels: [],
-  localContext: { windowSizeOverride: null, sliding: false },
+  localContext: { windowSizeOverride: null, sliding: false, stallTimeoutSec: 35 },
   aiPanelWidth: 420,
 };
 
@@ -291,9 +295,11 @@ function mergeWithDefaults(partial: LegacyAiSettings): AiSettings {
 
 function normalizeLocalContext(raw: Partial<LocalContextSettings> | undefined): LocalContextSettings {
   const override = raw?.windowSizeOverride;
+  const timeout = raw?.stallTimeoutSec;
   return {
     windowSizeOverride: typeof override === 'number' && override > 0 ? Math.floor(override) : null,
     sliding: raw?.sliding === true,
+    stallTimeoutSec: typeof timeout === 'number' && timeout >= 5 ? Math.floor(timeout) : 35,
   };
 }
 
