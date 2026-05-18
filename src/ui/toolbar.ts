@@ -1,5 +1,6 @@
 import { resetTour, startTour } from './tour';
 import { partwrightMarkSvg } from './brand';
+import { showQualitySettingsModal } from './qualitySettingsModal';
 import { getTheme, onThemeChange, toggleTheme } from './theme';
 import { downloadBlob } from '../export/download';
 import {
@@ -15,11 +16,6 @@ import {
   type ImportInboxEntry,
 } from '../import/importInbox';
 
-export interface ExampleEntry {
-  code: string;
-  language: 'manifold-js' | 'scad';
-}
-
 export interface ToolbarCallbacks {
   onRun: () => void;
   onExportGLB: () => void;
@@ -31,19 +27,46 @@ export interface ToolbarCallbacks {
   onImportFile: (file: File) => void | Promise<void>;
   /** Re-import a blob already held in the inbox (e.g. recent-imports re-click). */
   onImportInboxEntry: (entry: ImportInboxEntry) => void | Promise<void>;
-  onExampleSelect: (entry: ExampleEntry) => void;
+  onOpenCatalog: () => void;
   onLanguageSwitch: (lang: 'manifold-js' | 'scad') => void;
   onGoHome: () => void;
+  /** Toggle the AI chat side panel. */
+  onToggleAi: () => void;
+}
+
+let _aiBtn: HTMLButtonElement | null = null;
+
+/** Update the AI chip label/state from outside (e.g. when key connects/disconnects). */
+export function setAiToolbarState(connected: boolean): void {
+  if (!_aiBtn) return;
+  if (connected) {
+    _aiBtn.className = 'flex items-center gap-1.5 px-2 py-1 rounded text-xs text-blue-300 bg-blue-900/30 border border-blue-700/50 hover:bg-blue-900/50 transition-colors';
+    _aiBtn.innerHTML = '<span>✦ AI</span>';
+    _aiBtn.title = 'Open AI chat panel';
+  } else {
+    _aiBtn.className = 'flex items-center gap-1.5 px-2 py-1 rounded text-xs text-zinc-300 hover:bg-zinc-700 hover:text-zinc-100 transition-colors';
+    _aiBtn.innerHTML = '<span>✦ Connect AI</span>';
+    _aiBtn.title = 'Connect an Anthropic API key to chat with the AI';
+  }
 }
 
 /** File extensions accepted by the Import button and drag-and-drop. */
-export const IMPORT_ACCEPT = '.partwright.json,.json,.js,.scad';
+export const IMPORT_ACCEPT = '.partwright.json,.json,.js,.scad,.stl';
 
 let _autoRun = true;
 let _onAutoRunChange: ((on: boolean) => void) | null = null;
+let _syncAutoRunUI: (() => void) | null = null;
 
 /** Whether auto-run on edit is enabled */
 export function isAutoRun(): boolean { return _autoRun; }
+
+/** Programmatically set auto-run state (also syncs the toolbar button UI) */
+export function setAutoRun(enabled: boolean): void {
+  if (_autoRun === enabled) return;
+  _autoRun = enabled;
+  _syncAutoRunUI?.();
+  if (_onAutoRunChange) _onAutoRunChange(_autoRun);
+}
 
 /** Register a callback for when auto-run state changes */
 export function onAutoRunChange(cb: (on: boolean) => void): void { _onAutoRunChange = cb; }
@@ -70,11 +93,10 @@ export function setToolbarLanguage(lang: 'manifold-js' | 'scad'): void {
 
 export function createToolbar(
   container: HTMLElement,
-  examples: Record<string, ExampleEntry>,
   callbacks: ToolbarCallbacks,
 ): HTMLElement {
   const toolbar = document.createElement('div');
-  toolbar.className = 'flex items-center gap-1 px-3 py-1.5 bg-zinc-900 border-b border-zinc-700 text-sm shrink-0';
+  toolbar.className = 'flex flex-wrap md:flex-nowrap items-center gap-1 px-3 py-1.5 bg-zinc-900 border-b border-zinc-700 text-sm shrink-0';
 
   // Logo — clicking returns to the landing page
   const logo = document.createElement('button');
@@ -111,6 +133,7 @@ export function createToolbar(
       btnRun.classList.remove('hidden');
     }
   }
+  _syncAutoRunUI = syncAutoRunUI;
 
   autoRunBtn.addEventListener('click', () => {
     _autoRun = !_autoRun;
@@ -157,36 +180,11 @@ export function createToolbar(
   spacer.className = 'flex-1';
   toolbar.appendChild(spacer);
 
-  // Example select
-  const select = document.createElement('select');
-  select.id = 'example-select';
-  select.className = 'bg-zinc-800 border border-zinc-600 rounded px-2 py-1 text-xs text-zinc-300 cursor-pointer';
-
-  const defaultOpt = document.createElement('option');
-  defaultOpt.textContent = 'Load example\u2026';
-  defaultOpt.value = '';
-  select.appendChild(defaultOpt);
-
-  for (const [name, entry] of Object.entries(examples)) {
-    const opt = document.createElement('option');
-    const displayName = name
-      .replace(/^.*\//, '')
-      .replace(/\.(js|scad)$/, '')
-      .replace(/_/g, ' ');
-    const tag = entry.language === 'scad' ? ' [SCAD]' : '';
-    opt.textContent = displayName + tag;
-    opt.value = name;
-    select.appendChild(opt);
-  }
-
-  select.addEventListener('change', () => {
-    const key = select.value;
-    if (key && examples[key]) {
-      callbacks.onExampleSelect(examples[key]);
-      select.value = '';
-    }
-  });
-  toolbar.appendChild(select);
+  // Catalog — navigates to /catalog where premade sessions are browsed.
+  const btnCatalog = createButton('btn-catalog', '\u2630 Catalog');
+  btnCatalog.title = 'Browse the catalog of premade models';
+  btnCatalog.addEventListener('click', callbacks.onOpenCatalog);
+  toolbar.appendChild(btnCatalog);
 
   // Import dropdown — mirrors the Export dropdown. Holds a "Choose file…" entry
   // (the existing OS file picker) and a "Recent Imports" section for re-import.
@@ -195,7 +193,7 @@ export function createToolbar(
   importWrapper.id = 'import-wrapper';
 
   const btnImport = createButton('btn-import', '\u2191 Import');
-  btnImport.title = 'Import a .partwright.json session, or a .js / .scad file';
+  btnImport.title = 'Import a .partwright.json session, a .js / .scad source file, or an .stl mesh';
   importWrapper.appendChild(btnImport);
 
   // Hidden file input — kept inside the wrapper so click-outside-to-close still works.
@@ -217,7 +215,7 @@ export function createToolbar(
   importDropdown.appendChild(createSectionHeader('From file'));
   const chooseFileOpt = createDescribedItem(
     'Choose file\u2026',
-    'Open a .partwright.json session, or a .js / .scad file.',
+    'Open a .partwright.json session, a .js / .scad source file, or an .stl mesh.',
   );
   chooseFileOpt.addEventListener('click', () => {
     importDropdown.classList.add('hidden');
@@ -333,6 +331,7 @@ export function createToolbar(
   const threemfOpt = createDescribedItem(
     '3MF',
     'Geometry + color. Native format for Bambu Studio multi-color prints.',
+    'Recommended',
   );
   threemfOpt.addEventListener('click', () => {
     dropdown.classList.add('hidden');
@@ -377,7 +376,7 @@ export function createToolbar(
 
   const sessionOpt = createDescribedItem(
     'Session (.partwright.json)',
-    'All versions, notes, and reference images. Another Partwright user can import this.',
+    'All versions, notes, and attached images. Another Partwright user can import this.',
   );
   sessionOpt.addEventListener('click', () => {
     dropdown.classList.add('hidden');
@@ -489,6 +488,16 @@ export function createToolbar(
 
   toolbar.appendChild(exportWrapper);
 
+  // AI chat toggle — opens the side drawer; switches between "Connect AI"
+  // (no key yet) and a connected chip via setAiToolbarState() from main.ts.
+  _aiBtn = document.createElement('button');
+  _aiBtn.id = 'btn-ai';
+  _aiBtn.className = 'flex items-center gap-1.5 px-2 py-1 rounded text-xs text-zinc-300 hover:bg-zinc-700 hover:text-zinc-100 transition-colors ml-1';
+  _aiBtn.innerHTML = '<span>✦ Connect AI</span>';
+  _aiBtn.title = 'Connect an Anthropic API key to chat with the AI';
+  _aiBtn.addEventListener('click', callbacks.onToggleAi);
+  toolbar.appendChild(_aiBtn);
+
   // Dark mode toggle — text button, on by default, off when clicked
   const themeBtn = document.createElement('button');
   themeBtn.id = 'btn-theme';
@@ -507,10 +516,22 @@ export function createToolbar(
   onThemeChange(syncThemeBtn);
   toolbar.appendChild(themeBtn);
 
+  // Modeling-quality settings — gear icon opens a modal where users
+  // pick the default curve resolution. Defaults to "Highest" so the
+  // out-of-the-box rendering is smooth.
+  const qualityBtn = document.createElement('button');
+  qualityBtn.id = 'btn-quality';
+  qualityBtn.className = 'flex items-center justify-center w-10 h-10 md:w-6 md:h-6 rounded-full text-zinc-500 [@media(hover:hover)]:hover:text-zinc-200 [@media(hover:hover)]:hover:bg-zinc-700 transition-colors text-sm md:text-xs ml-2';
+  qualityBtn.textContent = '⚙';
+  qualityBtn.title = 'Modeling quality (default curve resolution)';
+  qualityBtn.setAttribute('aria-label', 'Modeling quality settings');
+  qualityBtn.addEventListener('click', () => { showQualitySettingsModal(); });
+  toolbar.appendChild(qualityBtn);
+
   // Help button
   const helpBtn = document.createElement('button');
   helpBtn.id = 'btn-help';
-  helpBtn.className = 'flex items-center justify-center w-6 h-6 rounded-full text-zinc-500 hover:text-zinc-200 hover:bg-zinc-700 transition-colors text-xs font-bold ml-2';
+  helpBtn.className = 'flex items-center justify-center w-10 h-10 md:w-6 md:h-6 rounded-full text-zinc-500 [@media(hover:hover)]:hover:text-zinc-200 [@media(hover:hover)]:hover:bg-zinc-700 transition-colors text-sm md:text-xs font-bold ml-1';
   helpBtn.textContent = '?';
   helpBtn.title = 'Help';
   helpBtn.addEventListener('click', () => {
@@ -523,7 +544,7 @@ export function createToolbar(
   // Tour re-entry button
   const tourBtn = document.createElement('button');
   tourBtn.id = 'btn-retake-tour';
-  tourBtn.className = 'flex items-center justify-center w-6 h-6 rounded-full text-zinc-500 hover:text-zinc-200 hover:bg-zinc-700 transition-colors text-xs ml-1';
+  tourBtn.className = 'flex items-center justify-center w-10 h-10 md:w-6 md:h-6 rounded-full text-zinc-500 [@media(hover:hover)]:hover:text-zinc-200 [@media(hover:hover)]:hover:bg-zinc-700 transition-colors text-sm md:text-xs ml-1';
   tourBtn.textContent = '\uD83C\uDFAF';
   tourBtn.title = 'Take the guided tour';
   tourBtn.addEventListener('click', () => {
@@ -540,7 +561,7 @@ export function createToolbar(
 function createButton(id: string, text: string): HTMLButtonElement {
   const btn = document.createElement('button');
   btn.id = id;
-  btn.className = 'flex items-center gap-1.5 px-2.5 py-1 rounded text-zinc-300 hover:bg-zinc-700 hover:text-zinc-100 transition-colors text-xs';
+  btn.className = 'flex items-center gap-1.5 px-3 py-2 md:px-2.5 md:py-1 rounded text-zinc-300 [@media(hover:hover)]:hover:bg-zinc-700 [@media(hover:hover)]:hover:text-zinc-100 transition-colors text-sm md:text-xs';
   btn.textContent = text;
   return btn;
 }

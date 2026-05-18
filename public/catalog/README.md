@@ -1,0 +1,51 @@
+# Catalog
+
+Static `.partwright.json` files surfaced on the `/catalog` page. Each
+entry is a self-contained session payload (schema 1.3+) that imports as
+a fresh session when a user clicks its tile.
+
+## Adding a new entry
+
+The starter set is generated from `examples/*.{js,scad}` by
+`scripts/generate-catalog.cjs` (see [Regenerating from examples](#regenerating-from-examples)
+below). For one-off entries authored interactively in the app:
+
+1. Build the model in the editor and save at least one version.
+2. Click `↓ Export` → `Session (.partwright.json)`. In the dialog, **enable
+   the Thumbnail option** so the catalog tile gets a real preview image.
+3. Drop the downloaded `.partwright.json` into this directory.
+4. Add a corresponding entry to `manifest.json`:
+
+   ```json
+   {
+     "id": "my-model",
+     "name": "My Model",
+     "description": "Short blurb.",
+     "file": "my_model.partwright.json",
+     "language": "manifold-js"
+   }
+   ```
+
+5. Commit. Cloudflare Pages serves these as static assets — no build step
+   required.
+
+## Regenerating from examples
+
+The starter entries are produced by driving a running dev server with
+Playwright, capturing real thumbnails for each example. To regenerate:
+
+```bash
+npm run dev                                        # in one terminal
+node scripts/generate-catalog.cjs http://localhost:5173   # in another
+```
+
+Re-run any time `examples/` or the entry list at the top of the script
+changes.
+
+## Notes
+
+- Files are fetched at runtime by `src/ui/catalog.ts`. Keep them small;
+  the embedded thumbnail is a base64 PNG and dominates file size.
+- A missing/broken entry renders a disabled placeholder tile rather than
+  blocking the whole page.
+- Entries without an embedded thumbnail show the hexagon placeholder.

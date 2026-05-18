@@ -5,19 +5,42 @@ export interface Session {
   name: string;
   created: number;
   updated: number;
-  referenceImages?: ReferenceImagesData | null;
+  images?: AttachedImage[] | null;
   /** Modeling language for this session. Missing = 'manifold-js'. */
   language?: 'manifold-js' | 'scad';
 }
 
-export interface ReferenceImagesData {
-  front?: string;
-  right?: string;
-  back?: string;
-  left?: string;
-  top?: string;
-  perspective?: string;
+export interface AttachedImage {
+  id: string;
+  /** data URL or remote URL */
+  src: string;
+  /** User-facing caption. Shown in the Gallery, lightbox, and tooltips.
+   *  May match one of the preset labels (Front, Right, Back, Left, Top,
+   *  Perspective) — those drive ordering in the Elevations strip — or be
+   *  a free-form custom string. Empty string and undefined both mean
+   *  "no caption". */
+  label?: string;
 }
+
+/** Suggested labels offered as quick picks in the UI. Items whose label
+ *  matches one of these (case-insensitive) sort earlier in the Elevations
+ *  strip in the order they appear here. */
+export const PRESET_LABELS = ['Front', 'Right', 'Back', 'Left', 'Top', 'Perspective'] as const;
+
+/** Returns the preset index for a label (case-insensitive), or -1 if it
+ *  doesn't match any preset. */
+export function presetIndex(label: string | undefined): number {
+  if (!label) return -1;
+  const norm = label.trim().toLowerCase();
+  for (let i = 0; i < PRESET_LABELS.length; i++) {
+    if (PRESET_LABELS[i].toLowerCase() === norm) return i;
+  }
+  return -1;
+}
+
+/** Legacy angle keys that pre-unification data was tagged with. */
+type LegacyImageAngle = 'front' | 'right' | 'back' | 'left' | 'top' | 'perspective';
+const LEGACY_ANGLES: readonly LegacyImageAngle[] = ['front', 'right', 'back', 'left', 'top', 'perspective'];
 
 export interface Version {
   id: string;
@@ -29,6 +52,14 @@ export interface Version {
   label: string;
   timestamp: number;
   notes?: string;
+  /** Snapshot of annotations (freehand strokes + pinned text labels) at the time
+   *  this version was saved. Shape matches `SerializedAnnotation[]` from the
+   *  annotations module — kept as `unknown[]` here to preserve db-layer isolation. */
+  annotations?: unknown[];
+  /** External meshes imported into this version (STL today). Exposed to the
+   *  sandbox as `api.imports[i]` so user code can call `Manifold.ofMesh(...)`.
+   *  Kept as `unknown[]` here to preserve db-layer isolation. */
+  importedMeshes?: unknown[];
 }
 
 export interface SessionNote {
@@ -41,7 +72,13 @@ export interface SessionNote {
 const DB_NAME = 'partwright';
 const LEGACY_DB_NAME = 'mainifold';
 const LEGACY_MIGRATION_KEY = 'partwright-migrated-mainifold-db';
-const DB_VERSION = 2;
+const DB_VERSION = 3;
+
+/** Opens the partwright IndexedDB. Exposed so the AI subsystem can attach
+ *  its own stores (`aiKeys`, `aiChats`) without duplicating the connection. */
+export function openPartwrightDB(): Promise<IDBDatabase> {
+  return openDB();
+}
 
 let dbPromise: Promise<IDBDatabase> | null = null;
 
@@ -63,6 +100,16 @@ function openDB(): Promise<IDBDatabase> {
         const store = db.createObjectStore('notes', { keyPath: 'id' });
         store.createIndex('sessionId', 'sessionId', { unique: false });
       }
+      // Bumped to v3 with stores backing the in-app AI chat — one row per
+      // provider in `aiKeys`, one row per chat message in `aiChats` indexed
+      // by sessionId so opening a session restores its transcript.
+      if (!db.objectStoreNames.contains('aiKeys')) {
+        db.createObjectStore('aiKeys', { keyPath: 'provider' });
+      }
+      if (!db.objectStoreNames.contains('aiChats')) {
+        const store = db.createObjectStore('aiChats', { keyPath: 'id' });
+        store.createIndex('sessionId', 'sessionId', { unique: false });
+      }
     };
     req.onsuccess = () => {
       const db = req.result;
@@ -75,7 +122,7 @@ function openDB(): Promise<IDBDatabase> {
   return dbPromise;
 }
 
-function generateId(): string {
+export function generateId(): string {
   const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
   let id = '';
   for (let i = 0; i < 12; i++) {
@@ -213,22 +260,77 @@ export async function createSession(name?: string, language?: 'manifold-js' | 's
   return session;
 }
 
+// Legacy on-disk shape for images: an object map keyed by angle. Sessions
+// stored before the array migration may still be in this form.
+type LegacyImagesObject = Partial<Record<LegacyImageAngle, string>>;
+
 export async function getSession(id: string): Promise<Session | null> {
   const store = await tx('sessions', 'readonly');
-  return reqToPromise(store.get(id)) as Promise<Session | null>;
+  const raw = await reqToPromise(store.get(id)) as (Session & { referenceImages?: LegacyImagesObject | AttachedImage[] | null }) | null;
+  return raw ? migrateSessionImages(raw) : null;
 }
 
 export async function listSessions(): Promise<Session[]> {
   const store = await tx('sessions', 'readonly');
-  const sessions = await reqToPromise(store.getAll()) as Session[];
-  return sessions.sort((a, b) => b.updated - a.updated);
+  const sessions = await reqToPromise(store.getAll()) as (Session & { referenceImages?: LegacyImagesObject | AttachedImage[] | null })[];
+  return sessions.map(migrateSessionImages).sort((a, b) => b.updated - a.updated);
 }
 
-export async function updateSession(id: string, updates: Partial<Pick<Session, 'name' | 'created' | 'updated' | 'referenceImages' | 'language'>>): Promise<void> {
+// Read-time migration for three legacy shapes:
+//  1. Pre-rename sessions stored data under `referenceImages` instead of `images`.
+//  2. Pre-array sessions stored an object map ({front: 'url', ...}) rather than an array.
+//  3. Pre-unification sessions stored items as {id, angle, src, label?}; we collapse
+//     `angle` into `label` here so callers see a single user-facing field.
+function migrateSessionImages(s: Session & { referenceImages?: LegacyImagesObject | AttachedImage[] | null }): Session {
+  // Operate on an untyped view so we can hold both legacy and new shapes during migration.
+  const raw = s as unknown as { images?: unknown; referenceImages?: unknown };
+  if (raw.images == null && raw.referenceImages != null) {
+    raw.images = raw.referenceImages;
+  }
+  delete raw.referenceImages;
+  if (raw.images && !Array.isArray(raw.images) && typeof raw.images === 'object') {
+    raw.images = legacyImagesObjectToArray(raw.images as LegacyImagesObject);
+  }
+  if (Array.isArray(raw.images)) {
+    raw.images = (raw.images as Array<Record<string, unknown>>).map(collapseAngleIntoLabel);
+  }
+  return s;
+}
+
+/** Drop the legacy `angle` field, copying it into `label` (capitalized) when
+ *  a label isn't already present. After this, `label` is the single source of
+ *  truth for how the image is named in the UI. */
+function collapseAngleIntoLabel(item: Record<string, unknown>): AttachedImage {
+  const id = typeof item.id === 'string' ? item.id : generateId();
+  const src = typeof item.src === 'string' ? item.src : '';
+  const existingLabel = typeof item.label === 'string' ? item.label.trim() : '';
+  const angle = typeof item.angle === 'string' ? item.angle : '';
+  const out: AttachedImage = { id, src };
+  const label = existingLabel || (angle ? capitalize(angle) : '');
+  if (label) out.label = label;
+  return out;
+}
+
+function capitalize(s: string): string {
+  return s.charAt(0).toUpperCase() + s.slice(1);
+}
+
+export function legacyImagesObjectToArray(obj: LegacyImagesObject): AttachedImage[] {
+  const result: AttachedImage[] = [];
+  for (const angle of LEGACY_ANGLES) {
+    const src = obj[angle];
+    if (src) result.push({ id: generateId(), src, label: capitalize(angle) });
+  }
+  return result;
+}
+
+export async function updateSession(id: string, updates: Partial<Pick<Session, 'name' | 'created' | 'updated' | 'images' | 'language'>>): Promise<void> {
   const store = await tx('sessions', 'readwrite');
   const session = await reqToPromise(store.get(id)) as Session | null;
   if (!session) return;
   Object.assign(session, updates);
+  // Strip legacy field if present so it doesn't shadow the new one on re-read
+  delete (session as { referenceImages?: unknown }).referenceImages;
   await reqToPromise(store.put(session));
 }
 
@@ -286,6 +388,10 @@ export async function saveVersion(
   notes?: string,
   /** Override the version timestamp (used by import to preserve the original). */
   timestamp?: number,
+  /** Snapshot of annotations at save time (opaque to the db layer). */
+  annotations?: unknown[],
+  /** External meshes imported into this version (opaque to the db layer). */
+  importedMeshes?: unknown[],
 ): Promise<Version> {
   const versions = await listVersions(sessionId);
   const nextIndex = versions.length > 0 ? Math.max(...versions.map(v => v.index)) + 1 : 1;
@@ -300,6 +406,8 @@ export async function saveVersion(
     label: label || `v${nextIndex}`,
     timestamp: timestamp ?? Date.now(),
     ...(notes ? { notes } : {}),
+    ...(annotations && annotations.length > 0 ? { annotations } : {}),
+    ...(importedMeshes && importedMeshes.length > 0 ? { importedMeshes } : {}),
   };
 
   const store = await tx('versions', 'readwrite');

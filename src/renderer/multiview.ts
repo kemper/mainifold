@@ -2,6 +2,34 @@ import * as THREE from 'three';
 import { createWhiteMaterial, createBlackWireframeMaterial } from './materials';
 import type { MeshData } from '../geometry/types';
 import { buildStrokesGroup, disposeStrokesGroup } from '../annotations/annotationOverlay';
+import { presetIndex } from '../storage/db';
+
+/** Composite-render angle sets accepted by `partwright.renderViews`.
+ *  Single source of truth shared by the API surface (main.ts), the AI
+ *  tool schema (src/ai/tools.ts), and the per-turn system prompt. */
+export const RENDER_VIEW_MODES = ['auto', 'tri', 'all'] as const;
+export type RenderViewMode = typeof RENDER_VIEW_MODES[number];
+
+/** Standard camera angles used by `renderSingleView` consumers across
+ *  the app: the renderViews composite, the Show-AI iso-views capture,
+ *  and any future thumbnail caller. Each value is exactly the shape
+ *  `renderSingleView` accepts. Single source so the Front-elevation
+ *  semantics can't drift between callers. */
+export const STANDARD_VIEWS = {
+  front: { label: 'Front', elevation: 0,  azimuth: 0,   ortho: true  },
+  right: { label: 'Right', elevation: 0,  azimuth: 90,  ortho: true  },
+  top:   { label: 'Top',   elevation: 90, azimuth: 0,   ortho: true  },
+  iso:   { label: 'Iso',   elevation: 35, azimuth: 45,  ortho: false },
+} as const;
+export type StandardViewAngle = typeof STANDARD_VIEWS[keyof typeof STANDARD_VIEWS];
+
+/** Solid-shaded grey applied to triangles that have no color region.
+ *  Sits between the white render background and the brightest painted
+ *  RGB so silhouettes stay visible without overpowering painted
+ *  features. ~0.85 is roughly halfway in perceptual luminance between
+ *  white and middle-gray (#bfbfbf). Picking a value too dark obscures
+ *  pastel paints; too light and the mesh disappears against the bg. */
+const UNPAINTED_BASE = 0.85;
 
 interface ViewConfig {
   name: string;
@@ -43,9 +71,14 @@ function meshDataToGeometry(meshData: MeshData): THREE.BufferGeometry {
       const b = triColors[t * 3 + 2] / 255;
       const painted = (triColors as Uint8Array & { _painted?: Uint8Array })._painted;
       const isPainted = painted ? painted[t] === 1 : (r !== 0 || g !== 0 || b !== 0);
-      const cr = isPainted ? r : 1;
-      const cg = isPainted ? g : 1;
-      const cb = isPainted ? b : 1;
+      // Unpainted base is light gray, NOT pure white, so the mesh
+      // silhouette is visible against the white render background.
+      // Pure white made unpainted parts of a model invisible against
+      // the bg — only the painted patches showed, which read as
+      // "the renderer is broken" to a model reasoning from the image.
+      const cr = isPainted ? r : UNPAINTED_BASE;
+      const cg = isPainted ? g : UNPAINTED_BASE;
+      const cb = isPainted ? b : UNPAINTED_BASE;
 
       for (let v = 0; v < 3; v++) {
         colors[t * 9 + v * 3] = cr;
@@ -73,6 +106,31 @@ function meshDataToGeometry(meshData: MeshData): THREE.BufferGeometry {
 }
 
 let offRenderer: THREE.WebGLRenderer | null = null;
+let offRendererDisposeTimer: ReturnType<typeof setTimeout> | null = null;
+
+// Three.js retains compiled shader programs, framebuffers, and texture handles
+// inside WebGLRenderer that setSize() does not free. Browsers also cap a tab
+// at ~16 live WebGL contexts. We dispose the offscreen renderer after a short
+// idle window so GPU memory is reclaimed between user actions; the lazy branch
+// in getOffscreenRenderer re-creates it on the next render.
+const OFFSCREEN_IDLE_DISPOSE_MS = 10_000;
+
+function disposeOffscreenRenderer(): void {
+  if (!offRenderer) return;
+  // forceContextLoss releases the underlying WebGL context; dispose() alone
+  // leaves it counted against the per-tab context cap.
+  offRenderer.forceContextLoss();
+  offRenderer.dispose();
+  offRenderer = null;
+}
+
+function scheduleOffscreenDispose(): void {
+  if (offRendererDisposeTimer) clearTimeout(offRendererDisposeTimer);
+  offRendererDisposeTimer = setTimeout(() => {
+    offRendererDisposeTimer = null;
+    disposeOffscreenRenderer();
+  }, OFFSCREEN_IDLE_DISPOSE_MS);
+}
 
 function getOffscreenRenderer(size: number): THREE.WebGLRenderer {
   if (!offRenderer) {
@@ -80,6 +138,7 @@ function getOffscreenRenderer(size: number): THREE.WebGLRenderer {
     offRenderer.setPixelRatio(1);
   }
   offRenderer.setSize(size, size);
+  scheduleOffscreenDispose();
   return offRenderer;
 }
 
@@ -250,29 +309,45 @@ export function renderCompositeCanvas(meshData: MeshData): HTMLCanvasElement {
   return compositeCanvas;
 }
 
-// === Reference images for comparison ===
+// === Attached images for elevation comparison ===
 
-export interface ReferenceImages {
-  front?: string;
-  right?: string;
-  back?: string;
-  left?: string;
-  top?: string;
-  perspective?: string;
+export interface AttachedImage {
+  id: string;
+  src: string;
+  /** Optional user-facing caption. Drives ordering via preset matching. */
+  label?: string;
 }
 
-let _referenceImages: ReferenceImages | null = null;
+let _images: AttachedImage[] = [];
 
-export function setReferenceImages(images: ReferenceImages): void {
-  _referenceImages = images;
+export function setImages(images: AttachedImage[]): void {
+  _images = images;
+  window.dispatchEvent(new Event('images-changed'));
 }
 
-export function clearReferenceImages(): void {
-  _referenceImages = null;
+export function clearImages(): void {
+  _images = [];
+  window.dispatchEvent(new Event('images-changed'));
 }
 
-export function getReferenceImages(): ReferenceImages | null {
-  return _referenceImages;
+export function getImages(): AttachedImage[] {
+  return _images;
+}
+
+/** Stable sort: preset-matching labels first in preset order, others keep
+ *  their insertion order at the end. */
+export function sortImagesByPreset(images: readonly AttachedImage[]): AttachedImage[] {
+  return images
+    .map((item, idx) => ({ item, idx, p: presetIndex(item.label) }))
+    .sort((a, b) => {
+      const aHasPreset = a.p >= 0;
+      const bHasPreset = b.p >= 0;
+      if (aHasPreset && bHasPreset) return a.p - b.p;
+      if (aHasPreset) return -1;
+      if (bHasPreset) return 1;
+      return a.idx - b.idx;
+    })
+    .map(x => x.item);
 }
 
 // === Orthographic elevation views ===
@@ -282,15 +357,14 @@ interface ElevationConfig {
   // Camera direction: where the camera looks FROM (multiplied by distance)
   direction: [number, number, number];
   up: [number, number, number];
-  refKey: keyof ReferenceImages; // which reference image to show alongside
 }
 
 const ELEVATIONS: ElevationConfig[] = [
-  { name: 'Front',  direction: [0, -1, 0],  up: [0, 0, 1], refKey: 'front' },
-  { name: 'Right',  direction: [1, 0, 0],   up: [0, 0, 1], refKey: 'right' },
-  { name: 'Back',   direction: [0, 1, 0],   up: [0, 0, 1], refKey: 'back' },
-  { name: 'Left',   direction: [-1, 0, 0],  up: [0, 0, 1], refKey: 'left' },
-  { name: 'Top',    direction: [0, 0, 1],   up: [0, 1, 0], refKey: 'top' },
+  { name: 'Front',  direction: [0, -1, 0],  up: [0, 0, 1] },
+  { name: 'Right',  direction: [1, 0, 0],   up: [0, 0, 1] },
+  { name: 'Back',   direction: [0, 1, 0],   up: [0, 0, 1] },
+  { name: 'Left',   direction: [-1, 0, 0],  up: [0, 0, 1] },
+  { name: 'Top',    direction: [0, 0, 1],   up: [0, 1, 0] },
 ];
 
 function createElevationScene(geometry: THREE.BufferGeometry, bgColor: number): THREE.Scene {
@@ -306,9 +380,18 @@ function createElevationScene(geometry: THREE.BufferGeometry, bgColor: number): 
   scene.add(dir2);
   const hasColors = geometry.hasAttribute('color');
   const solidMesh = new THREE.Mesh(geometry, createWhiteMaterial(hasColors));
-  const wireMesh = new THREE.Mesh(geometry, createBlackWireframeMaterial());
   scene.add(solidMesh);
-  scene.add(wireMesh);
+  // Wireframe overlay obscures vertex-color verification on dense
+  // organic meshes — at 320px tile size, the 30% black edges of tens
+  // of thousands of triangles compound into a dark mass that washes
+  // out painted regions. Skip the wireframe when the mesh carries
+  // per-triangle colors (the user is in a paint workflow and wants
+  // to read colors, not topology). Keep it for uncolored renders
+  // where topology IS the subject.
+  if (!hasColors) {
+    const wireMesh = new THREE.Mesh(geometry, createBlackWireframeMaterial());
+    scene.add(wireMesh);
+  }
   return scene;
 }
 
@@ -371,12 +454,14 @@ export function renderElevationsToContainer(container: HTMLElement, meshData: Me
 
   const viewSize = 300;
   const renderer = getOffscreenRenderer(viewSize);
-  const hasRef = _referenceImages !== null;
+  const hasRef = _images.length > 0;
 
   const annotations = buildStrokesGroup(new THREE.Vector2(viewSize, viewSize));
   if (annotations) scene.add(annotations);
 
-  // Compact reference images row (above the elevation grid)
+  // Compact images row (above the elevation grid). Items whose label matches
+  // a preset (Front, Right, Back, etc.) sort first in preset order; the rest
+  // keep their insertion order at the end.
   if (hasRef) {
     const refSection = document.createElement('div');
     refSection.className = 'pb-1 border-b border-zinc-700 shrink-0';
@@ -386,24 +471,21 @@ export function renderElevationsToContainer(container: HTMLElement, meshData: Me
 
     const refLabel = document.createElement('span');
     refLabel.className = 'text-xs text-zinc-500 font-mono shrink-0 px-1';
-    refLabel.textContent = 'Refs:';
+    refLabel.textContent = 'Images:';
     refRow.appendChild(refLabel);
 
-    const refKeys: (keyof ReferenceImages)[] = ['perspective', 'front', 'right', 'back', 'left', 'top'];
-    for (const key of refKeys) {
-      const src = _referenceImages![key];
-      if (!src) continue;
-
+    const sorted = sortImagesByPreset(_images);
+    for (const item of sorted) {
       const refImg = document.createElement('img');
-      refImg.src = src;
+      refImg.src = item.src;
       refImg.className = 'h-16 object-contain rounded bg-zinc-950 border border-blue-500/30 cursor-pointer hover:border-blue-400 transition-colors shrink-0';
-      refImg.title = `${key.charAt(0).toUpperCase() + key.slice(1)} — click to enlarge`;
+      refImg.title = item.label ? `${item.label} — click to enlarge` : 'Click to enlarge';
       refImg.addEventListener('click', () => {
         const overlay = document.createElement('div');
         overlay.className = 'fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm';
         overlay.addEventListener('click', (e) => { if (e.target === overlay) overlay.remove(); });
         const img = document.createElement('img');
-        img.src = src;
+        img.src = item.src;
         img.className = 'max-w-[90vw] max-h-[90vh] object-contain rounded-lg shadow-2xl';
         overlay.appendChild(img);
         document.body.appendChild(overlay);
@@ -492,24 +574,36 @@ export function renderElevationsToContainer(container: HTMLElement, meshData: Me
  *  For orthographic views, pass ortho: true.
  *  elevation/azimuth are in degrees: elevation 0 = horizon, 90 = top-down.
  *  azimuth 0 = front (-Y), 90 = right (+X), 180 = back (+Y), 270 = left (-X). */
-export function renderSingleView(meshData: MeshData, options: {
+/** Build the same THREE.Camera that `renderSingleView` would render
+ *  through for these options. Exported so `probePixel` (in
+ *  geometry/rayCast.ts) can replay the camera exactly and unproject
+ *  pixel coordinates back to world rays that hit the same triangles
+ *  the agent sees in the rendered image. Camera setup MUST match
+ *  renderSingleView byte-for-byte — both call sites read from this
+ *  function so they can't drift. */
+export function buildViewCamera(meshData: MeshData, options: {
   elevation?: number;
   azimuth?: number;
   ortho?: boolean;
-  size?: number;
-} = {}): string {
+}): THREE.Camera {
   const elevation = (options.elevation ?? 30) * Math.PI / 180;
   const azimuth = (options.azimuth ?? 315) * Math.PI / 180;
-  const viewSize = options.size ?? 500;
 
-  const geometry = meshDataToGeometry(meshData);
-  const scene = createElevationScene(geometry, 0xffffff);
-
-  const box = new THREE.Box3().setFromBufferAttribute(
-    geometry.getAttribute('position') as THREE.BufferAttribute,
-  );
-  const center = box.getCenter(new THREE.Vector3());
-  const bsize = box.getSize(new THREE.Vector3());
+  // Bounding box from the raw vertProperties — same numbers
+  // renderSingleView computes after constructing the BufferGeometry.
+  let minX = Infinity, minY = Infinity, minZ = Infinity;
+  let maxX = -Infinity, maxY = -Infinity, maxZ = -Infinity;
+  const { vertProperties, numVert, numProp } = meshData;
+  for (let i = 0; i < numVert; i++) {
+    const x = vertProperties[i * numProp];
+    const y = vertProperties[i * numProp + 1];
+    const z = vertProperties[i * numProp + 2];
+    if (x < minX) minX = x; if (x > maxX) maxX = x;
+    if (y < minY) minY = y; if (y > maxY) maxY = y;
+    if (z < minZ) minZ = z; if (z > maxZ) maxZ = z;
+  }
+  const center = new THREE.Vector3((minX + maxX) / 2, (minY + maxY) / 2, (minZ + maxZ) / 2);
+  const bsize = new THREE.Vector3(maxX - minX, maxY - minY, maxZ - minZ);
   const maxDim = Math.max(bsize.x, bsize.y, bsize.z);
   const dist = maxDim * 2;
 
@@ -535,7 +629,20 @@ export function renderSingleView(meshData: MeshData, options: {
     perspCamera.updateProjectionMatrix();
     camera = perspCamera;
   }
+  return camera;
+}
 
+export function renderSingleView(meshData: MeshData, options: {
+  elevation?: number;
+  azimuth?: number;
+  ortho?: boolean;
+  size?: number;
+} = {}): string {
+  const viewSize = options.size ?? 500;
+
+  const geometry = meshDataToGeometry(meshData);
+  const scene = createElevationScene(geometry, 0xffffff);
+  const camera = buildViewCamera(meshData, options);
   const renderer = getOffscreenRenderer(viewSize);
 
   const annotations = buildStrokesGroup(new THREE.Vector2(viewSize, viewSize));

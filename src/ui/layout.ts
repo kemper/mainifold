@@ -1,4 +1,6 @@
-export type TabName = 'interactive' | 'ai' | 'elevations' | 'gallery' | 'diff' | 'notes';
+import { getMobilePane, onMobilePaneChange, setMobilePane } from './mobilePane';
+
+export type TabName = 'interactive' | 'ai' | 'elevations' | 'gallery' | 'images' | 'diff' | 'notes';
 
 export interface LayoutElements {
   editorPane: HTMLElement;
@@ -8,6 +10,7 @@ export interface LayoutElements {
   viewsContainer: HTMLElement;
   elevationsContainer: HTMLElement;
   galleryContainer: HTMLElement;
+  imagesContainer: HTMLElement;
   diffContainer: HTMLElement;
   notesContainer: HTMLElement;
   statusBar: HTMLElement;
@@ -21,12 +24,14 @@ export interface SwitchTabOptions {
 
 export function createLayout(appContainer: HTMLElement): LayoutElements {
   const main = document.createElement('div');
-  main.className = 'flex flex-1 min-h-0';
+  // Stack panes vertically on narrow viewports, side-by-side at md+.
+  main.className = 'flex flex-col md:flex-row flex-1 min-h-0';
 
-  // === Left: Editor pane ===
+  // === Left (or top on mobile): Editor pane ===
+  // Width is only applied via inline style at md+ (see syncEditorPaneWidth).
+  // On mobile the pane uses flex sizing so both panes share the vertical space.
   const editorPane = document.createElement('div');
-  editorPane.className = 'flex flex-col border-r border-zinc-700';
-  editorPane.style.width = '35%';
+  editorPane.className = 'flex flex-col flex-1 md:flex-none min-h-0 border-b md:border-b-0 md:border-r border-zinc-700';
 
   const editorHeader = document.createElement('div');
   editorHeader.className = 'flex items-center justify-between px-3 py-1.5 bg-zinc-800 border-b border-zinc-700';
@@ -56,17 +61,23 @@ export function createLayout(appContainer: HTMLElement): LayoutElements {
   editorPane.appendChild(editorContainer);
 
   // === Splitter ===
+  // Outer is a wide transparent grab strip (touch-friendly); inner stripe is the
+  // 1px visible line. `touch-none` blocks the browser from claiming the gesture
+  // for scrolling so pointer drag works on touch devices.
   const splitter = document.createElement('div');
-  splitter.className = 'w-1 bg-zinc-700 hover:bg-blue-500 cursor-col-resize shrink-0 transition-colors';
+  splitter.className = 'hidden md:flex relative items-stretch w-2 bg-transparent cursor-col-resize shrink-0 touch-none group';
+  const splitterStripe = document.createElement('div');
+  splitterStripe.className = 'absolute inset-y-0 left-1/2 -translate-x-1/2 w-px bg-zinc-700 group-hover:bg-blue-500 group-[.is-dragging]:bg-blue-500 transition-colors';
+  splitter.appendChild(splitterStripe);
   initSplitter(splitter, editorPane);
 
-  // === Right: Tabbed viewport ===
+  // === Right (or bottom on mobile): Tabbed viewport ===
   const rightPane = document.createElement('div');
-  rightPane.className = 'flex-1 flex flex-col min-w-0';
+  rightPane.className = 'flex-1 flex flex-col min-w-0 min-h-0';
 
-  // Tab bar
+  // Tab bar — horizontally scrollable on narrow viewports so all tabs stay reachable.
   const tabBar = document.createElement('div');
-  tabBar.className = 'flex items-center bg-zinc-800 border-b border-zinc-700 shrink-0';
+  tabBar.className = 'flex items-stretch bg-zinc-800 border-b border-zinc-700 shrink-0 overflow-x-auto [scrollbar-width:thin]';
 
   const tabInteractive = createTab('Interactive', true);
   tabInteractive.title = 'Live 3D viewport \u2014 orbit, zoom, and inspect';
@@ -76,15 +87,18 @@ export function createLayout(appContainer: HTMLElement): LayoutElements {
   tabElevations.title = 'Orthographic views with optional reference image overlay';
   const tabGallery = createTab('Gallery', false);
   tabGallery.title = 'Compare saved versions side-by-side';
+  const tabImages = createTab('Images', false);
+  tabImages.title = 'Reference images attached to this session';
   const tabDiff = createTab('Diff', false);
   tabDiff.title = 'Compare code between two versions';
   const tabNotes = createTab('Notes', false);
   tabNotes.title = 'Session notes and design decisions log';
 
-  // Copy / Download buttons (shown only on AI Views tab)
+  // Copy / Download buttons (shown only on AI Views tab).
+  // `sticky right-0` keeps them reachable when the tab bar scrolls horizontally on narrow viewports.
   const viewActions = document.createElement('div');
   viewActions.id = 'view-actions';
-  viewActions.className = 'flex gap-2 ml-auto pr-3 hidden';
+  viewActions.className = 'flex items-center gap-2 ml-auto pl-3 pr-3 hidden shrink-0 sticky right-0 bg-zinc-800';
 
   const btnCopyViews = document.createElement('button');
   btnCopyViews.id = 'btn-copy-views';
@@ -102,6 +116,7 @@ export function createLayout(appContainer: HTMLElement): LayoutElements {
   tabBar.appendChild(tabAI);
   tabBar.appendChild(tabElevations);
   tabBar.appendChild(tabGallery);
+  tabBar.appendChild(tabImages);
   tabBar.appendChild(tabDiff);
   tabBar.appendChild(tabNotes);
   tabBar.appendChild(viewActions);
@@ -127,6 +142,10 @@ export function createLayout(appContainer: HTMLElement): LayoutElements {
   galleryContainer.id = 'gallery-container';
   galleryContainer.className = 'flex-1 min-h-0 overflow-auto bg-zinc-900 hidden p-4';
 
+  const imagesContainer = document.createElement('div');
+  imagesContainer.id = 'images-container';
+  imagesContainer.className = 'flex-1 min-h-0 overflow-auto bg-zinc-900 hidden p-4 flex flex-col';
+
   const diffContainer = document.createElement('div');
   diffContainer.id = 'diff-container';
   diffContainer.className = 'flex-1 min-h-0 overflow-hidden bg-zinc-900 hidden';
@@ -135,25 +154,88 @@ export function createLayout(appContainer: HTMLElement): LayoutElements {
   notesContainer.id = 'notes-container';
   notesContainer.className = 'flex-1 min-h-0 overflow-auto bg-zinc-900 hidden p-4 flex flex-col';
 
-  const allTabs = [tabInteractive, tabAI, tabElevations, tabGallery, tabDiff, tabNotes];
-  const allPanes = [viewportPane, viewsContainer, elevationsContainer, galleryContainer, diffContainer, notesContainer];
+  const allTabs = [tabInteractive, tabAI, tabElevations, tabGallery, tabImages, tabDiff, tabNotes];
+  const allPanes = [viewportPane, viewsContainer, elevationsContainer, galleryContainer, imagesContainer, diffContainer, notesContainer];
+
+  // Mobile-only pane toggle: lets the user swap between editor and viewport
+  // when the layout is stacked. Hidden at md+ and on tabs that already hide
+  // the editor (AI/Elevations/Diff).
+  const mobilePaneToggle = document.createElement('div');
+  mobilePaneToggle.id = 'mobile-pane-toggle';
+  mobilePaneToggle.className = 'md:hidden flex items-stretch bg-zinc-800 border-b border-zinc-700 shrink-0';
+  const mobileEditorBtn = document.createElement('button');
+  mobileEditorBtn.textContent = 'Code';
+  mobileEditorBtn.title = 'Show code editor';
+  const mobileViewportBtn = document.createElement('button');
+  mobileViewportBtn.textContent = 'Viewport';
+  mobileViewportBtn.title = 'Show 3D viewport';
+  mobilePaneToggle.appendChild(mobileEditorBtn);
+  mobilePaneToggle.appendChild(mobileViewportBtn);
+
+  const MOBILE_TOGGLE_ACTIVE = 'flex-1 px-4 py-2 text-sm font-medium text-zinc-100 border-b-2 border-blue-500 bg-zinc-900';
+  const MOBILE_TOGGLE_INACTIVE = 'flex-1 px-4 py-2 text-sm font-medium text-zinc-500 border-b-2 border-transparent';
+  function syncMobileToggleUI(pane: 'editor' | 'viewport') {
+    mobileEditorBtn.className = pane === 'editor' ? MOBILE_TOGGLE_ACTIVE : MOBILE_TOGGLE_INACTIVE;
+    mobileViewportBtn.className = pane === 'viewport' ? MOBILE_TOGGLE_ACTIVE : MOBILE_TOGGLE_INACTIVE;
+  }
+  mobileEditorBtn.addEventListener('click', () => setMobilePane('editor'));
+  mobileViewportBtn.addEventListener('click', () => setMobilePane('viewport'));
+
+  // Tracks the most recently activated tab so breakpoint or mobile-pane
+  // changes can recompose visibility without re-running tab DOM toggling.
+  let _currentTab: TabName = 'interactive';
+  const mqDesktop = window.matchMedia('(min-width: 768px)');
+
+  // Composes desktop/mobile pane visibility from the active tab and (on mobile)
+  // the persisted mobile pane choice. Also keeps the editor pane's inline
+  // width in sync with the breakpoint: only set at md+, cleared on mobile so
+  // flex sizing drives height.
+  function syncPaneVisibility() {
+    const tab = _currentTab;
+    const tabHidesEditor = tab === 'ai' || tab === 'elevations' || tab === 'diff';
+    const isDesktop = mqDesktop.matches;
+
+    if (isDesktop) {
+      // Restore inline width if it was cleared on mobile.
+      if (!editorPane.style.width) editorPane.style.width = '35%';
+      editorPane.classList.toggle('hidden', tabHidesEditor);
+      splitter.classList.toggle('hidden', tabHidesEditor);
+      rightPane.classList.remove('hidden');
+      mobilePaneToggle.classList.add('hidden');
+    } else {
+      // Mobile: clear inline width so flex sizing controls the editor's height.
+      editorPane.style.width = '';
+      splitter.classList.add('hidden');
+      if (tabHidesEditor) {
+        editorPane.classList.add('hidden');
+        rightPane.classList.remove('hidden');
+        // No choice to make — hide the toggle on AI/Elevations/Diff.
+        mobilePaneToggle.classList.add('hidden');
+      } else {
+        const pane = getMobilePane();
+        editorPane.classList.toggle('hidden', pane !== 'editor');
+        rightPane.classList.toggle('hidden', pane !== 'viewport');
+        mobilePaneToggle.classList.remove('hidden');
+        syncMobileToggleUI(pane);
+      }
+    }
+  }
 
   // Shared tab activation logic (DOM toggling, editor visibility, events)
   function applyTab(tab: TabName) {
-    const idx = tab === 'interactive' ? 0 : tab === 'ai' ? 1 : tab === 'elevations' ? 2 : tab === 'gallery' ? 3 : tab === 'diff' ? 4 : 5;
+    _currentTab = tab;
+    const idx = tab === 'interactive' ? 0 : tab === 'ai' ? 1 : tab === 'elevations' ? 2 : tab === 'gallery' ? 3 : tab === 'images' ? 4 : tab === 'diff' ? 5 : 6;
     for (let i = 0; i < allPanes.length; i++) {
       if (i === idx) {
         allPanes[i].classList.remove('hidden');
-        allTabs[i].className = 'px-4 py-1.5 text-xs font-medium text-zinc-100 border-b-2 border-blue-500 bg-zinc-900';
+        allTabs[i].className = TAB_ACTIVE_CLASS;
       } else {
         allPanes[i].classList.add('hidden');
-        allTabs[i].className = 'px-4 py-1.5 text-xs font-medium text-zinc-500 hover:text-zinc-300 border-b-2 border-transparent';
+        allTabs[i].className = TAB_INACTIVE_CLASS;
       }
     }
     viewActions.classList.toggle('hidden', tab !== 'ai' && tab !== 'elevations');
-    const hideEditor = tab === 'ai' || tab === 'elevations' || tab === 'diff';
-    editorPane.classList.toggle('hidden', hideEditor);
-    splitter.classList.toggle('hidden', hideEditor);
+    syncPaneVisibility();
     window.dispatchEvent(new CustomEvent('tab-switched', { detail: { tab } }));
     window.dispatchEvent(new Event('resize'));
   }
@@ -167,31 +249,43 @@ export function createLayout(appContainer: HTMLElement): LayoutElements {
     if (tab === 'ai') {
       params.set('view', 'ai');
       params.delete('gallery');
+      params.delete('images');
       params.delete('diff');
       params.delete('notes');
     } else if (tab === 'elevations') {
       params.set('view', 'elevations');
       params.delete('gallery');
+      params.delete('images');
       params.delete('diff');
       params.delete('notes');
     } else if (tab === 'gallery') {
       params.set('gallery', '');
       params.delete('view');
+      params.delete('images');
+      params.delete('diff');
+      params.delete('notes');
+    } else if (tab === 'images') {
+      params.set('images', '');
+      params.delete('view');
+      params.delete('gallery');
       params.delete('diff');
       params.delete('notes');
     } else if (tab === 'diff') {
       params.set('diff', '');
       params.delete('view');
       params.delete('gallery');
+      params.delete('images');
       params.delete('notes');
     } else if (tab === 'notes') {
       params.set('notes', '');
       params.delete('view');
       params.delete('gallery');
+      params.delete('images');
       params.delete('diff');
     } else {
       params.delete('view');
       params.delete('gallery');
+      params.delete('images');
       params.delete('diff');
       params.delete('notes');
     }
@@ -213,6 +307,7 @@ export function createLayout(appContainer: HTMLElement): LayoutElements {
   tabAI.addEventListener('click', () => switchTab('ai'));
   tabElevations.addEventListener('click', () => switchTab('elevations'));
   tabGallery.addEventListener('click', () => switchTab('gallery'));
+  tabImages.addEventListener('click', () => switchTab('images'));
   tabDiff.addEventListener('click', () => switchTab('diff'));
   tabNotes.addEventListener('click', () => switchTab('notes'));
 
@@ -222,6 +317,8 @@ export function createLayout(appContainer: HTMLElement): LayoutElements {
     applyTab('notes');
   } else if (initParams.has('diff')) {
     applyTab('diff');
+  } else if (initParams.has('images')) {
+    applyTab('images');
   } else if (initParams.has('gallery')) {
     applyTab('gallery');
   } else if (initParams.get('view') === 'elevations') {
@@ -235,6 +332,7 @@ export function createLayout(appContainer: HTMLElement): LayoutElements {
   rightPane.appendChild(viewsContainer);
   rightPane.appendChild(elevationsContainer);
   rightPane.appendChild(galleryContainer);
+  rightPane.appendChild(imagesContainer);
   rightPane.appendChild(diffContainer);
   rightPane.appendChild(notesContainer);
 
@@ -242,16 +340,43 @@ export function createLayout(appContainer: HTMLElement): LayoutElements {
   main.appendChild(splitter);
   main.appendChild(rightPane);
 
-  appContainer.appendChild(main);
+  // Outer wrapper holds the mobile pane toggle above the panes so it's
+  // visible regardless of which pane is currently shown.
+  const outer = document.createElement('div');
+  outer.className = 'flex flex-col flex-1 min-h-0';
+  outer.appendChild(mobilePaneToggle);
+  outer.appendChild(main);
+  appContainer.appendChild(outer);
 
-  return { editorPane, editorContainer, editorErrorPanel, viewportPane, viewsContainer, elevationsContainer, galleryContainer, diffContainer, notesContainer, statusBar, clipControls, switchTab };
+  // Apply initial pane visibility now that all elements are in the DOM.
+  syncPaneVisibility();
+
+  // Re-compose visibility on breakpoint crossing and on mobile-pane changes.
+  // Both must dispatch a resize so the Three.js canvas re-fits.
+  const onBreakpointChange = () => {
+    syncPaneVisibility();
+    window.dispatchEvent(new Event('resize'));
+  };
+  if (typeof mqDesktop.addEventListener === 'function') {
+    mqDesktop.addEventListener('change', onBreakpointChange);
+  } else {
+    // Safari < 14 fallback
+    (mqDesktop as unknown as { addListener: (cb: () => void) => void }).addListener(onBreakpointChange);
+  }
+  onMobilePaneChange(() => {
+    syncPaneVisibility();
+    window.dispatchEvent(new Event('resize'));
+  });
+
+  return { editorPane, editorContainer, editorErrorPanel, viewportPane, viewsContainer, elevationsContainer, galleryContainer, imagesContainer, diffContainer, notesContainer, statusBar, clipControls, switchTab };
 }
+
+const TAB_ACTIVE_CLASS = 'shrink-0 whitespace-nowrap px-4 py-2 md:py-1.5 text-sm md:text-xs font-medium text-zinc-100 border-b-2 border-blue-500 bg-zinc-900';
+const TAB_INACTIVE_CLASS = 'shrink-0 whitespace-nowrap px-4 py-2 md:py-1.5 text-sm md:text-xs font-medium text-zinc-500 [@media(hover:hover)]:hover:text-zinc-300 border-b-2 border-transparent';
 
 function createTab(label: string, active: boolean): HTMLButtonElement {
   const btn = document.createElement('button');
-  btn.className = active
-    ? 'px-4 py-1.5 text-xs font-medium text-zinc-100 border-b-2 border-blue-500 bg-zinc-900'
-    : 'px-4 py-1.5 text-xs font-medium text-zinc-500 hover:text-zinc-300 border-b-2 border-transparent';
+  btn.className = active ? TAB_ACTIVE_CLASS : TAB_INACTIVE_CLASS;
   btn.textContent = label;
   btn.dataset.tab = label;
   return btn;
@@ -260,12 +385,12 @@ function createTab(label: string, active: boolean): HTMLButtonElement {
 function createClipControls(): HTMLElement {
   const container = document.createElement('div');
   container.id = 'clip-controls';
-  container.className = 'absolute top-2 right-2 z-10 flex items-center gap-2';
+  container.className = 'absolute top-2 right-2 z-10 flex flex-wrap justify-end items-center gap-2 max-w-[calc(100%-1rem)]';
 
   // Grid toggle (off by default)
   const gridBtn = document.createElement('button');
   gridBtn.id = 'grid-toggle';
-  gridBtn.className = 'px-2 py-1 rounded text-xs bg-zinc-800/80 backdrop-blur text-zinc-400 hover:text-zinc-200 hover:bg-zinc-700/80 transition-colors border border-zinc-600/50';
+  gridBtn.className = 'px-3 py-2 md:px-2 md:py-1 rounded text-sm md:text-xs bg-zinc-800/80 backdrop-blur text-zinc-400 [@media(hover:hover)]:hover:text-zinc-200 [@media(hover:hover)]:hover:bg-zinc-700/80 transition-colors border border-zinc-600/50';
   gridBtn.textContent = '\u25A6';
   gridBtn.title = 'Show grid plane';
   container.appendChild(gridBtn);
@@ -273,7 +398,7 @@ function createClipControls(): HTMLElement {
   // Dimensions toggle (on by default)
   const dimBtn = document.createElement('button');
   dimBtn.id = 'dimensions-toggle';
-  dimBtn.className = 'px-2 py-1 rounded text-xs bg-blue-500/20 backdrop-blur text-blue-400 hover:bg-blue-500/30 transition-colors border border-blue-500/30';
+  dimBtn.className = 'px-3 py-2 md:px-2 md:py-1 rounded text-sm md:text-xs bg-blue-500/20 backdrop-blur text-blue-400 [@media(hover:hover)]:hover:bg-blue-500/30 transition-colors border border-blue-500/30';
   dimBtn.textContent = '\uD83D\uDCCF';
   dimBtn.title = 'Toggle bounding box dimensions';
   container.appendChild(dimBtn);
@@ -281,7 +406,7 @@ function createClipControls(): HTMLElement {
   // Orbit lock toggle
   const lockBtn = document.createElement('button');
   lockBtn.id = 'orbit-lock-toggle';
-  lockBtn.className = 'px-2 py-1 rounded text-xs bg-zinc-800/80 backdrop-blur text-zinc-400 hover:text-zinc-200 hover:bg-zinc-700/80 transition-colors border border-zinc-600/50';
+  lockBtn.className = 'px-3 py-2 md:px-2 md:py-1 rounded text-sm md:text-xs bg-zinc-800/80 backdrop-blur text-zinc-400 [@media(hover:hover)]:hover:text-zinc-200 [@media(hover:hover)]:hover:bg-zinc-700/80 transition-colors border border-zinc-600/50';
   lockBtn.textContent = '\uD83D\uDD13';
   lockBtn.title = 'Lock camera rotation';
   container.appendChild(lockBtn);
@@ -289,7 +414,7 @@ function createClipControls(): HTMLElement {
   // Measure toggle button
   const measureBtn = document.createElement('button');
   measureBtn.id = 'measure-toggle';
-  measureBtn.className = 'px-2 py-1 rounded text-xs bg-zinc-800/80 backdrop-blur text-zinc-400 hover:text-zinc-200 hover:bg-zinc-700/80 transition-colors border border-zinc-600/50';
+  measureBtn.className = 'px-3 py-2 md:px-2 md:py-1 rounded text-sm md:text-xs bg-zinc-800/80 backdrop-blur text-zinc-400 [@media(hover:hover)]:hover:text-zinc-200 [@media(hover:hover)]:hover:bg-zinc-700/80 transition-colors border border-zinc-600/50';
   measureBtn.textContent = '\uD83D\uDCCF Measure';
   measureBtn.title = 'Measure distance between two points on your model';
   container.appendChild(measureBtn);
@@ -297,7 +422,7 @@ function createClipControls(): HTMLElement {
   // Clip toggle button
   const toggleBtn = document.createElement('button');
   toggleBtn.id = 'clip-toggle';
-  toggleBtn.className = 'px-2 py-1 rounded text-xs bg-zinc-800/80 backdrop-blur text-zinc-400 hover:text-zinc-200 hover:bg-zinc-700/80 transition-colors border border-zinc-600/50';
+  toggleBtn.className = 'px-3 py-2 md:px-2 md:py-1 rounded text-sm md:text-xs bg-zinc-800/80 backdrop-blur text-zinc-400 [@media(hover:hover)]:hover:text-zinc-200 [@media(hover:hover)]:hover:bg-zinc-700/80 transition-colors border border-zinc-600/50';
   toggleBtn.textContent = '\u2702 Cross Section';
   toggleBtn.title = 'Toggle cross-section clipping plane';
   container.appendChild(toggleBtn);
@@ -331,8 +456,10 @@ function createClipControls(): HTMLElement {
 function initSplitter(splitter: HTMLElement, editorPane: HTMLElement) {
   let startX = 0;
   let startWidth = 0;
+  let activePointerId: number | null = null;
 
-  const onMouseMove = (e: MouseEvent) => {
+  const onPointerMove = (e: PointerEvent) => {
+    if (e.pointerId !== activePointerId) return;
     const newWidth = startWidth + (e.clientX - startX);
     const minW = 200;
     const maxW = window.innerWidth - 200;
@@ -340,20 +467,29 @@ function initSplitter(splitter: HTMLElement, editorPane: HTMLElement) {
     window.dispatchEvent(new Event('resize'));
   };
 
-  const onMouseUp = () => {
-    document.removeEventListener('mousemove', onMouseMove);
-    document.removeEventListener('mouseup', onMouseUp);
+  const onPointerEnd = (e: PointerEvent) => {
+    if (e.pointerId !== activePointerId) return;
+    activePointerId = null;
+    splitter.classList.remove('is-dragging');
+    try { splitter.releasePointerCapture(e.pointerId); } catch { /* no capture */ }
     document.body.style.cursor = '';
     document.body.style.userSelect = '';
   };
 
-  splitter.addEventListener('mousedown', (e) => {
+  splitter.addEventListener('pointerdown', (e) => {
+    // Ignore secondary buttons; allow primary mouse, touch, and pen.
+    if (e.button !== 0 && e.pointerType === 'mouse') return;
     e.preventDefault();
+    activePointerId = e.pointerId;
     startX = e.clientX;
     startWidth = editorPane.getBoundingClientRect().width;
+    splitter.setPointerCapture(e.pointerId);
+    splitter.classList.add('is-dragging');
     document.body.style.cursor = 'col-resize';
     document.body.style.userSelect = 'none';
-    document.addEventListener('mousemove', onMouseMove);
-    document.addEventListener('mouseup', onMouseUp);
   });
+
+  splitter.addEventListener('pointermove', onPointerMove);
+  splitter.addEventListener('pointerup', onPointerEnd);
+  splitter.addEventListener('pointercancel', onPointerEnd);
 }

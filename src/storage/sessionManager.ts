@@ -17,17 +17,23 @@ import {
   listNotes as dbListNotes,
   deleteNote as dbDeleteNote,
   updateNote as dbUpdateNote,
+  legacyImagesObjectToArray,
   type Session,
   type Version,
   type SessionNote,
-  type ReferenceImagesData,
+  type AttachedImage,
 } from './db';
+
+/** Legacy angle keys preserved only for typing the on-disk shapes we still
+ *  read for backward compatibility. */
+type LegacyImageAngle = 'front' | 'right' | 'back' | 'left' | 'top' | 'perspective';
 import type { SerializedColorRegion } from '../color/regions';
 import {
   serializeAll as serializeAnnotations,
   loadFromSerialized as loadAnnotations,
   type SerializedAnnotation,
 } from '../annotations/annotations';
+import { setActiveImports, type ImportedMesh } from '../import/importedMesh';
 
 /**
  * Current schema version for `.partwright.json` exports.
@@ -45,8 +51,30 @@ import {
  *  - `1.2` — annotations (freehand strokes + pinned text labels) included at the top
  *           level. Snapshots the in-memory annotation store at export time and is
  *           restored on import. Older readers ignore the field.
+ *  - `1.3` — annotations promoted to a per-version field (`versions[].annotations`).
+ *           Each version snapshots its own annotations, so switching versions swaps
+ *           them in. On import, files at schema 1.2 (top-level annotations) are
+ *           assigned to the latest version for back-compat.
+ *  - `1.4` — optional embedded version thumbnails (`versions[].thumbnail`) as
+ *           base64 PNG data URLs. Only written when the caller opts in via
+ *           {@link ExportOptions.includeThumbnails}. Importers prefer the
+ *           embedded thumbnail when present and fall back to regenerating from
+ *           code; older readers ignore the field.
+ *  - `1.5` — color regions gained two new descriptor variants, both
+ *           re-resolved at runtime so the triangle set is rebuilt on
+ *           each load:
+ *             - `{kind: 'byLabel', label}` — resolves via manifold-js's
+ *               `runOriginalID` provenance (api.label / api.labeledUnion
+ *               in user code). Persists the label name only.
+ *             - `{kind: 'connectedFromSeed', seedPoint, seedNormal,
+ *               maxDeviationDeg}` — BFS from the closest triangle to
+ *               the seed, gated by per-neighbor deviation from the seed
+ *               normal. Persists the seed only.
+ *           Older readers ignore unknown discriminant variants; the
+ *           region drops silently if its descriptor doesn't match a
+ *           known kind.
  */
-export const SCHEMA_VERSION = '1.2';
+export const SCHEMA_VERSION = '1.5';
 
 const CURRENT_MAJOR = 1;
 
@@ -55,7 +83,9 @@ export interface ExportedSession {
   partwright?: string;
   /** Legacy alias from the pre-rebrand era. Read as a fallback only. */
   mainifold?: string;
-  session: { name: string; created: number; updated: number; referenceImages?: ReferenceImagesData | null; language?: 'manifold-js' | 'scad' };
+  /** Images may be the array form or the legacy object map ({front, right, ...}).
+   * Both also exist under `referenceImages` for pre-rename exports. */
+  session: { name: string; created: number; updated: number; images?: AttachedImage[] | Partial<Record<LegacyImageAngle, string>> | null; referenceImages?: AttachedImage[] | Partial<Record<LegacyImageAngle, string>> | null; language?: 'manifold-js' | 'scad' };
   versions: {
     index: number;
     code: string;
@@ -69,14 +99,27 @@ export interface ExportedSession {
      * @since 1.1
      */
     colorRegions?: SerializedColorRegion[];
+    /**
+     * Per-version snapshot of freehand strokes and pinned text labels drawn on
+     * the model to communicate intent. Promoted to a per-version field in 1.3.
+     * @since 1.3
+     */
+    annotations?: SerializedAnnotation[];
+    /**
+     * Optional base64 PNG data URL of the version thumbnail. Only written when
+     * the caller opts in (catalog/gallery use cases). Importers prefer this
+     * over regenerating from code.
+     * @since 1.4
+     */
+    thumbnail?: string;
   }[];
   notes?: { text: string; timestamp: number }[];
   /**
-   * Freehand strokes and pinned text labels drawn on the model to communicate
-   * intent to AI agents working on it. Only included when exporting the
-   * currently active session (annotations live in transient module state and
-   * are not associated with non-active sessions).
-   * @since 1.2
+   * **Deprecated in 1.3** — top-level annotations were the 1.2 location.
+   * Still read on import (assigned to the latest version) for back-compat,
+   * but no longer written. New writers attach annotations per-version under
+   * `versions[].annotations`.
+   * @deprecated since 1.3
    */
   annotations?: SerializedAnnotation[];
 }
@@ -116,7 +159,7 @@ export function getSchemaCompatibilityWarning(data: ExportedSession): string | n
   return null;
 }
 
-export type { Session, Version, SessionNote, ReferenceImagesData } from './db';
+export type { Session, Version, SessionNote, AttachedImage } from './db';
 
 export interface SessionState {
   session: Session | null;
@@ -133,14 +176,28 @@ let currentState: SessionState = {
 };
 
 const listeners: StateChangeListener[] = [];
+const notesListeners: (() => void)[] = [];
 
 function notify() {
   for (const fn of listeners) fn(currentState);
   window.dispatchEvent(new CustomEvent('session-changed', { detail: currentState }));
 }
 
+function notifyNotes() {
+  for (const fn of notesListeners) fn();
+}
+
 export function onStateChange(fn: StateChangeListener): void {
   listeners.push(fn);
+}
+
+/** Subscribe to session-note mutations (add / update / delete). */
+export function onNotesChange(fn: () => void): () => void {
+  notesListeners.push(fn);
+  return () => {
+    const i = notesListeners.indexOf(fn);
+    if (i >= 0) notesListeners.splice(i, 1);
+  };
 }
 
 export function getState(): SessionState {
@@ -188,6 +245,10 @@ export async function createSession(name?: string, language?: 'manifold-js' | 's
   }
   const session = await dbCreateSession(name, language);
   currentState = { session, currentVersion: null, versionCount: 0 };
+  // Annotations are per-version; a fresh session starts empty so nothing
+  // bleeds in from the previously-active session.
+  loadAnnotations([]);
+  setActiveImports([]);
   updateURL();
   notify();
   return session;
@@ -213,6 +274,7 @@ export async function openSession(id: string, versionIndex?: number): Promise<Ve
   }
 
   currentState = { session, currentVersion: version, versionCount: count };
+  setActiveImports((version?.importedMeshes ?? []) as ImportedMesh[]);
   updateURL();
   notify();
   return version;
@@ -224,6 +286,8 @@ export async function closeSession(): Promise<void> {
     await deleteIfEmpty(currentState.session.id);
   }
   currentState = { session: null, currentVersion: null, versionCount: 0 };
+  loadAnnotations([]);
+  setActiveImports([]);
   updateURL();
   notify();
 }
@@ -257,18 +321,60 @@ export async function setSessionLanguage(id: string, language: 'manifold-js' | '
 
 // === Version operations ===
 
+/** Stable structural comparison for annotation snapshots. Both are arrays of
+ *  POJOs, so JSON-stringify is the simplest "equal value" check — order is
+ *  meaningful (annotations are appended) so we don't sort. */
+function annotationsEqual(a: unknown[] | undefined, b: unknown[] | undefined): boolean {
+  const aArr = a ?? [];
+  const bArr = b ?? [];
+  if (aArr.length !== bArr.length) return false;
+  if (aArr.length === 0) return true;
+  return JSON.stringify(aArr) === JSON.stringify(bArr);
+}
+
+/** Color regions are persisted as `geometryData.colorRegions` on each version.
+ *  Compare them so a save that only adds/edits color regions still creates a
+ *  new version — code may be identical, but the painted state is the change. */
+function colorRegionsEqual(prev: Record<string, unknown> | null | undefined, next: Record<string, unknown> | null | undefined): boolean {
+  const prevRegions = (prev?.colorRegions ?? []) as unknown[];
+  const nextRegions = (next?.colorRegions ?? []) as unknown[];
+  if (prevRegions.length !== nextRegions.length) return false;
+  if (prevRegions.length === 0) return true;
+  // Order is stable across saves — regions are stored in the order they were
+  // added, and we serialize via the same path.
+  return JSON.stringify(prevRegions) === JSON.stringify(nextRegions);
+}
+
 export async function saveVersion(
   code: string,
   geometryData: Record<string, unknown> | null,
   thumbnail: Blob | null,
   label?: string,
   notes?: string,
-  options?: { force?: boolean },
+  options?: { force?: boolean; importedMeshes?: ImportedMesh[] },
 ): Promise<Version | null> {
   if (!currentState.session) return null;
 
-  // Skip if code is identical to the current version (unless forced)
-  if (!options?.force && currentState.currentVersion && currentState.currentVersion.code === code) {
+  const annotationSnapshot = serializeAnnotations();
+
+  // Imports carry forward to new versions automatically: if the user edits
+  // their imported-mesh code and re-saves, the same mesh data should still
+  // back `api.imports[i]`. Pull from the current version when the caller
+  // didn't provide an explicit override.
+  const prevImports = (currentState.currentVersion?.importedMeshes ?? []) as ImportedMesh[];
+  const nextImports = options?.importedMeshes ?? prevImports;
+
+  // Skip if code AND annotations AND color regions are all identical to the
+  // current version (unless forced). Annotations and color regions live
+  // per-version, so a save that only changes either must still create a new
+  // version — comparing code alone would no-op.
+  if (
+    !options?.force &&
+    currentState.currentVersion &&
+    currentState.currentVersion.code === code &&
+    annotationsEqual(currentState.currentVersion.annotations, annotationSnapshot) &&
+    colorRegionsEqual(currentState.currentVersion.geometryData as Record<string, unknown> | null, geometryData)
+  ) {
     return null;
   }
 
@@ -279,6 +385,9 @@ export async function saveVersion(
     thumbnail,
     label,
     notes,
+    undefined,
+    annotationSnapshot,
+    nextImports.length > 0 ? nextImports : undefined,
   );
 
   currentState = {
@@ -286,6 +395,7 @@ export async function saveVersion(
     currentVersion: version,
     versionCount: currentState.versionCount + 1,
   };
+  setActiveImports((version.importedMeshes ?? []) as ImportedMesh[]);
   updateURL();
   notify();
   return version;
@@ -301,6 +411,7 @@ export async function navigateVersion(direction: 'prev' | 'next'): Promise<Versi
   if (!version) return null;
 
   currentState = { ...currentState, currentVersion: version };
+  setActiveImports((version.importedMeshes ?? []) as ImportedMesh[]);
   updateURL();
   notify();
   return version;
@@ -331,6 +442,7 @@ export async function loadVersion(target: number | string): Promise<Version | nu
   if (!version) return null;
 
   currentState = { ...currentState, currentVersion: version };
+  setActiveImports((version.importedMeshes ?? []) as ImportedMesh[]);
   updateURL();
   notify();
   return version;
@@ -355,34 +467,36 @@ export function getGalleryUrl(): string {
   return `${base}?session=${currentState.session.id}&gallery`;
 }
 
-// === Reference images ===
+// === Images ===
 
-export async function saveReferenceImages(images: ReferenceImagesData | null): Promise<void> {
+export async function saveImages(images: AttachedImage[] | null): Promise<void> {
   if (!currentState.session) return;
   await dbUpdateSession(currentState.session.id, {
-    referenceImages: images,
+    images,
     updated: Date.now(),
   });
   // Update local state so getState() reflects the change
   currentState = {
     ...currentState,
-    session: { ...currentState.session, referenceImages: images },
+    session: { ...currentState.session, images },
   };
   notify();
 }
 
-export async function getReferenceImagesFromSession(): Promise<ReferenceImagesData | null> {
+export async function getImagesFromSession(): Promise<AttachedImage[] | null> {
   if (!currentState.session) return null;
   // Refresh from DB in case it was updated externally
   const session = await getSession(currentState.session.id);
-  return session?.referenceImages ?? null;
+  return session?.images ?? null;
 }
 
 // === Notes ===
 
 export async function addSessionNote(text: string): Promise<SessionNote | null> {
   if (!currentState.session) return null;
-  return dbAddNote(currentState.session.id, text);
+  const note = await dbAddNote(currentState.session.id, text);
+  notifyNotes();
+  return note;
 }
 
 export async function listSessionNotes(): Promise<SessionNote[]> {
@@ -392,10 +506,12 @@ export async function listSessionNotes(): Promise<SessionNote[]> {
 
 export async function deleteSessionNote(noteId: string): Promise<void> {
   await dbDeleteNote(noteId);
+  notifyNotes();
 }
 
 export async function updateSessionNote(noteId: string, text: string): Promise<void> {
   await dbUpdateNote(noteId, text);
+  notifyNotes();
 }
 
 // === Recent error tracking (for agentHints) ===
@@ -503,6 +619,7 @@ export async function deleteIfEmpty(sessionId: string): Promise<boolean> {
   await dbDeleteSession(sessionId);
   if (currentState.session?.id === sessionId) {
     currentState = { session: null, currentVersion: null, versionCount: 0 };
+    setActiveImports([]);
   }
   return true;
 }
@@ -512,6 +629,8 @@ export async function deleteIfEmpty(sessionId: string): Promise<boolean> {
 export async function clearAllSessions(): Promise<void> {
   await clearAllData();
   currentState = { session: null, currentVersion: null, versionCount: 0 };
+  loadAnnotations([]);
+  setActiveImports([]);
   updateURL();
   notify();
 }
@@ -526,39 +645,101 @@ function extractColorRegions(geometryData: Record<string, unknown> | null): Seri
   return undefined;
 }
 
-export async function exportSession(sessionId?: string): Promise<ExportedSession | null> {
+/**
+ * Toggles for what gets included in an exported session JSON. Defaults match
+ * the historical behavior (all session-bound data on, thumbnails off — since
+ * the importer regenerates them from code unless an embedded one is present).
+ */
+export interface ExportOptions {
+  includeThumbnails?: boolean;
+  includeAnnotations?: boolean;
+  includeNotes?: boolean;
+  includeColorRegions?: boolean;
+}
+
+const DEFAULT_EXPORT_OPTIONS: Required<ExportOptions> = {
+  includeThumbnails: false,
+  includeAnnotations: true,
+  includeNotes: true,
+  includeColorRegions: true,
+};
+
+/** Read a Blob as a base64 data URL (e.g. "data:image/png;base64,..."). */
+function blobToDataURL(blob: Blob): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result as string);
+    reader.onerror = () => reject(reader.error ?? new Error('FileReader failed'));
+    reader.readAsDataURL(blob);
+  });
+}
+
+/** Decode a base64 data URL back into a Blob. Returns null on parse failure. */
+function dataURLToBlob(dataUrl: string): Blob | null {
+  const match = /^data:([^;,]+)(?:;base64)?,(.*)$/s.exec(dataUrl);
+  if (!match) return null;
+  const [, mime, payload] = match;
+  const isBase64 = dataUrl.includes(';base64,');
+  try {
+    const bin = isBase64 ? atob(payload) : decodeURIComponent(payload);
+    const buf = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) buf[i] = bin.charCodeAt(i);
+    return new Blob([buf], { type: mime || 'application/octet-stream' });
+  } catch {
+    return null;
+  }
+}
+
+/** Strip `colorRegions` from a geometryData blob without mutating the original. */
+function stripColorRegions(geometryData: Record<string, unknown> | null): Record<string, unknown> | null {
+  if (!geometryData) return geometryData;
+  if (!('colorRegions' in geometryData)) return geometryData;
+  const { colorRegions: _omit, ...rest } = geometryData;
+  return rest;
+}
+
+export async function exportSession(
+  sessionId?: string,
+  options?: ExportOptions,
+): Promise<ExportedSession | null> {
   const id = sessionId ?? currentState.session?.id;
   if (!id) return null;
 
   const session = await getSession(id);
   if (!session) return null;
 
-  const versions = await dbListVersions(id);
-  const notes = await dbListNotes(id);
+  const opts: Required<ExportOptions> = { ...DEFAULT_EXPORT_OPTIONS, ...options };
 
-  // Annotations live in transient module state, not in the database. Only attach
-  // them when the export target is the currently active session — exporting an
-  // inactive session shouldn't pick up annotations belonging to a different model.
-  const isActive = currentState.session?.id === id;
-  const annotations = isActive ? serializeAnnotations() : [];
+  const versions = await dbListVersions(id);
+  const notes = opts.includeNotes ? await dbListNotes(id) : [];
+
+  // Thumbnail conversion: read each version's Blob and convert to base64 data URL.
+  // Done in parallel since FileReader is async per-blob.
+  const thumbnailDataUrls: (string | null)[] = await Promise.all(
+    versions.map(v => (opts.includeThumbnails && v.thumbnail) ? blobToDataURL(v.thumbnail) : Promise.resolve(null)),
+  );
 
   return {
     partwright: SCHEMA_VERSION,
-    session: { name: session.name, created: session.created, updated: session.updated, referenceImages: session.referenceImages ?? null, ...(session.language ? { language: session.language } : {}) },
-    versions: versions.map(v => {
-      const colorRegions = extractColorRegions(v.geometryData);
+    session: { name: session.name, created: session.created, updated: session.updated, images: session.images ?? null, ...(session.language ? { language: session.language } : {}) },
+    versions: versions.map((v, i) => {
+      const colorRegions = opts.includeColorRegions ? extractColorRegions(v.geometryData) : undefined;
+      const geometryData = opts.includeColorRegions ? v.geometryData : stripColorRegions(v.geometryData);
+      const versionAnnotations = opts.includeAnnotations ? ((v.annotations ?? []) as SerializedAnnotation[]) : [];
+      const thumbDataUrl = thumbnailDataUrls[i];
       return {
         index: v.index,
         code: v.code,
         label: v.label,
-        geometryData: v.geometryData,
+        geometryData,
         timestamp: v.timestamp,
         ...(v.notes ? { notes: v.notes } : {}),
         ...(colorRegions ? { colorRegions } : {}),
+        ...(versionAnnotations.length > 0 ? { annotations: versionAnnotations } : {}),
+        ...(thumbDataUrl ? { thumbnail: thumbDataUrl } : {}),
       };
     }),
     ...(notes.length > 0 ? { notes: notes.map(n => ({ text: n.text, timestamp: n.timestamp })) } : {}),
-    ...(annotations.length > 0 ? { annotations } : {}),
   };
 }
 
@@ -572,10 +753,21 @@ export async function importSession(
 
   const session = await dbCreateSession(data.session.name, data.session.language);
 
-  // Restore reference images if present in the exported data
-  if (data.session.referenceImages) {
-    await dbUpdateSession(session.id, { referenceImages: data.session.referenceImages });
+  // Restore images if present in the exported data. Handle two legacy shapes:
+  //   - pre-rename: `referenceImages` instead of `images`
+  //   - pre-array: object map `{front: 'url', ...}` instead of `[{id, angle, src}]`
+  const rawImages = data.session.images ?? data.session.referenceImages ?? null;
+  if (rawImages) {
+    const imagesArr = Array.isArray(rawImages)
+      ? rawImages
+      : legacyImagesObjectToArray(rawImages);
+    await dbUpdateSession(session.id, { images: imagesArr });
   }
+
+  // Determine the index of the latest exported version. Schema 1.2 stored
+  // annotations at the top level; for back-compat we attach them to whichever
+  // version was most recent at export time (assumed to be the highest index).
+  const latestExportedIndex = data.versions.reduce((m, v) => Math.max(m, v.index), -Infinity);
 
   for (const v of data.versions) {
     // Normalize color regions: prefer the explicit (1.1+) field; fall back to the legacy
@@ -591,11 +783,32 @@ export async function importSession(
       geometryData = { ...(geometryData ?? {}), colorRegions: regions };
     }
 
+    // Prefer an embedded thumbnail (schema 1.3+) — avoids re-running WASM
+    // and gives us the exact image the exporter saw. Fall back to
+    // regenerating from code when the field is absent.
     let thumbnail: Blob | null = null;
-    if (regenerateThumbnail) {
+    if (v.thumbnail) thumbnail = dataURLToBlob(v.thumbnail);
+    if (!thumbnail && regenerateThumbnail) {
       thumbnail = await regenerateThumbnail(v.code);
     }
-    await dbSaveVersion(session.id, v.code, geometryData, thumbnail, v.label, v.notes, v.timestamp);
+
+    // Annotations: prefer the per-version field (1.3+). Fall back to the
+    // top-level field (1.2) attached to the latest exported version only.
+    let versionAnnotations: SerializedAnnotation[] | undefined = v.annotations;
+    if (!versionAnnotations && data.annotations && data.annotations.length > 0 && v.index === latestExportedIndex) {
+      versionAnnotations = data.annotations;
+    }
+
+    await dbSaveVersion(
+      session.id,
+      v.code,
+      geometryData,
+      thumbnail,
+      v.label,
+      v.notes,
+      v.timestamp,
+      versionAnnotations,
+    );
   }
 
   // Restore session notes
@@ -617,14 +830,16 @@ export async function importSession(
   const count = await getVersionCount(session.id);
   const latest = await getLatestVersion(session.id);
   currentState = { session: refreshedSession, currentVersion: latest, versionCount: count };
+  setActiveImports((latest?.importedMeshes ?? []) as ImportedMesh[]);
   updateURL();
   notify();
 
-  // Restore annotations into the in-memory store. This replaces any existing
-  // annotations — the imported session is now the active context.
-  if (data.annotations && data.annotations.length > 0) {
-    loadAnnotations(data.annotations);
-  }
+  // Note: annotations are NOT loaded here on purpose. The caller is expected to
+  // route the imported session through `loadVersionIntoEditor` (or equivalent)
+  // which will run the version's code, render the mesh, and call
+  // `applyVersionAnnotations`. Loading them twice (once here, once in the editor
+  // path) causes redundant rebuilds of the multiview offscreen renderer that
+  // can land mid-render and produce a frame that misses the annotations.
 
   return refreshedSession;
 }

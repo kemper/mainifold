@@ -3,6 +3,7 @@
 import {
   getState,
   onStateChange,
+  onNotesChange,
   createSession,
   closeSession,
   saveVersion,
@@ -10,14 +11,13 @@ import {
   renameSession,
   type SessionState,
 } from '../storage/sessionManager';
-import { getReferenceImages } from '../renderer/multiview';
+import { onChange as onColorRegionsChange } from '../color/regions';
+import { onChange as onAnnotationStrokesChange } from '../annotations/annotations';
 
 export interface SessionBarCallbacks {
   onSaveVersion: () => Promise<{ code: string; geometryData: Record<string, unknown> | null; thumbnail: Blob | null }>;
   onLoadVersion: (code: string) => void;
-  onOpenGallery: () => void;
   onOpenSessionList: () => void;
-  onLoadReferenceImages: (images: Record<string, string>) => void;
   onNewSession: () => void;
 }
 
@@ -34,6 +34,13 @@ export function createSessionBar(container: HTMLElement, cb: SessionBarCallbacks
   barEl = bar;
   render(getState());
   onStateChange(render);
+
+  // Re-render when paint regions, annotations, or notes change so the Save
+  // button reflects current dirty state and is clickable after these edits.
+  const refresh = () => render(getState());
+  onColorRegionsChange(refresh);
+  onAnnotationStrokesChange(refresh);
+  onNotesChange(refresh);
 
   container.appendChild(bar);
   return bar;
@@ -137,38 +144,38 @@ function render(state: SessionState) {
 
   barEl.appendChild(el('span', 'text-zinc-600', '|'));
 
-  // Save version (with guard against double-click)
+  // Save version (with guard against double-click).
+  // The button must be re-enabled in finally so it doesn't get stuck disabled
+  // when saveVersion silently skips a code-identical save (e.g. clicking save
+  // after only painting, annotating, or adding notes — none of which mutate
+  // the code text). Force=true when colors differ so paint-only changes still
+  // create a new version.
   let saving = false;
   const saveBtn = btn('\uD83D\uDCBE Save', async () => {
     if (saving) return;
     saving = true;
     saveBtn.disabled = true;
-    saveBtn.className += ' opacity-50';
+    saveBtn.classList.add('opacity-50');
     try {
       const data = await callbacks.onSaveVersion();
       const label = `v${state.versionCount + 1}`;
-      await saveVersion(data.code, data.geometryData, data.thumbnail, label);
+      const force = colorRegionsDiffer(state.currentVersion?.geometryData, data.geometryData);
+      await saveVersion(
+        data.code,
+        data.geometryData,
+        data.thumbnail,
+        label,
+        undefined,
+        force ? { force: true } : undefined,
+      );
     } finally {
       saving = false;
+      saveBtn.disabled = false;
+      saveBtn.classList.remove('opacity-50');
     }
   });
   saveBtn.id = 'btn-save-version';
   barEl.appendChild(saveBtn);
-
-  // Gallery
-  const galleryBtn = btn('\u25A6 Gallery', () => callbacks.onOpenGallery());
-  galleryBtn.id = 'btn-gallery';
-  barEl.appendChild(galleryBtn);
-
-  // Reference images indicator + loader
-  const refImages = getReferenceImages();
-  if (refImages) {
-    const refCount = Object.values(refImages).filter(Boolean).length;
-    const refBadge = el('span', 'text-xs font-mono text-blue-400 bg-blue-500/10 border border-blue-500/30 px-1.5 py-0.5 rounded', `Ref (${refCount})`);
-    refBadge.title = `${refCount} reference image(s) loaded`;
-    barEl.appendChild(refBadge);
-  }
-  barEl.appendChild(createRefLoader());
 
   // Spacer
   barEl.appendChild(el('div', 'flex-1', ''));
@@ -190,63 +197,19 @@ function el(tag: string, className: string, text: string): HTMLElement {
   return e;
 }
 
+function colorRegionsDiffer(
+  oldGeo: Record<string, unknown> | null | undefined,
+  newGeo: Record<string, unknown> | null | undefined,
+): boolean {
+  const oldColors = (oldGeo as Record<string, unknown> | null | undefined)?.colorRegions ?? null;
+  const newColors = (newGeo as Record<string, unknown> | null | undefined)?.colorRegions ?? null;
+  return JSON.stringify(oldColors) !== JSON.stringify(newColors);
+}
+
 function btn(text: string, onClick: () => void): HTMLButtonElement {
   const b = document.createElement('button');
   b.className = 'px-1.5 py-0.5 rounded text-zinc-400 hover:text-zinc-200 hover:bg-zinc-700 transition-colors text-xs';
   b.textContent = text;
   b.addEventListener('click', onClick);
   return b;
-}
-
-const ANGLE_KEYS = ['front', 'right', 'back', 'left', 'top', 'perspective'] as const;
-
-function createRefLoader(): HTMLElement {
-  const wrapper = document.createElement('span');
-  wrapper.id = 'btn-ref-upload';
-  wrapper.className = 'relative';
-
-  const input = document.createElement('input');
-  input.type = 'file';
-  input.accept = 'image/*';
-  input.multiple = true;
-  input.className = 'hidden';
-  input.addEventListener('change', async () => {
-    const files = Array.from(input.files || []);
-    if (!files.length) return;
-
-    const images: Record<string, string> = {};
-
-    for (const file of files) {
-      const name = file.name.toLowerCase();
-      const dataUrl = await readFileAsDataURL(file);
-      const matched = ANGLE_KEYS.find(a => name.includes(a));
-      if (matched) {
-        images[matched] = dataUrl;
-      } else {
-        // Default unmatched files to perspective
-        images.perspective = dataUrl;
-      }
-    }
-
-    callbacks.onLoadReferenceImages(images);
-    input.value = '';
-  });
-
-  const button = document.createElement('button');
-  button.className = 'px-2 py-0.5 rounded text-xs bg-blue-500/10 border border-blue-500/30 text-blue-400 hover:bg-blue-500/20 hover:text-blue-300 transition-colors cursor-pointer';
-  button.textContent = '\uD83D\uDCF7 Refs';
-  button.title = 'Upload reference images. Name files by angle (front.jpg, right.png, etc.) for multi-view comparison, or load a single photo as perspective.';
-  button.addEventListener('click', () => input.click());
-
-  wrapper.appendChild(input);
-  wrapper.appendChild(button);
-  return wrapper;
-}
-
-function readFileAsDataURL(file: File): Promise<string> {
-  return new Promise((resolve) => {
-    const reader = new FileReader();
-    reader.onload = () => resolve(reader.result as string);
-    reader.readAsDataURL(file);
-  });
 }

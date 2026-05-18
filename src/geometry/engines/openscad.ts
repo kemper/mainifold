@@ -3,6 +3,7 @@ import { parseBinarySTLToMeshGL } from './scadToManifold';
 import { getManifoldModule, manifoldJsEngine } from './manifoldJs';
 import { scadDiagnostics } from '../sourceDiagnostics';
 import { ensureBosl2InMemfs, sourceUsesBosl2 } from '../bosl2Loader';
+import { getDefaultCircularSegments } from '../qualitySettings';
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type CreateOpenSCAD = (opts: any) => Promise<any>;
@@ -131,8 +132,12 @@ export async function runScadAsync(source: string): Promise<MeshResult> {
     }
     instance.FS.writeFile('/in.scad', source);
 
+    // Seed $fn from the user's quality preset. The script can still
+    // reassign $fn=… at the top level or pass $fn= per primitive to
+    // override.
     const exitCode = instance.callMain([
       '--enable=manifold',
+      '-D', `$fn=${getDefaultCircularSegments()}`,
       '--export-format=binstl',
       '-o', '/out.stl',
       '/in.scad',

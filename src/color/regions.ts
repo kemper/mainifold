@@ -9,13 +9,17 @@ export interface ColorRegion {
   source: 'face-pick' | 'slab' | 'subtree' | 'paintbrush';
   descriptor: RegionDescriptor;
   order: number;
+  visible: boolean;
   triangles: Set<number>; // resolved triangle indices (transient, not persisted)
 }
 
 export type RegionDescriptor =
   | { kind: 'coplanar'; seedPoint: [number, number, number]; seedNormal: [number, number, number]; normalTolerance: number }
-  | { kind: 'slab'; axis: 'x' | 'y' | 'z'; min: number; max: number }
-  | { kind: 'triangles'; ids: number[] };
+  | { kind: 'slab'; normal: [number, number, number]; offset: number; thickness: number }
+  | { kind: 'box'; center: [number, number, number]; size: [number, number, number]; quaternion: [number, number, number, number] }
+  | { kind: 'triangles'; ids: number[] }
+  | { kind: 'byLabel'; label: string }
+  | { kind: 'connectedFromSeed'; seedPoint: [number, number, number]; seedNormal: [number, number, number]; maxDeviationDeg: number };
 
 export interface SerializedColorRegion {
   id: number;
@@ -24,6 +28,7 @@ export interface SerializedColorRegion {
   source: ColorRegion['source'];
   descriptor: RegionDescriptor;
   order: number;
+  visible?: boolean; // optional for backward compat — defaults to true on load
 }
 
 type ChangeListener = () => void;
@@ -107,6 +112,7 @@ export function addRegion(
   source: ColorRegion['source'],
   descriptor: RegionDescriptor,
   triangles: Set<number>,
+  visible: boolean = true,
 ): ColorRegion {
   const id = Date.now() + Math.floor(Math.random() * 1000);
   const region: ColorRegion = {
@@ -116,12 +122,31 @@ export function addRegion(
     source,
     descriptor,
     order: nextOrder++,
+    visible,
     triangles,
   };
   regions.push(region);
   clearRedoStack();
   notify();
   return region;
+}
+
+export function getRegion(id: number): ColorRegion | undefined {
+  return regions.find(r => r.id === id);
+}
+
+export function setRegionVisibility(id: number, visible: boolean): boolean {
+  const region = regions.find(r => r.id === id);
+  if (!region) return false;
+  if (region.visible === visible) return true;
+  region.visible = visible;
+  notify();
+  return true;
+}
+
+export function isRegionVisible(id: number): boolean | undefined {
+  const region = regions.find(r => r.id === id);
+  return region?.visible;
 }
 
 export function removeRegion(id: number): boolean {
@@ -174,8 +199,12 @@ export function clearRegions(): void {
 }
 
 /** Build triColors (Uint8Array, numTri*3 RGB) from current regions.
- *  Higher-order regions win on overlap. Returns null if no regions. */
-export function buildTriColors(numTri: number): Uint8Array | null {
+ *  Higher-order regions win on overlap. Returns null if no regions.
+ *
+ *  `respectPerRegionVisibility` (default false) skips regions with `visible:false`
+ *  so the viewport reflects per-region eye-toggle state. Exports leave it false
+ *  so a hidden-in-UI region still ships in the GLB/3MF. */
+export function buildTriColors(numTri: number, respectPerRegionVisibility = false): Uint8Array | null {
   if (regions.length === 0) return null;
 
   const buf = new Uint8Array(numTri * 3); // default 0,0,0 — will be ignored for unpainted tris
@@ -184,8 +213,9 @@ export function buildTriColors(numTri: number): Uint8Array | null {
   const triOrder = new Int32Array(numTri); // 0 = unpainted
   triOrder.fill(0);
 
-  // Sort by order ascending so higher-order regions overwrite lower
-  const sorted = [...regions].sort((a, b) => a.order - b.order);
+  // Sort by order ascending so higher-order regions overwrite lower.
+  const eligible = respectPerRegionVisibility ? regions.filter(r => r.visible) : regions;
+  const sorted = [...eligible].sort((a, b) => a.order - b.order);
 
   for (const region of sorted) {
     const r = Math.round(region.color[0] * 255);
@@ -219,6 +249,37 @@ export function isPainted(triColors: Uint8Array, triIndex: number): boolean {
   return painted ? painted[triIndex] === 1 : (triColors[triIndex * 3] !== 0 || triColors[triIndex * 3 + 1] !== 0 || triColors[triIndex * 3 + 2] !== 0);
 }
 
+/** Allocate an empty (all-zero) triColors buffer with the `_painted`
+ *  sidecar attached. Use this when you need a paintable buffer but the
+ *  current regions list is empty (so `buildTriColors` returned null). */
+export function createEmptyTriColors(numTri: number): Uint8Array {
+  const buf = new Uint8Array(numTri * 3);
+  (buf as Uint8Array & { _painted?: Uint8Array })._painted = new Uint8Array(numTri);
+  return buf;
+}
+
+/** Overlay a color onto specific triangles in a triColors buffer
+ *  (typically one returned by buildTriColors). Keeps the `_painted`
+ *  sidecar in sync. Used by paintPreview / paintExplain to highlight
+ *  a candidate or committed region in bright yellow over the existing
+ *  paint layer. */
+export function overlayPainted(
+  triColors: Uint8Array,
+  indices: Iterable<number>,
+  color: [number, number, number],
+): void {
+  const painted = (triColors as Uint8Array & { _painted?: Uint8Array })._painted;
+  const r = Math.round(color[0] * 255);
+  const g = Math.round(color[1] * 255);
+  const b = Math.round(color[2] * 255);
+  for (const t of indices) {
+    triColors[t * 3] = r;
+    triColors[t * 3 + 1] = g;
+    triColors[t * 3 + 2] = b;
+    if (painted) painted[t] = 1;
+  }
+}
+
 export function serialize(): SerializedColorRegion[] {
   return regions.map(r => ({
     id: r.id,
@@ -227,29 +288,34 @@ export function serialize(): SerializedColorRegion[] {
     source: r.source,
     descriptor: r.descriptor,
     order: r.order,
+    visible: r.visible,
   }));
 }
 
 export function deserialize(data: SerializedColorRegion[]): void {
   regions = data.map(d => ({
     ...d,
+    visible: d.visible !== false, // older saves lack the field — default to visible
     triangles: new Set<number>(),
   }));
   nextOrder = regions.reduce((max, r) => Math.max(max, r.order + 1), 1);
   clearRedoStack();
 }
 
-/** Apply triColors to a MeshData, returning a new object (non-destructive). */
+/** Apply triColors to a MeshData, returning a new object (non-destructive).
+ *  Use for EXPORTS — all regions are baked in regardless of UI visibility flags. */
 export function applyTriColors(mesh: MeshData): MeshData {
-  const triColors = buildTriColors(mesh.numTri);
+  const triColors = buildTriColors(mesh.numTri, false);
   if (!triColors) return mesh;
   return { ...mesh, triColors };
 }
 
-/** Same as `applyTriColors` but returns the mesh unchanged when paint
- *  visibility is toggled off. Use this for viewport rendering; exports should
- *  call `applyTriColors` directly so colors persist regardless of UI state. */
+/** Viewport-facing variant: returns the mesh unchanged when the global paint
+ *  visibility is toggled off, and skips individual regions whose per-region
+ *  `visible` flag is false (eye-icon toggles in the region list). */
 export function applyTriColorsIfVisible(mesh: MeshData): MeshData {
   if (!visible) return mesh;
-  return applyTriColors(mesh);
+  const triColors = buildTriColors(mesh.numTri, true);
+  if (!triColors) return mesh;
+  return { ...mesh, triColors };
 }

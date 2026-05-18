@@ -1,6 +1,8 @@
-// Gallery view — grid of version thumbnails for comparing iterations
+// Gallery view — grid of version thumbnails for comparing iterations,
+// plus a read-only strip of attached reference images at the top.
 
-import { listCurrentVersions, loadVersion, getReferenceImagesFromSession, type Version, type ReferenceImagesData } from '../storage/sessionManager';
+import { listCurrentVersions, loadVersion, type Version } from '../storage/sessionManager';
+import { getImages, sortImagesByPreset, type AttachedImage } from '../renderer/multiview';
 
 let galleryEl: HTMLElement | null = null;
 let onLoadCode: ((code: string) => void) | null = null;
@@ -12,23 +14,26 @@ export function createGalleryView(container: HTMLElement, loadCode: (code: strin
   window.addEventListener('session-changed', () => {
     if (galleryEl && !galleryEl.classList.contains('hidden')) refreshGallery();
   });
+  // Re-render when images are attached/removed/relabeled elsewhere.
+  window.addEventListener('images-changed', () => {
+    if (galleryEl && !galleryEl.classList.contains('hidden')) refreshGallery();
+  });
 }
 
 export async function refreshGallery(): Promise<void> {
   if (!galleryEl) return;
 
   const versions = await listCurrentVersions();
-  const refImages = await getReferenceImagesFromSession();
+  const images = getImages();
   galleryEl.innerHTML = '';
 
-  // Show reference images section if they exist
-  if (refImages) {
-    galleryEl.appendChild(createReferenceImagesSection(refImages));
+  if (images.length > 0) {
+    galleryEl.appendChild(createImagesSection(images));
   }
 
   if (versions.length === 0) {
     const empty = document.createElement('div');
-    empty.className = 'flex items-center justify-center h-full text-zinc-500 text-sm';
+    empty.className = 'flex items-center justify-center text-zinc-500 text-sm py-12';
     empty.textContent = 'No versions saved yet. Click "Save" to capture a version.';
     galleryEl.appendChild(empty);
     return;
@@ -45,16 +50,7 @@ export async function refreshGallery(): Promise<void> {
   galleryEl.appendChild(grid);
 }
 
-const REF_LABELS: { key: keyof ReferenceImagesData; label: string }[] = [
-  { key: 'front', label: 'Front' },
-  { key: 'right', label: 'Right' },
-  { key: 'back', label: 'Back' },
-  { key: 'left', label: 'Left' },
-  { key: 'top', label: 'Top' },
-  { key: 'perspective', label: 'Perspective' },
-];
-
-function createReferenceImagesSection(images: ReferenceImagesData): HTMLElement {
+function createImagesSection(images: AttachedImage[]): HTMLElement {
   const section = document.createElement('div');
   section.className = 'mb-4 pb-4 border-b border-zinc-700';
 
@@ -63,43 +59,89 @@ function createReferenceImagesSection(images: ReferenceImagesData): HTMLElement 
 
   const icon = document.createElement('span');
   icon.className = 'text-blue-400 text-sm';
-  icon.textContent = '\u{1F5BC}'; // framed picture unicode
+  icon.textContent = '\u{1F5BC}';
   header.appendChild(icon);
 
   const title = document.createElement('span');
   title.className = 'text-xs font-mono font-medium text-zinc-300';
-  title.textContent = 'Reference Images';
+  title.textContent = `Images (${images.length})`;
   header.appendChild(title);
 
   section.appendChild(header);
 
+  const sorted = sortImagesByPreset(images);
+
   const row = document.createElement('div');
   row.className = 'flex gap-2 overflow-x-auto';
 
-  for (const { key, label } of REF_LABELS) {
-    const src = images[key];
-    if (!src) continue;
-
+  for (const item of sorted) {
     const thumb = document.createElement('div');
     thumb.className = 'flex flex-col items-center shrink-0';
 
+    const caption = (item.label ?? '').trim();
     const imgEl = document.createElement('img');
-    imgEl.src = src;
+    imgEl.src = item.src;
     imgEl.className = 'w-24 h-24 object-contain rounded bg-zinc-800 border border-blue-500/30 cursor-pointer hover:border-blue-400 transition-colors';
-    imgEl.title = `Click to enlarge: ${label}`;
-    imgEl.addEventListener('click', () => showLightbox(src, label));
+    imgEl.title = caption ? `Click to enlarge: ${caption}` : 'Click to enlarge';
+    imgEl.addEventListener('click', () => showLightbox(item.src, caption));
     thumb.appendChild(imgEl);
 
-    const labelEl = document.createElement('div');
-    labelEl.className = 'text-xs text-zinc-500 font-mono mt-0.5';
-    labelEl.textContent = label;
-    thumb.appendChild(labelEl);
+    // Caption only shows the user-provided label. Angle is system metadata
+    // surfaced in the Images tab, not used as a fallback caption here — the
+    // image content speaks for itself.
+    if (caption) {
+      const labelEl = document.createElement('div');
+      labelEl.className = 'text-xs text-zinc-300 font-mono mt-0.5 max-w-24 truncate';
+      labelEl.title = caption;
+      labelEl.textContent = caption;
+      thumb.appendChild(labelEl);
+    }
 
     row.appendChild(thumb);
   }
 
   section.appendChild(row);
   return section;
+}
+
+function showLightbox(src: string, label: string): void {
+  const overlay = document.createElement('div');
+  overlay.className = 'fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm';
+  overlay.addEventListener('click', (e) => {
+    if (e.target === overlay) overlay.remove();
+  });
+
+  const container = document.createElement('div');
+  container.className = 'relative max-w-[90vw] max-h-[90vh] flex flex-col items-center';
+
+  const img = document.createElement('img');
+  img.src = src;
+  img.className = 'max-w-full max-h-[85vh] object-contain rounded-lg shadow-2xl';
+  container.appendChild(img);
+
+  if (label) {
+    const caption = document.createElement('div');
+    caption.className = 'text-sm text-zinc-300 font-mono mt-2';
+    caption.textContent = label;
+    container.appendChild(caption);
+  }
+
+  const closeBtn = document.createElement('button');
+  closeBtn.className = 'absolute -top-3 -right-3 w-8 h-8 rounded-full bg-zinc-700 text-zinc-300 hover:bg-zinc-600 flex items-center justify-center text-lg';
+  closeBtn.textContent = '\u00D7';
+  closeBtn.addEventListener('click', () => overlay.remove());
+  container.appendChild(closeBtn);
+
+  overlay.appendChild(container);
+  document.body.appendChild(overlay);
+
+  const onKey = (e: KeyboardEvent) => {
+    if (e.key === 'Escape') {
+      overlay.remove();
+      document.removeEventListener('keydown', onKey);
+    }
+  };
+  document.addEventListener('keydown', onKey);
 }
 
 function createTile(version: Version): HTMLElement {
@@ -219,45 +261,6 @@ function createTile(version: Version): HTMLElement {
 
   tile.appendChild(info);
   return tile;
-}
-
-function showLightbox(src: string, label: string): void {
-  const overlay = document.createElement('div');
-  overlay.className = 'fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm';
-  overlay.addEventListener('click', (e) => {
-    if (e.target === overlay) overlay.remove();
-  });
-
-  const container = document.createElement('div');
-  container.className = 'relative max-w-[90vw] max-h-[90vh] flex flex-col items-center';
-
-  const img = document.createElement('img');
-  img.src = src;
-  img.className = 'max-w-full max-h-[85vh] object-contain rounded-lg shadow-2xl';
-  container.appendChild(img);
-
-  const caption = document.createElement('div');
-  caption.className = 'text-sm text-zinc-300 font-mono mt-2';
-  caption.textContent = `Reference: ${label}`;
-  container.appendChild(caption);
-
-  const closeBtn = document.createElement('button');
-  closeBtn.className = 'absolute -top-3 -right-3 w-8 h-8 rounded-full bg-zinc-700 text-zinc-300 hover:bg-zinc-600 flex items-center justify-center text-lg';
-  closeBtn.textContent = '\u00D7';
-  closeBtn.addEventListener('click', () => overlay.remove());
-  container.appendChild(closeBtn);
-
-  overlay.appendChild(container);
-  document.body.appendChild(overlay);
-
-  // Close on Escape
-  const onKey = (e: KeyboardEvent) => {
-    if (e.key === 'Escape') {
-      overlay.remove();
-      document.removeEventListener('keydown', onKey);
-    }
-  };
-  document.addEventListener('keydown', onKey);
 }
 
 function formatTime(ts: number): string {
