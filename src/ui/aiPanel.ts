@@ -4,7 +4,7 @@
 // ai/* modules; this file is mostly DOM wiring.
 
 import { runTurn, totalCost, totalTokensEstimate, estimateCachedPrefixTokens } from '../ai/chatLoop';
-import { listMessages, GLOBAL_CHAT_BUCKET, putMessages, deleteMessages, getKey, clearChat } from '../ai/db';
+import { listMessages, GLOBAL_CHAT_BUCKET, putMessages, deleteMessages, getKey, clearChat, mergeChatBucket } from '../ai/db';
 import { proposeCompaction } from '../ai/compaction';
 import { captureIsoViews, fileToImageSource } from '../ai/images';
 import { loadSettings, saveSettings, setAnthropicModel, setToggles, ANTHROPIC_MODEL_OPTIONS, MAX_ITERATIONS_OPTIONS, MAX_SPEND_OPTIONS, type AiSettings } from '../ai/settings';
@@ -18,6 +18,8 @@ import { showSystemPromptModal } from './aiSystemPromptModal';
 import { showCompactConfirmModal } from './aiCompactModal';
 import { showAttachmentModal } from './aiAttachmentModal';
 import { putAttachment } from '../ai/attachments';
+import { exportChatMarkdown } from '../export/chat';
+import { getState } from '../storage/sessionManager';
 import { ensureModelLoaded, effectiveContextCeiling, interruptLocal, isModelLoaded, resolveLocalModel } from '../ai/local';
 import { activeModel, SPEND_CAP_USD, type AnthropicModelId, type ChatBlock, type ChatMessage, type ChatToggles, type ImageSource, type PersistedToolResult, type TurnOutcomeReason } from '../ai/types';
 import { errorLog } from '../diagnostics/errorLog';
@@ -282,6 +284,11 @@ function buildDrawer(): void {
   compactBtn.title = 'Compact the conversation: summarize older turns and promote insights to session notes.';
   compactBtn.addEventListener('click', () => { void runCompact(); });
   header.appendChild(compactBtn);
+
+  const exportBtn = createIconButton('Export chat', '⬇ Chat');
+  exportBtn.title = 'Export this conversation as a Markdown (.md) file. Saves the whole transcript — text, tool calls, and results.';
+  exportBtn.addEventListener('click', exportCurrentChat);
+  header.appendChild(exportBtn);
 
   const clearBtn = createIconButton('Clear', '🗑');
   clearBtn.title = 'Clear the chat history for the current session. The conversation is removed from your browser; saved versions and notes are untouched.';
@@ -921,6 +928,18 @@ async function loadLocalModelInline(): Promise<void> {
   } catch (err) {
     setTransientStatus(`Failed to load: ${err instanceof Error ? err.message : String(err)}`);
   }
+}
+
+/** Download the current conversation as a Markdown transcript. In-memory
+ *  history is already the authoritative, seq-ordered view, so no DB read. */
+function exportCurrentChat(): void {
+  if (state.history.length === 0) {
+    setTransientStatus('Nothing to export — the chat is empty.');
+    return;
+  }
+  const sessionName = state.sessionId === GLOBAL_CHAT_BUCKET ? null : (getState().session?.name ?? null);
+  exportChatMarkdown(state.history, sessionName);
+  setTransientStatus('Chat exported as Markdown.');
 }
 
 /** Clear chat history for the current session. Confirms first; refuses to
@@ -1574,6 +1593,10 @@ function formatTurnOutcome(o: TurnOutcome): string {
 async function runTurnWithStallRetry(apiKey: string | undefined, toggles: ChatToggles, userBlocks: ChatBlock[]): Promise<void> {
   let attempt = 0;
   let lastTurnOutcome: TurnOutcome | null = null;
+  // Bucket the conversation lives in as this turn begins. If the model creates
+  // a session mid-turn the active bucket changes out from under us, so we
+  // remember the starting bucket and re-home the chat once the turn settles.
+  let turnStartBucket = state.sessionId;
   while (true) {
     attempt++;
     const controller = new AbortController();
@@ -1715,6 +1738,24 @@ async function runTurnWithStallRetry(apiKey: string | undefined, toggles: ChatTo
     state.inFlightController = null;
     setSendButtonMode('send');
     updateRewindButtons();
+
+    // Bug fix — reunite a conversation split by a mid-turn session switch.
+    // chatLoop stamps every message of a turn with the session active when the
+    // turn began, so when the model creates or switches sessions mid-turn (via
+    // createSession, or a runAndSave auto-create), the lead-up turns stay under
+    // the old bucket — the global bucket OR an earlier real session — and
+    // vanish from the new session on reload. Fold them forward into the session
+    // the user landed on. Restricted to a fresh target (onlyIfTargetEmpty) so
+    // two distinct conversations are never auto-merged.
+    if (state.sessionId !== turnStartBucket) {
+      const moved = await mergeChatBucket(turnStartBucket, state.sessionId, { onlyIfTargetEmpty: true });
+      if (moved > 0) {
+        await loadHistoryForCurrentSession();
+        renderTranscript();
+        renderCostMeter();
+      }
+      turnStartBucket = state.sessionId;
+    }
 
     // Surface a sticky completion banner so the user knows the turn
     // actually ended and why — better than a silent hideProgress that

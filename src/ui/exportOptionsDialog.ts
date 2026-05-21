@@ -38,6 +38,12 @@ const OPTIONS: OptionDef[] = [
     description: 'Per-face color metadata (used for multi-color 3MF / OBJ exports).',
     defaultValue: true,
   },
+  {
+    key: 'includeChat',
+    label: 'Chat history',
+    description: 'The AI conversation for this session — text, tool calls, and results. Restored on import.',
+    defaultValue: true,
+  },
 ];
 
 /**
