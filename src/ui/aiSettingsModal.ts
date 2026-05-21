@@ -6,7 +6,7 @@
 import { deleteKey, getKey } from '../ai/db';
 import { resetClient } from '../ai/anthropic';
 import { resetClient as resetOpenaiClient } from '../ai/openai';
-import { resetClient as resetGeminiClient } from '../ai/gemini';
+import { resetClient as resetGeminiClient, listModels as listGeminiModels } from '../ai/gemini';
 import { formatUsd } from '../ai/cost';
 import { showAiKeyModal } from './aiKeyModal';
 import { showAiLocalModal } from './aiLocalModal';
@@ -297,7 +297,9 @@ function buildHostedIntro(provider: HostedProvider): HTMLElement {
  *  field and includes a custom-id input for dated snapshots / brand-new
  *  releases not in the curated list. */
 function buildHostedModelSection(provider: HostedProvider, cb: AiSettingsCallbacks): HTMLElement {
-  const options = provider === 'openai' ? OPENAI_MODEL_OPTIONS : GEMINI_MODEL_OPTIONS;
+  // Starts from the curated list; for Gemini the user can replace it with
+  // their key's real lineup via the "Load models from your key" button.
+  let optionList = provider === 'openai' ? OPENAI_MODEL_OPTIONS : GEMINI_MODEL_OPTIONS;
   const setModel = provider === 'openai' ? setOpenaiModel : setGeminiModel;
   const currentOf = () => provider === 'openai' ? loadSettings().toggles.openaiModel : loadSettings().toggles.geminiModel;
 
@@ -310,7 +312,9 @@ function buildHostedModelSection(provider: HostedProvider, cb: AiSettingsCallbac
 
   const desc = document.createElement('div');
   desc.className = 'text-[11px] text-zinc-400 leading-snug';
-  desc.innerHTML = 'Model used for new turns. You can also switch on the fly from the dropdown in the chat header.';
+  desc.innerHTML = provider === 'gemini'
+    ? 'Model used for new turns. The starter list is the GA 2.5 family; click <strong>Load models from your key</strong> to pull your account\'s full current lineup (Gemini 3, Nano Banana, previews) with their exact ids. You can also switch on the fly from the chat header.'
+    : 'Model used for new turns. You can also switch on the fly from the dropdown in the chat header.';
   wrap.appendChild(desc);
 
   const seg = document.createElement('div');
@@ -319,7 +323,7 @@ function buildHostedModelSection(provider: HostedProvider, cb: AiSettingsCallbac
     seg.replaceChildren();
     const current = currentOf();
     let matched = false;
-    for (const opt of options) {
+    for (const opt of optionList) {
       const b = document.createElement('button');
       const active = current === opt.id;
       if (active) matched = true;
@@ -344,6 +348,43 @@ function buildHostedModelSection(provider: HostedProvider, cb: AiSettingsCallbac
   };
   renderButtons();
   wrap.appendChild(seg);
+
+  // Gemini-only: pull the key's actual available models. Model ids rev
+  // fast and a hard-coded list goes stale (guessed Gemini 3 ids 404'd),
+  // so this is the reliable way to surface current models like Gemini 3
+  // / Nano Banana with whatever id the account was granted.
+  if (provider === 'gemini') {
+    const loadRow = document.createElement('div');
+    loadRow.className = 'flex items-center gap-2';
+    const loadBtn = document.createElement('button');
+    loadBtn.className = 'px-2 py-1 rounded text-[11px] text-zinc-200 bg-zinc-700 hover:bg-zinc-600';
+    loadBtn.textContent = 'Load models from your key';
+    const loadStatus = document.createElement('span');
+    loadStatus.className = 'text-[10px] text-zinc-500';
+    loadBtn.addEventListener('click', async () => {
+      const key = await getKey('gemini');
+      if (!key) { loadStatus.textContent = 'Connect a Gemini key first.'; return; }
+      loadBtn.disabled = true;
+      loadStatus.textContent = 'Loading…';
+      try {
+        const live = await listGeminiModels(key.apiKey);
+        if (live.length === 0) {
+          loadStatus.textContent = 'No chat models returned for this key.';
+        } else {
+          optionList = live;
+          loadStatus.textContent = `${live.length} model(s) loaded.`;
+          renderButtons();
+        }
+      } catch (err) {
+        loadStatus.textContent = err instanceof Error ? err.message : String(err);
+      } finally {
+        loadBtn.disabled = false;
+      }
+    });
+    loadRow.appendChild(loadBtn);
+    loadRow.appendChild(loadStatus);
+    wrap.appendChild(loadRow);
+  }
 
   // Custom-id input.
   const customRow = document.createElement('div');

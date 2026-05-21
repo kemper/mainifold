@@ -17,7 +17,14 @@ export async function* readSseStream(res: Response, signal?: AbortSignal): Async
       }
       const { value, done } = await reader.read();
       if (done) break;
-      buffer += decoder.decode(value, { stream: true });
+      // Normalize CRLF → LF before buffering. The SSE spec allows events
+      // to be separated by CR, LF, or CRLF; OpenAI uses bare LF but
+      // Google Gemini frames events with CRLF (`\r\n\r\n`). Splitting on
+      // `\n\n` alone never finds a CRLF boundary, so the entire stream
+      // gets buffered and dropped — which surfaced as a Gemini turn that
+      // "exited without a final message" with 0 tokens. Stripping CR up
+      // front makes the boundary detection work for both providers.
+      buffer += decoder.decode(value, { stream: true }).replace(/\r\n/g, '\n');
       // SSE events are terminated by a blank line (\n\n). Process each
       // complete event and keep the trailing partial in the buffer.
       let eventBoundary;

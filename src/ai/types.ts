@@ -25,11 +25,10 @@ export type OpenaiModelId =
   | 'gpt-4o'
   | 'gpt-4o-mini';
 
-/** Curated Gemini model ids. Same custom-id story as OpenAI. */
+/** Curated Gemini model ids (the GA 2.5 family we ship as defaults).
+ *  `geminiModel` on ChatToggles is a plain `string`, so newer ids picked
+ *  via "Load models from your key" or the custom-id input fit too. */
 export type GeminiModelId =
-  | 'gemini-3-pro'
-  | 'gemini-3-flash'
-  | 'gemini-3-pro-image'
   | 'gemini-2.5-pro'
   | 'gemini-2.5-flash'
   | 'gemini-2.5-flash-lite';

@@ -47,6 +47,38 @@ export async function validateKey(apiKey: string): Promise<string | null> {
   }
 }
 
+/** Fetch the models this key can actually use, filtered to those that
+ *  support generateContent. Model ids rev fast and vary by key tier — a
+ *  hard-coded list goes stale and 404s (which is exactly what happened
+ *  with guessed Gemini 3 ids). The settings modal calls this so the user
+ *  picks from their real current lineup, including newer models like
+ *  Gemini 3 / "Nano Banana" with whatever id Google actually assigned. */
+export async function listModels(apiKey: string): Promise<{ id: string; label: string }[]> {
+  const res = await fetch(`${API_BASE}/models?key=${encodeURIComponent(apiKey)}&pageSize=1000`, {
+    method: 'GET',
+    headers: { 'Content-Type': 'application/json' },
+  });
+  if (!res.ok) {
+    const err = await res.text().catch(() => '');
+    throw new Error(`Gemini ${res.status}: ${err.slice(0, 200) || res.statusText}`);
+  }
+  const data = await res.json() as {
+    models?: Array<{ name?: string; displayName?: string; supportedGenerationMethods?: string[] }>;
+  };
+  const out: { id: string; label: string }[] = [];
+  for (const m of data.models ?? []) {
+    if (!m.name) continue;
+    if (!(m.supportedGenerationMethods ?? []).includes('generateContent')) continue;
+    const id = m.name.replace(/^models\//, '');
+    // Skip legacy embedding / aqa / non-chat families that slip through.
+    if (/embedding|aqa|imagen/i.test(id)) continue;
+    out.push({ id, label: m.displayName ? `${m.displayName} (${id})` : id });
+  }
+  // Newest-ish first: 3.x before 2.5 before 1.5, then alpha.
+  out.sort((a, b) => b.id.localeCompare(a.id, undefined, { numeric: true }));
+  return out;
+}
+
 export interface StreamCallbacks {
   onText?: (delta: string) => void;
   onToolStart?: (toolUseId: string, toolName: string) => void;

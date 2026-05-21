@@ -75,7 +75,7 @@ export interface LocalContextSettings {
 }
 
 const DEFAULT_OPENAI_MODEL: OpenaiModelId = 'gpt-5-mini';
-const DEFAULT_GEMINI_MODEL: GeminiModelId = 'gemini-3-flash';
+const DEFAULT_GEMINI_MODEL: GeminiModelId = 'gemini-2.5-flash';
 
 const DEFAULT_TOGGLES_BY_PRESET: Record<Exclude<Preset, 'custom'>, Omit<ChatToggles, 'provider' | 'anthropicModel' | 'localModel' | 'openaiModel' | 'geminiModel'> & { anthropicModel: AnthropicModelId }> = {
   minimal: {
@@ -459,13 +459,13 @@ export const OPENAI_MODEL_OPTIONS: { id: string; label: string }[] = [
   { id: 'gpt-4o-mini', label: 'GPT-4o mini' },
 ];
 
-/** Curated Gemini model menu. `gemini-3-pro-image` is the model Google
- *  markets as "Nano Banana Pro" — same chat / tool surface, plus image
- *  generation. */
+/** Curated Gemini starter menu — only the GA 2.5 family, which is
+ *  verified to exist on the v1beta generateContent endpoint. Newer
+ *  models (Gemini 3, "Nano Banana", dated previews) rev fast and their
+ *  exact ids vary by key tier, so guessing them here just produces 404s.
+ *  The Gemini tab's "Load models from your key" button fetches the real
+ *  current lineup via listModels(); a custom-id input covers the rest. */
 export const GEMINI_MODEL_OPTIONS: { id: string; label: string }[] = [
-  { id: 'gemini-3-pro', label: 'Gemini 3 Pro' },
-  { id: 'gemini-3-flash', label: 'Gemini 3 Flash' },
-  { id: 'gemini-3-pro-image', label: 'Gemini 3 Pro · Nano Banana' },
   { id: 'gemini-2.5-pro', label: 'Gemini 2.5 Pro' },
   { id: 'gemini-2.5-flash', label: 'Gemini 2.5 Flash' },
   { id: 'gemini-2.5-flash-lite', label: 'Gemini 2.5 Flash Lite' },

@@ -6,6 +6,26 @@ import { test, expect } from 'playwright/test';
 // Gemini), the Review modal, and the Diagnostics view.
 
 test.describe('Multi-provider AI', () => {
+  test('SSE reader handles CRLF event framing (Gemini)', async ({ page }) => {
+    // Regression: Gemini frames streamGenerateContent SSE events with
+    // CRLF (`\r\n\r\n`). The reader used to split only on `\n\n`, so it
+    // never found a boundary and dropped the whole stream — the Gemini
+    // turn "exited without a final message" with 0 tokens. Feed the
+    // reader a CRLF-framed body and confirm it yields both events.
+    await page.goto('/editor');
+    await page.waitForSelector('#ai-panel');
+    const events = await page.evaluate(async () => {
+      const mod = await import('/src/ai/sse.ts');
+      const body = 'data: {"x":1}\r\n\r\ndata: {"y":2}\r\n\r\ndata: [DONE]\r\n\r\n';
+      const res = new Response(new Blob([body]), { headers: { 'Content-Type': 'text/event-stream' } });
+      const out: string[] = [];
+      for await (const e of mod.readSseStream(res)) out.push(e);
+      return out;
+    });
+    expect(events).toEqual(['{"x":1}', '{"y":2}', '[DONE]']);
+  });
+
+
   test('settings modal has a tab per provider', async ({ page }) => {
     await page.goto('/editor');
     await page.evaluate(() => { try { localStorage.setItem('partwright-tour-completed', '1'); } catch {} });
