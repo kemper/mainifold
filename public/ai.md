@@ -341,6 +341,8 @@ Segments guide: 6-8 low-poly, 32-48 smooth, 64+ high quality
 
 **Global mesh detail (refinement):** The "Mesh detail" slider above the code editor applies `refine(N)` to every returned manifold at render time (default **2×**), subdividing flat faces too — not just curves. This means the triangle counts you observe via `getMesh` / `getMeshSummary` are already ~N² denser than the raw geometry, and exports inherit that density. It is shape-preserving (volume/bbox unchanged) and preserves `runOriginalID`, so `api.label` / `paintByLabel` still work. You don't need to set it; it's a user preference. Calling `.refine()` yourself in code still stacks on top of it.
 
+**Imported meshes are exempt:** Geometry from `api.imports` (STL, etc.) keeps its native resolution — the global detail factor is not applied to it, so a heavy scan isn't silently multiplied. To go the other way and *reduce* an import, use the detail/reduce step offered when importing a heavy mesh, or call `.simplify(tolerance)` on it in code (tolerance-based vertex removal — great for over-tessellated flat regions, weaker on smoothly curved surfaces).
+
 ### All constructors
 
 ```

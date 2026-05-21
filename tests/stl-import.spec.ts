@@ -39,17 +39,10 @@ function buildCubeSTLBase64(): string {
 }
 
 test.describe('STL import', () => {
-  // Pin the global mesh-detail (refinement) factor to 1 (off) so these tests
-  // assert the import pipeline's intrinsic topology (a 12-triangle cube) rather
-  // than the default refined density.
-  test.beforeEach(async ({ page }) => {
-    await page.addInitScript(() => {
-      localStorage.setItem(
-        'partwright-quality-settings-v1',
-        JSON.stringify({ quality: 'highest', refine: 1 }),
-      );
-    });
-  });
+  // Note: imported meshes are exempt from the global mesh-detail (refine)
+  // factor, so the 12-triangle cube below stays 12 triangles even though the
+  // default factor is 2x. That exemption is what the triangleCount assertion
+  // (toBe(12)) guards here.
 
   test('binary STL creates a new session with an editable Manifold.ofMesh wrapper', async ({ page }) => {
     const stlBase64 = buildCubeSTLBase64();

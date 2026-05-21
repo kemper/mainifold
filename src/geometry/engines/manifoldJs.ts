@@ -189,7 +189,11 @@ export const manifoldJsEngine: Engine = {
       // Apply the global Detail-slider refinement before reading the mesh, so
       // the densified topology flows into rendering, exports, slicing, and the
       // label map alike. Proxies have no real refine() and are left untouched.
-      const rendered = renderOnly ? result : applyGlobalRefine(result);
+      // Imported meshes (STL etc.) are also exempt: they arrive at their own
+      // resolution and the import flow has its own simplify/detail step — we
+      // don't want to silently 4x a heavy scan on every render.
+      const skipRefine = renderOnly || getActiveImports().length > 0;
+      const rendered = skipRefine ? result : applyGlobalRefine(result);
       const mesh = rendered.getMesh();
       const labelMap = resolveLabelMap(mesh, labelRegistry);
       return {

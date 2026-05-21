@@ -66,6 +66,7 @@ import {
   type ImportInboxEntry,
 } from './import/importInbox';
 import { showImportPreview, summarizeSessionImport } from './ui/importPreview';
+import { showImportDetailModal, IMPORT_DETAIL_TRIANGLE_THRESHOLD } from './ui/importDetailModal';
 import { parseSTL } from './import/parsers/stl';
 import { generateImportCode } from './import/codegen';
 import { setActiveImports, type ImportedMesh } from './import/importedMesh';
@@ -609,7 +610,7 @@ async function main() {
   // so the imports survive a reload and so future saveVersion calls (which
   // carry forward `importedMeshes` from the prior version) have something to
   // build on.
-  async function importMeshPayload(mesh: ImportedMesh, sessionName: string, opts: { manifold: boolean } = { manifold: true }): Promise<{ sessionId: string }> {
+  async function importMeshPayload(mesh: ImportedMesh, sessionName: string, opts: { manifold: boolean; reducedFrom?: number } = { manifold: true }): Promise<{ sessionId: string }> {
     if (getActiveLanguage() !== 'manifold-js') await switchLanguage('manifold-js');
     const session = await createSession(sessionName, 'manifold-js');
     setActiveImports([mesh]);
@@ -618,11 +619,18 @@ async function main() {
     await runCodeSync(code);
     const thumbnail = await captureThumbnail();
     const geometryData = getGeometryDataObj();
-    const label = opts.manifold ? 'imported' : 'imported (render-only)';
+    const label = opts.manifold
+      ? (opts.reducedFrom ? 'imported · reduced' : 'imported')
+      : 'imported (render-only)';
     await saveVersion(code, geometryData, thumbnail, label, undefined, {
       force: true,
       importedMeshes: [mesh],
     });
+    if (opts.reducedFrom) {
+      await addSessionNote(
+        `[IMPORT] Simplified ${mesh.filename} on import: ${opts.reducedFrom.toLocaleString()} → ${mesh.numTri.toLocaleString()} triangles.`,
+      );
+    }
     return { sessionId: session.id };
   }
 
@@ -685,7 +693,7 @@ async function main() {
         const parsed = await parseSTLFile(file);
         if (parsed) {
           const sessionName = file.name.replace(/\.stl$/i, '');
-          await importMeshPayload(parsed.mesh, sessionName, { manifold: parsed.isManifold });
+          await importMeshPayload(parsed.mesh, sessionName, { manifold: parsed.isManifold, reducedFrom: parsed.reducedFrom });
           committed = true;
         }
       }
@@ -702,6 +710,9 @@ async function main() {
     /** True if Manifold.ofMesh() succeeded — supports boolean ops, paint, slicing.
      *  False if the user chose to import render-only after manifold construction failed. */
     isManifold: boolean;
+    /** Original triangle count when the user reduced the mesh in the import
+     *  detail step; undefined when imported at full detail. */
+    reducedFrom?: number;
   }
 
   /** Read an STL file, parse it, and verify Manifold.ofMesh() accepts the result.
@@ -738,6 +749,16 @@ async function main() {
       if (!mesh || mesh.numTri === 0) continue;
       const trial = tryConstructManifold(mesh);
       if (trial.ok) {
+        // Heavy meshes get an optional reduction step before we commit them.
+        if (mesh.numTri > IMPORT_DETAIL_TRIANGLE_THRESHOLD) {
+          const choice = await showImportDetailModal(mesh, file.name);
+          if (!choice) return null; // user cancelled the import
+          return {
+            mesh: toImportedMesh(file.name, choice.mesh),
+            isManifold: true,
+            reducedFrom: choice.reducedFrom ?? undefined,
+          };
+        }
         return { mesh: toImportedMesh(file.name, mesh), isManifold: true };
       }
       manifoldError = trial.error;
