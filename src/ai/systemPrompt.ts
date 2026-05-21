@@ -186,6 +186,52 @@ mistake, pass topOnly: true — that restricts the selector to upward-
 facing triangles only (axis +Z within 30°) and eliminates the most
 common over-paint cause.
 
+For organic mesh modeling — adding dents, ridges, bumps, or carved
+features that can't be expressed cleanly in the code itself — use the
+sculpt brush tools. They deform a working copy of the code-generated
+mesh by pushing or smoothing vertices within a brush radius. Pending
+strokes accumulate in a singleton queue and persist as a new locked
+version on saveSculptedVersion. The default mesh from a Manifold.cube
+has only 12 triangles — sculpt strokes on un-subdivided meshes are
+blocky; call subdivideMesh({levels: 2}) (or 3 for a finer surface)
+first when the base shape is coarse. Saved sculpt versions lock the
+editor exactly like painted versions; further code edits require
+unlocking through the fork modal.
+
+Canonical sculpt workflows:
+ - Single dab (one point on the surface): renderView → identify the
+   feature pixel → probePixel → applyBrushDab({point, normal, brush:
+   'push', radius, strength}) → saveSculptedVersion({label}). Use
+   negative strength to indent, positive to bulge out.
+ - Path stroke (sweep along a curve): pick several pixels in one
+   render and call probePixel on each → applyBrushStroke({samples:
+   [{point, normal}, ...], brush, radius, strength}) →
+   saveSculptedVersion. Each sample displaces vertices in its radius;
+   the union becomes a ridge or groove along the path.
+ - Coarse mesh: subdivideMesh({levels: 2}) BEFORE any brush calls (the
+   first stroke pins the level for the whole pending queue, so you
+   can't bump it mid-stream).
+ - Recovery: if a brush landed in the wrong place, use
+   undoLastSculptOp() to remove just the most recent stroke (it goes
+   onto a redo stack — call redoLastSculptOp() to put it back). For a
+   full restart, cancelPendingStrokes wipes the working mesh back to
+   the saved base. Prefer undoLastSculptOp over cancelPendingStrokes
+   when only the last stroke was wrong and you want to keep the rest.
+ - Undo/redo: undoLastSculptOp() pops the last pending stroke onto a
+   redo stack. redoLastSculptOp() re-applies it. Both return {error}
+   if the respective stack is empty. The redo stack is cleared by any
+   new stroke, cancelPendingStrokes, or version navigation — call
+   saveSculptedVersion before navigating if you want the state
+   preserved.
+
+The brush model is honest: AI can't really drag a continuous path the
+way a human can. Single-point dabs cover most useful cases (an indent
+for an eye socket, a bump for a nose). Multi-sample strokes are mostly
+useful for ridges where you can compute the path geometrically rather
+than by visual inspection — building the samples list by hand from
+pixel-probed points is tedious and probably better expressed as code
+in the first place.
+
 For planning paint targets without committing, prefer
 getFeatureCentroids() over getMeshSummary — it omits the triangleIds
 payload (which can be tens of thousands of integers) and ships only

@@ -86,6 +86,34 @@ import { initTheme, getTheme, setTheme } from './ui/theme';
 import type { Theme } from './ui/theme';
 import { initPaintUI, isPaintOpen, forceDeactivate as closePaintMenu } from './color/paintUI';
 import { updatePaintMesh, setOnRegionPainted, isActive as isPaintActive } from './color/paintMode';
+import { initSculptUI, setOnApply as setSculptApply } from './ui/sculptUI';
+import {
+  updateSculptBaseMesh,
+  setOnMeshChange as setSculptOnMeshChange,
+  subdivideToLevel as sculptSubdivideToLevel,
+  ensureWorkingMesh as ensureSculptWorkingMesh,
+  applyBrushSampleToWorkingMesh as applySculptBrushSample,
+  discardPending as discardSculptPending,
+  getWorkingMesh as getSculptWorkingMesh,
+} from './sculpt/sculptMode';
+import {
+  hasStrokes as hasSculptStrokes,
+  getStrokes as getSculptStrokes,
+  serialize as serializeStrokes,
+  deserialize as deserializeStrokes,
+  clearStrokes as clearSculptStrokes,
+  onChange as onSculptStrokesChange,
+  addStroke as addSculptStroke,
+  popLastStroke as popLastSculptStroke,
+  restoreStroke as restoreSculptStroke,
+  getStrokeRedoStack,
+  pushRedoStroke,
+  popRedoStroke,
+} from './sculpt/strokes';
+import type { BrushKind as SculptBrushKind, StrokePoint as SculptStrokePoint } from './sculpt/types';
+import { replayStrokes } from './sculpt/replay';
+import type { SerializedStroke } from './sculpt/types';
+import { getManifoldModule } from './geometry/engines/manifoldJs';
 import { initAnnotateUI, isAnnotateOpen, closeMenu as closeAnnotateMenu } from './annotations/annotateUI';
 import { isActive as isSelectActive, getSelectedId as getSelectedAnnotationId } from './annotations/selectMode';
 import {
@@ -501,13 +529,97 @@ function computeCodeDiff(before: string, after: string, maxLines = 60): { change
   return { changed: true, added, removed, diff };
 }
 
-/** Include color regions in geometry data for saving. */
+/** Rehydrate sculpt strokes from a version's geometryData. Replays
+ *  them over the just-executed base mesh, replaces `currentMeshData`
+ *  with the sculpted result, and tells the sculpt module to treat the
+ *  raw code mesh as its base (so further sculpting starts from there).
+ *  Returns true if strokes were applied. */
+function rehydrateSculptStrokes(geometryData: Record<string, unknown> | null): boolean {
+  clearSculptStrokes();
+  if (!geometryData || !currentMeshData) {
+    syncLockState();
+    return false;
+  }
+  const strokes = geometryData.strokes as SerializedStroke[] | undefined;
+  if (!strokes || strokes.length === 0) {
+    syncLockState();
+    return false;
+  }
+
+  deserializeStrokes(strokes);
+  // Replay strokes from the just-executed code mesh.
+  let sculpted: MeshData;
+  try {
+    sculpted = replayStrokes(currentMeshData, strokes);
+  } catch (err) {
+    console.warn('Sculpt rehydrate: replay failed, falling back to base mesh:', err);
+    syncLockState();
+    return false;
+  }
+  // sculptMode treats the raw code mesh as its base so future strokes
+  // start from the original (canonical) topology.
+  updateSculptBaseMesh(currentMeshData);
+  // Promote the sculpted mesh to "current" so paint, export, and
+  // viewport all see the same surface.
+  currentMeshData = sculpted;
+  // Refresh viewport + panes with the sculpted mesh.
+  updateMesh(sculpted, { skipAutoFrame: true });
+  // Also feed the sculpted mesh to the paint adjacency so picking
+  // works on the post-sculpt topology.
+  updatePaintMesh(sculpted);
+  updateGeometryData();
+  syncLockState();
+  return true;
+}
+
+/** Helper: rehydrate both sculpt strokes and color regions from a
+ *  version's geometryData, in the right order (strokes first so color
+ *  rehydration sees the sculpted topology). */
+function rehydrateVersionState(geometryData: Record<string, unknown> | null): void {
+  rehydrateSculptStrokes(geometryData);
+  rehydrateColorRegions(geometryData);
+}
+
+/** Include color regions and sculpt strokes in geometry data for saving. */
 function enrichGeometryDataWithColors(geoData: Record<string, unknown> | null): Record<string, unknown> | null {
   if (!geoData) return geoData;
   if (hasColorRegions()) {
     geoData.colorRegions = serializeRegions();
   }
+  if (hasSculptStrokes()) {
+    geoData.strokes = serializeStrokes();
+  }
   return geoData;
+}
+
+/** Snapshot the working mesh's vertex positions so applyBrushStroke can
+ *  compute how many vertices each sample actually moved (the union
+ *  across samples is the returned `affectedVertices`). Returns null if
+ *  the sculpt module has no working mesh. */
+function workingMeshVertSnapshot(): Float32Array | null {
+  const m = getSculptWorkingMesh();
+  if (!m) return null;
+  return new Float32Array(m.vertProperties);
+}
+
+function validatePoint(val: unknown, paramName: string): { x: number; y: number; z: number } {
+  if (!val || typeof val !== 'object' || Array.isArray(val)) {
+    throw new ValidationError(`${paramName} must be {x,y,z}, got ${typeof val}`);
+  }
+  const o = val as Record<string, unknown>;
+  for (const k of ['x', 'y', 'z'] as const) {
+    if (typeof o[k] !== 'number' || !Number.isFinite(o[k] as number)) {
+      throw new ValidationError(`${paramName}.${k} must be a finite number`);
+    }
+  }
+  return { x: o.x as number, y: o.y as number, z: o.z as number };
+}
+
+function validateBrushSampleInputs(opts: Record<string, unknown>, caller: string): { brush: 'push' | 'smooth'; radius: number; strength: number } {
+  assertEnum(opts.brush, ['push', 'smooth'] as const, `${caller}(opts).brush`);
+  assertNumber(opts.radius, `${caller}(opts).radius`, { min: 0.001 });
+  assertNumber(opts.strength, `${caller}(opts).strength`, { min: 0, max: 1 });
+  return { brush: opts.brush as 'push' | 'smooth', radius: opts.radius as number, strength: opts.strength as number };
 }
 
 // ===========================================================================
@@ -1018,7 +1130,7 @@ async function main() {
       await runCodeSync(code);
       const loadedVersion = getState().currentVersion;
       if (loadedVersion) {
-        rehydrateColorRegions(loadedVersion.geometryData);
+        rehydrateVersionState(loadedVersion.geometryData);
       }
       applyVersionAnnotations(loadedVersion);
     },
@@ -1063,10 +1175,10 @@ async function main() {
   createGalleryView(galleryContainer, async (code: string) => {
     setValue(code);
     await runCodeSync(code);
-    // Rehydrate color regions and annotations from the loaded version
+    // Rehydrate color regions, sculpt strokes, and annotations from the loaded version
     const loadedVersion = getState().currentVersion;
     if (loadedVersion) {
-      rehydrateColorRegions(loadedVersion.geometryData);
+      rehydrateVersionState(loadedVersion.geometryData);
     }
     applyVersionAnnotations(loadedVersion);
     switchTab('interactive');
@@ -1156,7 +1268,7 @@ async function main() {
     setActiveImports((version.importedMeshes ?? []) as ImportedMesh[]);
     setValue(version.code);
     await runCodeSync(version.code);
-    rehydrateColorRegions(version.geometryData);
+    rehydrateVersionState(version.geometryData);
     applyVersionAnnotations(version);
     const sessionImages = await getImagesFromSession();
     if (sessionImages) {
@@ -1440,6 +1552,112 @@ async function main() {
   initDimensionsToggle(clipControls);
   initAnnotateUI(clipControls);
   initPaintUI(clipControls);
+  initSculptUI(clipControls);
+  // Wire sculpt mesh changes back to the multiview + elevations panes so
+  // they update alongside the live viewport while sculpting.
+  setSculptOnMeshChange((mesh) => {
+    updateMultiView(mesh);
+    renderElevationsToContainer(elevationsContainer, mesh);
+  });
+  // Apply pending sculpt strokes to the current version. Shared between
+  // the UI Apply button and the AI `partwright.saveSculptedVersion()`
+  // call so the persistence/validation path lives in one place.
+  // Returns a structured result on success or `{ error }` on failure
+  // (instead of throwing) so the AI dispatcher can forward it back to
+  // the model unchanged.
+  async function applySculptStrokesToCurrentVersion(
+    label?: string,
+  ): Promise<
+    | { id: string; index: number; label: string; strokeCount: number; subdivisionLevel: number }
+    | { error: string }
+  > {
+    if (!getState().session) {
+      return { error: 'No active session. Call createSession() or openSession(id) first.' };
+    }
+    if (!hasSculptStrokes()) {
+      return { error: 'No pending sculpt strokes to save. Apply a brush dab/stroke first.' };
+    }
+    const baseMesh = currentMeshData;
+    if (!baseMesh) {
+      return { error: 'No current mesh to apply strokes to.' };
+    }
+    const strokesSnapshot = getSculptStrokes();
+    const sculpted = replayStrokes(baseMesh, strokesSnapshot);
+    // Validate manifoldness — failures (self-intersection, edge holes)
+    // are logged but don't block persistence; the mesh is renderable
+    // and exports may degrade gracefully.
+    const mod = getManifoldModule();
+    if (mod) {
+      try {
+        const test = mod.Manifold.ofMesh({
+          vertProperties: sculpted.vertProperties,
+          triVerts: sculpted.triVerts,
+          numProp: sculpted.numProp,
+        });
+        if (test && typeof test.delete === 'function') test.delete();
+      } catch (err) {
+        console.warn('Sculpt apply: Manifold.ofMesh validation failed, saving anyway:', err);
+      }
+    }
+    // Persist: write a new version carrying the strokes. The base
+    // mesh (unsculpted) stays as the canonical code output; strokes
+    // replay over it on reload.
+    const code = getValue();
+    const geoData = enrichGeometryDataWithColors(getGeometryDataObj() ?? {});
+    const thumbnail = await captureThumbnail();
+    const versionLabel = label ?? 'sculpted';
+    const version = await saveVersion(code, geoData, thumbnail, versionLabel, undefined, { force: true });
+    // After saving, treat the sculpted mesh as the current one so
+    // viewport/exports/paint stay aligned.
+    currentMeshData = sculpted;
+    updateMesh(sculpted, { skipAutoFrame: true });
+    updateMultiView(sculpted);
+    renderElevationsToContainer(elevationsContainer, sculpted);
+    updatePaintMesh(sculpted);
+    // Refresh the machine-readable stats so #geometry-data reports
+    // the post-sculpt vertex/triangle counts and bbox.
+    updateGeometryData();
+    syncLockState();
+    if (!version) {
+      // saveVersion's force:true path should always return a version;
+      // if it doesn't, something deeper has gone wrong.
+      return { error: 'Sculpt apply: saveVersion returned no version' };
+    }
+    return {
+      id: version.id,
+      index: version.index,
+      label: version.label,
+      strokeCount: strokesSnapshot.length,
+      subdivisionLevel: strokesSnapshot[0]?.subdivisionLevel ?? 0,
+    };
+  }
+  setSculptApply(async () => {
+    const result = await applySculptStrokesToCurrentVersion();
+    if ('error' in result) {
+      setStatus(statusBar, 'error', `Sculpt apply: ${result.error}`);
+    }
+  });
+
+  async function undoLastSculptOpAndRebuild(): Promise<
+    { undone: object; pendingCount: number; subdivisionLevel: number } | { error: string }
+  > {
+    const last = popLastSculptStroke();
+    if (!last) return { error: 'Nothing to undo — no pending sculpt operations.' };
+    pushRedoStroke(last);
+    await runCodeSync(getValue());
+    return { undone: { kind: 'stroke', brush: last.brush, radius: last.radius }, pendingCount: getSculptStrokes().length, subdivisionLevel: last.subdivisionLevel };
+  }
+
+  async function redoLastSculptOpAndRebuild(): Promise<
+    { redone: object; pendingCount: number; subdivisionLevel: number } | { error: string }
+  > {
+    const redo = popRedoStroke();
+    if (!redo) return { error: 'Nothing to redo — redo stack is empty.' };
+    // Use restoreStroke (not addStroke) so the remaining redo entries are preserved.
+    restoreSculptStroke(redo);
+    await runCodeSync(getValue());
+    return { redone: { kind: 'stroke', brush: redo.brush, radius: redo.radius }, pendingCount: getSculptStrokes().length, subdivisionLevel: redo.subdivisionLevel };
+  }
   // Declared before initMeasureToggle is called so the assignment inside it
   // doesn't hit a let-TDZ error (the same `let` lower in this function is
   // hoisted to a binding, but only initialized when execution reaches it).
@@ -1447,6 +1665,7 @@ async function main() {
   initMeasureToggle(clipControls);
   initOrbitLockToggle(clipControls);
   initEscapeMenuClose();
+  initSculptStrokeUndoShortcuts();
 
   // Initialize editor lock
   initEditorLock(editorContainer);
@@ -1470,13 +1689,13 @@ async function main() {
           await saveVersion(code, coloredGeoData, thumbnail, 'colored', undefined, { force: true });
         }
 
-        // 2. Re-render without colors, then save an uncolored sibling
-        updateMesh(currentMeshData, { skipAutoFrame: true });
-        updateMultiView(currentMeshData);
-        renderElevationsToContainer(elevationsContainer, currentMeshData);
+        // 2. Re-run code to restore the canonical (unsculpted, uncolored)
+        // mesh — `currentMeshData` may have been the sculpted mesh.
+        await runCodeSync(code);
 
         const cleanGeoData = getGeometryDataObj() ?? {};
         delete cleanGeoData.colorRegions;
+        delete cleanGeoData.strokes;
         const cleanThumb = await captureThumbnail();
         await saveVersion(code, cleanGeoData, cleanThumb, undefined, undefined, { force: true });
       } else {
@@ -1488,13 +1707,11 @@ async function main() {
         }
       }
     },
-    // Clear: just re-render without colors (clearRegions already called)
+    // Clear: re-run code to restore the canonical mesh (clearRegions /
+    // clearStrokes already called).
     () => {
-      if (currentMeshData) {
-        updateMesh(currentMeshData, { skipAutoFrame: true });
-        updateMultiView(currentMeshData);
-        renderElevationsToContainer(elevationsContainer, currentMeshData);
-      }
+      const code = getValue();
+      void runCodeSync(code);
     },
   );
 
@@ -1540,6 +1757,12 @@ async function main() {
   };
   onAnnotationStrokesChange(refreshAnnotationDependentPanes);
   onAnnotationVisibilityChange(refreshAnnotationDependentPanes);
+
+  // Sculpt strokes added/cleared also gate the editor lock — same
+  // banner + read-only behavior color regions use.
+  onSculptStrokesChange(() => {
+    syncLockState();
+  });
 
   editorReady = true;
   editorReadyResolve();
@@ -2355,7 +2578,7 @@ async function main() {
       }
       setValue(version.code);
       await runCodeSync(version.code);
-      rehydrateColorRegions(version.geometryData);
+      rehydrateVersionState(version.geometryData);
       applyVersionAnnotations(version);
       // Labels are runtime state from the just-executed code. Surface
       // whether any were registered so callers can decide between
@@ -2381,7 +2604,7 @@ async function main() {
       if (version) {
         setValue(version.code);
         await runCodeSync(version.code);
-        rehydrateColorRegions(version.geometryData);
+        rehydrateVersionState(version.geometryData);
         applyVersionAnnotations(version);
       }
       return version ? { id: version.id, index: version.index, label: version.label } : null;
@@ -3243,6 +3466,182 @@ async function main() {
       syncLockState();
       const stats = regionTriangleStats(triangles, mesh);
       return { id: region.id, name: region.name, triangles: triangles.size, bbox: stats.bbox, centroid: stats.centroid, seedTriangle: nearest.triIndex };
+    },
+
+    // === Sculpt: brush-based organic mesh modeling ============
+    //
+    // Sculpt strokes deform a working copy of the code-generated mesh
+    // by pushing or smoothing vertices within a brush radius. The human
+    // UI records strokes from a mouse drag; these AI tools let the
+    // agent emit them programmatically.
+    //
+    // Workflow (single dab):
+    //   1. renderView + probePixel to find a {point, normal} on the surface.
+    //   2. applyBrushDab({point, normal, brush, radius, strength}).
+    //   3. saveSculptedVersion({label}) to persist as a new locked version.
+    //
+    // Pending state (subdivision level + accumulated strokes) lives in
+    // a module-level singleton (src/sculpt/strokes.ts) — there is one
+    // pending queue per page. saveSculptedVersion commits it; the queue
+    // stays "pending" through reloads only if it was saved. discard via
+    // cancelPendingStrokes resets the working mesh to the base.
+
+    /** Apply N midpoint-subdivision passes to the working mesh. Each
+     *  level quadruples triangle count. Required before brushing on
+     *  coarse code-generated meshes (a default cube has only 12 tris;
+     *  brushes there are blocky). Levels 1–3 are typical; 4 is slow. */
+    subdivideMesh(opts: { levels: number }): { triangleCount: number; vertexCount: number; currentSubdivisionLevel: number } | { error: string } {
+      const check = guard(() => {
+        assertObject(opts, 'subdivideMesh(opts)');
+        assertNoUnknownKeys(opts as Record<string, unknown>, ['levels'], 'subdivideMesh(opts)');
+        assertNumber((opts as Record<string, unknown>).levels, 'subdivideMesh(opts).levels', { min: 1, max: 4, integer: true });
+      });
+      if (typeof check === 'object' && check !== null && 'error' in check) return check;
+      if (!currentMeshData) return { error: 'No geometry loaded — run code first.' };
+      const result = sculptSubdivideToLevel(opts.levels);
+      if ('error' in result) return result;
+      return {
+        triangleCount: result.mesh.numTri,
+        vertexCount: result.mesh.numVert,
+        currentSubdivisionLevel: result.level,
+      };
+    },
+
+    /** Apply a single brush sample at a point on the mesh. One click,
+     *  no drag. Use probePixel first to find {point, normal}. Records
+     *  a 1-sample stroke in the pending queue but does NOT save —
+     *  call saveSculptedVersion when done. */
+    applyBrushDab(opts: {
+      point: { x: number; y: number; z: number };
+      normal: { x: number; y: number; z: number };
+      brush: SculptBrushKind;
+      radius: number;
+      strength: number;
+    }): { affectedVertices: number; pendingStrokeCount: number } | { error: string } {
+      const validatedResult = guard(() => validateBrushSampleInputs(opts as Record<string, unknown>, 'applyBrushDab'));
+      if ('error' in validatedResult) return validatedResult;
+      const { brush, radius, strength } = validatedResult;
+      const sampleResult = guard(() => validatePoint((opts as Record<string, unknown>).point, 'applyBrushDab(opts).point'));
+      if ('error' in sampleResult) return sampleResult;
+      const normalResult = guard(() => validatePoint((opts as Record<string, unknown>).normal, 'applyBrushDab(opts).normal'));
+      if ('error' in normalResult) return normalResult;
+      const sample = sampleResult;
+      const normal = normalResult;
+      if (!currentMeshData) return { error: 'No geometry loaded — run code first.' };
+      if (!ensureSculptWorkingMesh()) return { error: 'No working mesh available for sculpt.' };
+      const pt: [number, number, number] = [sample.x, sample.y, sample.z];
+      const nm: [number, number, number] = [normal.x, normal.y, normal.z];
+      const affected = applySculptBrushSample(brush, pt, nm, radius, strength);
+      const strokePoints: SculptStrokePoint[] = [{
+        x: pt[0], y: pt[1], z: pt[2],
+        nx: nm[0], ny: nm[1], nz: nm[2],
+      }];
+      addSculptStroke(brush, strokePoints, radius, strength);
+      return { affectedVertices: affected, pendingStrokeCount: getSculptStrokes().length };
+    },
+
+    /** Apply a multi-sample brush stroke (equivalent to a human drag).
+     *  Samples are applied in order; each one moves vertices within the
+     *  brush radius. Use for sweep effects (e.g. a ridge along a curved
+     *  path). Records exactly one stroke in the pending queue. */
+    applyBrushStroke(opts: {
+      samples: Array<{ point: { x: number; y: number; z: number }; normal: { x: number; y: number; z: number } }>;
+      brush: SculptBrushKind;
+      radius: number;
+      strength: number;
+    }): { affectedVertices: number; pendingStrokeCount: number } | { error: string } {
+      const validatedResult = guard(() => validateBrushSampleInputs(opts as Record<string, unknown>, 'applyBrushStroke'));
+      if ('error' in validatedResult) return validatedResult;
+      const { brush, radius, strength } = validatedResult;
+      const samplesRaw = (opts as Record<string, unknown>).samples;
+      if (!Array.isArray(samplesRaw) || samplesRaw.length === 0) {
+        return { error: 'applyBrushStroke(opts).samples must be a non-empty array of {point, normal}' };
+      }
+      const samples: Array<{ pt: [number, number, number]; nm: [number, number, number] }> = [];
+      for (let i = 0; i < samplesRaw.length; i++) {
+        const s = samplesRaw[i] as Record<string, unknown> | undefined;
+        if (!s || typeof s !== 'object') {
+          return { error: `applyBrushStroke(opts).samples[${i}] must be an object with {point, normal}` };
+        }
+        const ptResult = guard(() => validatePoint(s!.point, `applyBrushStroke(opts).samples[${i}].point`));
+        if ('error' in ptResult) return ptResult;
+        const nmResult = guard(() => validatePoint(s!.normal, `applyBrushStroke(opts).samples[${i}].normal`));
+        if ('error' in nmResult) return nmResult;
+        samples.push({ pt: [ptResult.x, ptResult.y, ptResult.z], nm: [nmResult.x, nmResult.y, nmResult.z] });
+      }
+      if (!currentMeshData) return { error: 'No geometry loaded — run code first.' };
+      if (!ensureSculptWorkingMesh()) return { error: 'No working mesh available for sculpt.' };
+      // Track unique affected vertex indices across all samples so the
+      // returned count is the union, not the sum (matching the doc).
+      const affectedSet = new Set<number>();
+      const strokePoints: SculptStrokePoint[] = [];
+      for (const { pt, nm } of samples) {
+        const before = workingMeshVertSnapshot();
+        applySculptBrushSample(brush, pt, nm, radius, strength);
+        const after = workingMeshVertSnapshot();
+        if (before && after) {
+          for (let i = 0; i < after.length; i++) {
+            if (before[i] !== after[i]) affectedSet.add(i);
+          }
+        }
+        strokePoints.push({
+          x: pt[0], y: pt[1], z: pt[2],
+          nx: nm[0], ny: nm[1], nz: nm[2],
+        });
+      }
+      addSculptStroke(brush, strokePoints, radius, strength);
+      return { affectedVertices: affectedSet.size, pendingStrokeCount: getSculptStrokes().length };
+    },
+
+    /** Persist all pending sculpt strokes (and any subdivision applied)
+     *  as a new locked version. After this, further edits require
+     *  forking via the unlock flow (same as paint regions). */
+    async saveSculptedVersion(opts?: { label?: string }): Promise<
+      | { versionId: string; strokeCount: number; subdivisionLevel: number }
+      | { error: string }
+    > {
+      const check = guard(() => {
+        if (opts !== undefined) {
+          assertObject(opts, 'saveSculptedVersion(opts)');
+          assertNoUnknownKeys(opts as Record<string, unknown>, ['label'], 'saveSculptedVersion(opts)');
+          assertString((opts as Record<string, unknown>).label, 'saveSculptedVersion(opts).label', { optional: true, allowEmpty: false });
+        }
+      });
+      if (typeof check === 'object' && check !== null && 'error' in check) return check;
+      const result = await applySculptStrokesToCurrentVersion(opts?.label);
+      if ('error' in result) return result;
+      return {
+        versionId: result.id,
+        strokeCount: result.strokeCount,
+        subdivisionLevel: result.subdivisionLevel,
+      };
+    },
+
+    /** Discard all pending strokes (and any subdivision-in-progress)
+     *  without saving. Resets the working mesh to the version's saved
+     *  state. Useful if a stroke went wrong before save. */
+    cancelPendingStrokes(): { ok: true } | { error: string } {
+      // Clear strokes first so discardSculptPending's rebuild sees an
+      // empty stroke list (matches the UI Discard button order).
+      clearSculptStrokes();
+      discardSculptPending();
+      syncLockState();
+      return { ok: true };
+    },
+
+    /** Undo the most recent pending sculpt stroke. The removed stroke goes
+     *  onto a redo stack — call redoLastSculptOp() to re-apply it. The redo
+     *  stack is cleared by any new stroke, cancelPendingStrokes, or version
+     *  navigation. Returns {error} if there are no strokes to undo. */
+    async undoLastSculptOp() {
+      return undoLastSculptOpAndRebuild();
+    },
+
+    /** Re-apply the most recently undone sculpt stroke. Returns {error} if
+     *  the redo stack is empty (nothing was undone, or a new stroke was
+     *  added since the last undo). */
+    async redoLastSculptOp() {
+      return redoLastSculptOpAndRebuild();
     },
 
     /** Check if any component is fully contained inside another (invisible geometry) */
@@ -5550,12 +5949,31 @@ async function main() {
       // saved version re-runs the code first, which rebuilds the map.
       currentLabelMap = result.labelMap ?? null;
 
+      // Hand the freshly-built code mesh to the sculpt module so its
+      // base mesh stays in sync. If the run was triggered while sculpt
+      // strokes were in the pending list, they remain pending; the
+      // sculpt mode replays them on top of the new base for the
+      // user's next preview.
+      updateSculptBaseMesh(result.mesh);
+
+      // If sculpt strokes from a previous rehydrate are still in the
+      // store, replay them on top of the newly-executed mesh so the
+      // visible surface stays the sculpted one. This matters for
+      // every code re-run while a sculpted version is loaded —
+      // including the debounced auto-run that fires when setValue()
+      // populates the editor on version load.
+      let activeMesh: MeshData = result.mesh;
+      if (hasSculptStrokes()) {
+        activeMesh = replayStrokes(result.mesh, getSculptStrokes());
+        currentMeshData = activeMesh;
+      }
+
       // Apply any existing color regions to the mesh
-      const displayMesh = hasColorRegions() ? applyTriColorsIfVisible(result.mesh) : result.mesh;
+      const displayMesh = hasColorRegions() ? applyTriColorsIfVisible(activeMesh) : activeMesh;
       updateMesh(displayMesh);
       updateMultiView(displayMesh);
       renderElevationsToContainer(elevationsContainer, displayMesh);
-      updatePaintMesh(result.mesh); // always pass uncolored mesh for adjacency
+      updatePaintMesh(activeMesh); // always pass post-sculpt mesh for adjacency
 
       updateGeometryData(elapsed, src);
       syncClipSliderBounds();
@@ -5651,6 +6069,23 @@ async function main() {
         setMeasureLock(true);
         measureBtn.className = activeClass;
       }
+    });
+  }
+
+  function initSculptStrokeUndoShortcuts() {
+    document.addEventListener('keydown', (e) => {
+      if (!(e.ctrlKey || e.metaKey)) return;
+      const target = e.target as HTMLElement | null;
+      if (target && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable)) return;
+      if (!hasSculptStrokes() && getStrokeRedoStack().length === 0) return;
+
+      const isUndo = e.key === 'z' && !e.shiftKey;
+      const isRedo = (e.key === 'z' && e.shiftKey) || e.key === 'y';
+      if (!isUndo && !isRedo) return;
+
+      e.preventDefault();
+      if (isUndo) void undoLastSculptOpAndRebuild();
+      else void redoLastSculptOpAndRebuild();
     });
   }
 
