@@ -155,6 +155,11 @@ export function createLayout(appContainer: HTMLElement): LayoutElements {
   const clipControls = createClipControls();
   viewportPane.appendChild(clipControls);
 
+  // Cross-section Z slider — anchored below the orientation gizmo, separate from
+  // the toolbar so showing it doesn't shift the buttons.
+  const clipSlider = createClipSlider();
+  viewportPane.appendChild(clipSlider);
+
   const viewsContainer = document.createElement('div');
   viewsContainer.id = 'views-container';
   viewsContainer.className = 'flex-1 min-h-0 overflow-auto bg-zinc-900 hidden p-2';
@@ -488,10 +493,24 @@ function createClipControls(): HTMLElement {
   toggleBtn.title = 'Toggle cross-section clipping plane';
   container.appendChild(toggleBtn);
 
-  // Vertical slider + Z value (hidden until clip is active)
+  return container;
+}
+
+// Vertical Z slider for the cross-section plane. Kept out of the toolbar's flex
+// flow and anchored directly below the orientation gizmo (top-right) so toggling
+// clip never reflows the toolbar buttons. Hidden until clip is active.
+function createClipSlider(): HTMLElement {
+  // The orientation gizmo occupies a 128px square at the viewport's top-right
+  // corner (8px margin). Mirror that footprint here so the slider centers under
+  // it; pointer-events-none lets clicks fall through the empty anchor box to the
+  // model, while the slider group itself re-enables them.
+  const anchor = document.createElement('div');
+  anchor.id = 'clip-slider-anchor';
+  anchor.className = 'absolute right-2 top-36 z-10 w-32 flex justify-center pointer-events-none';
+
   const sliderGroup = document.createElement('div');
   sliderGroup.id = 'clip-slider-group';
-  sliderGroup.className = 'hidden flex flex-col items-center gap-2 px-2 py-2 rounded bg-zinc-800/80 backdrop-blur border border-zinc-600/50 self-start';
+  sliderGroup.className = 'hidden flex flex-col items-center gap-2 px-2 py-2 rounded bg-zinc-800/80 backdrop-blur border border-zinc-600/50 pointer-events-auto';
 
   const slider = document.createElement('input');
   slider.type = 'range';
@@ -511,9 +530,8 @@ function createClipControls(): HTMLElement {
   zLabel.textContent = 'Z: 5.00';
   sliderGroup.appendChild(zLabel);
 
-  container.appendChild(sliderGroup);
-
-  return container;
+  anchor.appendChild(sliderGroup);
+  return anchor;
 }
 
 function initSplitter(splitter: HTMLElement, editorPane: HTMLElement) {
