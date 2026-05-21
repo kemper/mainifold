@@ -2,6 +2,7 @@ import type { Engine, MeshResult, ValidateResult } from './types';
 import { javaScriptSyntaxDiagnostics, runtimeDiagnostic } from '../sourceDiagnostics';
 import { createCurvesNamespace } from '../curves';
 import { getDefaultCircularSegments } from '../qualitySettings';
+import { applyGlobalRefine } from '../refine';
 import { getActiveImports } from '../../import/importedMesh';
 
 /** Marker the sandbox attaches to render-only proxies (see `renderMesh` below).
@@ -181,12 +182,16 @@ export const manifoldJsEngine: Engine = {
         };
       }
 
-      const mesh = result.getMesh();
-      const labelMap = resolveLabelMap(mesh, labelRegistry);
       // Render-only proxies (from `api.renderMesh`) carry the marker so we can
       // signal downstream "this isn't a real Manifold — skip volume/genus/slice".
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const renderOnly = (result as any)[RENDER_ONLY_MARKER] === true;
+      // Apply the global Detail-slider refinement before reading the mesh, so
+      // the densified topology flows into rendering, exports, slicing, and the
+      // label map alike. Proxies have no real refine() and are left untouched.
+      const rendered = renderOnly ? result : applyGlobalRefine(result);
+      const mesh = rendered.getMesh();
+      const labelMap = resolveLabelMap(mesh, labelRegistry);
       return {
         mesh: {
           vertProperties: mesh.vertProperties,
@@ -199,7 +204,7 @@ export const manifoldJsEngine: Engine = {
           runIndex: mesh.runIndex,
           runOriginalID: mesh.runOriginalID,
         },
-        manifold: renderOnly ? null : result,
+        manifold: renderOnly ? null : rendered,
         error: null,
         labelMap,
       };

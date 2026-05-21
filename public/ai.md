@@ -339,6 +339,8 @@ Segments guide: 6-8 low-poly, 32-48 smooth, 64+ high quality
 
 **Default segment count:** Partwright seeds `setCircularSegments()` from the user's Modeling Quality preset (gear icon in the toolbar) before each run. The default preset is **Highest** (128 segments), so curves render smooth out of the box without any explicit configuration. Users can drop to Low/Medium/High in the settings modal if they prefer faster renders. Your code can still call `setCircularSegments(n)` or pass an explicit segments argument to a primitive to override on a per-script or per-call basis.
 
+**Global mesh detail (refinement):** The "Mesh detail" slider above the code editor applies `refine(N)` to every returned manifold at render time (default **2×**), subdividing flat faces too — not just curves. This means the triangle counts you observe via `getMesh` / `getMeshSummary` are already ~N² denser than the raw geometry, and exports inherit that density. It is shape-preserving (volume/bbox unchanged) and preserves `runOriginalID`, so `api.label` / `paintByLabel` still work. You don't need to set it; it's a user preference. Calling `.refine()` yourself in code still stacks on top of it.
+
 ### All constructors
 
 ```

@@ -31,7 +31,7 @@ test.describe('Modeling quality settings', () => {
 
     const stored = await page.evaluate(() => localStorage.getItem('partwright-quality-settings-v1'));
     expect(stored).toBeTruthy();
-    expect(JSON.parse(stored!)).toEqual({ quality: 'low' });
+    expect(JSON.parse(stored!)).toEqual({ quality: 'low', refine: 2 });
 
     // Close + reopen modal — Low should still be the selected radio.
     await page.getByRole('button', { name: 'Done' }).click();

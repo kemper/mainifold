@@ -4,6 +4,7 @@ import { getManifoldModule, manifoldJsEngine } from './manifoldJs';
 import { scadDiagnostics } from '../sourceDiagnostics';
 import { ensureBosl2InMemfs, sourceUsesBosl2 } from '../bosl2Loader';
 import { getDefaultCircularSegments } from '../qualitySettings';
+import { applyGlobalRefine } from '../refine';
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type CreateOpenSCAD = (opts: any) => Promise<any>;
@@ -191,6 +192,10 @@ export async function runScadAsync(source: string): Promise<MeshResult> {
       // Non-manifold SCAD output — still render raw mesh.
       return { mesh, manifold: null, error: null };
     }
+
+    // Honor the global Detail-slider refinement for SCAD output too.
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    manifold = applyGlobalRefine(manifold as any);
 
     // Get canonical mesh with merge vectors for clean export topology.
     // eslint-disable-next-line @typescript-eslint/no-explicit-any

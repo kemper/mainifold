@@ -73,7 +73,7 @@ export function showQualitySettingsModal(): void {
 
     radio.addEventListener('change', () => {
       if (radio.checked) {
-        saveQualitySettings({ quality: opt.id as QualityLevel });
+        saveQualitySettings({ ...loadQualitySettings(), quality: opt.id as QualityLevel });
       }
     });
   }
