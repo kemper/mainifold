@@ -20,6 +20,8 @@
 // throughout that API are pure and live in the validation module above.
 
 import './style.css';
+import { errorLog } from './diagnostics/errorLog';
+import { initDiagnosticsPanel, toggleDiagnosticsPanel } from './ui/diagnosticsPanel';
 import { initEngine, executeCode, executeCodeAsync, validateCodeAsync, ensureEngineReady, getModule, getActiveLanguage, setActiveLanguage, type Language } from './geometry/engine';
 import { onQualitySettingsChange } from './geometry/qualitySettings';
 import { sliceAtZ, getBoundingBox } from './geometry/crossSection';
@@ -27,11 +29,12 @@ import { initViewport, updateMesh, setClipping, setClipZ, getClipState, getCamer
 import { renderCompositeCanvas, renderElevationsToContainer, renderSingleView, renderSliceSVG, setImages as _setImages, clearImages as _clearImages, getImages as _getImages, buildViewCamera, RENDER_VIEW_MODES, STANDARD_VIEWS, type AttachedImage, type RenderViewMode } from './renderer/multiview';
 import { generateId } from './storage/db';
 import { setPhantom, clearPhantom, hasPhantom, type PhantomOptions } from './renderer/phantomGeometry';
-import { initEditor, setValue, getValue, setLanguage as setEditorLanguage, setEditorDiagnostics, clearEditorDiagnostics, revealFirstDiagnostic } from './editor/codeEditor';
+import { initEditor, setValue, getValue, setLanguage as setEditorLanguage, setEditorDiagnostics, clearEditorDiagnostics, revealFirstDiagnostic, formatCode, getAutoFormat, setAutoFormat } from './editor/codeEditor';
 import { createLayout, type TabName } from './ui/layout';
 import { createToolbar, isAutoRun, setAutoRun, setToolbarLanguage, setAiToolbarState } from './ui/toolbar';
 import { initAiPanel, setActiveSession as setAiActiveSession, toggleAiPanel } from './ui/aiPanel';
-import { getKey as getAiKey } from './ai/db';
+import { getKey as getAiKey, mergeChatBucket } from './ai/db';
+import { loadSettings as loadAiSettings } from './ai/settings';
 import { createLandingPage } from './ui/landing';
 import { createHelpPage } from './ui/help';
 import { showExportOptionsDialog } from './ui/exportOptionsDialog';
@@ -376,13 +379,17 @@ function applyVersionAnnotations(version: Version | null | undefined): void {
 }
 
 /** Rehydrate color regions from a version's geometryData.
- *  Rebuilds adjacency + BFS for coplanar descriptors against the current mesh. */
-function rehydrateColorRegions(geometryData: Record<string, unknown> | null): void {
+ *  Rebuilds adjacency + BFS for coplanar descriptors against the current mesh.
+ *  Returns the names of regions that resolved to ≥1 triangle (`carried`) vs.
+ *  those whose descriptor no longer matches the current geometry (`dropped`),
+ *  so callers transferring colors across versions can report what landed. */
+function rehydrateColorRegions(geometryData: Record<string, unknown> | null): { carried: string[]; dropped: string[] } {
   clearRegions();
 
-  if (!geometryData || !currentMeshData) return;
+  const report: { carried: string[]; dropped: string[] } = { carried: [], dropped: [] };
+  if (!geometryData || !currentMeshData) return report;
   const regions = geometryData.colorRegions as SerializedColorRegion[] | undefined;
-  if (!regions || regions.length === 0) return;
+  if (!regions || regions.length === 0) return report;
 
   const mesh = currentMeshData;
   const adjacency = buildAdjacency(mesh);
@@ -450,6 +457,9 @@ function rehydrateColorRegions(geometryData: Record<string, unknown> | null): vo
 
     if (triangles.size > 0) {
       addRegion(region.name, region.color, region.source, region.descriptor, triangles, region.visible !== false);
+      report.carried.push(region.name);
+    } else {
+      report.dropped.push(region.name);
     }
   }
 
@@ -460,6 +470,63 @@ function rehydrateColorRegions(geometryData: Record<string, unknown> | null): vo
     const colored = applyTriColorsIfVisible(currentMeshData);
     updateMesh(colored, { skipAutoFrame: true });
   }
+
+  return report;
+}
+
+/** Pull a version's serialized color regions out of its geometryData blob
+ *  (where saveVersion persists them via enrichGeometryDataWithColors).
+ *  Returns [] when the version has no colors. */
+function versionColorRegions(v: Version | null | undefined): SerializedColorRegion[] {
+  const nested = (v?.geometryData as Record<string, unknown> | null | undefined)?.colorRegions;
+  return Array.isArray(nested) ? (nested as SerializedColorRegion[]) : [];
+}
+
+/** Compact line-level diff for surfacing what a fork/transform actually
+ *  changed in the source — the cheapest way for an agent to confirm a
+ *  patch landed (a no-op patch shows `changed: false`). LCS-based so
+ *  insertions/deletions align; output is capped to keep the token cost of
+ *  a large rewrite bounded. */
+function computeCodeDiff(before: string, after: string, maxLines = 60): { changed: boolean; added: number; removed: number; diff: string | null } {
+  if (before === after) return { changed: false, added: 0, removed: 0, diff: null };
+  const a = before.split('\n');
+  const b = after.split('\n');
+  const n = a.length, m = b.length;
+  // The LCS table below is O(n·m). CAD scripts are small, but guard against a
+  // pathologically large rewrite by falling back to a cheap multiset line
+  // count (still surfaces "something changed" without allocating a huge table).
+  if (n * m > 2_000_000) {
+    const minus = (from: string[], against: string[]): number => {
+      const counts = new Map<string, number>();
+      for (const l of against) counts.set(l, (counts.get(l) ?? 0) + 1);
+      let extra = 0;
+      for (const l of from) {
+        const c = counts.get(l) ?? 0;
+        if (c > 0) counts.set(l, c - 1); else extra++;
+      }
+      return extra;
+    };
+    return { changed: true, added: minus(b, a), removed: minus(a, b), diff: '(diff too large to render line-by-line)' };
+  }
+  const dp: number[][] = Array.from({ length: n + 1 }, () => new Array<number>(m + 1).fill(0));
+  for (let i = n - 1; i >= 0; i--) {
+    for (let j = m - 1; j >= 0; j--) {
+      dp[i][j] = a[i] === b[j] ? dp[i + 1][j + 1] + 1 : Math.max(dp[i + 1][j], dp[i][j + 1]);
+    }
+  }
+  const lines: string[] = [];
+  let added = 0, removed = 0, i = 0, j = 0;
+  while (i < n && j < m) {
+    if (a[i] === b[j]) { i++; j++; }
+    else if (dp[i + 1][j] >= dp[i][j + 1]) { lines.push(`- ${a[i]}`); removed++; i++; }
+    else { lines.push(`+ ${b[j]}`); added++; j++; }
+  }
+  while (i < n) { lines.push(`- ${a[i]}`); removed++; i++; }
+  while (j < m) { lines.push(`+ ${b[j]}`); added++; j++; }
+  const diff = lines.length > maxLines
+    ? `${lines.slice(0, maxLines).join('\n')}\n… (${lines.length - maxLines} more changed lines)`
+    : lines.join('\n');
+  return { changed: true, added, removed, diff };
 }
 
 /** Rehydrate sculpt strokes from a version's geometryData. Replays
@@ -643,6 +710,10 @@ function showEditorUI(landingEl: HTMLElement | null, helpEl: HTMLElement | null,
 }
 
 async function main() {
+  // Install global error/warning capture as early as possible so nothing
+  // slips through before the rest of the app is ready.
+  errorLog.install();
+
   // Apply persisted theme before any UI renders
   initTheme();
 
@@ -1021,6 +1092,7 @@ async function main() {
     onImportFile: async (file) => { await handleImportFile(file); },
     onImportInboxEntry: handleReimportInboxEntry,
     onToggleAi: () => { toggleAiPanel(); },
+    onToggleDiagnostics: () => { toggleDiagnosticsPanel(); },
     onLanguageSwitch: async (lang: 'manifold-js' | 'scad') => {
       if (lang === getActiveLanguage()) return;
       // If current session has work, ask before switching
@@ -1042,6 +1114,9 @@ async function main() {
       runCode(code);
     },
   });
+
+  // Init diagnostic panel — attaches to document.body, registers badge subscriber.
+  initDiagnosticsPanel();
 
   // Create session bar
   createSessionBar(editorUI, {
@@ -1069,7 +1144,29 @@ async function main() {
   });
 
   // Create layout
-  const { editorContainer, editorErrorPanel, viewportPane, viewsContainer, elevationsContainer, galleryContainer, imagesContainer, diffContainer, notesContainer, statusBar, clipControls, switchTab } = createLayout(editorUI);
+  const { editorContainer, editorErrorPanel, viewportPane, viewsContainer, elevationsContainer, galleryContainer, imagesContainer, diffContainer, notesContainer, statusBar, clipControls, formatBtn, autoFormatToggle, switchTab } = createLayout(editorUI);
+
+  // Format button and auto-format toggle
+  const AUTO_FORMAT_ON_CLASS = 'shrink-0 px-2 py-0.5 rounded text-xs leading-none border text-emerald-400 border-emerald-700 bg-emerald-950/40 hover:bg-emerald-900/40';
+  const AUTO_FORMAT_OFF_CLASS = 'shrink-0 px-2 py-0.5 rounded text-xs leading-none border text-zinc-500 border-zinc-700 hover:text-zinc-300';
+  function syncAutoFormatToggleUI(): void {
+    const on = getAutoFormat();
+    autoFormatToggle.textContent = on ? 'Auto' : 'Auto';
+    autoFormatToggle.title = on ? 'Auto-format on — click to disable' : 'Auto-format off — click to enable';
+    autoFormatToggle.className = on ? AUTO_FORMAT_ON_CLASS : AUTO_FORMAT_OFF_CLASS;
+  }
+  syncAutoFormatToggleUI();
+  formatBtn.addEventListener('click', () => formatCode());
+  autoFormatToggle.addEventListener('click', () => {
+    setAutoFormat(!getAutoFormat());
+    syncAutoFormatToggleUI();
+  });
+  document.addEventListener('keydown', (e) => {
+    if (e.shiftKey && e.altKey && e.key === 'F') {
+      e.preventDefault();
+      formatCode();
+    }
+  });
 
   // Init views panel
   initViewsPanel(viewsContainer);
@@ -1700,18 +1797,28 @@ async function main() {
       });
       const cur = getState();
       await setAiActiveSession(cur.session?.id ?? null);
-      const key = await getAiKey('anthropic');
-      setAiToolbarState(!!key);
-      // Watch for key changes via a poll-on-focus trigger — cheap, and
-      // matches the chip's update cadence in the AI settings modal.
-      window.addEventListener('focus', async () => {
-        const k = await getAiKey('anthropic');
-        setAiToolbarState(!!k);
+      await refreshAiToolbarChip();
+      // Watch for key/provider changes via a poll-on-focus trigger — cheap,
+      // and matches the chip's update cadence in the AI settings modal.
+      window.addEventListener('focus', () => { void refreshAiToolbarChip(); });
+      // Also watch localStorage for cross-tab provider switches.
+      window.addEventListener('storage', e => {
+        if (e.key === 'partwright-ai-settings-v1') void refreshAiToolbarChip();
       });
     } catch (err) {
       console.warn('AI panel init failed:', err);
     }
   })();
+
+  async function refreshAiToolbarChip(): Promise<void> {
+    const settings = loadAiSettings();
+    if (settings.toggles.provider === 'local' && settings.toggles.localModel) {
+      setAiToolbarState('local');
+      return;
+    }
+    const key = await getAiKey('anthropic');
+    setAiToolbarState(key ? 'cloud' : 'disconnected');
+  }
 
   // Set initial editor title if we're on the editor page
   if (!showLanding && !showHelpPage && !showCatalog && !show404) {
@@ -1758,7 +1865,9 @@ async function main() {
     try {
       await ensureEngineReady(lang);
     } catch (e) {
-      setStatus(statusBar, 'error', `Failed to load ${lang}: ${e instanceof Error ? e.message : String(e)}`);
+      const msg = `Failed to load ${lang}: ${e instanceof Error ? e.message : String(e)}`;
+      setStatus(statusBar, 'error', msg);
+      errorLog.capture({ level: 'error', source: 'engine', message: msg });
       throw e;
     }
     // Persist the language to the active session so reopening it loads in the
@@ -1815,7 +1924,9 @@ async function main() {
 
     /** Get current geometry stats without re-running */
     getGeometryData(): Record<string, unknown> {
-      return JSON.parse(geometryDataEl.textContent || '{}');
+      const geo = JSON.parse(geometryDataEl.textContent || '{}');
+      const warnings = geometryWarnings(geo);
+      return warnings.length > 0 ? { ...geo, warnings } : geo;
     },
 
     /** Get current editor code */
@@ -1954,6 +2065,22 @@ async function main() {
         sizeBytes: built.blob.size,
         data: built.data,
       };
+    },
+
+    /** Maintenance: merge a chat transcript from one session into another to
+     *  reunite a conversation that got split across sessions. Re-sequences the
+     *  combined transcript chronologically. Refresh the target session to see
+     *  the result. Returns { moved, into } or { error }. */
+    async mergeChatHistory(fromSessionId: string, toSessionId: string) {
+      const check = guard(() => {
+        assertString(fromSessionId, 'mergeChatHistory(fromSessionId)', { allowEmpty: false });
+        assertString(toSessionId, 'mergeChatHistory(toSessionId)', { allowEmpty: false });
+        return true;
+      });
+      if (typeof check === 'object' && check !== null && 'error' in check) return check;
+      const moved = await mergeChatBucket(fromSessionId, toSessionId);
+      if (moved === 0) return { error: 'No messages moved — check the source has chat and differs from the target.' };
+      return { moved, into: toSessionId };
     },
 
     /** Return the current editor source as text + metadata. */
@@ -2484,7 +2611,9 @@ async function main() {
     },
 
     /** Run code and save as a new version in one call. Returns stat diff vs previous version.
-     *  Optional assertions — if provided, validates before saving. Fails fast without saving if assertions don't pass. */
+     *  Optional assertions — if provided, validates after running. Saves only if assertions pass.
+     *  The editor and viewport always update to reflect the new code (including on assertion failure),
+     *  so the model can inspect the failing geometry. The version is NOT saved on failure. */
     async runAndSave(code: string, label?: string, assertions?: GeometryAssertions) {
       const check = guard(() => {
         assertString(code, 'runAndSave(code)', { allowEmpty: false });
@@ -2493,17 +2622,23 @@ async function main() {
         return true;
       });
       if (typeof check === 'object' && check !== null && 'error' in check) return check;
-      // If assertions provided, validate in isolation first (no side effects if it fails)
+
+      const prevGeoData = getState().currentVersion?.geometryData as Record<string, unknown> | null;
+
+      // Single execution — run the code, update editor + viewport, read geometry.
+      // Assertions are checked against the live result rather than a separate
+      // isolation run. This halves execution time for assertion-guarded saves.
+      setValue(code);
+      await runCodeSync(code);
+      const newGeoData = JSON.parse(geometryDataEl.textContent || '{}');
+
       if (assertions) {
-        const { geometryData: testData, manifold: testManifold } = await executeIsolated(code);
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        try { (testManifold as any)?.delete?.(); } catch { /* ignore */ }
-        if (testData.status === 'error') {
-          return { passed: false, failures: [testData.error as string], geometry: testData, version: null, diff: null, galleryUrl: getGalleryUrl() };
+        if (newGeoData.status === 'error') {
+          return { passed: false, failures: [newGeoData.error as string], geometry: newGeoData, version: null, diff: null, galleryUrl: getGalleryUrl() };
         }
-        const failures = checkAssertions(testData, assertions);
+        const failures = checkAssertions(newGeoData, assertions);
         if (failures.length > 0) {
-          return { passed: false, failures, geometry: testData, version: null, diff: null, galleryUrl: getGalleryUrl() };
+          return { passed: false, failures, geometry: newGeoData, version: null, diff: null, galleryUrl: getGalleryUrl() };
         }
       }
 
@@ -2513,11 +2648,6 @@ async function main() {
         await createSession(sessionName, getActiveLanguage());
       }
 
-      const prevGeoData = getState().currentVersion?.geometryData as Record<string, unknown> | null;
-
-      setValue(code);
-      await runCodeSync(code);
-      const newGeoData = JSON.parse(geometryDataEl.textContent || '{}');
       const thumbnail = await captureThumbnail();
       const version = await saveVersion(code, enrichGeometryDataWithColors(getGeometryDataObj()), thumbnail, label, assertions?.notes);
 
@@ -2526,12 +2656,14 @@ async function main() {
         diff = computeStatDiff(prevGeoData, newGeoData);
       }
 
+      const warnings = geometryWarnings(newGeoData);
       return {
         ...(assertions ? { passed: true } : {}),
         geometry: newGeoData,
         version: version ? { id: version.id, index: version.index, label: version.label } : null,
         diff,
         galleryUrl: getGalleryUrl(),
+        ...(warnings.length > 0 ? { warnings } : {}),
       };
     },
 
@@ -2547,6 +2679,7 @@ async function main() {
       transformFn: (code: string) => string,
       label?: string,
       assertions?: GeometryAssertions,
+      carryColors: boolean = true,
     ) {
       const parsed = parseVersionTarget(target, 'forkVersion');
       if ('error' in parsed) return parsed;
@@ -2565,8 +2698,7 @@ async function main() {
 
       const parent = await peekVersion(parsed.value);
       if (!parent) {
-        const kind = typeof target === 'number' ? 'index' : 'id';
-        return { error: `No version found with ${kind} "${target}" in the active session. Use listVersions() to see valid ${kind}s.` };
+        return { error: `No version found with ${parsed.kind} "${parsed.value}" in the active session. Use listVersions() to see valid ${parsed.kind}s.` };
       }
 
       let newCode: string;
@@ -2593,26 +2725,91 @@ async function main() {
         }
       }
 
-      // Commit: update editor, run, save.
+      // Commit: update editor, run, (carry colors), save.
       const prevGeoData = getState().currentVersion?.geometryData as Record<string, unknown> | null;
+      const parentColors = carryColors ? versionColorRegions(parent) : [];
       setValue(newCode);
       await runCodeSync(newCode);
       const newGeoData = JSON.parse(geometryDataEl.textContent || '{}');
+
+      // Re-apply the parent's color regions to the forked geometry before
+      // snapshotting the thumbnail and saving, so a geometry tweak doesn't
+      // force the agent to repaint. Descriptors are re-resolved against the
+      // new mesh; non-matching regions drop out and are reported. When not
+      // carrying, clear any stale in-memory regions so the fork is clean.
+      let colorReport: { carried: string[]; dropped: string[] } = { carried: [], dropped: [] };
+      if (parentColors.length > 0) {
+        colorReport = rehydrateColorRegions({ colorRegions: parentColors });
+      } else {
+        clearRegions();
+      }
+
+      // Carry the PARENT's annotations onto the fork. saveVersion snapshots
+      // the in-memory annotation store, which still holds the previously
+      // active version's strokes — without this the fork would silently
+      // inherit the wrong annotations (or drop them). Mirrors how
+      // loadVersion swaps annotations to the version it loads.
+      applyVersionAnnotations(parent);
+      const annotationsCarried = (parent.annotations?.length ?? 0) > 0;
+
       const thumbnail = await captureThumbnail();
-      const version = await saveVersion(newCode, getGeometryDataObj(), thumbnail, label, assertions?.notes);
+      const version = await saveVersion(newCode, enrichGeometryDataWithColors(getGeometryDataObj()), thumbnail, label, assertions?.notes);
 
       let diff = null;
       if (prevGeoData && prevGeoData.status === 'ok' && newGeoData.status === 'ok') {
         diff = computeStatDiff(prevGeoData, newGeoData);
       }
 
+      const forkWarnings = geometryWarnings(newGeoData);
       return {
         ...(assertions ? { passed: true } : {}),
         parent: { id: parent.id, index: parent.index, label: parent.label },
         geometry: newGeoData,
         version: version ? { id: version.id, index: version.index, label: version.label } : null,
         diff,
+        codeDiff: computeCodeDiff(parent.code, newCode),
+        ...(parentColors.length > 0 ? { colors: colorReport } : {}),
+        ...(annotationsCarried ? { annotationsCarried: parent.annotations?.length ?? 0 } : {}),
         galleryUrl: getGalleryUrl(),
+        ...(forkWarnings.length > 0 ? { warnings: forkWarnings } : {}),
+      };
+    },
+
+    /** Transfer the color regions from a prior version onto the CURRENT
+     *  geometry by re-resolving each region's descriptor against the live
+     *  mesh — instead of repainting region by region after a rebuild. Any
+     *  colors currently on the model are replaced. Regions whose descriptor
+     *  no longer resolves (a dropped label, raw-triangle regions on changed
+     *  topology) are skipped and listed in `dropped`. In-memory like any
+     *  paint op: call runAndSave / saveVersion to persist. Returns
+     *  { source, carried, dropped } or { error }. */
+    async copyColorsFromVersion(target: { index?: number; id?: string }) {
+      const parsed = parseVersionTarget(target, 'copyColorsFromVersion');
+      if ('error' in parsed) return parsed;
+      if (!getState().session) {
+        return { error: 'No active session. Call openSession(id) or createSession() first.' };
+      }
+      if (!currentMeshData) {
+        return { error: 'No geometry loaded — run code first, then copy colors onto it.' };
+      }
+      const source = await peekVersion(parsed.value);
+      if (!source) {
+        return { error: `No version found with ${parsed.kind} "${parsed.value}" in the active session. Use listVersions() to see valid ${parsed.kind}s.` };
+      }
+      const regions = versionColorRegions(source);
+      if (regions.length === 0) {
+        return { error: `Version ${source.index} ("${source.label}") has no color regions to copy.` };
+      }
+      const report = rehydrateColorRegions({ colorRegions: regions });
+      scheduleColorRefresh();
+      syncLockState();
+      return {
+        source: { index: source.index, label: source.label },
+        carried: report.carried,
+        dropped: report.dropped,
+        note: report.dropped.length > 0
+          ? 'Some regions did not resolve on the current geometry and were skipped — repaint those, or check the labels/topology still match. The rest are in-memory; your next runAndSave will persist them.'
+          : 'All regions transferred. They are in-memory like any paint op; your next runAndSave will persist them.',
       };
     },
 
@@ -2675,7 +2872,13 @@ async function main() {
     async getSessionContext() {
       const ctx = await getSessionContext();
       if (!ctx) return { error: 'No active session' };
-      return ctx;
+      const geo = JSON.parse(geometryDataEl.textContent || '{}');
+      const warnings = geometryWarnings(geo);
+      return {
+        ...ctx,
+        currentCode: getValue(),
+        ...(warnings.length > 0 ? { geometryWarnings: warnings } : {}),
+      };
     },
 
     /** Export a session as JSON (defaults to current session) */
@@ -2958,30 +3161,36 @@ async function main() {
         return true;
       });
       if (typeof check === 'object' && check !== null && 'error' in check) {
-        return { error: check.error, modifiedCode: null, stats: null };
+        return { error: check.error, stats: null };
       }
       const currentCode = getValue();
       let modifiedCode: string;
       try {
         modifiedCode = patchFn(currentCode);
       } catch (e: unknown) {
-        return { error: `Patch function failed: ${e instanceof Error ? e.message : String(e)}`, modifiedCode: null, stats: null };
+        return { error: `Patch function failed: ${e instanceof Error ? e.message : String(e)}`, stats: null };
       }
+
+      // Surface what the patch actually changed. A transform that matched
+      // nothing returns the code unchanged (codeDiff.changed === false) —
+      // the cheapest way to catch a no-op tweak before reading stats that
+      // look identical for the wrong reason.
+      const codeDiff = computeCodeDiff(currentCode, modifiedCode);
 
       const { geometryData, manifold } = await executeIsolated(modifiedCode);
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       try { (manifold as any)?.delete?.(); } catch { /* ignore */ }
 
       if (geometryData.status === 'error') {
-        return { error: geometryData.error, modifiedCode, stats: geometryData, ...(assertions ? { passed: false, failures: [geometryData.error as string] } : {}) };
+        return { error: geometryData.error, modifiedCode, codeDiff, stats: geometryData, ...(assertions ? { passed: false, failures: [geometryData.error as string] } : {}) };
       }
 
       if (assertions) {
         const failures = checkAssertions(geometryData, assertions);
-        return { modifiedCode, stats: geometryData, passed: failures.length === 0, failures: failures.length > 0 ? failures : undefined };
+        return { modifiedCode, codeDiff, stats: geometryData, passed: failures.length === 0, failures: failures.length > 0 ? failures : undefined };
       }
 
-      return { modifiedCode, stats: geometryData };
+      return { modifiedCode, codeDiff, stats: geometryData };
     },
 
     /** Query multiple properties of the current geometry in a single call. Avoids multiple round-trips. */
@@ -3997,6 +4206,49 @@ async function main() {
       return commitPaintFromSet(triangles, opts.color, opts.name, 'paintbrush');
     },
 
+    /** Paint triangles whose centroids fall inside a cylindrical shell:
+     *  rMin ≤ dist(centroid, axis) ≤ rMax AND zMin ≤ centroid.z ≤ zMax.
+     *  The canonical tool for inner walls of hollow cylinders, mugs, vases,
+     *  and any revolved shape where `paintInBox` catches too many faces.
+     *  Set rMin > 0 to exclude the axis core and select only the inner surface. */
+    paintInCylinder(opts: {
+      center?: [number, number];
+      rMin: number;
+      rMax: number;
+      zMin: number;
+      zMax: number;
+      color: [number, number, number];
+      name?: string;
+      normalCone?: { axis: [number, number, number]; angleDeg: number };
+      topOnly?: boolean;
+      coverageMode?: CoverageMode;
+      maxTriangleArea?: number;
+    }) {
+      if (!currentMeshData) return { error: 'No geometry loaded' };
+      if (!opts || typeof opts !== 'object') return { error: 'paintInCylinder requires { rMin, rMax, zMin, zMax, color }' };
+      if (typeof opts.rMin !== 'number' || typeof opts.rMax !== 'number') return { error: 'rMin and rMax must be numbers' };
+      if (typeof opts.zMin !== 'number' || typeof opts.zMax !== 'number') return { error: 'zMin and zMax must be numbers' };
+      if (!Array.isArray(opts.color) || opts.color.length !== 3) return { error: 'color must be [r,g,b] in 0..1' };
+      const cone = resolvePaintCone(opts.normalCone, opts.topOnly);
+      const coneErr = validateNormalCone(cone);
+      if (coneErr) return { error: coneErr };
+      const areaErr = validateMaxTriangleArea(opts.maxTriangleArea);
+      if (areaErr) return { error: areaErr };
+      const triangles = collectTrianglesByCylinder(
+        currentMeshData,
+        opts.center ?? [0, 0],
+        opts.rMin, opts.rMax,
+        opts.zMin, opts.zMax,
+        cone,
+        opts.coverageMode,
+        opts.maxTriangleArea,
+      );
+      if (triangles.size === 0) {
+        return { error: `paintInCylinder: no triangles in cylindrical shell (rMin=${opts.rMin}, rMax=${opts.rMax}, z=${opts.zMin}..${opts.zMax})${cone ? ' with normalCone filter' : ''}. Try widening the shell, checking the center, or calling paintPreview with a box first to locate the geometry.` };
+      }
+      return commitPaintFromSet(triangles, opts.color, opts.name, 'paintbrush');
+    },
+
     /** Render a preview of the current model with a candidate region tinted
      *  bright yellow, *without* committing the paint to the regions list.
      *  Accepts the same selectors as `paintInBox` / `paintNear` plus an
@@ -4642,22 +4894,41 @@ async function main() {
      *  ```
      *  Returns `{ id, name, triangles, bbox, centroid }` on success or
      *  `{ error }` if no such label exists or no labels were registered. */
-    paintByLabel(opts: { label: string; color: [number, number, number]; name?: string }) {
+    paintByLabel(opts: { label: string; color: [number, number, number]; name?: string; topOnly?: boolean; normalCone?: { axis: [number, number, number]; angleDeg: number } }) {
       if (!opts || typeof opts !== 'object') return { error: 'paintByLabel requires { label, color }' };
       if (typeof opts.label !== 'string' || opts.label.length === 0) return { error: 'paintByLabel.label must be a non-empty string' };
       if (!Array.isArray(opts.color) || opts.color.length !== 3) return { error: 'paintByLabel.color must be [r,g,b] in 0..1' };
       if (!currentMeshData) return { error: 'No geometry loaded — run code first.' };
       if (!currentLabelMap || currentLabelMap.size === 0) {
-        return { error: 'No labels registered in the current run. Wrap features with api.label(shape, "name") in your code, then runAndSave, then call paintByLabel.' };
+        return { error: 'No labels registered in the current run. Either wrap features with api.label(shape, "name") in your code, then runAndSave, then call paintByLabel — or, if you cannot edit the code, paint by coordinates instead: paintInBox / paintComponent (after listComponents) / paintConnected (after probePixel on a render).' };
       }
       const ids = currentLabelMap.get(opts.label);
       if (!ids || ids.size === 0) {
         const known = [...currentLabelMap.keys()].map(k => `"${k}"`).join(', ');
         return { error: `paintByLabel: no label "${opts.label}". Known labels: ${known}.` };
       }
-      const triangles = new Set(ids);
       const mesh = currentMeshData;
       const regionName = opts.name ?? opts.label;
+      const cone = resolvePaintCone(opts.normalCone, opts.topOnly);
+      if (cone) {
+        // Filter the label's triangle set by normal direction. Use a
+        // triangles descriptor (not byLabel) so the exact filtered set
+        // is preserved on re-hydration rather than restoring the full set.
+        const adjacency = buildAdjacency(mesh);
+        const axLen = Math.hypot(cone.axis[0], cone.axis[1], cone.axis[2]);
+        const cax = cone.axis[0] / axLen, cay = cone.axis[1] / axLen, caz = cone.axis[2] / axLen;
+        const coneCos = Math.cos(cone.angleDeg * Math.PI / 180);
+        const filtered = new Set<number>();
+        for (const t of ids) {
+          const dot = cax * adjacency.normals[t * 3] + cay * adjacency.normals[t * 3 + 1] + caz * adjacency.normals[t * 3 + 2];
+          if (dot >= coneCos) filtered.add(t);
+        }
+        if (filtered.size === 0) {
+          return { error: `paintByLabel: label "${opts.label}" matched ${ids.size} triangles but none passed the ${opts.topOnly ? 'topOnly' : 'normalCone'} filter. Try widening angleDeg or removing the filter.` };
+        }
+        return commitPaintFromSet(filtered, opts.color as [number, number, number], regionName, 'paintbrush');
+      }
+      const triangles = new Set(ids);
       const region = addRegion(
         regionName,
         opts.color as [number, number, number],
@@ -4690,12 +4961,12 @@ async function main() {
      *    { label: 'mouth', color: [0.8, 0.2, 0.2] },
      *  ]);
      *  ``` */
-    paintByLabels(items: Array<{ label: string; color: [number, number, number]; name?: string }>) {
-      if (!Array.isArray(items)) return { error: 'paintByLabels requires an array of { label, color, name? }' };
+    paintByLabels(items: Array<{ label: string; color: [number, number, number]; name?: string; topOnly?: boolean; normalCone?: { axis: [number, number, number]; angleDeg: number } }>) {
+      if (!Array.isArray(items)) return { error: 'paintByLabels requires an array of { label, color, name?, topOnly?, normalCone? }' };
       if (items.length === 0) return { results: [], failed: [] };
       if (!currentMeshData) return { error: 'No geometry loaded — run code first.' };
       if (!currentLabelMap || currentLabelMap.size === 0) {
-        return { error: 'No labels registered in the current run. Wrap features with api.label(shape, "name") in your code, then runAndSave, then call paintByLabels.' };
+        return { error: 'No labels registered in the current run. Either wrap features with api.label(shape, "name") in your code, then runAndSave, then call paintByLabels — or, if you cannot edit the code, paint by coordinates instead: paintInBox / paintComponent (after listComponents) / paintConnected (after probePixel on a render).' };
       }
       const results: Array<Record<string, unknown>> = [];
       const failed: Array<{ label: string; error: string }> = [];
@@ -4903,7 +5174,7 @@ async function main() {
         'runIsolated':     { signature: 'await runIsolated(code) -- Test without side effects -> {geometryData, thumbnail}', docs: '/ai.md#testing-without-side-effects' },
         'runAndAssert':    { signature: 'await runAndAssert(code, assertions) -- Validate geometry -> {passed, failures?, stats}', docs: '/ai.md#assertions----structured-validation' },
         'runAndExplain':   { signature: 'await runAndExplain(code) -- Debug disconnected components -> {stats, components[], hints[]}', docs: '/ai.md#debugging-disconnected-components' },
-        'modifyAndTest':   { signature: 'await modifyAndTest(patchFn, assertions?) -- Modify + test without committing', docs: '/ai.md#modify-and-test' },
+        'modifyAndTest':   { signature: 'await modifyAndTest(patchFn, assertions?) -- Modify + test without committing -> {modifiedCode, codeDiff, stats, passed?}', docs: '/ai.md#modify-and-test' },
         'query':           { signature: 'query({sliceAt?, decompose?, boundingBox?}) -- Multi-query current geometry', docs: '/ai.md#multi-query-current-geometry' },
         // Sessions
         'createSession':   { signature: 'await createSession(name?) -- Create session -> {id, url, galleryUrl}', docs: '/ai.md#console-api--windowpartwright' },
@@ -4911,7 +5182,8 @@ async function main() {
         'saveVersion':     { signature: 'await saveVersion(label?) -- Save current state as version', docs: '/ai.md#console-api--windowpartwright' },
         'listVersions':    { signature: 'await listVersions() -- List all versions in session', docs: '/ai.md#console-api--windowpartwright' },
         'loadVersion':     { signature: 'await loadVersion({index} | {id}) -- Load version into editor -> {id, index, label, code, geometryData} or {error}', docs: '/ai.md#console-api--windowpartwright' },
-        'forkVersion':     { signature: 'await forkVersion({index} | {id}, transformFn, label?, assertions?) -- Load + modify + validate + save in one call', docs: '/ai.md#forking-a-prior-version' },
+        'forkVersion':     { signature: 'await forkVersion({index} | {id}, transformFn, label?, assertions?, carryColors=true) -- Load + modify + validate + save in one call; carries parent colors -> {..., codeDiff, colors}', docs: '/ai.md#forking-a-prior-version' },
+        'copyColorsFromVersion': { signature: 'await copyColorsFromVersion({index} | {id}) -- Re-apply a prior version\'s color regions onto the current mesh -> {source, carried, dropped}', docs: '/ai.md#forking-a-prior-version' },
         'openSession':     { signature: 'await openSession(id) -- Open existing session', docs: '/ai.md#resuming-a-session' },
         'listSessions':    { signature: 'await listSessions() -- List all sessions', docs: '/ai.md#console-api--windowpartwright' },
         'getSessionContext': { signature: 'await getSessionContext() -- Get full session context (for resuming)', docs: '/ai.md#resuming-a-session' },
@@ -4947,71 +5219,71 @@ async function main() {
         'exportOBJ':       { signature: 'exportOBJ() -- Download OBJ file', docs: '/ai.md#console-api--windowpartwright' },
         'export3MF':       { signature: 'export3MF() -- Download 3MF file', docs: '/ai.md#console-api--windowpartwright' },
         // AI-friendly export — return bytes over the API instead of triggering a download
-        'exportGLBData':   { signature: 'await exportGLBData() -- Return GLB as {filename, mimeType, base64, sizeBytes}', docs: '/ai.md#ai-friendly-file-io' },
-        'exportSTLData':   { signature: 'await exportSTLData() -- Return STL as {filename, mimeType, base64, sizeBytes}', docs: '/ai.md#ai-friendly-file-io' },
-        'exportOBJData':   { signature: 'await exportOBJData() -- Return OBJ as {filename, mimeType, text? | base64, sizeBytes}', docs: '/ai.md#ai-friendly-file-io' },
-        'export3MFData':   { signature: 'await export3MFData() -- Return 3MF as {filename, mimeType, base64, sizeBytes}', docs: '/ai.md#ai-friendly-file-io' },
-        'exportSessionData': { signature: 'await exportSessionData(sessionId?) -- Return parsed session JSON {filename, mimeType, data, sizeBytes}', docs: '/ai.md#ai-friendly-file-io' },
-        'exportCodeData':  { signature: 'exportCodeData() -- Return editor source as {filename, mimeType, language, text, sizeBytes}', docs: '/ai.md#ai-friendly-file-io' },
+        'exportGLBData':   { signature: 'await exportGLBData() -- Return GLB as {filename, mimeType, base64, sizeBytes}', docs: '/ai/file-io.md' },
+        'exportSTLData':   { signature: 'await exportSTLData() -- Return STL as {filename, mimeType, base64, sizeBytes}', docs: '/ai/file-io.md' },
+        'exportOBJData':   { signature: 'await exportOBJData() -- Return OBJ as {filename, mimeType, text? | base64, sizeBytes}', docs: '/ai/file-io.md' },
+        'export3MFData':   { signature: 'await export3MFData() -- Return 3MF as {filename, mimeType, base64, sizeBytes}', docs: '/ai/file-io.md' },
+        'exportSessionData': { signature: 'await exportSessionData(sessionId?) -- Return parsed session JSON {filename, mimeType, data, sizeBytes}', docs: '/ai/file-io.md' },
+        'exportCodeData':  { signature: 'exportCodeData() -- Return editor source as {filename, mimeType, language, text, sizeBytes}', docs: '/ai/file-io.md' },
         // AI-friendly import — bypass the file picker
-        'importSessionData': { signature: 'await importSessionData(jsonObjectOrString) -- Import .partwright.json payload -> {sessionId} or {error}', docs: '/ai.md#ai-friendly-file-io' },
-        'importCodeData':  { signature: 'await importCodeData(code, language, sessionName?) -- Import raw source as new session', docs: '/ai.md#ai-friendly-file-io' },
+        'importSessionData': { signature: 'await importSessionData(jsonObjectOrString) -- Import .partwright.json payload -> {sessionId} or {error}', docs: '/ai/file-io.md' },
+        'importCodeData':  { signature: 'await importCodeData(code, language, sessionName?) -- Import raw source as new session', docs: '/ai/file-io.md' },
         // Recent Exports inbox (also visible in toolbar Export dropdown)
-        'listRecentExports': { signature: 'listRecentExports() -- Recent export metadata, newest first', docs: '/ai.md#ai-friendly-file-io' },
-        'getRecentExport': { signature: 'await getRecentExport(id) -- Look up bytes by id -> {filename, mimeType, text? | base64, ...}', docs: '/ai.md#ai-friendly-file-io' },
-        'downloadRecentExport': { signature: 'downloadRecentExport(id) -- Re-trigger browser download for an inbox entry', docs: '/ai.md#ai-friendly-file-io' },
-        'clearRecentExports': { signature: 'clearRecentExports() -- Empty the Recent Exports list', docs: '/ai.md#ai-friendly-file-io' },
+        'listRecentExports': { signature: 'listRecentExports() -- Recent export metadata, newest first', docs: '/ai/file-io.md' },
+        'getRecentExport': { signature: 'await getRecentExport(id) -- Look up bytes by id -> {filename, mimeType, text? | base64, ...}', docs: '/ai/file-io.md' },
+        'downloadRecentExport': { signature: 'downloadRecentExport(id) -- Re-trigger browser download for an inbox entry', docs: '/ai/file-io.md' },
+        'clearRecentExports': { signature: 'clearRecentExports() -- Empty the Recent Exports list', docs: '/ai/file-io.md' },
         // Color regions
-        'paintRegion':     { signature: 'paintRegion({point, normal, color, name?, tolerance?}) -- Paint coplanar face region (flood-fill, edge-bounded). Diagnostic error on failure.', docs: '/ai.md#color-regions' },
-        'paintNearestRegion': { signature: 'paintNearestRegion({point, color, searchRadius?, name?, tolerance?}) -- Snap seed to nearest face, then paint coplanar region', docs: '/ai.md#color-regions' },
-        'paintNear':       { signature: 'paintNear({point, radius, normalCone?, color, name?}) -- Paint triangles whose centroid is within `radius` of `point`. Predictable, no flood-fill tolerance to tune.', docs: '/ai.md#color-regions' },
-        'paintInBox':      { signature: 'paintInBox({box, normalCone?, color, name?}) -- Paint triangles whose centroid is inside an axis-aligned box (and optional normal cone).', docs: '/ai.md#color-regions' },
-        'paintInOrientedBox': { signature: 'paintInOrientedBox({box: {center, size, quaternion?}, color, name?}) -- Paint triangles whose centroid is inside a rotated oriented box. Same selector as the UI Box tool.', docs: '/ai.md#color-regions' },
-        'paintFaces':      { signature: 'paintFaces({triangleIds, color, name?}) -- Paint specific triangle indices', docs: '/ai.md#color-regions' },
-        'paintSlab':       { signature: 'paintSlab({axis|normal, offset, thickness, color, name?}) -- Paint planar slab range', docs: '/ai.md#color-regions' },
-        'paintPreview':    { signature: 'paintPreview({box?|point+radius?|triangleIds?, normalCone?, withImage?, view?}) -- DRY-RUN -> {triangleCount, bbox, centroid, [thumbnail]}. Default count-only; pass withImage:true for the yellow-highlighted thumbnail.', docs: '/ai.md#color-regions' },
-        'paintExplain':    { signature: 'paintExplain({region, withImage?, view?}) -- Diagnose a committed region -> {triangleCount, area, bbox, centroid, normalHistogram, [thumbnail]}.', docs: '/ai.md#color-regions' },
-        'assertPaint':     { signature: 'assertPaint({region, expectedTriangleCount?, expectedBoundingBox?, expectedCentroid?}) -- Verify a previously-painted region -> {passed, failures?}', docs: '/ai.md#color-regions' },
-        'findFaces':       { signature: 'findFaces({box?, normal?, normalTolerance?, color?, region?, maxResults?}) -- Query triangle ids by geometry/color filters', docs: '/ai.md#color-regions' },
-        'getMesh':         { signature: 'getMesh() -- Direct triangle/vertex/normal/centroid access for procedural paint workflows', docs: '/ai.md#color-regions' },
-        'getMeshSummary':  { signature: 'getMeshSummary({tolerance?, minTriangles?, maxTrianglesPerGroup?, maxGroups?}?) -- List coplanar face groups with centroid/normal/area/bbox', docs: '/ai.md#color-regions' },
-        'listRegions':     { signature: 'listRegions() -- List all color regions with bbox + centroid for each', docs: '/ai.md#color-regions' },
-        'clearColors':     { signature: 'clearColors() -- Remove ALL color regions (use undoLastPaint to reverse just one)', docs: '/ai.md#color-regions' },
-        'listComponents':  { signature: 'listComponents() -> {count, components: [{index, centroid, boundingBox, volume, surfaceArea}]} -- Decompose the manifold into boolean-distinct parts. For "paint each feature" workflows (e.g. unioned head + eyes + mouth).', docs: '/ai.md#color-regions' },
-        'paintComponent':  { signature: 'paintComponent({index, color, name?, topOnly?}) -- One-call shortcut: listComponents + paintInBox for the Nth piece.', docs: '/ai.md#color-regions' },
-        'listLabels':      { signature: 'listLabels() -> {count, labels: [{name, triangleCount, bbox, centroid}]} -- Labels registered in the current run via api.label(shape, name). Survives boolean ops; the cleanest paint primitive on agent-authored geometry.', docs: '/ai.md#color-regions' },
-        'paintByLabel':    { signature: 'paintByLabel({label, color, name?}) -- Paint a labelled feature by name. Pair with api.label/labeledUnion in your code. No coordinate guessing.', docs: '/ai.md#color-regions' },
-        'paintByLabels':   { signature: 'paintByLabels([{label, color, name?}, ...]) -- Batch sibling. N features painted in one call -> {results, failed}. Use for any multi-feature paint job.', docs: '/ai.md#color-regions' },
-        'paintConnected':  { signature: 'paintConnected({seed: {point, normal?}, maxDeviationDeg?, color, name?}) -- BFS-flood from a surface seed, gated by deviation from SEED normal (not adjacent). Pairs with probePixel for "paint everything contiguous and facing this way".', docs: '/ai.md#color-regions' },
-        'getFeatureCentroids': { signature: 'getFeatureCentroids({maxGroups?, withinBox?}?) -- Token-cheap: face-group centroids + normals + bbox, no triangleIds. Use to plan paint targets.', docs: '/ai.md#color-regions' },
-        'removeRegion':    { signature: 'removeRegion(id) -- Remove ONE color region by id from listRegions(). Use this to fix a single mistake without nuking the rest.', docs: '/ai.md#color-regions' },
-        'setRegionVisibility': { signature: 'setRegionVisibility(id, visible) -- Show/hide ONE region in the viewport. Hidden regions still export.', docs: '/ai.md#color-regions' },
-        'hideRegion':      { signature: 'hideRegion(id) -- Shorthand for setRegionVisibility(id, false).', docs: '/ai.md#color-regions' },
-        'showRegion':      { signature: 'showRegion(id) -- Shorthand for setRegionVisibility(id, true).', docs: '/ai.md#color-regions' },
-        'undoLastPaint':   { signature: 'undoLastPaint() -- Undo the most recent paint op. Removed region goes on a redo stack.', docs: '/ai.md#color-regions' },
-        'redoLastPaint':   { signature: 'redoLastPaint() -- Reapply the most recently undone paint op.', docs: '/ai.md#color-regions' },
-        'getBucketTolerance': { signature: 'getBucketTolerance() -- Read the bucket flood-fill tolerance (cosine of max bend angle).', docs: '/ai.md#color-regions' },
-        'setBucketTolerance': { signature: 'setBucketTolerance(tolerance) -- Set the bucket flood-fill tolerance (-1..1). Affects the UI bucket tool and the default for paintRegion.', docs: '/ai.md#color-regions' },
-        'getBrushSize':    { signature: 'getBrushSize() -- Read the UI brush radius (mesh units). 0 = single triangle.', docs: '/ai.md#color-regions' },
-        'setBrushSize':    { signature: 'setBrushSize(radius) -- Set the UI brush radius (mesh units, >= 0). Affects only the interactive brush tool; programmatic painting uses paintNear / paintFaces.', docs: '/ai.md#color-regions' },
+        'paintRegion':     { signature: 'paintRegion({point, normal, color, name?, tolerance?}) -- Paint coplanar face region (flood-fill, edge-bounded). Diagnostic error on failure.', docs: '/ai/colors.md' },
+        'paintNearestRegion': { signature: 'paintNearestRegion({point, color, searchRadius?, name?, tolerance?}) -- Snap seed to nearest face, then paint coplanar region', docs: '/ai/colors.md' },
+        'paintNear':       { signature: 'paintNear({point, radius, normalCone?, color, name?}) -- Paint triangles whose centroid is within `radius` of `point`. Predictable, no flood-fill tolerance to tune.', docs: '/ai/colors.md' },
+        'paintInBox':      { signature: 'paintInBox({box, normalCone?, color, name?}) -- Paint triangles whose centroid is inside an axis-aligned box (and optional normal cone).', docs: '/ai/colors.md' },
+        'paintInOrientedBox': { signature: 'paintInOrientedBox({box: {center, size, quaternion?}, color, name?}) -- Paint triangles whose centroid is inside a rotated oriented box. Same selector as the UI Box tool.', docs: '/ai/colors.md' },
+        'paintFaces':      { signature: 'paintFaces({triangleIds, color, name?}) -- Paint specific triangle indices', docs: '/ai/colors.md' },
+        'paintSlab':       { signature: 'paintSlab({axis|normal, offset, thickness, color, name?}) -- Paint planar slab range', docs: '/ai/colors.md' },
+        'paintPreview':    { signature: 'paintPreview({box?|point+radius?|triangleIds?, normalCone?, withImage?, view?}) -- DRY-RUN -> {triangleCount, bbox, centroid, [thumbnail]}. Default count-only; pass withImage:true for the yellow-highlighted thumbnail.', docs: '/ai/colors.md' },
+        'paintExplain':    { signature: 'paintExplain({region, withImage?, view?}) -- Diagnose a committed region -> {triangleCount, area, bbox, centroid, normalHistogram, [thumbnail]}.', docs: '/ai/colors.md' },
+        'assertPaint':     { signature: 'assertPaint({region, expectedTriangleCount?, expectedBoundingBox?, expectedCentroid?}) -- Verify a previously-painted region -> {passed, failures?}', docs: '/ai/colors.md' },
+        'findFaces':       { signature: 'findFaces({box?, normal?, normalTolerance?, color?, region?, maxResults?}) -- Query triangle ids by geometry/color filters', docs: '/ai/colors.md' },
+        'getMesh':         { signature: 'getMesh() -- Direct triangle/vertex/normal/centroid access for procedural paint workflows', docs: '/ai/colors.md' },
+        'getMeshSummary':  { signature: 'getMeshSummary({tolerance?, minTriangles?, maxTrianglesPerGroup?, maxGroups?}?) -- List coplanar face groups with centroid/normal/area/bbox', docs: '/ai/colors.md' },
+        'listRegions':     { signature: 'listRegions() -- List all color regions with bbox + centroid for each', docs: '/ai/colors.md' },
+        'clearColors':     { signature: 'clearColors() -- Remove ALL color regions (use undoLastPaint to reverse just one)', docs: '/ai/colors.md' },
+        'listComponents':  { signature: 'listComponents() -> {count, components: [{index, centroid, boundingBox, volume, surfaceArea}]} -- Decompose the manifold into boolean-distinct parts. For "paint each feature" workflows (e.g. unioned head + eyes + mouth).', docs: '/ai/colors.md' },
+        'paintComponent':  { signature: 'paintComponent({index, color, name?, topOnly?}) -- One-call shortcut: listComponents + paintInBox for the Nth piece.', docs: '/ai/colors.md' },
+        'listLabels':      { signature: 'listLabels() -> {count, labels: [{name, triangleCount, bbox, centroid}]} -- Labels registered in the current run via api.label(shape, name). Survives boolean ops; the cleanest paint primitive on agent-authored geometry.', docs: '/ai/colors.md' },
+        'paintByLabel':    { signature: 'paintByLabel({label, color, name?}) -- Paint a labelled feature by name. Pair with api.label/labeledUnion in your code. No coordinate guessing.', docs: '/ai/colors.md' },
+        'paintByLabels':   { signature: 'paintByLabels([{label, color, name?}, ...]) -- Batch sibling. N features painted in one call -> {results, failed}. Use for any multi-feature paint job.', docs: '/ai/colors.md' },
+        'paintConnected':  { signature: 'paintConnected({seed: {point, normal?}, maxDeviationDeg?, color, name?}) -- BFS-flood from a surface seed, gated by deviation from SEED normal (not adjacent). Pairs with probePixel for "paint everything contiguous and facing this way".', docs: '/ai/colors.md' },
+        'getFeatureCentroids': { signature: 'getFeatureCentroids({maxGroups?, withinBox?}?) -- Token-cheap: face-group centroids + normals + bbox, no triangleIds. Use to plan paint targets.', docs: '/ai/colors.md' },
+        'removeRegion':    { signature: 'removeRegion(id) -- Remove ONE color region by id from listRegions(). Use this to fix a single mistake without nuking the rest.', docs: '/ai/colors.md' },
+        'setRegionVisibility': { signature: 'setRegionVisibility(id, visible) -- Show/hide ONE region in the viewport. Hidden regions still export.', docs: '/ai/colors.md' },
+        'hideRegion':      { signature: 'hideRegion(id) -- Shorthand for setRegionVisibility(id, false).', docs: '/ai/colors.md' },
+        'showRegion':      { signature: 'showRegion(id) -- Shorthand for setRegionVisibility(id, true).', docs: '/ai/colors.md' },
+        'undoLastPaint':   { signature: 'undoLastPaint() -- Undo the most recent paint op. Removed region goes on a redo stack.', docs: '/ai/colors.md' },
+        'redoLastPaint':   { signature: 'redoLastPaint() -- Reapply the most recently undone paint op.', docs: '/ai/colors.md' },
+        'getBucketTolerance': { signature: 'getBucketTolerance() -- Read the bucket flood-fill tolerance (cosine of max bend angle).', docs: '/ai/colors.md' },
+        'setBucketTolerance': { signature: 'setBucketTolerance(tolerance) -- Set the bucket flood-fill tolerance (-1..1). Affects the UI bucket tool and the default for paintRegion.', docs: '/ai/colors.md' },
+        'getBrushSize':    { signature: 'getBrushSize() -- Read the UI brush radius (mesh units). 0 = single triangle.', docs: '/ai/colors.md' },
+        'setBrushSize':    { signature: 'setBrushSize(radius) -- Set the UI brush radius (mesh units, >= 0). Affects only the interactive brush tool; programmatic painting uses paintNear / paintFaces.', docs: '/ai/colors.md' },
         // Annotations
-        'listAnnotations':    { signature: 'listAnnotations() -- List freehand strokes -> [{id, color, width, points}]', docs: '/ai.md#annotations' },
-        'listTextAnnotations':{ signature: 'listTextAnnotations() -- List pinned text labels -> [{id, text, color, fontSizePx, anchor}]', docs: '/ai.md#annotations' },
-        'addTextAnnotation':  { signature: 'addTextAnnotation({anchor, text, color?, fontSizePx?}) -- Pin a text label at a 3D point', docs: '/ai.md#annotations' },
-        'getAnnotationCount': { signature: 'getAnnotationCount() -- Total annotations (strokes + text)', docs: '/ai.md#annotations' },
-        'undoAnnotation':     { signature: 'undoAnnotation() -- Remove the most recently added annotation -> {removed, remaining}', docs: '/ai.md#annotations' },
-        'removeAnnotation':   { signature: 'removeAnnotation(id) -- Remove a specific annotation by id', docs: '/ai.md#annotations' },
-        'clearAnnotations':   { signature: 'clearAnnotations() -- Remove all annotations (strokes + text) -> {cleared}', docs: '/ai.md#annotations' },
-        'clearAnnotationStrokes': { signature: 'clearAnnotationStrokes() -- Remove only freehand strokes', docs: '/ai.md#annotations' },
-        'clearTextAnnotations':   { signature: 'clearTextAnnotations() -- Remove only text labels', docs: '/ai.md#annotations' },
-        'setAnnotationsVisible': { signature: 'setAnnotationsVisible(bool) -- Show/hide all annotations (also affects renderView output)', docs: '/ai.md#annotations' },
-        'areAnnotationsVisible': { signature: 'areAnnotationsVisible() -- Whether annotations are currently visible', docs: '/ai.md#annotations' },
-        'setAnnotationColor': { signature: 'setAnnotationColor([r,g,b]) -- Set draw color for new strokes/text (RGB 0..1)', docs: '/ai.md#annotations' },
-        'setAnnotationWidth': { signature: 'setAnnotationWidth(px) -- Set line width for new strokes (0.5..64 px)', docs: '/ai.md#annotations' },
-        'getAnnotationWidth': { signature: 'getAnnotationWidth() -- Current line width (pixels)', docs: '/ai.md#annotations' },
-        'setAnnotationFontSize': { signature: 'setAnnotationFontSize(px) -- Set font size for new text labels (4..256 px)', docs: '/ai.md#annotations' },
-        'getAnnotationFontSize': { signature: 'getAnnotationFontSize() -- Current text label font size (pixels)', docs: '/ai.md#annotations' },
-        'restoreAnnotationView': { signature: 'restoreAnnotationView(id) -- Snap the camera to the angle the annotation was made from', docs: '/ai.md#annotations' },
+        'listAnnotations':    { signature: 'listAnnotations() -- List freehand strokes -> [{id, color, width, points}]', docs: '/ai/annotations.md' },
+        'listTextAnnotations':{ signature: 'listTextAnnotations() -- List pinned text labels -> [{id, text, color, fontSizePx, anchor}]', docs: '/ai/annotations.md' },
+        'addTextAnnotation':  { signature: 'addTextAnnotation({anchor, text, color?, fontSizePx?}) -- Pin a text label at a 3D point', docs: '/ai/annotations.md' },
+        'getAnnotationCount': { signature: 'getAnnotationCount() -- Total annotations (strokes + text)', docs: '/ai/annotations.md' },
+        'undoAnnotation':     { signature: 'undoAnnotation() -- Remove the most recently added annotation -> {removed, remaining}', docs: '/ai/annotations.md' },
+        'removeAnnotation':   { signature: 'removeAnnotation(id) -- Remove a specific annotation by id', docs: '/ai/annotations.md' },
+        'clearAnnotations':   { signature: 'clearAnnotations() -- Remove all annotations (strokes + text) -> {cleared}', docs: '/ai/annotations.md' },
+        'clearAnnotationStrokes': { signature: 'clearAnnotationStrokes() -- Remove only freehand strokes', docs: '/ai/annotations.md' },
+        'clearTextAnnotations':   { signature: 'clearTextAnnotations() -- Remove only text labels', docs: '/ai/annotations.md' },
+        'setAnnotationsVisible': { signature: 'setAnnotationsVisible(bool) -- Show/hide all annotations (also affects renderView output)', docs: '/ai/annotations.md' },
+        'areAnnotationsVisible': { signature: 'areAnnotationsVisible() -- Whether annotations are currently visible', docs: '/ai/annotations.md' },
+        'setAnnotationColor': { signature: 'setAnnotationColor([r,g,b]) -- Set draw color for new strokes/text (RGB 0..1)', docs: '/ai/annotations.md' },
+        'setAnnotationWidth': { signature: 'setAnnotationWidth(px) -- Set line width for new strokes (0.5..64 px)', docs: '/ai/annotations.md' },
+        'getAnnotationWidth': { signature: 'getAnnotationWidth() -- Current line width (pixels)', docs: '/ai/annotations.md' },
+        'setAnnotationFontSize': { signature: 'setAnnotationFontSize(px) -- Set font size for new text labels (4..256 px)', docs: '/ai/annotations.md' },
+        'getAnnotationFontSize': { signature: 'getAnnotationFontSize() -- Current text label font size (pixels)', docs: '/ai/annotations.md' },
+        'restoreAnnotationView': { signature: 'restoreAnnotationView(id) -- Snap the camera to the angle the annotation was made from', docs: '/ai/annotations.md' },
       };
 
       if (method) {
@@ -5498,6 +5770,90 @@ async function main() {
     return result;
   }
 
+  /** Collect triangle ids whose centroids fall within a cylindrical shell
+   *  (rMin ≤ radial dist from axis ≤ rMax, zMin ≤ z ≤ zMax). */
+  function collectTrianglesByCylinder(
+    mesh: MeshData,
+    center: [number, number],
+    rMin: number,
+    rMax: number,
+    zMin: number,
+    zMax: number,
+    cone: { axis: [number, number, number]; angleDeg: number } | undefined,
+    coverage: CoverageMode = 'centroid',
+    maxArea: number | undefined = undefined,
+  ): Set<number> {
+    const adjacency = cone ? buildAdjacency(mesh) : null;
+    let coneAxis: [number, number, number] | null = null;
+    let coneCos = -1;
+    if (cone) {
+      const len = Math.hypot(cone.axis[0], cone.axis[1], cone.axis[2]);
+      coneAxis = [cone.axis[0] / len, cone.axis[1] / len, cone.axis[2] / len];
+      coneCos = Math.cos(cone.angleDeg * Math.PI / 180);
+    }
+    const rMin2 = rMin * rMin, rMax2 = rMax * rMax;
+    const [cx, cy] = center;
+    const result = new Set<number>();
+    const { triVerts, vertProperties, numProp, numTri } = mesh;
+
+    function radial2(x: number, y: number): number {
+      const dx = x - cx, dy = y - cy;
+      return dx * dx + dy * dy;
+    }
+    function inShell(x: number, y: number, z: number): boolean {
+      const r2 = radial2(x, y);
+      return r2 >= rMin2 && r2 <= rMax2 && z >= zMin && z <= zMax;
+    }
+
+    for (let t = 0; t < numTri; t++) {
+      const v0 = triVerts[t * 3], v1 = triVerts[t * 3 + 1], v2 = triVerts[t * 3 + 2];
+      const ax = vertProperties[v0 * numProp], ay = vertProperties[v0 * numProp + 1], az = vertProperties[v0 * numProp + 2];
+      const bx = vertProperties[v1 * numProp], by = vertProperties[v1 * numProp + 1], bz = vertProperties[v1 * numProp + 2];
+      const cx2 = vertProperties[v2 * numProp], cy2 = vertProperties[v2 * numProp + 1], cz2 = vertProperties[v2 * numProp + 2];
+
+      if (coverage === 'fully_inside') {
+        if (!inShell(ax, ay, az) || !inShell(bx, by, bz) || !inShell(cx2, cy2, cz2)) continue;
+      } else if (coverage === 'any_vertex_inside') {
+        if (!inShell(ax, ay, az) && !inShell(bx, by, bz) && !inShell(cx2, cy2, cz2)) continue;
+      } else {
+        const ccx = (ax + bx + cx2) / 3, ccy = (ay + by + cy2) / 3, ccz = (az + bz + cz2) / 3;
+        if (!inShell(ccx, ccy, ccz)) continue;
+      }
+
+      if (coneAxis && adjacency) {
+        const nx = adjacency.normals[t * 3], ny = adjacency.normals[t * 3 + 1], nz = adjacency.normals[t * 3 + 2];
+        if (coneAxis[0] * nx + coneAxis[1] * ny + coneAxis[2] * nz < coneCos) continue;
+      }
+      if (maxArea !== undefined && triangleArea(t, mesh) > maxArea) continue;
+      result.add(t);
+    }
+    return result;
+  }
+
+  /** Produce advisory warnings for geometry that was saved or queried.
+   *  Returns an empty array when the geometry is clean.
+   *  These are non-blocking — the save has already happened. */
+  function geometryWarnings(geo: Record<string, unknown>): string[] {
+    if (!geo || geo.status !== 'ok') return [];
+    const warnings: string[] = [];
+    if (geo.isManifold === false) {
+      warnings.push(
+        'isManifold: false — the mesh has non-manifold edges or gaps. ' +
+        'Export and slicing will fail with most tools. Fix the geometry ' +
+        'before finalizing: ensure boolean operands overlap by ≥ 0.5 units, ' +
+        'avoid zero-thickness walls, and check for duplicate faces.',
+      );
+    }
+    if (typeof geo.componentCount === 'number' && geo.componentCount > 1) {
+      warnings.push(
+        `componentCount: ${geo.componentCount} — model has ${geo.componentCount} disconnected pieces. ` +
+        'If unintentional, check that boolean union shapes overlap by ≥ 0.5 units. ' +
+        'If intentional (separate printable parts), ignore this warning.',
+      );
+    }
+    return warnings;
+  }
+
   /** Commit a triangle set as a region and refresh the viewport — shared by
    *  `paintInBox` and `paintNear` so they stay byte-for-byte consistent with
    *  the existing `paintFaces`/`paintRegion` rendering path. */
@@ -5562,6 +5918,7 @@ async function main() {
 
     if (result.error) {
       recordError(result.error);
+      errorLog.capture({ level: 'error', source: 'engine', message: result.error });
       const diagnostics = result.diagnostics ?? [];
       setStatus(statusBar, 'error', summarizeDiagnostics(result.error, diagnostics));
       setEditorDiagnostics(diagnostics);

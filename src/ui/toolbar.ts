@@ -32,26 +32,53 @@ export interface ToolbarCallbacks {
   onGoHome: () => void;
   /** Toggle the AI chat side panel. */
   onToggleAi: () => void;
+  /** Toggle the diagnostic log panel. */
+  onToggleDiagnostics: () => void;
 }
 
 let _aiBtn: HTMLButtonElement | null = null;
 
-/** Update the AI chip label/state from outside (e.g. when key connects/disconnects). */
-export function setAiToolbarState(connected: boolean): void {
+let _diagBadgeEl: HTMLElement | null = null;
+
+/** Update the unseen-error badge count on the diagnostics toolbar button.
+ *  Called by diagnosticsPanel when new entries arrive while the panel is closed. */
+export function setDiagnosticsToolbarBadge(count: number): void {
+  if (!_diagBadgeEl) return;
+  if (count === 0) {
+    _diagBadgeEl.classList.add('hidden');
+  } else {
+    _diagBadgeEl.classList.remove('hidden');
+    _diagBadgeEl.textContent = count > 99 ? '99+' : String(count);
+  }
+}
+
+export type AiToolbarMode = 'disconnected' | 'cloud' | 'local';
+
+/** Update the AI chip label/state from outside. Cloud = Anthropic key is
+ *  connected; Local = a local WebGPU model is configured; Disconnected =
+ *  neither, so clicking opens the connect flow. */
+export function setAiToolbarState(mode: AiToolbarMode | boolean): void {
   if (!_aiBtn) return;
-  if (connected) {
+  // Tolerate the legacy boolean caller signature so an old import doesn't
+  // crash the toolbar at runtime.
+  const actual: AiToolbarMode = typeof mode === 'boolean' ? (mode ? 'cloud' : 'disconnected') : mode;
+  if (actual === 'cloud') {
     _aiBtn.className = 'flex items-center gap-1.5 px-2 py-1 rounded text-xs text-blue-300 bg-blue-900/30 border border-blue-700/50 hover:bg-blue-900/50 transition-colors';
     _aiBtn.innerHTML = '<span>✦ AI</span>';
-    _aiBtn.title = 'Open AI chat panel';
+    _aiBtn.title = 'Open AI chat panel (hosted Claude).';
+  } else if (actual === 'local') {
+    _aiBtn.className = 'flex items-center gap-1.5 px-2 py-1 rounded text-xs text-emerald-300 bg-emerald-900/30 border border-emerald-700/50 hover:bg-emerald-900/50 transition-colors';
+    _aiBtn.innerHTML = '<span>✦ AI · Local</span>';
+    _aiBtn.title = 'Open AI chat panel (local WebGPU model).';
   } else {
     _aiBtn.className = 'flex items-center gap-1.5 px-2 py-1 rounded text-xs text-zinc-300 hover:bg-zinc-700 hover:text-zinc-100 transition-colors';
     _aiBtn.innerHTML = '<span>✦ Connect AI</span>';
-    _aiBtn.title = 'Connect an Anthropic API key to chat with the AI';
+    _aiBtn.title = 'Connect an API key or download a local model to chat with the AI.';
   }
 }
 
 /** File extensions accepted by the Import button and drag-and-drop. */
-export const IMPORT_ACCEPT = '.partwright.json,.json,.js,.scad';
+export const IMPORT_ACCEPT = '.partwright.json,.json,.js,.scad,.stl';
 
 let _autoRun = true;
 let _onAutoRunChange: ((on: boolean) => void) | null = null;
@@ -193,7 +220,7 @@ export function createToolbar(
   importWrapper.id = 'import-wrapper';
 
   const btnImport = createButton('btn-import', '\u2191 Import');
-  btnImport.title = 'Import a .partwright.json session, or a .js / .scad file';
+  btnImport.title = 'Import a .partwright.json session, a .js / .scad source file, or an .stl mesh';
   importWrapper.appendChild(btnImport);
 
   // Hidden file input — kept inside the wrapper so click-outside-to-close still works.
@@ -215,7 +242,7 @@ export function createToolbar(
   importDropdown.appendChild(createSectionHeader('From file'));
   const chooseFileOpt = createDescribedItem(
     'Choose file\u2026',
-    'Open a .partwright.json session, or a .js / .scad file.',
+    'Open a .partwright.json session, a .js / .scad source file, or an .stl mesh.',
   );
   chooseFileOpt.addEventListener('click', () => {
     importDropdown.classList.add('hidden');
@@ -527,6 +554,21 @@ export function createToolbar(
   qualityBtn.setAttribute('aria-label', 'Modeling quality settings');
   qualityBtn.addEventListener('click', () => { showQualitySettingsModal(); });
   toolbar.appendChild(qualityBtn);
+
+  // Diagnostic log toggle — shows a badge when unseen errors/warnings exist.
+  const diagBtn = document.createElement('button');
+  diagBtn.id = 'btn-diagnostics';
+  diagBtn.className = 'relative flex items-center justify-center w-10 h-10 md:w-6 md:h-6 rounded-full text-zinc-500 [@media(hover:hover)]:hover:text-zinc-200 [@media(hover:hover)]:hover:bg-zinc-700 transition-colors text-sm md:text-xs ml-1';
+  diagBtn.title = 'Diagnostic log — errors and warnings';
+  diagBtn.setAttribute('aria-label', 'Diagnostic log');
+  diagBtn.innerHTML = '⚠';
+
+  _diagBadgeEl = document.createElement('span');
+  _diagBadgeEl.className = 'hidden absolute -top-0.5 -right-0.5 text-[8px] font-bold bg-red-500 text-white rounded-full min-w-[14px] h-[14px] flex items-center justify-center px-0.5 leading-none pointer-events-none';
+  diagBtn.appendChild(_diagBadgeEl);
+
+  diagBtn.addEventListener('click', callbacks.onToggleDiagnostics);
+  toolbar.appendChild(diagBtn);
 
   // Help button
   const helpBtn = document.createElement('button');

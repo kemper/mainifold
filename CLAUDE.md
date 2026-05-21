@@ -113,10 +113,21 @@ After any changes that touch routing, Vite config, index.html, or initialization
 11. **Gallery badges**: Colored versions in the gallery should show small color-swatch dots next to the version label.
 12. **Color export**: With color regions painted, export GLB — the file should carry vertex colors. Export 3MF — the file should include `<basematerials>` and per-triangle `pid` attributes.
 13. **Annotations are per-version**: Annotate v1, save v2 (annotations persist into v2). Clear annotations, draw a different one, save v3. Navigating v1↔v2↔v3 should swap annotations to match each version (v1 empty, v2 first set, v3 second set). Importing a schema-1.2 file (top-level `annotations`) should attach those annotations to the latest version on import.
+14. **Local model picker**: Click the `✦ Connect AI` (or `✦ AI`) chip → in the modal, follow "Run a local model in your browser". A second modal lists Small / Medium / Large / Vision options with download sizes. The WebGPU banner shows green on Chrome/Edge/Safari 26+ and red elsewhere. The "Use this model" / "Download X GB" button only triggers a network request the first time; cached models show a "Downloaded" pill and skip straight to GPU load. Closing the tab during a download cancels it cleanly.
+15. **STL import**: Click Import → "Choose file…" → pick an `.stl`. A new session is created named after the file, the editor shows a short `return Manifold.ofMesh(api.imports[0])` wrapper, and the mesh renders in the viewport. The version label is "imported" and editing the wrapper (e.g. adding `.subtract(Manifold.cube([5,5,5], true))`) re-renders correctly. Closing and reopening the session must restore the imported mesh from IndexedDB.
 
 ## AI Agent Workflow & API Reference
 
 For the full Manifold/CrossSection API, `window.partwright` console API, session workflow, verification patterns, and photo-to-model workflow, see `public/ai.md`. The legacy `window.mainifold` alias remains available for older prompts.
+
+### In-app AI chat — two providers
+
+The right-side AI drawer can drive Partwright through either:
+
+- **Anthropic (cloud)** — user pastes their own API key (`src/ai/anthropic.ts`). The key is stored in IndexedDB; the chat streams from Anthropic's hosted Claude.
+- **Local (WebGPU)** — runs a model entirely in the browser via [WebLLM](https://webllm.mlc.ai) (`src/ai/local.ts`). The user opts in from the AI settings modal, picks one of four sizes (Small/Medium/Large/Vision), and the weights download once into the browser cache. No API key, no network traffic per turn.
+
+Both providers share the same chat loop (`src/ai/chatLoop.ts`), the same tool schemas (`src/ai/tools.ts`), and the same `public/ai.md` system prompt — only the request transport differs. The WebLLM SDK is loaded via dynamic `import()` so users who stick with Anthropic never pay the ~6 MB chunk download.
 
 Key rules:
 - **Always use sessions** for user-requested geometry — never create files in `examples/`
@@ -143,6 +154,9 @@ Static site, no backend. Vanilla TypeScript + Vite.
 - `src/export/stl.ts` — STL export
 - `src/export/obj.ts` — OBJ export
 - `src/export/threemf.ts` — 3MF export (ZIP-packaged XML)
+- `src/import/parsers/stl.ts` — STL import (binary + ASCII)
+- `src/import/codegen.ts` — Generates `Manifold.ofMesh(api.imports[i])` wrapper code
+- `src/import/importedMesh.ts` — Active-imports register exposed to the sandbox as `api.imports`
 
 ## Coordinate System
 
@@ -221,6 +235,16 @@ When referencing app routes in HTML/JS strings (links, prompts, instructions), u
 ### Duplicated Logic
 
 When two functions share identical logic (same DOM manipulation, same data transformation), extract the shared part into a single helper and have both callers use it. Copy-pasted logic drifts out of sync when one copy gets updated and the other doesn't.
+
+### Mobile-Friendly UI
+
+The app targets both desktop and mobile. The `md:` breakpoint (768 px) separates the stacked-mobile layout from the side-by-side desktop layout. When adding interactive or layout features, keep these rules in mind:
+
+- **Drag interactions**: Use the Pointer Events API (`pointerdown` / `pointermove` / `pointerup` + `setPointerCapture`) — it works identically for mouse, touch, and stylus. Never use mouse-only events (`mousedown`, `mousemove`) for draggable UI.
+- **Touch targets**: Draggable handles and small buttons must have a hit area of at least 44 × 44 px on mobile. Use a visually narrow stripe (1–2 px) centered inside a wider/taller transparent wrapper element (`w-5`, `h-5`, etc.) so the visual stays subtle but the target is fingertip-friendly.
+- **`touch-none`**: Add `touch-action: none` (Tailwind `touch-none`) to any draggable handle so the browser doesn't claim the gesture for scrolling before pointer-capture kicks in.
+- **Layout overlays**: Fixed overlays (like the AI panel) that push desktop content via `padding-right` on `#app` should skip that adjustment on mobile (`window.matchMedia('(min-width: 768px)').matches`). Stacked mobile layouts don't have a side-by-side viewport to push.
+- **Viewport-relative sizing**: Avoid hard-coded pixel widths for panel defaults that would exceed a phone screen. Test new panels/modals at 375 px wide.
 
 ### Commit & PR Conventions
 

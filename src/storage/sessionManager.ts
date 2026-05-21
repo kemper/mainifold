@@ -18,11 +18,14 @@ import {
   deleteNote as dbDeleteNote,
   updateNote as dbUpdateNote,
   legacyImagesObjectToArray,
+  generateId,
   type Session,
   type Version,
   type SessionNote,
   type AttachedImage,
 } from './db';
+import { listMessages as dbListMessages, putMessages as dbPutMessages } from '../ai/db';
+import type { ChatMessage } from '../ai/types';
 
 /** Legacy angle keys preserved only for typing the on-disk shapes we still
  *  read for backward compatibility. */
@@ -33,6 +36,7 @@ import {
   loadFromSerialized as loadAnnotations,
   type SerializedAnnotation,
 } from '../annotations/annotations';
+import { setActiveImports, type ImportedMesh } from '../import/importedMesh';
 
 /**
  * Current schema version for `.partwright.json` exports.
@@ -72,8 +76,13 @@ import {
  *           Older readers ignore unknown discriminant variants; the
  *           region drops silently if its descriptor doesn't match a
  *           known kind.
+ *  - `1.6` — optional AI chat transcript (`chat`) for the session. Holds the
+ *           persisted conversation (text, tool calls, tool results) so a
+ *           session round-trips with its chat. Only written when the caller
+ *           opts in via {@link ExportOptions.includeChat}. On import each
+ *           message is re-keyed to the new session; older readers ignore it.
  */
-export const SCHEMA_VERSION = '1.5';
+export const SCHEMA_VERSION = '1.6';
 
 const CURRENT_MAJOR = 1;
 
@@ -114,6 +123,13 @@ export interface ExportedSession {
   }[];
   notes?: { text: string; timestamp: number }[];
   /**
+   * The session's AI chat transcript, oldest first. Stored without the volatile
+   * `id`/`sessionId`/`errored` fields — those are regenerated/re-keyed on
+   * import. Only present when exported with {@link ExportOptions.includeChat}.
+   * @since 1.6
+   */
+  chat?: ExportedChatMessage[];
+  /**
    * **Deprecated in 1.3** — top-level annotations were the 1.2 location.
    * Still read on import (assigned to the latest version) for back-compat,
    * but no longer written. New writers attach annotations per-version under
@@ -122,6 +138,11 @@ export interface ExportedSession {
    */
   annotations?: SerializedAnnotation[];
 }
+
+/** A chat message as embedded in an exported session. The persisted shape
+ *  minus the fields that are environment-specific: `id` and `sessionId` are
+ *  regenerated/re-keyed on import, and `errored` is never persisted. */
+export type ExportedChatMessage = Omit<ChatMessage, 'id' | 'sessionId' | 'errored'>;
 
 interface SchemaVersionInfo {
   raw: string;
@@ -247,6 +268,7 @@ export async function createSession(name?: string, language?: 'manifold-js' | 's
   // Annotations are per-version; a fresh session starts empty so nothing
   // bleeds in from the previously-active session.
   loadAnnotations([]);
+  setActiveImports([]);
   updateURL();
   notify();
   return session;
@@ -272,6 +294,7 @@ export async function openSession(id: string, versionIndex?: number): Promise<Ve
   }
 
   currentState = { session, currentVersion: version, versionCount: count };
+  setActiveImports((version?.importedMeshes ?? []) as ImportedMesh[]);
   updateURL();
   notify();
   return version;
@@ -284,6 +307,7 @@ export async function closeSession(): Promise<void> {
   }
   currentState = { session: null, currentVersion: null, versionCount: 0 };
   loadAnnotations([]);
+  setActiveImports([]);
   updateURL();
   notify();
 }
@@ -347,11 +371,18 @@ export async function saveVersion(
   thumbnail: Blob | null,
   label?: string,
   notes?: string,
-  options?: { force?: boolean },
+  options?: { force?: boolean; importedMeshes?: ImportedMesh[] },
 ): Promise<Version | null> {
   if (!currentState.session) return null;
 
   const annotationSnapshot = serializeAnnotations();
+
+  // Imports carry forward to new versions automatically: if the user edits
+  // their imported-mesh code and re-saves, the same mesh data should still
+  // back `api.imports[i]`. Pull from the current version when the caller
+  // didn't provide an explicit override.
+  const prevImports = (currentState.currentVersion?.importedMeshes ?? []) as ImportedMesh[];
+  const nextImports = options?.importedMeshes ?? prevImports;
 
   // Skip if code AND annotations AND color regions are all identical to the
   // current version (unless forced). Annotations and color regions live
@@ -376,6 +407,7 @@ export async function saveVersion(
     notes,
     undefined,
     annotationSnapshot,
+    nextImports.length > 0 ? nextImports : undefined,
   );
 
   currentState = {
@@ -383,6 +415,7 @@ export async function saveVersion(
     currentVersion: version,
     versionCount: currentState.versionCount + 1,
   };
+  setActiveImports((version.importedMeshes ?? []) as ImportedMesh[]);
   updateURL();
   notify();
   return version;
@@ -398,6 +431,7 @@ export async function navigateVersion(direction: 'prev' | 'next'): Promise<Versi
   if (!version) return null;
 
   currentState = { ...currentState, currentVersion: version };
+  setActiveImports((version.importedMeshes ?? []) as ImportedMesh[]);
   updateURL();
   notify();
   return version;
@@ -428,6 +462,7 @@ export async function loadVersion(target: number | string): Promise<Version | nu
   if (!version) return null;
 
   currentState = { ...currentState, currentVersion: version };
+  setActiveImports((version.importedMeshes ?? []) as ImportedMesh[]);
   updateURL();
   notify();
   return version;
@@ -604,6 +639,7 @@ export async function deleteIfEmpty(sessionId: string): Promise<boolean> {
   await dbDeleteSession(sessionId);
   if (currentState.session?.id === sessionId) {
     currentState = { session: null, currentVersion: null, versionCount: 0 };
+    setActiveImports([]);
   }
   return true;
 }
@@ -614,6 +650,7 @@ export async function clearAllSessions(): Promise<void> {
   await clearAllData();
   currentState = { session: null, currentVersion: null, versionCount: 0 };
   loadAnnotations([]);
+  setActiveImports([]);
   updateURL();
   notify();
 }
@@ -638,6 +675,7 @@ export interface ExportOptions {
   includeAnnotations?: boolean;
   includeNotes?: boolean;
   includeColorRegions?: boolean;
+  includeChat?: boolean;
 }
 
 const DEFAULT_EXPORT_OPTIONS: Required<ExportOptions> = {
@@ -645,6 +683,7 @@ const DEFAULT_EXPORT_OPTIONS: Required<ExportOptions> = {
   includeAnnotations: true,
   includeNotes: true,
   includeColorRegions: true,
+  includeChat: true,
 };
 
 /** Read a Blob as a base64 data URL (e.g. "data:image/png;base64,..."). */
@@ -673,6 +712,13 @@ function dataURLToBlob(dataUrl: string): Blob | null {
   }
 }
 
+/** Drop the environment-specific fields from a persisted chat message so it can
+ *  be embedded in an export (id/sessionId are regenerated on import). */
+function toExportedChatMessage(m: ChatMessage): ExportedChatMessage {
+  const { id: _id, sessionId: _sessionId, errored: _errored, ...rest } = m;
+  return rest;
+}
+
 /** Strip `colorRegions` from a geometryData blob without mutating the original. */
 function stripColorRegions(geometryData: Record<string, unknown> | null): Record<string, unknown> | null {
   if (!geometryData) return geometryData;
@@ -695,6 +741,7 @@ export async function exportSession(
 
   const versions = await dbListVersions(id);
   const notes = opts.includeNotes ? await dbListNotes(id) : [];
+  const chat = opts.includeChat ? await dbListMessages(id) : [];
 
   // Thumbnail conversion: read each version's Blob and convert to base64 data URL.
   // Done in parallel since FileReader is async per-blob.
@@ -723,6 +770,7 @@ export async function exportSession(
       };
     }),
     ...(notes.length > 0 ? { notes: notes.map(n => ({ text: n.text, timestamp: n.timestamp })) } : {}),
+    ...(chat.length > 0 ? { chat: chat.map(toExportedChatMessage) } : {}),
   };
 }
 
@@ -801,6 +849,17 @@ export async function importSession(
     }
   }
 
+  // Restore the AI chat transcript (schema 1.6+). Re-key every message to the
+  // new session and mint a fresh id so importing into a DB that still holds
+  // the original conversation can't overwrite it. seq is preserved for order.
+  if (Array.isArray(data.chat) && data.chat.length > 0) {
+    const messages: ChatMessage[] = data.chat
+      .filter((m): m is ExportedChatMessage =>
+        !!m && (m.role === 'user' || m.role === 'assistant') && Array.isArray(m.blocks))
+      .map(m => ({ ...m, id: generateId(), sessionId: session.id }));
+    if (messages.length > 0) await dbPutMessages(messages);
+  }
+
   // Restore the session's original created/updated timestamps so the schema round-trips
   // byte-equivalently. (dbCreateSession set these to Date.now(); dbSaveVersion bumped
   // `updated` per version. Override both back to the exported values now.)
@@ -813,6 +872,7 @@ export async function importSession(
   const count = await getVersionCount(session.id);
   const latest = await getLatestVersion(session.id);
   currentState = { session: refreshedSession, currentVersion: latest, versionCount: count };
+  setActiveImports((latest?.importedMeshes ?? []) as ImportedMesh[]);
   updateURL();
   notify();
 

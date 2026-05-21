@@ -1,13 +1,21 @@
 // Main agent loop: assembles the request, streams the response, executes
 // tools, persists everything, and loops until the model hits end_turn.
+//
+// Dispatch by provider:
+//   anthropic → src/ai/anthropic.ts   (hosted Claude over HTTPS)
+//   local     → src/ai/local.ts       (WebLLM, in-browser WebGPU)
+// Both providers return the same `StreamResult` shape; chatLoop is
+// otherwise agnostic to which one is in play.
 
 import { generateId } from '../storage/db';
-import { streamTurn, buildApiMessages, type StreamCallbacks } from './anthropic';
+import { streamTurn, buildApiMessages, type StreamCallbacks as AnthropicStreamCallbacks } from './anthropic';
+import { streamLocalTurn, resolveLocalModel, type StreamCallbacks as LocalStreamCallbacks } from './local';
 import { recordUsage, putMessages } from './db';
 import { buildToolList, executeTool } from './tools';
-import { buildSystemPrompt, loadAiMd, toggleSuffix } from './systemPrompt';
+import { buildLocalSystemPrompt, buildMediumLocalSystemPrompt, buildSystemPrompt, loadAiMd, toggleSuffix } from './systemPrompt';
+import { loadSettings } from './settings';
 import { turnCostUsd } from './cost';
-import { ITERATION_CAP, SPEND_CAP_USD, type ChatBlock, type ChatMessage, type ChatToggles, type PersistedToolCall, type PersistedToolResult, type TurnOutcomeReason } from './types';
+import { activeModel, ITERATION_CAP, SPEND_CAP_USD, type ChatBlock, type ChatMessage, type ChatToggles, type PersistedToolCall, type PersistedToolResult, type TurnOutcomeReason } from './types';
 
 /** Yield to the browser between heavy synchronous work blocks so the
  *  page stays responsive. requestAnimationFrame lets the browser paint
@@ -26,7 +34,8 @@ function yieldToBrowser(): Promise<void> {
 const SLOW_TOOL_MS = 250;
 
 export interface RunTurnInput {
-  apiKey: string;
+  /** Hosted-provider API key. Required only when toggles.provider === 'anthropic'. */
+  apiKey?: string;
   toggles: ChatToggles;
   /** sessionId for the current chat bucket. */
   sessionId: string;
@@ -38,6 +47,13 @@ export interface RunTurnInput {
    *  agent loop both stop at the next safe seam. Any partial assistant
    *  text that was streamed is preserved as `aborted: true`. */
   signal?: AbortSignal;
+  /** Optional drain hook — called once per loop iteration, right after the
+   *  tool_result user message is persisted and before the next assistant
+   *  request goes out. If it returns blocks, they're appended to the
+   *  just-persisted user turn so the model sees them as part of the next
+   *  iteration. This is how mid-run "queued" messages from the human get
+   *  delivered at the next natural pause without aborting the agent. */
+  onDrainQueuedBlocks?: () => ChatBlock[];
 }
 
 export interface RunTurnCallbacks {
@@ -56,6 +72,11 @@ export interface RunTurnCallbacks {
   onToolResult?: (toolUseId: string, toolName: string, result: PersistedToolResult) => void;
   /** Persisted assistant message at the end of one round (post-tools). */
   onAssistantPersisted?: (msg: ChatMessage) => void;
+  /** The just-persisted tool_result user turn had queued user blocks
+   *  merged into it. The UI uses this to refresh the in-memory copy and
+   *  re-render the transcript so the user sees their queued message land
+   *  immediately, without waiting for the turn to fully complete. */
+  onUserMessageUpdated?: (msg: ChatMessage) => void;
   /** A "thinking" beat — fires when a turn begins, when each tool starts,
    *  and on a wall-clock interval while waiting for the first text delta.
    *  Use to keep an indicator alive so the user knows we haven't frozen. */
@@ -81,8 +102,33 @@ export interface RunTurnCallbacks {
 export async function runTurn(input: RunTurnInput, callbacks: RunTurnCallbacks = {}): Promise<ChatMessage[]> {
   const { apiKey, toggles, sessionId, history, userBlocks, signal } = input;
   const tools = buildToolList(toggles);
-  const aiMd = await loadAiMd();
-  const systemPrompt = buildSystemPrompt(aiMd);
+
+  // The full ai.md is ~12.5K tokens — fine for hosted Claude with prompt
+  // caching. Most local models have 32K context so it technically fits
+  // there too, but smaller models do better with the hand-tuned
+  // slim/medium prompts (which leave more room for tool docs +
+  // conversation + the reply) and call readDoc to pull subdocs on demand.
+  // Either path honors the per-provider user override if one is set in
+  // AI settings.
+  const settings = loadSettings();
+  const override = settings.systemPromptOverrides?.[toggles.provider] ?? null;
+  let systemPrompt: string;
+  if (override !== null) {
+    systemPrompt = override;
+  } else if (toggles.provider === 'local' && toggles.localModel) {
+    try {
+      const info = resolveLocalModel(toggles.localModel);
+      systemPrompt = info.promptTier === 'medium'
+        ? buildMediumLocalSystemPrompt()
+        : buildLocalSystemPrompt();
+    } catch {
+      systemPrompt = buildLocalSystemPrompt();
+    }
+  } else if (toggles.provider === 'local') {
+    systemPrompt = buildLocalSystemPrompt();
+  } else {
+    systemPrompt = buildSystemPrompt(await loadAiMd());
+  }
 
   const seqStart = nextSeq(history);
 
@@ -100,19 +146,30 @@ export async function runTurn(input: RunTurnInput, callbacks: RunTurnCallbacks =
   let workingHistory: ChatMessage[] = [...history, userMsg];
   let totalCostUsd = 0;
   let totalToolCalls = 0;
+  let turnApiTimeMs = 0;
   const maxIter = ITERATION_CAP[toggles.maxIterations];
   const maxSpend = SPEND_CAP_USD[toggles.maxSpend];
+  // Spend cap is a session budget — count what prior turns already
+  // burned so this turn stops when the running total tips over the cap,
+  // not when this single turn would exceed the whole cap on its own.
+  const priorSessionCost = totalCost(history);
+
+  const model = activeModel(toggles);
+  if (model === null) {
+    callbacks.onError?.(new Error('No model is active. Open AI settings and choose a provider + model.'));
+    callbacks.onTurnComplete?.({ totalCostUsd: 0, toolCalls: 0, reason: 'error', iterations: 0 });
+    return workingHistory;
+  }
 
   for (let iter = 0; Number.isFinite(maxIter) ? iter < maxIter : true; iter++) {
     // Give the browser a frame between iterations so an agent running
     // many tool round-trips doesn't lock up the page.
     if (iter > 0) await yieldToBrowser();
-    const apiMessages = buildApiMessages(workingHistory);
     const assistantId = generateId();
     callbacks.onAssistantStart?.(assistantId);
 
     callbacks.onProgress?.({ phase: 'thinking', detail: 'Waiting for first token...' });
-    const streamCallbacks: StreamCallbacks = {
+    const streamCallbacks: AnthropicStreamCallbacks & LocalStreamCallbacks = {
       onText: delta => {
         // Beat on EVERY delta so the stall watchdog sees a healthy stream
         // and the elapsed-seconds counter doesn't keep climbing while text
@@ -128,22 +185,45 @@ export async function runTurn(input: RunTurnInput, callbacks: RunTurnCallbacks =
       },
     };
 
+    const apiCallStart = Date.now();
     let result;
     try {
-      result = await streamTurn({
-        apiKey,
-        model: toggles.model,
-        systemPrompt,
-        systemSuffix: toggleSuffix(toggles),
-        apiMessages,
-        tools,
-      }, streamCallbacks, signal);
+      if (toggles.provider === 'anthropic') {
+        if (!apiKey) throw new Error('Anthropic API key is required.');
+        const apiMessages = buildApiMessages(workingHistory);
+        result = await streamTurn({
+          apiKey,
+          model: toggles.anthropicModel,
+          systemPrompt,
+          systemSuffix: toggleSuffix(toggles),
+          apiMessages,
+          tools,
+        }, streamCallbacks, signal);
+      } else {
+        if (!toggles.localModel) throw new Error('No local model is selected. Open AI settings → Local model.');
+        // Local provider doesn't accept AbortSignal yet — the user's Stop
+        // click takes effect at the next iteration / tool boundary.
+        result = await streamLocalTurn({
+          modelId: toggles.localModel,
+          systemPrompt,
+          systemSuffix: toggleSuffix(toggles),
+          history: workingHistory,
+          tools,
+        }, streamCallbacks);
+      }
     } catch (err) {
+      // Surface the error to the caller; runTurn returns normally and the
+      // caller's awaited post-cleanup runs the history reload. The
+      // in-memory "Thinking…" placeholder gets wiped there.
       callbacks.onError?.(err instanceof Error ? err : new Error(String(err)));
+      callbacks.onTurnComplete?.({ totalCostUsd, toolCalls: totalToolCalls, reason: 'error', iterations: iter + 1 });
       return workingHistory;
     }
 
-    const turnCost = turnCostUsd(toggles.model, result.usage);
+    const durationMs = Date.now() - apiCallStart;
+    turnApiTimeMs += durationMs;
+
+    const turnCost = turnCostUsd(model, result.usage);
     totalCostUsd += turnCost;
 
     const aborted = result.stopReason === 'aborted' || signal?.aborted === true;
@@ -158,13 +238,26 @@ export async function runTurn(input: RunTurnInput, callbacks: RunTurnCallbacks =
       costUsd: turnCost,
       createdAt: Date.now(),
       seq: seqStart + 1 + iter * 2,
+      durationMs,
+      turnElapsedMs: turnApiTimeMs,
       ...(aborted ? { aborted: true } : {}),
     };
     await putMessages([assistantMsg]);
     workingHistory = [...workingHistory, assistantMsg];
     callbacks.onAssistantPersisted?.(assistantMsg);
 
-    void recordUsage('anthropic', result.usage.inputTokens + result.usage.cacheReadInputTokens + result.usage.cacheCreationInputTokens, result.usage.outputTokens, turnCost);
+    if (toggles.provider === 'anthropic') {
+      void recordUsage('anthropic', result.usage.inputTokens + result.usage.cacheReadInputTokens + result.usage.cacheCreationInputTokens, result.usage.outputTokens, turnCost);
+    }
+
+    // Local-provider truncation: max_tokens or unclosed tool-call. We
+    // don't fire `onError` here — that would race with `onTurnComplete`
+    // below and stomp the outcome. Instead we flag a synthetic stopReason
+    // so the outcome formatter in the panel surfaces a useful hint.
+    const localTruncated = toggles.provider === 'local' && (result as { truncated?: boolean }).truncated;
+    if (localTruncated && result.stopReason !== 'tool_use') {
+      result = { ...result, stopReason: 'max_tokens' };
+    }
 
     if (aborted) {
       callbacks.onAborted?.();
@@ -172,11 +265,11 @@ export async function runTurn(input: RunTurnInput, callbacks: RunTurnCallbacks =
       return workingHistory;
     }
 
-    // Spend cap — stop BEFORE the next iteration if we've already
-    // exceeded the user's per-turn budget. We check after persisting
-    // the current iteration so the assistant message they paid for
-    // still lands in the transcript.
-    if (Number.isFinite(maxSpend) && totalCostUsd > maxSpend) {
+    // Spend cap — stop BEFORE the next iteration if the running session
+    // total (prior turns + this turn so far) has tipped over the user's
+    // budget. Checked after persisting the current iteration so the
+    // assistant message they paid for still lands in the transcript.
+    if (Number.isFinite(maxSpend) && (priorSessionCost + totalCostUsd) > maxSpend) {
       callbacks.onTurnComplete?.({
         totalCostUsd,
         toolCalls: totalToolCalls,
@@ -204,20 +297,54 @@ export async function runTurn(input: RunTurnInput, callbacks: RunTurnCallbacks =
     // flight, but we check the signal between calls so a stop request
     // takes effect within ~one tool's duration.
     callbacks.onProgress?.({ phase: 'tool', detail: `running ${result.toolCalls.length} tool(s)...` });
-    const toolResults = await executeAllWithRetry(result.toolCalls, toggles, callbacks, signal);
-    totalToolCalls += result.toolCalls.length;
 
+    // Persist a placeholder tool-result message immediately after the assistant
+    // message so that a page kill (tab switch, browser GC, system sleep) between
+    // now and when tools finish doesn't leave orphaned tool_use blocks in
+    // IndexedDB. Orphaned blocks cause a synthetic "interrupted" error on every
+    // future resume of this session. Each slot is updated in-place as its tool
+    // completes; the final await below writes the authoritative copy.
     const toolResultMsg: ChatMessage = {
       id: generateId(),
       sessionId,
       role: 'user',
       blocks: [],
-      toolResults,
+      toolResults: result.toolCalls.map(tc => ({
+        toolUseId: tc.id,
+        content: '[Tool call was interrupted and did not complete]',
+        isError: true,
+      })),
       createdAt: Date.now(),
       seq: seqStart + 2 + iter * 2,
     };
     await putMessages([toolResultMsg]);
+
+    const toolResults = await executeAllWithRetry(
+      result.toolCalls, toggles, callbacks, signal,
+      (eachResult, i) => {
+        toolResultMsg.toolResults![i] = eachResult;
+        void putMessages([toolResultMsg]);
+      },
+    );
+    totalToolCalls += result.toolCalls.length;
+
+    // Final authoritative persist: same id, complete result set.
+    toolResultMsg.toolResults = toolResults;
+    await putMessages([toolResultMsg]);
     workingHistory = [...workingHistory, toolResultMsg];
+
+    // Drain anything the human queued while we were thinking, streaming,
+    // or running tools. Merging into the same user turn that carries the
+    // tool_results keeps the API turn alternation clean (no two
+    // consecutive user messages) and means the model sees the new
+    // instruction as part of its very next response.
+    const queuedBlocks = input.onDrainQueuedBlocks?.() ?? [];
+    if (queuedBlocks.length > 0) {
+      toolResultMsg.blocks = [...toolResultMsg.blocks, ...queuedBlocks];
+      await putMessages([toolResultMsg]);
+      workingHistory[workingHistory.length - 1] = toolResultMsg;
+      callbacks.onUserMessageUpdated?.(toolResultMsg);
+    }
 
     if (signal?.aborted) {
       callbacks.onAborted?.();
@@ -239,9 +366,11 @@ async function executeAllWithRetry(
   toggles: ChatToggles,
   callbacks: RunTurnCallbacks,
   signal?: AbortSignal,
+  onEachResult?: (result: PersistedToolResult, index: number) => void,
 ): Promise<PersistedToolResult[]> {
   const results: PersistedToolResult[] = [];
-  for (const tc of toolCalls) {
+  for (let i = 0; i < toolCalls.length; i++) {
+    const tc = toolCalls[i];
     // If the user hit Stop, every remaining tool call gets a synthetic
     // "aborted by user" result. The API requires every tool_use to have a
     // matching tool_result on the next turn, so we can't just drop them.
@@ -253,6 +382,7 @@ async function executeAllWithRetry(
       };
       results.push(aborted);
       callbacks.onToolResult?.(tc.id, tc.name, aborted);
+      onEachResult?.(aborted, i);
       continue;
     }
     let attempt = 0;
@@ -269,6 +399,7 @@ async function executeAllWithRetry(
     };
     results.push(persisted);
     callbacks.onToolResult?.(tc.id, tc.name, persisted);
+    onEachResult?.(persisted, i);
     // Yield BETWEEN tool calls so the browser can flush a frame and the
     // user can interact (click Stop, scroll the transcript). A run of 5
     // paint tools without yields is enough to trigger Chrome's "page

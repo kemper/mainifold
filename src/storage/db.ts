@@ -56,6 +56,10 @@ export interface Version {
    *  this version was saved. Shape matches `SerializedAnnotation[]` from the
    *  annotations module — kept as `unknown[]` here to preserve db-layer isolation. */
   annotations?: unknown[];
+  /** External meshes imported into this version (STL today). Exposed to the
+   *  sandbox as `api.imports[i]` so user code can call `Manifold.ofMesh(...)`.
+   *  Kept as `unknown[]` here to preserve db-layer isolation. */
+  importedMeshes?: unknown[];
 }
 
 export interface SessionNote {
@@ -68,7 +72,7 @@ export interface SessionNote {
 const DB_NAME = 'partwright';
 const LEGACY_DB_NAME = 'mainifold';
 const LEGACY_MIGRATION_KEY = 'partwright-migrated-mainifold-db';
-const DB_VERSION = 3;
+const DB_VERSION = 4;
 
 /** Opens the partwright IndexedDB. Exposed so the AI subsystem can attach
  *  its own stores (`aiKeys`, `aiChats`) without duplicating the connection. */
@@ -105,6 +109,13 @@ function openDB(): Promise<IDBDatabase> {
       if (!db.objectStoreNames.contains('aiChats')) {
         const store = db.createObjectStore('aiChats', { keyPath: 'id' });
         store.createIndex('sessionId', 'sessionId', { unique: false });
+      }
+      // v4: backing store for the attach-image picker's "recent" list.
+      // Keyed by SHA-256 of the image bytes so re-uploading the same file
+      // bumps lastUsedAt instead of duplicating the row.
+      if (!db.objectStoreNames.contains('aiAttachments')) {
+        const store = db.createObjectStore('aiAttachments', { keyPath: 'id' });
+        store.createIndex('lastUsedAt', 'lastUsedAt', { unique: false });
       }
     };
     req.onsuccess = () => {
@@ -386,6 +397,8 @@ export async function saveVersion(
   timestamp?: number,
   /** Snapshot of annotations at save time (opaque to the db layer). */
   annotations?: unknown[],
+  /** External meshes imported into this version (opaque to the db layer). */
+  importedMeshes?: unknown[],
 ): Promise<Version> {
   const versions = await listVersions(sessionId);
   const nextIndex = versions.length > 0 ? Math.max(...versions.map(v => v.index)) + 1 : 1;
@@ -401,6 +414,7 @@ export async function saveVersion(
     timestamp: timestamp ?? Date.now(),
     ...(notes ? { notes } : {}),
     ...(annotations && annotations.length > 0 ? { annotations } : {}),
+    ...(importedMeshes && importedMeshes.length > 0 ? { importedMeshes } : {}),
   };
 
   const store = await tx('versions', 'readwrite');

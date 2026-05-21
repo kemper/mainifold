@@ -4,10 +4,22 @@
 // future provider (OpenAI, Gemini, Ollama) can adapt to it without changing
 // the storage layer.
 
-export type Provider = 'anthropic';
+import type { LocalModelId } from './localModels';
 
-export type ModelId = 'claude-haiku-4-5' | 'claude-sonnet-4-6' | 'claude-opus-4-7';
+/** Anthropic = hosted Claude (BYO API key). Local = WebLLM running on the
+ *  user's GPU. Only one is active per chat at a time; switching is a UI
+ *  affordance, not a per-turn decision. */
+export type Provider = 'anthropic' | 'local';
 
+export type AnthropicModelId = 'claude-haiku-4-5' | 'claude-sonnet-4-6' | 'claude-opus-4-7';
+
+/** Either an Anthropic model name or a WebLLM model_id. The shape is the
+ *  same at the type level (a string) so callers can treat it opaquely. */
+export type ModelId = AnthropicModelId | LocalModelId;
+
+/** Named bundles of toggle settings the user can flip between with a
+ *  single click. 'custom' means none of the named bundles match — the
+ *  user has tweaked individual toggles. */
 export type Preset = 'minimal' | 'standard' | 'full' | 'custom';
 
 /** Per-session knobs the user can flip in the toggle strip above the chat
@@ -33,13 +45,26 @@ export interface ChatToggles {
    *  turn. The agent stops with a "stopped at cap" banner if it would
    *  exceed this. 'low'=4, 'medium'=16, 'high'=64, 'infinity'=unlimited. */
   maxIterations: 'low' | 'medium' | 'high' | 'infinity';
-  /** Hard cap on USD spend per user turn. Sums input + output + cache
-   *  read/write across every iteration. When exceeded the loop stops
-   *  with a "stopped at spend cap" banner. Both this and maxIterations
-   *  apply — whichever trips first stops the turn. 'infinity' disables
-   *  the cap. */
-  maxSpend: 'cheap' | 'low' | 'medium' | 'high' | 'infinity';
-  model: ModelId;
+  /** Hard cap on total USD spent in this session. Sums input + output +
+   *  cache read/write across every iteration of every turn so far.
+   *  Enforced two ways: the active turn stops with a "stopped at spend
+   *  cap" banner when this iteration would push the session total over,
+   *  and the panel blocks further sends once the cap has been reached
+   *  until the user raises it. Both this and maxIterations apply —
+   *  whichever trips first stops the turn. 'infinity' disables the cap.
+   *  Local turns are billed at $0, so the cap only matters when the
+   *  active provider is Anthropic. */
+  maxSpend: 'cheap' | 'low' | 'medium' | 'medHigh' | 'high' | 'veryHigh' | 'infinity';
+  /** Which backend the chat is talking to right now. */
+  provider: Provider;
+  /** Anthropic model for cloud chats. Always present so the user can switch
+   *  back to Anthropic without re-picking a model. */
+  anthropicModel: AnthropicModelId;
+  /** WebLLM model for local chats. Stored as a plain string so user-added
+   *  custom model ids (which aren't in the curated `LocalModelId` union)
+   *  fit too. Present from the first time the user picks one in the
+   *  local-model modal. */
+  localModel: string | null;
 }
 
 /** Source of truth for the iteration-cap dropdown. The toggle pill,
@@ -56,10 +81,12 @@ export const MAX_ITERATIONS: Record<ChatToggles['maxIterations'], { value: numbe
 /** Source of truth for the spend-cap dropdown. Same pattern as
  *  MAX_ITERATIONS. */
 export const MAX_SPEND: Record<ChatToggles['maxSpend'], { value: number; label: string; promptLabel: string; hint: string }> = {
-  cheap:    { value: 0.10,  label: '$0.10', promptLabel: '$0.10',     hint: 'Tight budget. Pairs well with Haiku and short turns.' },
+  cheap:    { value: 0.10,  label: '$0.10', promptLabel: '$0.10',     hint: 'Tight session budget. Pairs well with Haiku and short turns.' },
   low:      { value: 0.50,  label: '$0.50', promptLabel: '$0.50',     hint: 'Safety net for casual iteration.' },
-  medium:   { value: 2.00,  label: '$2',    promptLabel: '$2',        hint: 'Default. Comfortable for most Sonnet turns including a few vision calls.' },
+  medium:   { value: 2.00,  label: '$2',    promptLabel: '$2',        hint: 'Default. Comfortable for a Sonnet session with a few vision calls.' },
+  medHigh:  { value: 5.00,  label: '$5',    promptLabel: '$5',        hint: 'Multi-turn Sonnet session with steady vision verification.' },
   high:     { value: 10.00, label: '$10',   promptLabel: '$10',       hint: 'Long autonomous runs on Opus, lots of vision verification.' },
+  veryHigh: { value: 20.00, label: '$20',   promptLabel: '$20',       hint: 'Marathon Opus sessions. Watch the cost meter.' },
   infinity: { value: Number.POSITIVE_INFINITY, label: '∞', promptLabel: 'unlimited', hint: 'No budget cap. The model can spend whatever it wants.' },
 };
 
@@ -109,6 +136,16 @@ export interface ChatMessage {
   compacted?: boolean;
   /** When the user hit Stop mid-stream and we preserved the partial. */
   aborted?: boolean;
+  /** Marks a synthetic assistant message representing a turn that errored
+   *  out (e.g. the model crashed or hit the iteration cap). Rendered with
+   *  a red border so it stands out from a normal reply, and offers a
+   *  Retry button next to it. Not persisted to IndexedDB. */
+  errored?: boolean;
+  /** Wall-clock milliseconds for this single model request/response cycle. */
+  durationMs?: number;
+  /** Cumulative model time in milliseconds across all API calls since the
+   *  user triggered this turn (resets each time the user sends a message). */
+  turnElapsedMs?: number;
 }
 
 export type ChatBlock =
@@ -156,4 +193,12 @@ export interface KeyRecord {
   totalInputTokens: number;
   totalOutputTokens: number;
   totalCostUsd: number;
+}
+
+/** Returns the active model id given a settings object. Centralized so the
+ *  cost meter, the request builder, and the toolbar chip all agree on which
+ *  model is in play for the next turn. */
+export function activeModel(toggles: ChatToggles): ModelId | string | null {
+  if (toggles.provider === 'anthropic') return toggles.anthropicModel;
+  return toggles.localModel;
 }

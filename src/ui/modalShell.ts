@@ -15,6 +15,10 @@ export interface ModalShellOptions {
   /** When true, applies `max-h-[80vh]` + `overflow-auto` so long bodies
    *  (e.g. compaction proposal with many notes) scroll. */
   scrollable?: boolean;
+  /** Called when the shell is dismissed by Escape, click-outside, the ✕
+   *  button, or a programmatic `close()`. Promise-returning modals use
+   *  this to resolve with a cancellation value. Fires exactly once. */
+  onClose?: () => void;
 }
 
 export interface ModalShell {
@@ -38,10 +42,11 @@ export function createModalShell(opts: ModalShellOptions): ModalShell {
   }
 
   const maxW = `max-w-${opts.maxWidth ?? 'md'}`;
-  const maxH = opts.scrollable ? 'max-h-[80vh]' : '';
+  const maxH = opts.scrollable ? 'max-h-[calc(100vh-2rem)]' : '';
+  const overlayPad = opts.scrollable ? 'p-4' : '';
 
   const overlay = document.createElement('div');
-  overlay.className = 'fixed inset-0 bg-black/60 flex items-center justify-center z-50';
+  overlay.className = `fixed inset-0 bg-black/60 flex items-center justify-center z-50 ${overlayPad}`;
 
   const modal = document.createElement('div');
   modal.className = `bg-zinc-800 rounded-xl shadow-2xl border border-zinc-700 w-full ${maxW} ${maxH} flex flex-col`.replace(/\s+/g, ' ').trim();
@@ -59,7 +64,7 @@ export function createModalShell(opts: ModalShellOptions): ModalShell {
   modal.appendChild(header);
 
   const body = document.createElement('div');
-  const overflowClass = opts.scrollable ? 'overflow-auto' : '';
+  const overflowClass = opts.scrollable ? 'overflow-y-auto flex-1 min-h-0' : '';
   body.className = `px-5 py-4 flex flex-col gap-3 text-sm text-zinc-200 ${overflowClass}`.trim();
   modal.appendChild(body);
 
@@ -82,6 +87,7 @@ export function createModalShell(opts: ModalShellOptions): ModalShell {
     document.removeEventListener('keydown', escHandler);
     overlay.remove();
     if (currentModal === overlay) currentModal = null;
+    opts.onClose?.();
   }
 
   overlay.addEventListener('click', e => { if (e.target === overlay) close(); });

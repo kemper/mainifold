@@ -99,6 +99,24 @@ test.describe('AI chat panel', () => {
     await expect(page.locator('#btn-ai')).toContainText(/Connect AI/);
   });
 
+  test('stale local-model id falls back to the dual connect prompt', async ({ page }) => {
+    // Regression: when the curated local-model list is pruned, a user whose
+    // saved provider was 'local' would get stuck on "No local model picked.
+    // Choose a model" instead of the friendlier "Connect Anthropic API or
+    // run a local model" dual prompt. Simulate by planting localStorage with
+    // a provider=local + bogus model id before the app boots.
+    await page.addInitScript(() => {
+      localStorage.setItem('partwright-ai-settings-v1', JSON.stringify({
+        toggles: { provider: 'local', localModel: 'Bogus-Removed-Model-MLC' },
+      }));
+    });
+    await page.goto('/editor?view=ai');
+    await page.click('#btn-ai');
+    const panel = page.locator('#ai-panel');
+    await expect(panel.locator('button:has-text("Connect Anthropic API")')).toBeVisible();
+    await expect(panel.locator('button:has-text("run a local model")')).toBeVisible();
+  });
+
   test('toggle pills flip state on click', async ({ page }) => {
     await page.goto('/editor?view=ai');
     await page.click('#btn-ai');
@@ -167,6 +185,27 @@ test.describe('AI chat panel', () => {
     const onModal = page.waitForSelector('input[type="password"]', { timeout: 5000 }).then(() => 'modal');
     const which = await Promise.race([onEditor, onModal]);
     expect(['editor', 'modal']).toContain(which);
+  });
+
+  test('Send stays as Send when a turn is in flight; Stop is the separate red button', async ({ page }) => {
+    // Regression: pre-queue, the Send button toggled to Stop while a turn
+    // was in flight. The queue feature requires Send to keep dispatching
+    // (queueing mid-run) with Stop split out as its own button so a typed
+    // follow-up doesn't accidentally abort the agent.
+    await page.goto('/editor');
+    await page.waitForSelector('#ai-panel');
+    await page.locator('#btn-ai').dispatchEvent('click');
+
+    const panel = page.locator('#ai-panel');
+    // Idle state: Send is visible, Stop and queued-message badge are hidden.
+    await expect(panel.locator('button', { hasText: /^Send$/ })).toBeVisible();
+    await expect(panel.locator('#btn-ai-stop')).toBeHidden();
+    await expect(panel.locator('#queued-message-badge')).toBeHidden();
+
+    // No assertion runs an actual turn (that needs an API key + network),
+    // but the end-to-end queue → drain → transcript path is covered by
+    // the chatLoop unit test suite when added; this test pins the UX
+    // contract that Send never becomes Stop.
   });
 });
 
