@@ -18,11 +18,14 @@ import {
   deleteNote as dbDeleteNote,
   updateNote as dbUpdateNote,
   legacyImagesObjectToArray,
+  generateId,
   type Session,
   type Version,
   type SessionNote,
   type AttachedImage,
 } from './db';
+import { listMessages as dbListMessages, putMessages as dbPutMessages } from '../ai/db';
+import type { ChatMessage } from '../ai/types';
 
 /** Legacy angle keys preserved only for typing the on-disk shapes we still
  *  read for backward compatibility. */
@@ -73,8 +76,13 @@ import { setActiveImports, type ImportedMesh } from '../import/importedMesh';
  *           Older readers ignore unknown discriminant variants; the
  *           region drops silently if its descriptor doesn't match a
  *           known kind.
+ *  - `1.6` — optional AI chat transcript (`chat`) for the session. Holds the
+ *           persisted conversation (text, tool calls, tool results) so a
+ *           session round-trips with its chat. Only written when the caller
+ *           opts in via {@link ExportOptions.includeChat}. On import each
+ *           message is re-keyed to the new session; older readers ignore it.
  */
-export const SCHEMA_VERSION = '1.5';
+export const SCHEMA_VERSION = '1.6';
 
 const CURRENT_MAJOR = 1;
 
@@ -115,6 +123,13 @@ export interface ExportedSession {
   }[];
   notes?: { text: string; timestamp: number }[];
   /**
+   * The session's AI chat transcript, oldest first. Stored without the volatile
+   * `id`/`sessionId`/`errored` fields — those are regenerated/re-keyed on
+   * import. Only present when exported with {@link ExportOptions.includeChat}.
+   * @since 1.6
+   */
+  chat?: ExportedChatMessage[];
+  /**
    * **Deprecated in 1.3** — top-level annotations were the 1.2 location.
    * Still read on import (assigned to the latest version) for back-compat,
    * but no longer written. New writers attach annotations per-version under
@@ -123,6 +138,11 @@ export interface ExportedSession {
    */
   annotations?: SerializedAnnotation[];
 }
+
+/** A chat message as embedded in an exported session. The persisted shape
+ *  minus the fields that are environment-specific: `id` and `sessionId` are
+ *  regenerated/re-keyed on import, and `errored` is never persisted. */
+export type ExportedChatMessage = Omit<ChatMessage, 'id' | 'sessionId' | 'errored'>;
 
 interface SchemaVersionInfo {
   raw: string;
@@ -655,6 +675,7 @@ export interface ExportOptions {
   includeAnnotations?: boolean;
   includeNotes?: boolean;
   includeColorRegions?: boolean;
+  includeChat?: boolean;
 }
 
 const DEFAULT_EXPORT_OPTIONS: Required<ExportOptions> = {
@@ -662,6 +683,7 @@ const DEFAULT_EXPORT_OPTIONS: Required<ExportOptions> = {
   includeAnnotations: true,
   includeNotes: true,
   includeColorRegions: true,
+  includeChat: true,
 };
 
 /** Read a Blob as a base64 data URL (e.g. "data:image/png;base64,..."). */
@@ -690,6 +712,13 @@ function dataURLToBlob(dataUrl: string): Blob | null {
   }
 }
 
+/** Drop the environment-specific fields from a persisted chat message so it can
+ *  be embedded in an export (id/sessionId are regenerated on import). */
+function toExportedChatMessage(m: ChatMessage): ExportedChatMessage {
+  const { id: _id, sessionId: _sessionId, errored: _errored, ...rest } = m;
+  return rest;
+}
+
 /** Strip `colorRegions` from a geometryData blob without mutating the original. */
 function stripColorRegions(geometryData: Record<string, unknown> | null): Record<string, unknown> | null {
   if (!geometryData) return geometryData;
@@ -712,6 +741,7 @@ export async function exportSession(
 
   const versions = await dbListVersions(id);
   const notes = opts.includeNotes ? await dbListNotes(id) : [];
+  const chat = opts.includeChat ? await dbListMessages(id) : [];
 
   // Thumbnail conversion: read each version's Blob and convert to base64 data URL.
   // Done in parallel since FileReader is async per-blob.
@@ -740,6 +770,7 @@ export async function exportSession(
       };
     }),
     ...(notes.length > 0 ? { notes: notes.map(n => ({ text: n.text, timestamp: n.timestamp })) } : {}),
+    ...(chat.length > 0 ? { chat: chat.map(toExportedChatMessage) } : {}),
   };
 }
 
@@ -816,6 +847,17 @@ export async function importSession(
     for (const n of data.notes) {
       await dbAddNote(session.id, n.text);
     }
+  }
+
+  // Restore the AI chat transcript (schema 1.6+). Re-key every message to the
+  // new session and mint a fresh id so importing into a DB that still holds
+  // the original conversation can't overwrite it. seq is preserved for order.
+  if (Array.isArray(data.chat) && data.chat.length > 0) {
+    const messages: ChatMessage[] = data.chat
+      .filter((m): m is ExportedChatMessage =>
+        !!m && (m.role === 'user' || m.role === 'assistant') && Array.isArray(m.blocks))
+      .map(m => ({ ...m, id: generateId(), sessionId: session.id }));
+    if (messages.length > 0) await dbPutMessages(messages);
   }
 
   // Restore the session's original created/updated timestamps so the schema round-trips

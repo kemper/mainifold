@@ -18,6 +18,8 @@ import { showSystemPromptModal } from './aiSystemPromptModal';
 import { showCompactConfirmModal } from './aiCompactModal';
 import { showAttachmentModal } from './aiAttachmentModal';
 import { putAttachment } from '../ai/attachments';
+import { exportChatMarkdown } from '../export/chat';
+import { getState } from '../storage/sessionManager';
 import { ensureModelLoaded, effectiveContextCeiling, interruptLocal, isModelLoaded, resolveLocalModel } from '../ai/local';
 import { activeModel, SPEND_CAP_USD, type AnthropicModelId, type ChatBlock, type ChatMessage, type ChatToggles, type ImageSource, type PersistedToolResult, type TurnOutcomeReason } from '../ai/types';
 import { errorLog } from '../diagnostics/errorLog';
@@ -301,6 +303,11 @@ function buildDrawer(): void {
   compactBtn.title = 'Compact the conversation: summarize older turns and promote insights to session notes.';
   compactBtn.addEventListener('click', () => { void runCompact(); });
   header.appendChild(compactBtn);
+
+  const exportBtn = createIconButton('Export chat', '⬇ Chat');
+  exportBtn.title = 'Export this conversation as a Markdown (.md) file. Saves the whole transcript — text, tool calls, and results.';
+  exportBtn.addEventListener('click', exportCurrentChat);
+  header.appendChild(exportBtn);
 
   const clearBtn = createIconButton('Clear', '🗑');
   clearBtn.title = 'Clear the chat history for the current session. The conversation is removed from your browser; saved versions and notes are untouched.';
@@ -940,6 +947,18 @@ async function loadLocalModelInline(): Promise<void> {
   } catch (err) {
     setTransientStatus(`Failed to load: ${err instanceof Error ? err.message : String(err)}`);
   }
+}
+
+/** Download the current conversation as a Markdown transcript. In-memory
+ *  history is already the authoritative, seq-ordered view, so no DB read. */
+function exportCurrentChat(): void {
+  if (state.history.length === 0) {
+    setTransientStatus('Nothing to export — the chat is empty.');
+    return;
+  }
+  const sessionName = state.sessionId === GLOBAL_CHAT_BUCKET ? null : (getState().session?.name ?? null);
+  exportChatMarkdown(state.history, sessionName);
+  setTransientStatus('Chat exported as Markdown.');
 }
 
 /** Clear chat history for the current session. Confirms first; refuses to
