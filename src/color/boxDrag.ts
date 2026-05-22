@@ -308,7 +308,7 @@ export function commitBox(): number {
     `${shapeLabel(shapeType)} ${existingCount + 1}`,
     [...getColor()] as [number, number, number],
     'slab',
-    { kind: 'box', center: box.center, size: box.size, quaternion: box.quaternion },
+    { kind: 'box', center: box.center, size: box.size, quaternion: box.quaternion, shape: shapeType },
     triangles,
   );
 

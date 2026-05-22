@@ -23,6 +23,16 @@ function getWorker(): Worker {
   if (worker) return worker;
   worker = new Worker(new URL('./agentWorker.ts', import.meta.url), { type: 'module' });
   worker.onmessage = handleMessage;
+  worker.onmessageerror = (ev) => {
+    // A Worker→Main message that fails structured-clone on receipt is dropped
+    // silently otherwise, so the in-flight turn would never settle.
+    rejectCurrentTurn?.(new Error('Agent Worker sent an undeserializable message'));
+    cleanup();
+    worker?.terminate();
+    worker = null;
+    // eslint-disable-next-line no-console
+    console.error('[AgentWorker] messageerror', ev);
+  };
   worker.onerror = (ev) => {
     const err = new Error(`Agent Worker crashed: ${ev.message}`);
     if (rejectCurrentTurn) {
@@ -61,6 +71,7 @@ async function handleMessage(event: MessageEvent): Promise<void> {
       case 'onUserPersisted':      cb.onUserPersisted?.(args[0] as ChatMessage); break;
       case 'onAssistantStart':     cb.onAssistantStart?.(args[0] as string); break;
       case 'onAssistantText':      cb.onAssistantText?.(args[0] as string); break;
+      case 'onAssistantThinking':  cb.onAssistantThinking?.(args[0] as string); break;
       case 'onToolStart':          cb.onToolStart?.(args[0] as string, args[1] as string); break;
       case 'onToolResult':         cb.onToolResult?.(args[0] as string, args[1] as string, args[2] as PersistedToolResult); break;
       case 'onAssistantPersisted': cb.onAssistantPersisted?.(args[0] as ChatMessage); break;

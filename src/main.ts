@@ -26,7 +26,7 @@ import { initEngine, executeCode, executeCodeAsync, validateCodeAsync, ensureEng
 import { onQualitySettingsChange } from './geometry/qualitySettings';
 import { sliceAtZ, getBoundingBox } from './geometry/crossSection';
 import { initViewport, updateMesh, setClipping, setClipZ, getClipState, getCameraState, getCanvas, getMeshGroup, getCamera, setMeasureLock, setUserOrbitLock, isUserOrbitLocked, onUserOrbitLockChange, setDimensionsVisible, isDimensionsVisible, setGridVisible, isGridVisible } from './renderer/viewport';
-import { renderCompositeCanvas, renderElevationsToContainer, renderSingleView, renderSliceSVG, setImages as _setImages, clearImages as _clearImages, getImages as _getImages, buildViewCamera, RENDER_VIEW_MODES, STANDARD_VIEWS, type AttachedImage, type RenderViewMode } from './renderer/multiview';
+import { renderCompositeCanvas, renderSingleView, renderSliceSVG, setImages as _setImages, clearImages as _clearImages, getImages as _getImages, buildViewCamera, RENDER_VIEW_MODES, STANDARD_VIEWS, type AttachedImage, type RenderViewMode } from './renderer/multiview';
 import { generateId } from './storage/db';
 import { setPhantom, clearPhantom, hasPhantom, type PhantomOptions } from './renderer/phantomGeometry';
 import { initEditor, setValue, getValue, setLanguage as setEditorLanguage, setEditorDiagnostics, clearEditorDiagnostics, revealFirstDiagnostic, formatCode, getAutoFormat, setAutoFormat } from './editor/codeEditor';
@@ -43,7 +43,6 @@ import { showExportOptionsDialog } from './ui/exportOptionsDialog';
 import { createCatalogPage, type CatalogManifestEntry } from './ui/catalog';
 import { createNotFoundPage } from './ui/notFound';
 import { applyRouteMeta, routeTitle, type RouteName } from './seo/meta';
-import { initViewsPanel, updateMultiView } from './ui/panels';
 import { createSessionBar } from './ui/sessionBar';
 import { createGalleryView, refreshGallery } from './ui/gallery';
 import { createVersionsView, refreshVersions } from './ui/versions';
@@ -55,6 +54,7 @@ import { exportGLB, buildGLB } from './export/gltf';
 import { exportSTL, buildSTL } from './export/stl';
 import { exportOBJ, buildOBJ } from './export/obj';
 import { export3MF, build3MF } from './export/threemf';
+import { assertFiniteMesh } from './export/meshClean';
 import { exportSessionJSON, exportRawCode, buildSessionJSON, buildRawCode } from './export/session';
 import { blobToBase64, downloadBlob } from './export/download';
 import {
@@ -80,7 +80,7 @@ function registerExportFromBuilt(built: BuiltExport, source: string): void {
 }
 import type { MeshData, SourceDiagnostic } from './geometry/types';
 import { analyzeZProfile, type ZProfile } from './geometry/profileAnalysis';
-import { probeAtXY, probeRay, probePixel, measureDistance, type ProbeResult, type GeneralRayResult, type PixelHit } from './geometry/rayCast';
+import { probeAtXY, probeRay, probePixel, measureDistance, type ProbeResult, type GeneralRayResult, type PixelHit, type PixelMiss } from './geometry/rayCast';
 import { checkContainment, type ContainmentWarning } from './geometry/containmentCheck';
 import { setUnits as _setUnits, getUnits as _getUnits, type UnitSystem } from './geometry/units';
 import { initMeasureTool, activate as activateMeasure, deactivate as deactivateMeasure, getState as getMeasureState } from './ui/measureTool';
@@ -101,13 +101,11 @@ import {
   loadFromSerialized as loadAnnotations,
   removeLastAnnotation,
   removeAnnotationById,
-  onChange as onAnnotationStrokesChange,
   type SerializedAnnotation,
 } from './annotations/annotations';
 import {
   setAnnotationsVisible as setAnnotationsVisibleOverlay,
   isAnnotationsVisible as isAnnotationsVisibleOverlay,
-  onVisibilityChange as onAnnotationVisibilityChange,
 } from './annotations/annotationOverlay';
 import { setColor as setAnnotateColor, setWidth as setAnnotateWidth, getWidth as getAnnotateWidth } from './annotations/annotateMode';
 import { addTextAnnotationAtAnchor, setFontSize as setAnnotateFontSize, getFontSize as getAnnotateFontSize } from './annotations/textMode';
@@ -117,7 +115,7 @@ import { setBucketTolerance as setPaintBucketTolerance, getBucketTolerance as ge
 import { initEditorLock, syncLockState, setUnlockHandlers } from './color/editorLock';
 import { buildAdjacency, findCoplanarRegion, findConnectedFromSeed, resolveSeed, findNearestTriangle } from './color/adjacency';
 import { findSlabTriangles } from './color/slabPaint';
-import { findBoxTriangles } from './color/boxPaint';
+import { findBoxTriangles, findShapeTriangles } from './color/boxPaint';
 import { computeFaceGroups } from './color/faceGroups';
 import {
   getSessionIdFromURL,
@@ -384,8 +382,8 @@ function rehydrateColorRegions(geometryData: Record<string, unknown> | null): { 
       const { normal, offset, thickness } = region.descriptor;
       triangles = findSlabTriangles(mesh, normal, offset, thickness);
     } else if (region.descriptor.kind === 'box') {
-      const { center, size, quaternion } = region.descriptor;
-      triangles = findBoxTriangles(mesh, { center, size, quaternion });
+      const { center, size, quaternion, shape } = region.descriptor;
+      triangles = findShapeTriangles(mesh, shape ?? 'box', { center, size, quaternion });
     } else if (region.descriptor.kind === 'byLabel') {
       // Labels are runtime state — manifold-3d assigns fresh
       // originalIDs on every run, so we re-resolve by name from the
@@ -597,8 +595,6 @@ function getTabFromURL(): TabName {
   if (params.has('images')) return 'images';
   if (params.has('versions')) return 'versions';
   if (params.has('gallery')) return 'gallery';
-  if (params.get('view') === 'elevations') return 'elevations';
-  if (params.get('view') === 'ai') return 'ai';
   return 'interactive';
 }
 
@@ -961,16 +957,27 @@ async function main() {
     onOpenCatalog: () => { void showCatalogPage(); },
     onRun: () => runCode(),
     onExportGLB: async () => {
-      try { await exportGLB(); } catch (e) { console.error('GLB export error:', e); }
+      try {
+        if (currentMeshData) assertFiniteMesh(currentMeshData);
+        await exportGLB();
+      } catch (e) {
+        showToast(e instanceof Error ? e.message : 'GLB export failed', { variant: 'warn' });
+      }
     },
     onExportSTL: () => {
-      if (currentMeshData) exportSTL(currentMeshData);
+      if (!currentMeshData) return;
+      try { exportSTL(currentMeshData); }
+      catch (e) { showToast(e instanceof Error ? e.message : 'STL export failed', { variant: 'warn' }); }
     },
     onExportOBJ: () => {
-      if (currentMeshData) exportOBJ(hasColorRegions() ? applyTriColors(currentMeshData) : currentMeshData);
+      if (!currentMeshData) return;
+      try { exportOBJ(hasColorRegions() ? applyTriColors(currentMeshData) : currentMeshData); }
+      catch (e) { showToast(e instanceof Error ? e.message : 'OBJ export failed', { variant: 'warn' }); }
     },
     onExport3MF: () => {
-      if (currentMeshData) export3MF(hasColorRegions() ? applyTriColors(currentMeshData) : currentMeshData);
+      if (!currentMeshData) return;
+      try { export3MF(hasColorRegions() ? applyTriColors(currentMeshData) : currentMeshData); }
+      catch (e) { showToast(e instanceof Error ? e.message : '3MF export failed', { variant: 'warn' }); }
     },
     onExportSessionJSON: async () => {
       if (!getState().session) {
@@ -995,9 +1002,8 @@ async function main() {
         );
         if (!proceed) return;
       }
-      const exportVersions = await listCurrentVersions();
       const opts = await showExportOptionsDialog(
-        exportVersions.map(v => ({ index: v.index, label: v.label })),
+        versions.map(v => ({ index: v.index, label: v.label })),
       );
       if (!opts) return;
       const ok = await exportSessionJSON(undefined, opts);
@@ -1062,14 +1068,14 @@ async function main() {
   });
 
   // Create layout
-  const { editorContainer, editorErrorPanel, viewportPane, viewsContainer, elevationsContainer, galleryContainer, versionsContainer, imagesContainer, diffContainer, notesContainer, statusBar, clipControls, formatBtn, autoFormatToggle, switchTab } = createLayout(editorUI);
+  const { editorContainer, editorErrorPanel, viewportPane, galleryContainer, versionsContainer, imagesContainer, diffContainer, notesContainer, statusBar, clipControls, formatBtn, autoFormatToggle, switchTab } = createLayout(editorUI);
 
   // Format button and auto-format toggle
   const AUTO_FORMAT_ON_CLASS = 'shrink-0 px-2 py-0.5 rounded text-xs leading-none border text-emerald-400 border-emerald-700 bg-emerald-950/40 hover:bg-emerald-900/40';
   const AUTO_FORMAT_OFF_CLASS = 'shrink-0 px-2 py-0.5 rounded text-xs leading-none border text-zinc-500 border-zinc-700 hover:text-zinc-300';
   function syncAutoFormatToggleUI(): void {
     const on = getAutoFormat();
-    autoFormatToggle.textContent = on ? 'Auto' : 'Auto';
+    autoFormatToggle.textContent = on ? 'Auto ✓' : 'Auto';
     autoFormatToggle.title = on ? 'Auto-format on — click to disable' : 'Auto-format off — click to enable';
     autoFormatToggle.className = on ? AUTO_FORMAT_ON_CLASS : AUTO_FORMAT_OFF_CLASS;
   }
@@ -1080,7 +1086,9 @@ async function main() {
     syncAutoFormatToggleUI();
   });
   document.addEventListener('keydown', (e) => {
-    if (e.shiftKey && e.altKey && e.key === 'F') {
+    // Use e.code (physical key) — on macOS, Option+Shift+F composes a dead-key
+    // character so e.key is no longer 'F' and the shortcut would never fire.
+    if (e.shiftKey && e.altKey && e.code === 'KeyF') {
       e.preventDefault();
       formatCode();
     }
@@ -1099,9 +1107,6 @@ async function main() {
       }
     },
   });
-
-  // Init views panel
-  initViewsPanel(viewsContainer);
 
   // Init gallery
   createGalleryView(galleryContainer, async (code: string) => {
@@ -1122,12 +1127,6 @@ async function main() {
     onChange: async (next) => {
       _setImages(next);
       await persistImages(next);
-      if (currentMeshData) {
-        renderElevationsToContainer(
-          document.getElementById('elevations-container')!,
-          currentMeshData,
-        );
-      }
     },
   });
 
@@ -1540,8 +1539,6 @@ async function main() {
 
         // 2. Re-render without colors, then save an uncolored sibling
         updateMesh(currentMeshData, { skipAutoFrame: true });
-        updateMultiView(currentMeshData);
-        renderElevationsToContainer(elevationsContainer, currentMeshData);
 
         const cleanGeoData = getGeometryDataObj() ?? {};
         delete cleanGeoData.colorRegions;
@@ -1551,8 +1548,6 @@ async function main() {
         // No session — just re-render without colors
         if (currentMeshData) {
           updateMesh(currentMeshData, { skipAutoFrame: true });
-          updateMultiView(currentMeshData);
-          renderElevationsToContainer(elevationsContainer, currentMeshData);
         }
       }
     },
@@ -1560,8 +1555,6 @@ async function main() {
     () => {
       if (currentMeshData) {
         updateMesh(currentMeshData, { skipAutoFrame: true });
-        updateMultiView(currentMeshData);
-        renderElevationsToContainer(elevationsContainer, currentMeshData);
       }
     },
   );
@@ -1571,8 +1564,6 @@ async function main() {
     if (currentMeshData) {
       const colored = applyTriColorsIfVisible(currentMeshData);
       updateMesh(colored, { skipAutoFrame: true });
-      updateMultiView(colored);
-      renderElevationsToContainer(elevationsContainer, colored);
     }
     syncLockState();
   });
@@ -1587,27 +1578,13 @@ async function main() {
     }
   });
 
-  // Toggling paint visibility re-renders the viewport, multiview, and elevations
-  // so colors disappear/reappear immediately. Exports remain colored regardless.
+  // Toggling paint visibility re-renders the viewport so colors
+  // disappear/reappear immediately. Exports remain colored regardless.
   onPaintVisibilityChange(() => {
     if (!currentMeshData) return;
     const colored = applyTriColorsIfVisible(currentMeshData);
     updateMesh(colored, { skipAutoFrame: true });
-    updateMultiView(colored);
-    renderElevationsToContainer(elevationsContainer, colored);
   });
-
-  // When annotations change (stroke added/removed/cleared) or are toggled,
-  // refresh the offscreen-rendered panes (multiview + elevations) so they
-  // stay in sync with the live viewport.
-  const refreshAnnotationDependentPanes = () => {
-    if (!currentMeshData) return;
-    const meshForPanes = isPaintActive() ? applyTriColorsIfVisible(currentMeshData) : currentMeshData;
-    updateMultiView(meshForPanes);
-    renderElevationsToContainer(elevationsContainer, meshForPanes);
-  };
-  onAnnotationStrokesChange(refreshAnnotationDependentPanes);
-  onAnnotationVisibilityChange(refreshAnnotationDependentPanes);
 
   editorReady = true;
   editorReadyResolve();
@@ -1696,21 +1673,6 @@ async function main() {
       }
     }
   });
-
-  // Warn AI agents that try to drive the UI when ?view=ai is set
-  if (new URLSearchParams(window.location.search).get('view') === 'ai') {
-    let agentUIWarningShown = false;
-    const warnAgentUI = () => {
-      if (agentUIWarningShown) return;
-      agentUIWarningShown = true;
-      const msg = 'Detected UI-driven input. This app expects programmatic control from AI agents. Use window.partwright.runAndSave() -- see /llms.txt';
-      console.warn(msg);
-      showToast(msg, { variant: 'warn', durationMs: 8000 });
-    };
-    // Listen on the editor and viewport containers
-    editorUI.addEventListener('keydown', warnAgentUI, { once: true });
-    editorUI.addEventListener('click', warnAgentUI, { once: true });
-  }
 
   // === Language switching helper ===
   async function switchLanguage(lang: Language) {
@@ -1827,6 +1789,7 @@ async function main() {
     /** Export current model as GLB download. Optional filename override. */
     async exportGLB(filename?: string) {
       assertString(filename, 'exportGLB(filename)', { optional: true });
+      if (currentMeshData) assertFiniteMesh(currentMeshData);
       await exportGLB(filename);
     },
 
@@ -1857,6 +1820,7 @@ async function main() {
     /** Build a GLB and return its bytes as base64. Same blob as exportGLB(). */
     async exportGLBData(filename?: string) {
       assertString(filename, 'exportGLBData(filename)', { optional: true });
+      if (currentMeshData) assertFiniteMesh(currentMeshData);
       const built = await buildGLB(filename);
       registerExportFromBuilt(built, 'GLB');
       return {
@@ -2193,23 +2157,45 @@ async function main() {
      *  flat models get [Top, Iso]; tall models get [Front, Right, Iso];
      *  everything else gets [Front, Top, Iso]. `views: 'tri'` forces the
      *  front/top/iso composite regardless of shape; `views: 'all'` is the
-     *  classic 4-view iso grid (front/right/top/iso). */
-    async renderViews(options?: { views?: RenderViewMode; size?: number }): Promise<string | null> {
+     *  classic 4-view iso grid (front/right/top/iso); `views: 'box'` is the
+     *  6 orthographic axis faces (front/back/left/right/top/bottom) — the
+     *  guaranteed all-faces check, since back/left/bottom are otherwise
+     *  never shown. For total control, pass `angles` (an explicit list of
+     *  {elevation, azimuth, ortho?, label?}) which overrides `views`.
+     *  Bump `size` for a higher-resolution final inspection. */
+    async renderViews(options?: { views?: RenderViewMode; angles?: Array<{ elevation: number; azimuth: number; ortho?: boolean; label?: string }>; size?: number }): Promise<string | null> {
       if (options !== undefined) {
         const o = assertObject(options, 'renderViews(options)')!;
-        assertNoUnknownKeys(o, ['views', 'size'], 'renderViews(options)');
+        assertNoUnknownKeys(o, ['views', 'angles', 'size'], 'renderViews(options)');
         if (o.views !== undefined) assertEnum(o.views, RENDER_VIEW_MODES, 'renderViews(options).views');
+        if (o.angles !== undefined) {
+          const arr = assertArray(o.angles, 'renderViews(options).angles') as unknown[];
+          for (let i = 0; i < arr.length; i++) {
+            const a = assertObject(arr[i], `renderViews(options).angles[${i}]`)!;
+            assertNoUnknownKeys(a, ['elevation', 'azimuth', 'ortho', 'label'], `renderViews(options).angles[${i}]`);
+            assertNumber(a.elevation, `renderViews(options).angles[${i}].elevation`, { min: -90, max: 90 });
+            assertNumber(a.azimuth, `renderViews(options).angles[${i}].azimuth`);
+            assertBoolean(a.ortho, `renderViews(options).angles[${i}].ortho`, { optional: true });
+            assertString(a.label, `renderViews(options).angles[${i}].label`, { optional: true, allowEmpty: true });
+          }
+        }
         assertNumber(o.size, 'renderViews(options).size', { optional: true, min: 1, integer: true });
       }
       if (!currentMeshData) return null;
       const which = options?.views ?? 'auto';
       const tileSize = options?.size ?? 320;
       const colored = applyTriColorsIfVisible(currentMeshData);
-      const angles = chooseRenderAngles(which);
+      const explicit = options?.angles;
+      const angles = explicit && explicit.length > 0
+        ? explicit.map((a) => ({
+            label: a.label ?? `elev ${a.elevation}° az ${a.azimuth}°`,
+            opts: { elevation: a.elevation, azimuth: a.azimuth, ortho: a.ortho ?? false },
+          }))
+        : chooseRenderAngles(which);
 
       const labelHeight = 24;
       const cellHeight = tileSize + labelHeight;
-      const cols = angles.length === 1 ? 1 : 2;
+      const cols = angles.length <= 1 ? 1 : angles.length <= 4 ? 2 : 3;
       const rows = Math.ceil(angles.length / cols);
       const composite = document.createElement('canvas');
       composite.width = tileSize * cols;
@@ -2245,10 +2231,10 @@ async function main() {
 
     // === Images API ===
 
-    /** Attach images for side-by-side comparison in the Images, Elevations, and Gallery
+    /** Attach images for side-by-side comparison in the Images and Gallery
      *  tabs. Each item is `{src, label?}`. `src` is a data URL or http(s) URL.
      *  `label` is an optional caption — common values like "Front", "Right", "Back",
-     *  "Left", "Top", "Perspective" are presets that drive ordering in the Elevations
+     *  "Left", "Top", "Perspective" are presets that drive ordering in the image
      *  strip; any other string is also valid. Multiple items may share a label.
      *  Replaces all currently attached images. If a session is active, also persists
      *  to IndexedDB. Returns the canonical list with assigned ids. */
@@ -2271,12 +2257,6 @@ async function main() {
       }
       _setImages(items);
       persistImages(items);
-      if (currentMeshData) {
-        renderElevationsToContainer(
-          document.getElementById('elevations-container')!,
-          currentMeshData,
-        );
-      }
       return items;
     },
 
@@ -2292,12 +2272,6 @@ async function main() {
       const next = [..._getImages(), item];
       _setImages(next);
       persistImages(next);
-      if (currentMeshData) {
-        renderElevationsToContainer(
-          document.getElementById('elevations-container')!,
-          currentMeshData,
-        );
-      }
       return item;
     },
 
@@ -2309,12 +2283,6 @@ async function main() {
       if (next.length === current.length) return false;
       _setImages(next);
       persistImages(next);
-      if (currentMeshData) {
-        renderElevationsToContainer(
-          document.getElementById('elevations-container')!,
-          currentMeshData,
-        );
-      }
       return true;
     },
 
@@ -2322,12 +2290,6 @@ async function main() {
     clearImages(): void {
       _clearImages();
       persistImages(null);
-      if (currentMeshData) {
-        renderElevationsToContainer(
-          document.getElementById('elevations-container')!,
-          currentMeshData,
-        );
-      }
     },
 
     /** Get the currently attached images as an array of `{id, angle, src}`. */
@@ -2344,7 +2306,7 @@ async function main() {
       await addSessionNote(
         '[WORKFLOW] Drive this app via window.partwright (see /ai.md). ' +
         'Use runAndSave(code, label, assertions) for iterations; ' +
-        'after structural changes verify visually via renderView({ortho:true}) or the Elevations tab; ' +
+        'after structural changes verify visually via renderViews (use views:"box" for an all-faces final check); ' +
         'addSessionNote with [REQUIREMENT]/[DECISION]/[MEASUREMENT]/[FEEDBACK]/[ATTEMPT]/[TODO] prefixes; ' +
         'getSessionContext() when resuming.',
       );
@@ -2375,12 +2337,6 @@ async function main() {
       const sessionImages = await getImagesFromSession();
       if (sessionImages) {
         _setImages(sessionImages);
-        if (currentMeshData) {
-          renderElevationsToContainer(
-            document.getElementById('elevations-container')!,
-            currentMeshData,
-          );
-        }
       } else {
         _clearImages();
       }
@@ -2808,12 +2764,6 @@ async function main() {
       const sessionImages = await getImagesFromSession();
       if (sessionImages) {
         _setImages(sessionImages);
-        if (currentMeshData) {
-          renderElevationsToContainer(
-            document.getElementById('elevations-container')!,
-            currentMeshData,
-          );
-        }
       }
       return { id: session.id, name: session.name, ...(warning ? { warning } : {}) };
     },
@@ -3223,12 +3173,14 @@ async function main() {
      *    pixel: [180, 220],
      *    view:  { elevation: 0, azimuth: 0, ortho: true, size: 320 },
      *  });
-     *  if (hit) partwright.paintNear({ point: hit.point, radius: 4, color: [...] });
+     *  // On a miss, `hit.hint` reports the model's pixel bounds so you can
+     *  // re-aim; on a hit, `hit.point`/`hit.normal` carry the surface seed.
+     *  if ('point' in hit) partwright.paintNear({ point: hit.point, radius: 4, color: [...] });
      *  ``` */
     probePixel(opts: {
       pixel: [number, number];
       view: { elevation?: number; azimuth?: number; ortho?: boolean; size?: number };
-    }): PixelHit | { error: string } | null {
+    }): (PixelHit & { nextStep: string }) | (PixelMiss & { reason: string; hint: string }) | { error: string } | null {
       if (!opts || typeof opts !== 'object') return { error: 'probePixel requires { pixel, view }' };
       if (!Array.isArray(opts.pixel) || opts.pixel.length !== 2) return { error: 'probePixel.pixel must be [x, y]' };
       for (const c of opts.pixel) {
@@ -3248,7 +3200,22 @@ async function main() {
         return { error: `probePixel.pixel [${px}, ${py}] is outside the ${size}×${size} viewport. Pixel (0,0) is top-left, (${size - 1},${size - 1}) is bottom-right.` };
       }
       const camera = buildViewCamera(currentMeshData, opts.view);
-      return probePixel(currentMeshData, camera, [px, py], size);
+      const result = probePixel(currentMeshData, camera, [px, py], size);
+      if ('hit' in result) {
+        // Miss: instead of a bare null, tell the caller where the model
+        // actually projects so they can re-aim. Pixel estimation off a
+        // render carries ±10-20px error, so misses are an expected, common
+        // case — make them self-correcting rather than a dead end.
+        const b = result.modelPixelBounds;
+        const hint = b
+          ? `In this ${size}×${size} view the model occupies pixels x[${b.minX}..${b.maxX}], y[${b.minY}..${b.maxY}] (top-left is [0,0]). Re-aim inside that box and probe again.`
+          : 'The model does not project into this view (off-screen or degenerate). Render this exact view first to see where it sits, or try a different elevation/azimuth.';
+        return { ...result, reason: `Pixel [${px}, ${py}] missed the mesh (background).`, hint };
+      }
+      return {
+        ...result,
+        nextStep: 'To paint here, pass this point+normal to paintConnected({seed:{point,normal},color}) (follows the surface by normal) or paintNear({point,radius,normalCone:{axis:normal,angleDeg:35},color}) (bounded blob).',
+      };
     },
 
     /** Paint a connected patch starting from a seed point on the
@@ -3327,8 +3294,6 @@ async function main() {
       );
       const colored = applyTriColorsIfVisible(mesh);
       updateMesh(colored, { skipAutoFrame: true });
-      updateMultiView(colored);
-      renderElevationsToContainer(elevationsContainer, colored);
       syncLockState();
       const stats = regionTriangleStats(triangles, mesh);
       return { id: region.id, name: region.name, triangles: triangles.size, bbox: stats.bbox, centroid: stats.centroid, seedTriangle: nearest.triIndex };
@@ -3348,8 +3313,8 @@ async function main() {
     },
 
     /** Programmatic tab switching */
-    setView(tab: 'interactive' | 'ai' | 'elevations' | 'gallery' | 'versions' | 'diff' | 'notes'): void {
-      assertEnum(tab, ['interactive', 'ai', 'elevations', 'gallery', 'versions', 'diff', 'notes'] as const, 'setView(tab)');
+    setView(tab: 'interactive' | 'gallery' | 'versions' | 'images' | 'diff' | 'notes'): void {
+      assertEnum(tab, ['interactive', 'gallery', 'versions', 'images', 'diff', 'notes'] as const, 'setView(tab)');
       switchTab(tab);
     },
 
@@ -3491,8 +3456,6 @@ async function main() {
       // Re-render with colors
       const colored = applyTriColorsIfVisible(currentMeshData);
       updateMesh(colored, { skipAutoFrame: true });
-      updateMultiView(colored);
-      renderElevationsToContainer(elevationsContainer, colored);
       syncLockState();
 
       return { id: region.id, name: region.name, triangles: triangles.size };
@@ -3546,7 +3509,6 @@ async function main() {
 
       const colored = applyTriColorsIfVisible(currentMeshData);
       updateMesh(colored, { skipAutoFrame: true });
-      updateMultiView(colored);
       syncLockState();
 
       return {
@@ -3591,8 +3553,6 @@ async function main() {
 
       const colored = applyTriColorsIfVisible(currentMeshData);
       updateMesh(colored, { skipAutoFrame: true });
-      updateMultiView(colored);
-      renderElevationsToContainer(elevationsContainer, colored);
       syncLockState();
 
       return { id: region.id, name: region.name, triangles: triangles.size };
@@ -4888,7 +4848,7 @@ async function main() {
         'renderViews':     { signature: 'await renderViews({views?: "tri"|"all", size?}) -- 3- or 4-angle labeled composite -> data URL. Use for verification when one angle could hide errors.', docs: '/ai.md#visual-verification' },
         'analyzeProfile':  { signature: 'analyzeProfile(sampleCount?) -- Z-profile feature summary', docs: '/ai.md#console-api--windowpartwright' },
         'measureAt':       { signature: 'measureAt([x,y]) -- Ray-cast probe at XY -> {hits, thickness, topZ, bottomZ}', docs: '/ai.md#console-api--windowpartwright' },
-        'probePixel':      { signature: 'probePixel({pixel: [x,y], view}) -- Translate a pixel in a rendered view back to a surface hit: {point, normal, distance, triangleId}. The view spec must match the renderView call. null when the pixel is background.', docs: '/ai.md#console-api--windowpartwright' },
+        'probePixel':      { signature: 'probePixel({pixel: [x,y], view}) -- Translate a pixel in a rendered view back to a surface hit: {point, normal, distance, triangleId, nextStep}. The view spec must match the renderView call. On a background pixel returns {hit:false, modelPixelBounds, reason, hint} telling you where the model projects so you can re-aim.', docs: '/ai.md#console-api--windowpartwright' },
         // Viewport controls
         'setGridVisible':       { signature: 'setGridVisible(on?) -- Show/hide grid plane (omit to toggle) -> boolean', docs: '/ai.md#viewport-controls' },
         'isGridVisible':        { signature: 'isGridVisible() -- Whether grid plane is visible', docs: '/ai.md#viewport-controls' },
@@ -4901,8 +4861,8 @@ async function main() {
         'setAutoRun':           { signature: 'setAutoRun(enabled) -- Enable/disable auto-render on edit', docs: '/ai.md#viewport-controls' },
         'isAutoRunEnabled':     { signature: 'isAutoRunEnabled() -- Whether auto-run is active', docs: '/ai.md#viewport-controls' },
         // View
-        'setView':         { signature: 'setView(tab) -- Switch tab: "interactive", "ai", "elevations", "gallery", "diff"', docs: '/ai.md#view-tabs' },
-        'getViewState':    { signature: 'getViewState() -- Current tab and camera state', docs: '/ai.md#view-tabs' },
+        'setView':         { signature: 'setView(tab) -- Switch tab: "interactive", "gallery", "images", "diff", "notes"', docs: '/ai.md#how-to-use-this-tool' },
+        'getViewState':    { signature: 'getViewState() -- Current tab and camera state', docs: '/ai.md#how-to-use-this-tool' },
         // Export
         'exportGLB':       { signature: 'await exportGLB() -- Download GLB file', docs: '/ai.md#console-api--windowpartwright' },
         'exportSTL':       { signature: 'exportSTL() -- Download STL file', docs: '/ai.md#console-api--windowpartwright' },
@@ -5074,6 +5034,13 @@ async function main() {
     const ISO   = view(STANDARD_VIEWS.iso);
     if (which === 'tri') return [FRONT, TOP, ISO];
     if (which === 'all') return [FRONT, RIGHT, TOP, ISO];
+    if (which === 'box') return [
+      FRONT, RIGHT,
+      { label: 'Back', opts: { elevation: 0, azimuth: 180, ortho: true } },
+      { label: 'Left', opts: { elevation: 0, azimuth: 270, ortho: true } },
+      TOP,
+      { label: 'Bottom', opts: { elevation: -90, azimuth: 0, ortho: true } },
+    ];
     // 'auto': inspect the current manifold's bounding box.
     let bb: { min: [number, number, number]; max: [number, number, number] } | null = null;
     if (currentManifold) {
@@ -5583,8 +5550,6 @@ async function main() {
       if (!currentMeshData) return;
       const colored = applyTriColorsIfVisible(currentMeshData);
       updateMesh(colored, { skipAutoFrame: true });
-      updateMultiView(colored);
-      renderElevationsToContainer(elevationsContainer, colored);
     });
   }
 
@@ -5662,8 +5627,6 @@ async function main() {
       // Apply any existing color regions to the mesh
       const displayMesh = hasColorRegions() ? applyTriColorsIfVisible(result.mesh) : result.mesh;
       updateMesh(displayMesh);
-      updateMultiView(displayMesh);
-      renderElevationsToContainer(elevationsContainer, displayMesh);
       updatePaintMesh(result.mesh); // always pass uncolored mesh for adjacency
 
       updateGeometryData(elapsed, src);
