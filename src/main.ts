@@ -152,10 +152,12 @@ import {
   recordError,
   onStateChange,
   initSessionTabSync,
+  setViewerPredicate,
+  refreshCurrentSession,
   type ExportedSession,
   type ExportOptions,
 } from './storage/sessionManager';
-import { acquireSession as acquireSessionLock, initSessionLeader } from './storage/sessionLock';
+import { acquireSession as acquireSessionLock, initSessionLeader, onOwnershipChange } from './storage/sessionLock';
 import { initViewerMode, isReadOnlyViewer } from './ui/viewerMode';
 import type { Version } from './storage/db';
 import {
@@ -1751,6 +1753,19 @@ async function main() {
     // Claim (or queue for) write-ownership of the now-active session so two
     // tabs on the same session don't both drive the chat / save versions.
     void acquireSessionLock(state.session?.id ?? null);
+    // A read-only viewer mirrors the leader's current (latest) version into its
+    // editor + viewport so it reads along instead of freezing on an old one.
+    if (isReadOnlyViewer() && state.currentVersion && getValue() !== state.currentVersion.code) {
+      void loadVersionIntoEditor(state.currentVersion);
+    }
+  });
+
+  // Tell the session manager this tab's viewer status so cross-tab reloads
+  // follow the latest version when we're a viewer; and when we *become* a
+  // viewer (a peer took control), snap to the leader's latest state.
+  setViewerPredicate(() => isReadOnlyViewer());
+  onOwnershipChange(({ sessionId, owned }) => {
+    if (sessionId && !owned) void refreshCurrentSession();
   });
 
   // syncEditorFromURL() above opened the initial session BEFORE the listener

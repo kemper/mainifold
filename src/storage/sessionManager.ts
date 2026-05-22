@@ -779,6 +779,21 @@ export async function clearAllSessions(): Promise<void> {
 
 // === Cross-tab sync ===
 
+let isViewerTab: () => boolean = () => false;
+
+/** Register whether this tab is a read-only viewer of the open session. When it
+ *  returns true, cross-tab reloads follow the latest saved version (mirror the
+ *  leader) instead of pinning the version this tab happened to be on. */
+export function setViewerPredicate(fn: () => boolean): void {
+  isViewerTab = fn;
+}
+
+/** Public trigger to re-read the open session from IndexedDB — used when this
+ *  tab becomes a read-only viewer and should snap to the leader's latest state. */
+export async function refreshCurrentSession(): Promise<void> {
+  await reloadCurrentSessionFromDB();
+}
+
 /** Re-read the currently-open session from IndexedDB after a peer tab changed
  *  it. Updates the persisted-version pointer and counts; the editor's working
  *  buffer is owned separately and is intentionally left untouched. */
@@ -795,11 +810,19 @@ async function reloadCurrentSessionFromDB(): Promise<void> {
     return;
   }
   const count = await getVersionCount(id);
-  const wantedIndex = currentState.currentVersion?.index;
-  let version = typeof wantedIndex === 'number' ? await getVersionByIndex(id, wantedIndex) : null;
-  if (!version) version = await getLatestVersion(id);
+  let version: Version | null;
+  if (isViewerTab()) {
+    // A read-only viewer mirrors the leader, so follow the latest saved version
+    // instead of pinning whatever version this tab happened to be on.
+    version = await getLatestVersion(id);
+  } else {
+    const wantedIndex = currentState.currentVersion?.index;
+    version = typeof wantedIndex === 'number' ? await getVersionByIndex(id, wantedIndex) : null;
+    if (!version) version = await getLatestVersion(id);
+  }
   currentState = { session, currentVersion: version, versionCount: count };
   setActiveImports((version?.importedMeshes ?? []) as ImportedMesh[]);
+  updateURL();
   notify();
 }
 

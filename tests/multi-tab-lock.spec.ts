@@ -36,6 +36,17 @@ test.describe('Multi-tab single-writer leader', () => {
     await expect(page2.url()).not.toContain('takeover');
     await expect(page1.locator('#session-viewer-overlay')).toBeVisible({ timeout: 10000 });
 
+    // page2 (leader) saves a new version; page1 (read-only viewer) should mirror
+    // to it rather than freezing on the version it had.
+    await page2.evaluate(async () => {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const pw = (window as any).partwright;
+      await pw.runAndSave('const { Manifold } = api; return Manifold.sphere(8);', 'mirror');
+    });
+    const leaderV = new URL(page2.url()).searchParams.get('v');
+    expect(leaderV).toBeTruthy();
+    await expect(page1).toHaveURL(new RegExp(`[?&]v=${leaderV}(&|$)`), { timeout: 10000 });
+
     await page1.close();
     await page2.close();
   });
