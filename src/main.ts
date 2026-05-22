@@ -36,7 +36,7 @@ import { installKeyboardShortcuts } from './ui/keyboardShortcuts';
 import { showToast } from './ui/toast';
 import { initAiPanel, setActiveSession as setAiActiveSession, toggleAiPanel } from './ui/aiPanel';
 import { getKey as getAiKey, mergeChatBucket } from './ai/db';
-import { loadSettings as loadAiSettings } from './ai/settings';
+import { loadSettings as loadAiSettings, reloadSettingsFromStorage } from './ai/settings';
 import { createLandingPage } from './ui/landing';
 import { createHelpPage } from './ui/help';
 import { showExportOptionsDialog } from './ui/exportOptionsDialog';
@@ -1641,9 +1641,15 @@ async function main() {
       // Watch for key/provider changes via a poll-on-focus trigger — cheap,
       // and matches the chip's update cadence in the AI settings modal.
       window.addEventListener('focus', () => { void refreshAiToolbarChip(); });
-      // Also watch localStorage for cross-tab provider switches.
+      // Also watch localStorage for cross-tab provider switches. Drop our
+      // cached settings blob first so refreshAiToolbarChip (and any
+      // onSettingsChange subscriber, e.g. the AI panel) reads the peer tab's
+      // change instead of our stale copy.
       window.addEventListener('storage', e => {
-        if (e.key === 'partwright-ai-settings-v1') void refreshAiToolbarChip();
+        if (e.key === 'partwright-ai-settings-v1') {
+          reloadSettingsFromStorage();
+          void refreshAiToolbarChip();
+        }
       });
     } catch (err) {
       console.warn('AI panel init failed:', err);
