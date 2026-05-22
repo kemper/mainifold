@@ -175,6 +175,36 @@ test.describe('Multi-provider AI', () => {
     await expect(box.locator('pre')).toContainText('winding order must be CCW');
   });
 
+  test('OpenAI sends max_completion_tokens, not the rejected max_tokens', async ({ page }) => {
+    // Regression: the gpt-5 family and o-series 400 on `max_tokens`
+    // ("Unsupported parameter… Use 'max_completion_tokens' instead"). Stub
+    // the SSE stream, drive streamTurn, and assert the outgoing body uses
+    // the new spelling and drops the old one entirely.
+    await page.goto('/editor');
+    await page.waitForSelector('#ai-panel');
+    const sentBody = await page.evaluate(async () => {
+      const openai = await import('/src/ai/openai.ts');
+      let captured = '';
+      const origFetch = window.fetch;
+      // @ts-expect-error test stub
+      window.fetch = async (_input: unknown, init: { body?: string }) => {
+        captured = String(init?.body ?? '');
+        const body = 'data: {"choices":[{"delta":{"content":"ok"},"finish_reason":null}]}\n\ndata: {"choices":[{"delta":{},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n';
+        return new Response(new Blob([body]), { status: 200, headers: { 'Content-Type': 'text/event-stream' } });
+      };
+      try {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        await openai.streamTurn({ apiKey: 'k', model: 'gpt-5-mini', systemPrompt: 'sys', systemSuffix: '', history: [] as any, tools: [] });
+      } finally {
+        window.fetch = origFetch;
+      }
+      return captured;
+    });
+    const sent = JSON.parse(sentBody);
+    expect(sent.max_completion_tokens).toBeGreaterThan(0);
+    expect(sent.max_tokens).toBeUndefined();
+  });
+
   test('settings modal has a tab per provider', async ({ page }) => {
     await page.goto('/editor');
     await page.evaluate(() => { try { localStorage.setItem('partwright-tour-completed', '1'); } catch {} });

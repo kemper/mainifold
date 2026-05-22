@@ -37,7 +37,7 @@ export async function validateKey(apiKey: string): Promise<string | null> {
       headers: authHeaders(apiKey),
       body: JSON.stringify({
         model: 'gpt-4o-mini',
-        max_tokens: 1,
+        max_completion_tokens: 1,
         messages: [{ role: 'user', content: 'ok' }],
       }),
     });
@@ -100,7 +100,7 @@ export async function streamTurn(
   callbacks: StreamCallbacks = {},
   signal?: AbortSignal,
 ): Promise<StreamResult> {
-  const max_tokens = spec.maxTokens ?? 8192;
+  const maxCompletionTokens = spec.maxTokens ?? 8192;
 
   const tools: OpenAIToolDef[] = spec.tools.map(t => ({
     type: 'function',
@@ -123,7 +123,11 @@ export async function streamTurn(
 
   const body: Record<string, unknown> = {
     model: spec.model,
-    max_tokens,
+    // `max_completion_tokens`, not `max_tokens` — the gpt-5 family and the
+    // o-series reject `max_tokens` outright (400 unsupported_parameter),
+    // and it's the forward-compatible spelling for the older 4o/4.1 models
+    // too. Don't switch this back.
+    max_completion_tokens: maxCompletionTokens,
     messages,
     stream: true,
     stream_options: { include_usage: true },
@@ -342,7 +346,8 @@ export async function summarize(
     headers: authHeaders(apiKey),
     body: JSON.stringify({
       model,
-      max_tokens: maxTokens,
+      // See streamTurn — newer OpenAI models require max_completion_tokens.
+      max_completion_tokens: maxTokens,
       messages: [
         { role: 'system', content: system },
         { role: 'user', content: user },
