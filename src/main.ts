@@ -44,6 +44,7 @@ import { createCatalogPage, type CatalogManifestEntry } from './ui/catalog';
 import { createNotFoundPage } from './ui/notFound';
 import { applyRouteMeta, routeTitle, type RouteName } from './seo/meta';
 import { createSessionBar } from './ui/sessionBar';
+import { createPartList } from './ui/partList';
 import { createGalleryView, refreshGallery } from './ui/gallery';
 import { createVersionsView, refreshVersions } from './ui/versions';
 import { createImagesView, refreshImages } from './ui/imagesView';
@@ -139,6 +140,7 @@ import {
   changePart,
   renamePart,
   deletePart,
+  reorderParts,
   getState,
   getSessionUrl,
   getGalleryUrl,
@@ -1119,13 +1121,23 @@ async function main() {
     },
     onOpenSessionList: () => showSessionList(),
     onNewSession: startNewSessionInEditor,
-    onSwitchPart: async (partId: string) => {
+  });
+
+  // Create layout
+  const { editorContainer, editorErrorPanel, viewportPane, galleryContainer, versionsContainer, imagesContainer, diffContainer, notesContainer, statusBar, clipControls, formatBtn, autoFormatToggle, switchTab, partsRail, togglePartsRail } = createLayout(editorUI);
+
+  // Parts rail — IDE-style list of the session's parts.
+  createPartList(partsRail, {
+    onSelectPart: async (partId: string) => {
       const version = await changePart(partId);
       await loadPartIntoEditor(version);
     },
     onCreatePart: async () => {
       await createPart();
       startNewPartInEditor();
+    },
+    onRenamePart: async (partId: string, name: string) => {
+      await renamePart(partId, name);
     },
     onDeletePart: async (partId: string) => {
       const wasCurrent = getState().currentPart?.id === partId;
@@ -1134,10 +1146,24 @@ async function main() {
         await loadPartIntoEditor(getState().currentVersion);
       }
     },
+    onReorderParts: async (orderedIds: string[]) => {
+      await reorderParts(orderedIds);
+    },
+    onToggleCollapse: () => togglePartsRail(),
   });
 
-  // Create layout
-  const { editorContainer, editorErrorPanel, viewportPane, galleryContainer, versionsContainer, imagesContainer, diffContainer, notesContainer, statusBar, clipControls, formatBtn, autoFormatToggle, switchTab } = createLayout(editorUI);
+  // Keep the editor title showing the active part's name (falls back to the
+  // generic filename when no part/session is open). The element is looked up on
+  // each call rather than captured, since the editor root may not be mounted in
+  // the document when this wiring first runs.
+  function syncEditorTitle(state: ReturnType<typeof getState>): void {
+    const editorTitleEl = document.getElementById('editor-title');
+    if (!editorTitleEl) return;
+    const part = state.currentPart;
+    editorTitleEl.textContent = part ? part.name : (getActiveLanguage() === 'scad' ? 'editor.scad' : 'editor.js');
+  }
+  syncEditorTitle(getState());
+  onStateChange(syncEditorTitle);
 
   // Format button and auto-format toggle
   const AUTO_FORMAT_ON_CLASS = 'shrink-0 px-2 py-0.5 rounded text-xs leading-none border text-emerald-400 border-emerald-700 bg-emerald-950/40 hover:bg-emerald-900/40';
@@ -1760,9 +1786,9 @@ async function main() {
     setActiveLanguage(lang);
     setEditorLanguage(lang);
     setToolbarLanguage(lang);
-    // Update editor filename indicator
-    const titleEl = document.getElementById('editor-title');
-    if (titleEl) titleEl.textContent = lang === 'scad' ? 'editor.scad' : 'editor.js';
+    // Update the editor title (shows the active part name, or the filename
+    // fallback when no part is open).
+    syncEditorTitle(getState());
     setStatus(statusBar, 'running', lang === 'scad' ? 'Loading OpenSCAD...' : 'Switching...');
     try {
       await ensureEngineReady(lang);

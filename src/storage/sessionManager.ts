@@ -640,6 +640,36 @@ export async function deletePart(partId: string): Promise<DeletePartResult | nul
   return { deleted: target, newCurrent: null };
 }
 
+/**
+ * Persist a new display order for the active session's parts. `orderedIds` is
+ * the full list of part ids, first = top. Ids not present are appended in their
+ * existing relative order (defensive). No-op without an active session.
+ */
+export async function reorderParts(orderedIds: string[]): Promise<void> {
+  if (!currentState.session) return;
+  const byId = new Map(currentState.parts.map(p => [p.id, p]));
+  const ordered: Part[] = [];
+  for (const id of orderedIds) {
+    const p = byId.get(id);
+    if (p) { ordered.push(p); byId.delete(id); }
+  }
+  // Any parts the caller didn't mention keep their relative order at the end.
+  for (const p of currentState.parts) if (byId.has(p.id)) ordered.push(p);
+
+  const next = ordered.map((p, i) => ({ ...p, order: i }));
+  for (const p of next) await dbUpdatePart(p.id, { order: p.order });
+
+  currentState = {
+    ...currentState,
+    parts: next,
+    currentPart: currentState.currentPart
+      ? next.find(p => p.id === currentState.currentPart!.id) ?? currentState.currentPart
+      : null,
+  };
+  updateURL();
+  notify();
+}
+
 // === Version operations ===
 
 /** Stable structural comparison for annotation snapshots. Both are arrays of

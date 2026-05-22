@@ -108,7 +108,7 @@ test.describe('Multi-part sessions', () => {
     expect(after.parts).toEqual(['Handle', 'Part 1']);
   });
 
-  test('session-bar part switcher renders and switches parts', async ({ page }) => {
+  test('parts rail renders, switches, and adds parts; editor title shows the part', async ({ page }) => {
     await page.goto('/editor');
     await waitForEngine(page);
 
@@ -120,22 +120,60 @@ test.describe('Multi-part sessions', () => {
       await pw.runAndSave(codeB1, 'b1');
     }, { codeA1: cube(10, 'A1'), codeB1: cube(6, 'LID') });
 
-    // The part <select> lists both parts; the lid (current) is selected.
-    const select = page.locator('#part-select');
-    await expect(select).toBeVisible();
-    await expect(select.locator('option')).toHaveCount(2);
+    // The rail lists both parts; the editor title shows the current one (Lid).
+    const list = page.locator('#parts-list');
+    await expect(list.locator('[data-part-id]')).toHaveCount(2);
+    await expect(page.locator('#editor-title')).toHaveText('Lid');
 
-    // Switch to "Part 1" via the dropdown; the editor should load its code.
-    await select.selectOption({ label: 'Part 1' });
+    // Click "Part 1" in the rail to switch; editor + title update.
+    await list.getByText('Part 1', { exact: true }).click();
     await expect
       .poll(() => page.evaluate(() => (window as unknown as { partwright: PartsAPI }).partwright.getCode()))
       .toContain('A1');
+    await expect(page.locator('#editor-title')).toHaveText('Part 1');
 
-    // The add-part button increases the part count.
+    // The add-part button (rail header) increases the part count.
     await page.locator('#btn-add-part').click();
     await expect
       .poll(() => page.evaluate(() => (window as unknown as { partwright: PartsAPI }).partwright.listParts().length))
       .toBe(3);
+  });
+
+  test('parts can be drag-reordered in the rail', async ({ page }) => {
+    await page.goto('/editor');
+    await waitForEngine(page);
+
+    await page.evaluate(async ({ code }) => {
+      const pw = (window as unknown as { partwright: PartsAPI }).partwright;
+      await pw.createSession('reorder');
+      await pw.runAndSave(code, 'a1');     // Part 1
+      await pw.createPart('Beta');
+      await pw.createPart('Gamma');
+    }, { code: cube(10, 'A1') });
+
+    const list = page.locator('#parts-list');
+    await expect(list.locator('[data-part-id]')).toHaveCount(3);
+    // Initial order: Part 1, Beta, Gamma.
+    const initial = await page.evaluate(() =>
+      (window as unknown as { partwright: PartsAPI }).partwright.listParts().map(p => p.name));
+    expect(initial).toEqual(['Part 1', 'Beta', 'Gamma']);
+
+    // Drag the first row's grip below the last row.
+    const firstGrip = list.locator('[data-part-id]').first().locator('[title="Drag to reorder"]');
+    const lastRow = list.locator('[data-part-id]').last();
+    const g = await firstGrip.boundingBox();
+    const l = await lastRow.boundingBox();
+    if (!g || !l) throw new Error('missing drag boxes');
+    await page.mouse.move(g.x + g.width / 2, g.y + g.height / 2);
+    await page.mouse.down();
+    await page.mouse.move(l.x + l.width / 2, l.y + l.height + 6, { steps: 10 });
+    await page.mouse.up();
+
+    // Part 1 should now be last; order persists in state.
+    await expect
+      .poll(() => page.evaluate(() =>
+        (window as unknown as { partwright: PartsAPI }).partwright.listParts().map(p => p.name)))
+      .toEqual(['Beta', 'Gamma', 'Part 1']);
   });
 
   test('adding a part after painting clears stale regions and unlocks the editor', async ({ page }) => {
