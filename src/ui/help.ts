@@ -1,5 +1,7 @@
 // Help page — explains what Partwright is and how to use it
 
+import { getShortcutDocs, IS_MAC, MOD_LABEL, SHIFT_LABEL, ALT_LABEL } from './shortcutDefs';
+
 export interface HelpCallbacks {
   onBack: () => void;
   onStartTour: () => void;
@@ -74,7 +76,7 @@ export function createHelpPage(
       id: 'quick-example',
       heading: 'Quick example',
       body:
-        '<pre class="bg-zinc-800 rounded-lg p-4 text-xs leading-relaxed overflow-x-auto mt-2"><code class="text-zinc-300">const { Manifold } = api;\n\n// Create a box and subtract a cylinder\nconst box = Manifold.cube([20, 20, 10], true);\nconst hole = Manifold.cylinder(12, 4, 4, 32);\n\nreturn box.subtract(hole);</code></pre>',
+        '<pre class="bg-zinc-800 rounded-lg p-4 text-xs leading-relaxed overflow-x-auto mt-2"><code class="text-zinc-300">const { Manifold } = api;\n\n// Create a box and subtract a cylinder\nconst box = Manifold.cube([20, 20, 10], true);\nconst hole = Manifold.cylinder(12, 4, 4);\n\nreturn box.subtract(hole);</code></pre>',
     },
     {
       id: 'tabs',
@@ -167,7 +169,7 @@ export function createHelpPage(
       heading: 'Quality settings & theme',
       body:
         '<strong class="text-zinc-300">Mesh settings</strong> — The <strong class="text-zinc-300">Mesh</strong> button in the viewport overlay (next to Paint / Annotate / Measure) opens a small panel with two controls.<br><br>' +
-        '<strong class="text-zinc-300">Curve quality</strong> picks how many segments approximate a circle (Highest / High / Medium / Low). <em>Highest</em> is the default and gives the smoothest curves; drop down if you\'re iterating on heavy geometry and want faster renders.<br><br>' +
+        '<strong class="text-zinc-300">Curve quality</strong> picks how many segments approximate a circle (Ultra / Very High / High / Medium / Low). <em>Very High</em> (128 segments) is the default; <em>Ultra</em> (1024 segments) gives near-perfect curves for smooth final output, while lower presets render faster when you\'re iterating on heavy geometry. The preset only applies to curves that don\'t pass their own segment count, and the AI assistant honors it too.<br><br>' +
         '<strong class="text-zinc-300">Mesh detail</strong> refines the whole model, splitting each triangle edge into N pieces so flat faces get denser too (not just curves). It\'s <em>off by default</em> — raise it mainly when you want finer paint regions. Triangle count grows ~N², so high values can slow heavy models.<br><br>' +
         '<strong class="text-zinc-300">Theme</strong> — Toggle <strong class="text-zinc-300">Dark Mode</strong> in the toolbar to switch the entire UI, viewport background, and grid colors between dark and light. Your choice persists across sessions.',
     },
@@ -233,14 +235,26 @@ export function createHelpPage(
     {
       id: 'shortcuts',
       heading: 'Keyboard shortcuts',
-      body:
-        '<ul class="list-disc list-inside mt-2 space-y-1 text-zinc-400">' +
-        '<li><strong class="text-zinc-300">Escape</strong> — Close the open dropdown, modal, paint or annotate panel, cross-section overlay, or exit the guided tour.</li>' +
-        '<li><strong class="text-zinc-300">Enter</strong> / <strong class="text-zinc-300">→</strong> — Next step during the guided tour.</li>' +
-        '<li><strong class="text-zinc-300">←</strong> — Previous step during the guided tour.</li>' +
-        '<li><strong class="text-zinc-300">Ctrl/Cmd + Enter</strong> — Save the current notes textarea.</li>' +
-        '<li><strong class="text-zinc-300">Enter</strong> in input modals (e.g. Connect AI, Import Preview) — Confirm.</li>' +
-        '</ul>',
+      body: (() => {
+        const kbd = (keys: string) => `<strong class="text-zinc-300">${keys}</strong>`;
+        const modEnter = IS_MAC ? `${MOD_LABEL} Enter` : `${MOD_LABEL} + Enter`;
+        const formatKeys = IS_MAC ? `${SHIFT_LABEL} ${ALT_LABEL} F` : `${SHIFT_LABEL} + ${ALT_LABEL} + F`;
+        const owned = getShortcutDocs()
+          .map(s => `<li>${kbd(s.keys)} — ${s.description}</li>`)
+          .join('');
+        return (
+          '<p class="text-zinc-400">Shortcuts adapt to your operating system (⌘ on macOS, Ctrl elsewhere).</p>' +
+          '<ul class="list-disc list-inside mt-2 space-y-1 text-zinc-400">' +
+          owned +
+          `<li>${kbd(formatKeys)} — Format the code in the editor.</li>` +
+          `<li>${kbd('Escape')} — Close the open dropdown, modal, paint or annotate panel, cross-section overlay, or exit the guided tour.</li>` +
+          `<li>${kbd('Enter')} / ${kbd('→')} — Next step during the guided tour.</li>` +
+          `<li>${kbd('←')} — Previous step during the guided tour.</li>` +
+          `<li>${kbd(modEnter)} — Save the current notes textarea.</li>` +
+          `<li>${kbd('Enter')} in input modals (e.g. Connect AI, Import Preview) — Confirm.</li>` +
+          '</ul>'
+        );
+      })(),
     },
   ];
 

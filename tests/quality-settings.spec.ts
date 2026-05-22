@@ -13,19 +13,18 @@ test.beforeEach(async ({ page }) => {
 });
 
 test.describe('Curve quality settings', () => {
-  test('Mesh popover shows presets with Highest active by default', async ({ page }) => {
+  test('Mesh popover shows presets with Very High active by default', async ({ page }) => {
     await page.goto('/editor');
     await page.waitForSelector('#mesh-settings-toggle');
 
     await page.locator('#mesh-settings-toggle').click();
     await expect(page.locator('#mesh-settings-panel')).toBeVisible();
 
-    // All four presets are present; Highest is the default selection.
-    for (const q of ['low', 'medium', 'high', 'highest']) {
+    // All five presets are present; 'highest' (labeled "Very High") is default.
+    for (const q of ['low', 'medium', 'high', 'highest', 'ultra']) {
       await expect(page.locator(`#mesh-settings-panel [data-quality="${q}"]`)).toBeVisible();
     }
     const stored0 = await page.evaluate(() => localStorage.getItem('partwright-quality-settings-v1'));
-    // Either unset (defaults apply) or already highest.
     if (stored0) expect(JSON.parse(stored0).quality ?? 'highest').toBe('highest');
   });
 
@@ -68,5 +67,35 @@ test.describe('Curve quality settings', () => {
     const low = await runSphere();
     expect(low.triangleCount ?? 0).toBeLessThan(high.triangleCount ?? 0);
     expect(low.triangleCount ?? 0).toBeGreaterThan(0);
+  });
+
+  test('Ultra preset yields more triangles than the default', async ({ page }) => {
+    await page.goto('/editor');
+    await page.waitForSelector('#mesh-settings-toggle');
+    await page.waitForFunction(
+      () => !!(window as unknown as { partwright?: { run?: unknown } }).partwright?.run,
+      { timeout: 20_000 },
+    );
+
+    type RunResult = { triangleCount?: number; error?: string };
+    type PartwrightApi = { run: (code: string) => Promise<RunResult> };
+    // A cylinder stays cheap at 1024 segments (~4k tris); a sphere would be
+    // ~2M and too heavy for a smoke test. Either way the count must climb.
+    const cylinderCode = 'const { Manifold } = api; return Manifold.cylinder(5, 3, 3);';
+    const runCyl = () =>
+      page.evaluate((code) => {
+        const api = (window as unknown as { partwright: PartwrightApi }).partwright;
+        return api.run(code);
+      }, cylinderCode);
+
+    // Baseline at the default (Very High = 128 segments).
+    const high = await runCyl();
+
+    // Switch to Ultra (1024 segments) via the Mesh popover.
+    await page.locator('#mesh-settings-toggle').click();
+    await page.locator('#mesh-settings-panel [data-quality="ultra"]').click();
+
+    const ultra = await runCyl();
+    expect(ultra.triangleCount ?? 0).toBeGreaterThan(high.triangleCount ?? 0);
   });
 });

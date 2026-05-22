@@ -229,7 +229,8 @@ await partwright.createSessionWithVersions(name, [{code, label},...]) // Batch c
 await partwright.saveVersion(label?)     // Save current state as version
 await partwright.listVersions()          // -> [{id, index, label, timestamp, status}]
 await partwright.loadVersion({index} | {id})  // Load version into editor -> {id, index, label, code, geometryData, labelsAvailable, labelCount} or {error}
-await partwright.forkVersion({index} | {id}, transformFn, label?, assertions?) // Load + modify + validate + save in one call
+await partwright.forkVersion({index} | {id}, transformFn, label?, assertions?, carryColors=true) // Load + modify + validate + save atomically; carries parent colors -> {..., codeDiff, colors}
+await partwright.copyColorsFromVersion({index} | {id}) // Re-apply a prior version's colors onto the current mesh -> {source, carried, dropped}
 partwright.getGalleryUrl()               // -> URL for gallery view (human review)
 partwright.getSessionUrl()               // -> URL for this session
 await partwright.listSessions()          // -> [{id, name, updated}]
@@ -334,10 +335,14 @@ revolve(cs, n?, degrees?)
   -> around Y axis, then remaps so result is Z-up.
     Profile X=radial distance, Y=height -> after revolve, Y becomes Z automatically.
     Only positive-X side used. degrees defaults to 360.
-Segments guide: 6-8 low-poly, 32-48 smooth, 64+ high quality
+Segments: OMIT the segment argument so curves inherit the user's quality
+  preset (recommended). Pass an explicit 6-8 only for an intentional
+  low-poly look; only override upward when one specific feature needs more
+  resolution than the preset. Never hard-code a low count (e.g. 32) just to
+  "make it smooth" — that shadows the preset and looks chunky to the user.
 ```
 
-**Default segment count:** Partwright seeds `setCircularSegments()` from the user's Curve quality preset (the **Mesh** button in the viewport overlay) before each run. The default preset is **Highest** (128 segments), so curves render smooth out of the box without any explicit configuration. Users can drop to Low/Medium/High if they prefer faster renders. Your code can still call `setCircularSegments(n)` or pass an explicit segments argument to a primitive to override on a per-script or per-call basis.
+**Default segment count:** Partwright seeds `setCircularSegments()` (and `$fn` for OpenSCAD) from the user's Curve quality preset (the **Mesh** button in the viewport overlay) before each run. Presets are Low (16) / Medium (32) / High (64) / Very High (128, the default) / Ultra (1024), so curves render smooth out of the box without any explicit configuration. **An explicit segments argument always overrides this preset for that primitive**, so leave it off unless you specifically want a different resolution than the user chose. The current preset is reported in the per-turn "Session toggle state" suffix; honor it. You can still call `setCircularSegments(n)` or pass an explicit count to override on a per-script or per-call basis when a design genuinely needs it.
 
 **Global mesh detail (refinement):** The "Mesh detail" slider in the same Mesh popover applies `refine(N)` to every returned manifold at render time, subdividing flat faces too — not just curves. It **defaults to off (1×)**; when raised, the triangle counts you observe via `getMesh` / `getMeshSummary` are ~N² denser than the raw geometry, and exports inherit that density. It is shape-preserving (volume/bbox unchanged) and preserves `runOriginalID`, so `api.label` / `paintByLabel` still work. You don't need to set it; it's a user preference. Calling `.refine()` yourself in code still stacks on top of it.
 
@@ -522,7 +527,7 @@ If your rotated geometry looks mirrored, negate the angle. This burned 10+ minut
 
 ### Painting locks the editor — `clearColors()` to iterate
 
-Once any region exists, the editor goes read-only and `runAndSave` is rejected. To change the geometry mid-session, call `partwright.clearColors()` first, *then* run new code. To preserve a colored version while iterating, call `forkVersion(...)` instead — it loads, transforms, validates, and saves a fresh uncolored child without touching the colored one.
+Once any region exists, the editor's Run button is disabled in the UI (re-running would change the triangle indices the colors were painted against). The programmatic `runAndSave` is *not* blocked, but re-running new geometry with colors still in memory leaves them resolved against the old triangles. So to change the geometry mid-session, call `partwright.clearColors()` first, *then* run new code — or use `forkVersion(...)`, which re-resolves the parent's colors onto the new geometry by descriptor (pass `carryColors: false` for an uncolored child).
 
 ### Verify before you commit
 
@@ -629,7 +634,8 @@ const r = await partwright.forkVersion(
   { index: 11 },                       // or { id: "Kx3Pq9mA2wEr" } from listVersions()
   code => code.replace('towerH = 28', 'towerH = 35'),
   "v11a - taller towers",              // label for the new version
-  { isManifold: true, maxComponents: 1 } // optional assertions (validated before saving)
+  { isManifold: true, maxComponents: 1 }, // optional assertions (validated before saving)
+  true                                  // carryColors (default true) — re-apply parent colors
 );
 // On success:
 //   r.passed       = true (only when assertions provided)
@@ -637,6 +643,10 @@ const r = await partwright.forkVersion(
 //   r.geometry     = full geometry stats
 //   r.version      = { id, index, label } of the newly saved version
 //   r.diff         = stat diff vs. the previous current version
+//   r.codeDiff     = { changed, added, removed, diff } — what actually changed in the SOURCE.
+//                    Verify your transform landed here: changed:false means the code is
+//                    byte-identical to the parent (your edit was a no-op).
+//   r.colors       = { carried: [names], dropped: [names] } when the parent had colors
 //   r.galleryUrl   = gallery URL for human review
 // On failure:
 //   r.error        = "No version found with index ..." / "transformFn threw: ..." / etc.
@@ -648,6 +658,33 @@ const r = await partwright.forkVersion(
 looked up. This is the recommended way to build parallel branches (v11a, v11b, ...) off a shared
 parent without a load/read/modify/save round-trip chain.
 
+**Color carry-over.** If the parent version has color regions, `forkVersion` re-applies them to the
+forked geometry automatically — each region's geometry-relative descriptor (box / slab / `byLabel` /
+coplanar / connected-from-seed) is re-resolved against the new mesh, so a dimension tweak does **not**
+force you to repaint. Regions whose descriptor no longer matches (a label the new code dropped, raw
+triangle ids on changed topology) are skipped and reported in `r.colors.dropped`. Pass `carryColors:
+false` for an intentionally uncolored fork.
+
+> When the AI tool form is used, pass `patches: [{find, replace}, ...]` instead of a `transformFn`.
+> Each `find` must occur **exactly once** in the parent code — a find that matches zero or multiple
+> times is rejected with an error rather than silently saving the parent unchanged, so copy the exact
+> text (whitespace included) from `getCode()`/`loadVersion()`.
+
+### Copying colors onto a rebuilt version
+
+When you rebuild geometry from scratch with `runAndSave` (rather than forking) but it matches an
+earlier *painted* version, transfer the colors in one call instead of repainting region by region:
+
+```js
+const r = await partwright.copyColorsFromVersion({ index: 7 }); // the painted version
+// r.source  = { index, label }
+// r.carried = [names] re-resolved onto the current mesh
+// r.dropped = [names] whose descriptor no longer matches — repaint those
+```
+
+This is in-memory like any paint op — your next `runAndSave` serializes the current regions, so they
+persist with it. (You don't need this after `forkVersion`, which already carries colors.)
+
 ### Modify and test
 
 Modify current editor code with a transform function and test the result without committing:
@@ -657,10 +694,18 @@ const r = await partwright.modifyAndTest(
   { isManifold: true, maxComponents: 1 }
 );
 // r.modifiedCode = the transformed code string
+// r.codeDiff     = { changed, added, removed, diff } — confirm the tweak landed.
+//                  changed:false means your transform matched nothing (a no-op);
+//                  the stats below would then describe the UNCHANGED code.
 // r.stats        = geometry stats of the modified code
 // r.passed       = true/false (only if assertions given)
 // r.failures     = [...] (only if failed)
 ```
+
+> Prefer the AI tool's `find`/`replace` (or `patches`) form over a bare `code => code.replace(...)`
+> transform: a string `replace` whose needle is absent returns the code **unchanged with no error**,
+> so the tweak silently no-ops. The `find`/`replace` form is rejected when the needle doesn't match
+> exactly once. Either way, check `codeDiff.changed` before trusting the result.
 
 ### Multi-query current geometry
 

@@ -4,7 +4,7 @@
 // ai/* modules; this file is mostly DOM wiring.
 
 import { runTurn, totalCost, totalTokensEstimate, estimateCachedPrefixTokens } from '../ai/chatLoop';
-import { listMessages, GLOBAL_CHAT_BUCKET, putMessages, deleteMessages, getKey, clearChat } from '../ai/db';
+import { listMessages, GLOBAL_CHAT_BUCKET, putMessages, deleteMessages, getKey, clearChat, mergeChatBucket } from '../ai/db';
 import { proposeCompaction } from '../ai/compaction';
 import { captureIsoViews, fileToImageSource } from '../ai/images';
 import { loadSettings, saveSettings, setAnthropicModel, setToggles, ANTHROPIC_MODEL_OPTIONS, MAX_ITERATIONS_OPTIONS, MAX_SPEND_OPTIONS, type AiSettings } from '../ai/settings';
@@ -18,6 +18,8 @@ import { showSystemPromptModal } from './aiSystemPromptModal';
 import { showCompactConfirmModal } from './aiCompactModal';
 import { showAttachmentModal } from './aiAttachmentModal';
 import { putAttachment } from '../ai/attachments';
+import { exportChatMarkdown } from '../export/chat';
+import { getState } from '../storage/sessionManager';
 import { ensureModelLoaded, effectiveContextCeiling, interruptLocal, isModelLoaded, resolveLocalModel } from '../ai/local';
 import { activeModel, SPEND_CAP_USD, type AnthropicModelId, type ChatBlock, type ChatMessage, type ChatToggles, type ImageSource, type PersistedToolResult, type TurnOutcomeReason } from '../ai/types';
 import { errorLog } from '../diagnostics/errorLog';
@@ -282,6 +284,11 @@ function buildDrawer(): void {
   compactBtn.title = 'Compact the conversation: summarize older turns and promote insights to session notes.';
   compactBtn.addEventListener('click', () => { void runCompact(); });
   header.appendChild(compactBtn);
+
+  const exportBtn = createIconButton('Export chat', '⬇ Chat');
+  exportBtn.title = 'Export this conversation as a Markdown (.md) file. Saves the whole transcript — text, tool calls, and results.';
+  exportBtn.addEventListener('click', exportCurrentChat);
+  header.appendChild(exportBtn);
 
   const clearBtn = createIconButton('Clear', '🗑');
   clearBtn.title = 'Clear the chat history for the current session. The conversation is removed from your browser; saved versions and notes are untouched.';
@@ -850,8 +857,8 @@ function panelStatusUpdate(): void {
   const settings = loadSettings();
   if (settings.toggles.provider === 'local') {
     panelStatusEl.replaceChildren();
+    panelStatusEl.classList.remove('hidden', 'text-emerald-400', 'text-amber-400', 'text-blue-300');
     if (!settings.toggles.localModel) {
-      panelStatusEl.classList.remove('hidden', 'text-emerald-400');
       panelStatusEl.classList.add('text-amber-400');
       panelStatusEl.appendChild(document.createTextNode('No local model picked. '));
       const link = document.createElement('button');
@@ -862,7 +869,6 @@ function panelStatusUpdate(): void {
       });
       panelStatusEl.appendChild(link);
     } else if (!isModelLoaded(settings.toggles.localModel)) {
-      panelStatusEl.classList.remove('hidden', 'text-emerald-400');
       panelStatusEl.classList.add('text-blue-300');
       let label = 'Model';
       try { label = resolveLocalModel(settings.toggles.localModel).label; } catch { /* stale id */ }
@@ -874,8 +880,26 @@ function panelStatusUpdate(): void {
       panelStatusEl.appendChild(link);
       panelStatusEl.appendChild(document.createTextNode(' or send a message to auto-load.'));
     } else {
-      panelStatusEl.classList.add('hidden');
+      panelStatusEl.classList.add('text-zinc-400');
     }
+    // Quality hint — always shown when local is the active provider so the
+    // user knows Anthropic exists and is sharper. Click opens settings on
+    // the Anthropic tab where the explicit Enable button lives.
+    const hint = document.createElement('div');
+    hint.className = 'text-zinc-400 mt-0.5';
+    hint.appendChild(document.createTextNode('Switch to the '));
+    const switchLink = document.createElement('button');
+    switchLink.className = 'underline text-zinc-200 hover:text-zinc-50';
+    switchLink.textContent = 'Anthropic provider';
+    switchLink.addEventListener('click', () => {
+      void showAiSettingsModal(
+        { onChange: () => { renderTranscript(); renderToggleStrip(); renderCostMeter(); renderModelPicker(); renderPromptChip(); panelStatusUpdate(); } },
+        { initialTab: 'anthropic' },
+      );
+    });
+    hint.appendChild(switchLink);
+    hint.appendChild(document.createTextNode(' for better quality.'));
+    panelStatusEl.appendChild(hint);
     return;
   }
   void getKey('anthropic').then(key => {
@@ -921,6 +945,18 @@ async function loadLocalModelInline(): Promise<void> {
   } catch (err) {
     setTransientStatus(`Failed to load: ${err instanceof Error ? err.message : String(err)}`);
   }
+}
+
+/** Download the current conversation as a Markdown transcript. In-memory
+ *  history is already the authoritative, seq-ordered view, so no DB read. */
+function exportCurrentChat(): void {
+  if (state.history.length === 0) {
+    setTransientStatus('Nothing to export — the chat is empty.');
+    return;
+  }
+  const sessionName = state.sessionId === GLOBAL_CHAT_BUCKET ? null : (getState().session?.name ?? null);
+  exportChatMarkdown(state.history, sessionName);
+  setTransientStatus('Chat exported as Markdown.');
 }
 
 /** Clear chat history for the current session. Confirms first; refuses to
@@ -1574,6 +1610,10 @@ function formatTurnOutcome(o: TurnOutcome): string {
 async function runTurnWithStallRetry(apiKey: string | undefined, toggles: ChatToggles, userBlocks: ChatBlock[]): Promise<void> {
   let attempt = 0;
   let lastTurnOutcome: TurnOutcome | null = null;
+  // Bucket the conversation lives in as this turn begins. If the model creates
+  // a session mid-turn the active bucket changes out from under us, so we
+  // remember the starting bucket and re-home the chat once the turn settles.
+  let turnStartBucket = state.sessionId;
   while (true) {
     attempt++;
     const controller = new AbortController();
@@ -1715,6 +1755,24 @@ async function runTurnWithStallRetry(apiKey: string | undefined, toggles: ChatTo
     state.inFlightController = null;
     setSendButtonMode('send');
     updateRewindButtons();
+
+    // Bug fix — reunite a conversation split by a mid-turn session switch.
+    // chatLoop stamps every message of a turn with the session active when the
+    // turn began, so when the model creates or switches sessions mid-turn (via
+    // createSession, or a runAndSave auto-create), the lead-up turns stay under
+    // the old bucket — the global bucket OR an earlier real session — and
+    // vanish from the new session on reload. Fold them forward into the session
+    // the user landed on. Restricted to a fresh target (onlyIfTargetEmpty) so
+    // two distinct conversations are never auto-merged.
+    if (state.sessionId !== turnStartBucket) {
+      const moved = await mergeChatBucket(turnStartBucket, state.sessionId, { onlyIfTargetEmpty: true });
+      if (moved > 0) {
+        await loadHistoryForCurrentSession();
+        renderTranscript();
+        renderCostMeter();
+      }
+      turnStartBucket = state.sessionId;
+    }
 
     // Surface a sticky completion banner so the user knows the turn
     // actually ended and why — better than a silent hideProgress that
@@ -1871,9 +1929,10 @@ function renderProgress(): void {
   }
 }
 
-/** Display a sticky completion / failure status for ~6s after a turn
- *  ends. Replaces the silent hideProgress() that left users wondering
- *  whether the model finished, errored, or just stopped speaking. */
+/** Display a completion / failure status after a turn ends. The status
+ *  remains visible until the next turn starts (showProgress overwrites
+ *  the 'final' phase), so the user always sees the outcome of the most
+ *  recent turn instead of a banner that vanishes on a timer. */
 function showProgressFinal(detail: string): void {
   if (!progressEl) return;
   progressState.phase = 'final';
@@ -1885,11 +1944,6 @@ function showProgressFinal(detail: string): void {
     clearInterval(progressTickerId);
     progressTickerId = null;
   }
-  window.setTimeout(() => {
-    if (progressState.phase === 'final' && progressState.detail === detail) {
-      hideProgress();
-    }
-  }, 6000);
 }
 
 function triggerStallRetry(): void {
