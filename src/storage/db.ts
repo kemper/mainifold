@@ -333,12 +333,18 @@ export function legacyImagesObjectToArray(obj: LegacyImagesObject): AttachedImag
 
 export async function updateSession(id: string, updates: Partial<Pick<Session, 'name' | 'created' | 'updated' | 'images' | 'language'>>): Promise<void> {
   const store = await tx('sessions', 'readwrite');
-  const session = await reqToPromise(store.get(id)) as Session | null;
-  if (!session) return;
-  Object.assign(session, updates);
-  // Strip legacy field if present so it doesn't shadow the new one on re-read
-  delete (session as { referenceImages?: unknown }).referenceImages;
-  await reqToPromise(store.put(session));
+  // Read-modify-write inside one transaction: queue the put from the get's
+  // callback (awaiting between them risks auto-commit), then await oncomplete.
+  const getReq = store.get(id);
+  getReq.onsuccess = () => {
+    const session = getReq.result as Session | null;
+    if (!session) return;
+    Object.assign(session, updates);
+    // Strip legacy field if present so it doesn't shadow the new one on re-read
+    delete (session as { referenceImages?: unknown }).referenceImages;
+    store.put(session);
+  };
+  await txComplete(store.transaction);
 }
 
 export async function deleteSession(id: string): Promise<void> {
@@ -485,11 +491,15 @@ export async function deleteNote(id: string): Promise<void> {
 
 export async function updateNote(id: string, text: string): Promise<void> {
   const store = await tx('notes', 'readwrite');
-  const note = await reqToPromise(store.get(id)) as SessionNote | null;
-  if (!note) return;
-  note.text = text;
-  note.timestamp = Date.now();
-  await reqToPromise(store.put(note));
+  const getReq = store.get(id);
+  getReq.onsuccess = () => {
+    const note = getReq.result as SessionNote | null;
+    if (!note) return;
+    note.text = text;
+    note.timestamp = Date.now();
+    store.put(note);
+  };
+  await txComplete(store.transaction);
 }
 
 // === Database reset ===

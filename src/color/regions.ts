@@ -1,6 +1,7 @@
 // ColorRegionStore — manages per-face color regions for the current mesh
 
 import type { MeshData } from '../geometry/types';
+import type { ShapeType } from './boxPaint';
 
 export interface ColorRegion {
   id: number;
@@ -16,7 +17,7 @@ export interface ColorRegion {
 export type RegionDescriptor =
   | { kind: 'coplanar'; seedPoint: [number, number, number]; seedNormal: [number, number, number]; normalTolerance: number }
   | { kind: 'slab'; normal: [number, number, number]; offset: number; thickness: number }
-  | { kind: 'box'; center: [number, number, number]; size: [number, number, number]; quaternion: [number, number, number, number] }
+  | { kind: 'box'; center: [number, number, number]; size: [number, number, number]; quaternion: [number, number, number, number]; shape?: ShapeType }
   | { kind: 'triangles'; ids: number[] }
   | { kind: 'byLabel'; label: string }
   | { kind: 'connectedFromSeed'; seedPoint: [number, number, number]; seedNormal: [number, number, number]; maxDeviationDeg: number };
@@ -327,16 +328,6 @@ export function serialize(): SerializedColorRegion[] {
     order: r.order,
     visible: r.visible,
   }));
-}
-
-export function deserialize(data: SerializedColorRegion[]): void {
-  regions = data.map(d => ({
-    ...d,
-    visible: d.visible !== false, // older saves lack the field — default to visible
-    triangles: new Set<number>(),
-  }));
-  nextOrder = regions.reduce((max, r) => Math.max(max, r.order + 1), 1);
-  clearRedoStack();
 }
 
 /** Apply triColors to a MeshData, returning a new object (non-destructive).

@@ -66,6 +66,7 @@ export function setTool(tool: PaintTool): void {
   const prev = currentTool;
   currentTool = tool;
   clearHighlight();
+  if (tool !== 'brush') clearBrushRing(); // ring is brush-only; don't leave it in the scene
 
   if (active) {
     if (tool === 'slab') activateSlabDrag();

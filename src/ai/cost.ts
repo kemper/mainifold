@@ -79,25 +79,7 @@ function pricingFor(provider: string, model: string): ModelPricing | null {
   return table[model] ?? FALLBACK_PRICING;
 }
 
-export function turnCostUsd(provider: string, model: string, usage: TurnUsage): number;
-export function turnCostUsd(model: string, usage: TurnUsage): number;
-export function turnCostUsd(...args: unknown[]): number {
-  // Two-arg form (legacy from the Anthropic-only era) infers Anthropic
-  // when the model id looks like one, falls back to Anthropic pricing
-  // anyway (the only thing that called this from staging was the
-  // Anthropic code path).
-  let provider: string;
-  let model: string;
-  let usage: TurnUsage;
-  if (args.length === 2) {
-    provider = 'anthropic';
-    model = args[0] as string;
-    usage = args[1] as TurnUsage;
-  } else {
-    provider = args[0] as string;
-    model = args[1] as string;
-    usage = args[2] as TurnUsage;
-  }
+export function turnCostUsd(provider: string, model: string, usage: TurnUsage): number {
   const p = pricingFor(provider, model);
   if (!p) return 0;
   const inputCost = (usage.inputTokens * p.input) / 1_000_000;
