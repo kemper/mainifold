@@ -150,6 +150,7 @@ import {
   getSessionContext,
   recordError,
   onStateChange,
+  initSessionTabSync,
   type ExportedSession,
   type ExportOptions,
 } from './storage/sessionManager';
@@ -1616,6 +1617,10 @@ async function main() {
   if (!showLanding && !showHelpPage && !showCatalog && !show404 && engineOk) {
     await syncEditorFromURL();
   }
+
+  // Keep this tab's session state in sync with peer tabs that mutate the same
+  // session in another window.
+  initSessionTabSync();
 
   // Update document title when session state changes (create, open, close, rename)
   onStateChange((state) => {
