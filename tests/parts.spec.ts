@@ -1,0 +1,138 @@
+// E2E coverage for multi-part sessions: a session can hold several parts, each
+// with its own code and independent version history. Verifies the console API,
+// the session-bar part switcher, and that parts survive a reload (persistence +
+// the lazy parts migration). Network-free — all geometry is produced locally.
+
+import { test, expect, type Page } from 'playwright/test';
+
+interface PartsAPI {
+  createSession: (name?: string) => Promise<{ id: string }>;
+  runAndSave: (code: string, label?: string) => Promise<unknown>;
+  getCode: () => string;
+  setCode: (code: string) => void;
+  createPart: (name?: string) => Promise<{ id: string; name: string } | { error: string }>;
+  changePart: (target: string | { id?: string; name?: string }) => Promise<unknown>;
+  listParts: () => { id: string; name: string; order: number; isCurrent: boolean }[];
+  listVersions: () => Promise<{ index: number; label: string }[]>;
+  getSessionState: () => { currentPart: { id: string; name: string } | null; versionCount: number };
+}
+
+async function waitForEngine(page: Page) {
+  await page.waitForSelector('text=Ready', { timeout: 20_000 });
+  await page.waitForFunction(
+    () => !!(window as unknown as { partwright?: { createPart?: unknown } }).partwright?.createPart,
+    { timeout: 20_000 },
+  );
+}
+
+const cube = (s: number, marker: string) =>
+  `// ${marker}\nconst { Manifold } = api; return Manifold.cube([${s}, ${s}, ${s}], true);`;
+
+test.describe('Multi-part sessions', () => {
+  // Suppress the first-visit guided tour so its backdrop doesn't intercept clicks.
+  test.beforeEach(async ({ page }) => {
+    await page.addInitScript(() => localStorage.setItem('partwright-tour-completed', '1'));
+  });
+
+  test('parts carry independent code and version history', async ({ page }) => {
+    await page.goto('/editor');
+    await waitForEngine(page);
+
+    const result = await page.evaluate(async ({ codeA1, codeA2, codeB1 }) => {
+      const pw = (window as unknown as { partwright: PartsAPI }).partwright;
+      await pw.createSession('multi');
+      // Part 1 (default): two versions.
+      await pw.runAndSave(codeA1, 'a1');
+      await pw.runAndSave(codeA2, 'a2');
+
+      // A second part with its own single version.
+      const made = await pw.createPart('Lid');
+      const lidVersionsBeforeSave = (await pw.listVersions()).length; // fresh part: 0
+      await pw.runAndSave(codeB1, 'b1');
+
+      const partsAfter = pw.listParts();
+      const lidVersions = (await pw.listVersions()).length;
+
+      // Switch back to the first part and confirm its history is intact and
+      // the editor shows its code, not the lid's.
+      const first = partsAfter.find(p => p.name !== 'Lid')!;
+      await pw.changePart(first.id);
+      const firstVersions = (await pw.listVersions()).length;
+      const firstCode = pw.getCode();
+
+      return {
+        madeOk: !('error' in made),
+        partCount: partsAfter.length,
+        partNames: partsAfter.map(p => p.name),
+        lidVersionsBeforeSave,
+        lidVersions,
+        firstVersions,
+        firstCodeHasA2: firstCode.includes('A2'),
+        firstCodeHasLid: firstCode.includes('LID'),
+      };
+    }, { codeA1: cube(10, 'A1'), codeA2: cube(12, 'A2'), codeB1: cube(6, 'LID') });
+
+    expect(result.madeOk).toBe(true);
+    expect(result.partCount).toBe(2);
+    expect(result.partNames).toContain('Lid');
+    expect(result.lidVersionsBeforeSave).toBe(0);   // a new part starts empty
+    expect(result.lidVersions).toBe(1);             // independent history
+    expect(result.firstVersions).toBe(2);           // first part untouched
+    expect(result.firstCodeHasA2).toBe(true);       // editor restored first part's latest
+    expect(result.firstCodeHasLid).toBe(false);
+  });
+
+  test('parts persist across a reload', async ({ page }) => {
+    await page.goto('/editor');
+    await waitForEngine(page);
+
+    const sessionId = await page.evaluate(async ({ codeA1, codeB1 }) => {
+      const pw = (window as unknown as { partwright: PartsAPI }).partwright;
+      const s = await pw.createSession('persist');
+      await pw.runAndSave(codeA1, 'a1');
+      await pw.createPart('Handle');
+      await pw.runAndSave(codeB1, 'b1');
+      return s.id;
+    }, { codeA1: cube(10, 'A1'), codeB1: cube(6, 'HANDLE') });
+
+    // Reload by URL — bootstrap must re-open the session and its parts.
+    await page.goto(`/editor?session=${sessionId}`);
+    await waitForEngine(page);
+
+    const after = await page.evaluate(() => {
+      const pw = (window as unknown as { partwright: PartsAPI }).partwright;
+      return { parts: pw.listParts().map(p => p.name).sort() };
+    });
+    expect(after.parts).toEqual(['Handle', 'Part 1']);
+  });
+
+  test('session-bar part switcher renders and switches parts', async ({ page }) => {
+    await page.goto('/editor');
+    await waitForEngine(page);
+
+    await page.evaluate(async ({ codeA1, codeB1 }) => {
+      const pw = (window as unknown as { partwright: PartsAPI }).partwright;
+      await pw.createSession('switcher');
+      await pw.runAndSave(codeA1, 'a1');
+      await pw.createPart('Lid');
+      await pw.runAndSave(codeB1, 'b1');
+    }, { codeA1: cube(10, 'A1'), codeB1: cube(6, 'LID') });
+
+    // The part <select> lists both parts; the lid (current) is selected.
+    const select = page.locator('#part-select');
+    await expect(select).toBeVisible();
+    await expect(select.locator('option')).toHaveCount(2);
+
+    // Switch to "Part 1" via the dropdown; the editor should load its code.
+    await select.selectOption({ label: 'Part 1' });
+    await expect
+      .poll(() => page.evaluate(() => (window as unknown as { partwright: PartsAPI }).partwright.getCode()))
+      .toContain('A1');
+
+    // The add-part button increases the part count.
+    await page.locator('#btn-add-part').click();
+    await expect
+      .poll(() => page.evaluate(() => (window as unknown as { partwright: PartsAPI }).partwright.listParts().length))
+      .toBe(3);
+  });
+});

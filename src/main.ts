@@ -120,6 +120,7 @@ import { computeFaceGroups } from './color/faceGroups';
 import {
   getSessionIdFromURL,
   getVersionFromURL,
+  getPartIdFromURL,
   openSession,
   createSession,
   closeSession,
@@ -132,6 +133,12 @@ import {
   loadVersion as loadVersionFromStore,
   peekVersion,
   listCurrentVersions,
+  listCurrentParts,
+  getCurrentPart,
+  createPart,
+  changePart,
+  renamePart,
+  deletePart,
   getState,
   getSessionUrl,
   getGalleryUrl,
@@ -151,7 +158,7 @@ import {
   type ExportedSession,
   type ExportOptions,
 } from './storage/sessionManager';
-import type { Version } from './storage/db';
+import type { Version, Part } from './storage/db';
 import {
   ValidationError,
   guard,
@@ -564,6 +571,36 @@ function parseVersionTarget(
     return { error: `${caller}: target.id must be a non-empty string (got ${typeof id}).` };
   }
   return { kind: 'id', value: id };
+}
+
+/** Resolve a part-target arg — a part id string, or { id } / { name } — to a
+ *  Part in the active session. Returns { error } (with guidance) on a miss. */
+function resolvePartTarget(target: unknown, caller: string): Part | { error: string } {
+  if (!getState().session) {
+    return { error: `${caller}: no active session. Call createSession() or openSession(id) first.` };
+  }
+  const parts = listCurrentParts();
+  let id: string | undefined;
+  let name: string | undefined;
+  if (typeof target === 'string') {
+    id = target;
+  } else if (target && typeof target === 'object') {
+    ({ id, name } = target as { id?: string; name?: string });
+  } else {
+    return { error: `${caller}(target): pass a part id string, or { id } / { name } from listParts().` };
+  }
+  let part: Part | undefined;
+  if (id !== undefined) {
+    if (typeof id !== 'string' || id.length === 0) return { error: `${caller}: id must be a non-empty string.` };
+    part = parts.find(p => p.id === id);
+  } else if (name !== undefined) {
+    if (typeof name !== 'string' || name.length === 0) return { error: `${caller}: name must be a non-empty string.` };
+    part = parts.find(p => p.name === name);
+  } else {
+    return { error: `${caller}(target): pass { id } or { name } from listParts().` };
+  }
+  if (!part) return { error: `${caller}: no matching part. Use listParts() to see available parts.` };
+  return part;
 }
 
 // Determine which page to show based on URL path and query params
@@ -1051,6 +1088,24 @@ async function main() {
     _clearImages();
   }
 
+  // Reset the editor for a freshly created part. Unlike a new session, parts
+  // share the session's reference images, so those are left intact.
+  function startNewPartInEditor() {
+    const freshCode = '// New part\nconst { Manifold } = api;\nreturn Manifold.cube([10, 10, 10], true);';
+    setValue(freshCode);
+    runCode(freshCode);
+  }
+
+  // Load a part's active version into the editor, or reset to a blank part when
+  // the part has no saved versions yet.
+  async function loadPartIntoEditor(version: Version | null) {
+    if (version) {
+      await loadVersionIntoEditor(version);
+    } else {
+      startNewPartInEditor();
+    }
+  }
+
   // Create session bar
   createSessionBar(editorUI, {
     onSaveVersion: async () => ({
@@ -1070,6 +1125,21 @@ async function main() {
     },
     onOpenSessionList: () => showSessionList(),
     onNewSession: startNewSessionInEditor,
+    onSwitchPart: async (partId: string) => {
+      const version = await changePart(partId);
+      await loadPartIntoEditor(version);
+    },
+    onCreatePart: async () => {
+      await createPart();
+      startNewPartInEditor();
+    },
+    onDeletePart: async (partId: string) => {
+      const wasCurrent = getState().currentPart?.id === partId;
+      const result = await deletePart(partId);
+      if (result && wasCurrent) {
+        await loadPartIntoEditor(getState().currentVersion);
+      }
+    },
   });
 
   // Create layout
@@ -1403,11 +1473,13 @@ async function main() {
     const sessionId = getSessionIdFromURL();
     if (sessionId) {
       const versionIndex = getVersionFromURL();
+      const partId = getPartIdFromURL();
       const state = getState();
       const needsSessionLoad = state.session?.id !== sessionId;
+      const needsPartLoad = partId !== null && state.currentPart?.id !== partId;
       const needsVersionLoad = versionIndex !== null && state.currentVersion?.index !== versionIndex;
-      if (needsSessionLoad || needsVersionLoad) {
-        const version = await openSession(sessionId, versionIndex ?? undefined);
+      if (needsSessionLoad || needsPartLoad || needsVersionLoad) {
+        const version = await openSession(sessionId, versionIndex ?? undefined, partId ?? undefined);
         if (version) {
           await loadVersionIntoEditor(version);
           if (tab === 'gallery') refreshGallery();
@@ -2386,6 +2458,78 @@ async function main() {
       await deleteSession(id);
     },
 
+    // === Part API ===
+    // A session holds one or more parts; each part has its own code + version
+    // history. The "current part" determines what every other method (run,
+    // save, paint, export, …) acts on.
+
+    /** List the parts in the active session, each flagged with `isCurrent`. */
+    listParts() {
+      const current = getCurrentPart();
+      return listCurrentParts().map(p => ({ id: p.id, name: p.name, order: p.order, isCurrent: p.id === current?.id }));
+    },
+
+    /** The active part, or null when no session is open. */
+    getCurrentPart() {
+      const p = getCurrentPart();
+      return p ? { id: p.id, name: p.name, order: p.order } : null;
+    },
+
+    /** Create a new, empty part and switch to it. Resets the editor to a starter
+     *  snippet; call runAndSave/saveVersion to commit its first version. */
+    async createPart(name?: string) {
+      const check = guard(() => assertString(name, 'createPart(name)', { optional: true }));
+      if (typeof check === 'object' && check !== null && 'error' in check) return check;
+      if (!getState().session) {
+        return { error: 'No active session. Call createSession() or openSession(id) first.' };
+      }
+      const part = await createPart(name);
+      if (!part) return { error: 'Could not create part (no active session).' };
+      startNewPartInEditor();
+      return { id: part.id, name: part.name, order: part.order };
+    },
+
+    /** Switch the active part. Pass a part id string, or { id } / { name } from
+     *  listParts(). Loads that part's latest version into the editor. */
+    async changePart(target: string | { id?: string; name?: string }) {
+      const part = resolvePartTarget(target, 'changePart');
+      if ('error' in part) return part;
+      const version = await changePart(part.id);
+      await loadPartIntoEditor(version);
+      return {
+        id: part.id,
+        name: part.name,
+        currentVersion: version ? { id: version.id, index: version.index, label: version.label } : null,
+      };
+    },
+
+    /** Rename a part. Pass a part id string, or { id } / { name }. */
+    async renamePart(target: string | { id?: string; name?: string }, newName: string) {
+      const check = guard(() => assertString(newName, 'renamePart(newName)', { allowEmpty: false }));
+      if (typeof check === 'object' && check !== null && 'error' in check) return check;
+      const part = resolvePartTarget(target, 'renamePart');
+      if ('error' in part) return part;
+      await renamePart(part.id, newName);
+      return { id: part.id, name: newName };
+    },
+
+    /** Delete a part and its versions. Refuses to delete a session's last part.
+     *  Deleting the active part activates and loads an adjacent one. */
+    async deletePart(target: string | { id?: string; name?: string }) {
+      const part = resolvePartTarget(target, 'deletePart');
+      if ('error' in part) return part;
+      const wasCurrent = getCurrentPart()?.id === part.id;
+      const result = await deletePart(part.id);
+      if (!result) return { error: 'Cannot delete the last part of a session.' };
+      if (wasCurrent) {
+        await loadPartIntoEditor(getState().currentVersion);
+      }
+      return {
+        deleted: { id: result.deleted.id, name: result.deleted.name },
+        newCurrent: result.newCurrent ? { id: result.newCurrent.id, name: result.newCurrent.name } : null,
+      };
+    },
+
     /** Save current state as a new version in the active session.
      *  Returns `{ id, index, label }` on success, `{ error }` if no session is
      *  active, or `{ skipped: true, reason }` when nothing has changed since
@@ -2678,6 +2822,8 @@ async function main() {
       const state = getState();
       return {
         session: state.session ? { id: state.session.id, name: state.session.name } : null,
+        currentPart: state.currentPart ? { id: state.currentPart.id, name: state.currentPart.name } : null,
+        parts: state.parts.map(p => ({ id: p.id, name: p.name, order: p.order, isCurrent: p.id === state.currentPart?.id })),
         currentVersion: state.currentVersion ? { index: state.currentVersion.index, label: state.currentVersion.label } : null,
         versionCount: state.versionCount,
       };
@@ -4869,6 +5015,13 @@ async function main() {
         'openSession':     { signature: 'await openSession(id) -- Open existing session', docs: '/ai.md#resuming-a-session' },
         'listSessions':    { signature: 'await listSessions() -- List all sessions', docs: '/ai.md#console-api--windowpartwright' },
         'getSessionContext': { signature: 'await getSessionContext() -- Get full session context (for resuming)', docs: '/ai.md#resuming-a-session' },
+        // Parts (multiple objects per session)
+        'listParts':       { signature: 'listParts() -- List parts in the session -> [{id, name, order, isCurrent}]', docs: '/ai.md#console-api--windowpartwright' },
+        'getCurrentPart':  { signature: 'getCurrentPart() -- Active part -> {id, name, order} or null', docs: '/ai.md#console-api--windowpartwright' },
+        'createPart':      { signature: 'await createPart(name?) -- New empty part + switch to it -> {id, name, order}', docs: '/ai.md#console-api--windowpartwright' },
+        'changePart':      { signature: 'await changePart(id) -- Switch active part (loads its latest version)', docs: '/ai.md#console-api--windowpartwright' },
+        'renamePart':      { signature: 'await renamePart(id, name) -- Rename a part', docs: '/ai.md#console-api--windowpartwright' },
+        'deletePart':      { signature: 'await deletePart(id) -- Delete a part and its versions', docs: '/ai.md#console-api--windowpartwright' },
         'getGalleryUrl':   { signature: 'getGalleryUrl() -- URL for gallery view (human review)', docs: '/ai.md#console-api--windowpartwright' },
         // Notes
         'addSessionNote':  { signature: 'await addSessionNote(text) -- Add note with [PREFIX] tag', docs: '/ai.md#session-notes----tracking-design-context' },

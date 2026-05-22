@@ -10,6 +10,7 @@ import {
   navigateVersion,
   listCurrentVersions,
   renameSession,
+  renamePart,
   type SessionState,
 } from '../storage/sessionManager';
 import { onChange as onColorRegionsChange } from '../color/regions';
@@ -20,6 +21,12 @@ export interface SessionBarCallbacks {
   onLoadVersion: (code: string) => void;
   onOpenSessionList: () => void;
   onNewSession: () => void;
+  /** Switch the active part by id (loads its latest version into the editor). */
+  onSwitchPart: (partId: string) => void | Promise<void>;
+  /** Create a new part in the active session (resets editor to a starter). */
+  onCreatePart: () => void | Promise<void>;
+  /** Delete a part by id (an adjacent part becomes active). */
+  onDeletePart: (partId: string) => void | Promise<void>;
 }
 
 let barEl: HTMLElement | null = null;
@@ -121,6 +128,12 @@ function render(state: SessionState) {
   // Separator
   barEl.appendChild(el('span', 'text-zinc-600', '|'));
 
+  // Part switcher (a session always has at least one part)
+  renderPartControl(barEl, state);
+
+  // Separator
+  barEl.appendChild(el('span', 'text-zinc-600', '|'));
+
   // Version nav
   if (state.currentVersion && state.versionCount > 0) {
     // Position within the (gap-tolerant) index list, not raw index math.
@@ -207,6 +220,57 @@ function render(state: SessionState) {
   const closeBtn = btn('✕', () => closeSession());
   closeBtn.title = 'Close session';
   barEl.appendChild(closeBtn);
+}
+
+/** Render the part switcher: a dropdown of the session's parts plus add/rename/
+ *  delete controls. A session always has ≥1 part, so this always shows when a
+ *  session is active. */
+function renderPartControl(container: HTMLElement, state: SessionState): void {
+  const current = state.currentPart;
+  if (!current) return;
+
+  const icon = el('span', 'text-zinc-500', '▤'); // ▤ parts glyph
+  icon.title = 'Parts in this session';
+  container.appendChild(icon);
+
+  const select = document.createElement('select');
+  select.id = 'part-select';
+  select.className = 'bg-zinc-700 text-zinc-200 text-xs rounded px-1 py-0.5 border border-zinc-600 max-w-40 truncate cursor-pointer focus:outline-none focus:border-blue-500';
+  select.title = 'Switch part';
+  for (const p of state.parts) {
+    const opt = document.createElement('option');
+    opt.value = p.id;
+    opt.textContent = p.name;
+    if (p.id === current.id) opt.selected = true;
+    select.appendChild(opt);
+  }
+  select.addEventListener('change', () => { void callbacks.onSwitchPart(select.value); });
+  container.appendChild(select);
+
+  const addBtn = btn('＋', () => { void callbacks.onCreatePart(); }); // ＋
+  addBtn.id = 'btn-add-part';
+  addBtn.title = 'Add a new part to this session';
+  container.appendChild(addBtn);
+
+  const renameBtn = btn('✎', async () => { // ✎
+    const name = prompt('Rename part', current.name);
+    if (name && name.trim() && name.trim() !== current.name) {
+      await renamePart(current.id, name.trim());
+    }
+  });
+  renameBtn.title = 'Rename this part';
+  container.appendChild(renameBtn);
+
+  // Deleting is only possible when more than one part exists.
+  if (state.parts.length > 1) {
+    const delBtn = btn('\u{1F5D1}', async () => { // 🗑
+      if (confirm(`Delete part "${current.name}" and all of its versions? This cannot be undone.`)) {
+        await callbacks.onDeletePart(current.id);
+      }
+    });
+    delBtn.title = 'Delete this part';
+    container.appendChild(delBtn);
+  }
 }
 
 function el(tag: string, className: string, text: string): HTMLElement {

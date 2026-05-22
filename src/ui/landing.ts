@@ -9,7 +9,7 @@
 //   7. Footer
 
 import { listSessions, type Session } from '../storage/sessionManager';
-import { getLatestVersion, getVersionCount } from '../storage/db';
+import { getSessionLatestVersion, getSessionVersionCount } from '../storage/db';
 import { partwrightMarkSvg } from './brand';
 import { getTheme, onThemeChange, toggleTheme } from './theme';
 import type { ExportedSession } from '../storage/sessionManager';
@@ -465,8 +465,8 @@ async function buildRecentSessions(callbacks: LandingCallbacks): Promise<HTMLEle
   const tileData = await Promise.all(
     sessions.slice(0, 12).map(async (session) => {
       const [latestVersion, versionCount] = await Promise.all([
-        getLatestVersion(session.id),
-        getVersionCount(session.id),
+        getSessionLatestVersion(session.id),
+        getSessionVersionCount(session.id),
       ]);
       return { session, latestVersion, versionCount };
     }),
