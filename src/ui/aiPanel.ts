@@ -290,6 +290,10 @@ function recordSessionAiPreference(): void {
  *  current model and show a non-blocking notice — without erasing the stored
  *  preference, so it snaps back once the model is available again. */
 async function applySessionAiPreference(): Promise<void> {
+  // Only the writer applies its session's remembered model. A viewer (or a
+  // background tab) applying would rewrite the shared global settings blob and
+  // nudge the peer/owner tab's model via the settings storage event.
+  if (!writeOwner) return;
   hidePrefNotice();
   const pref = getState().session?.aiPreference;
   if (!pref) return;
@@ -372,9 +376,9 @@ function applyOwnership(owned: boolean): void {
   if (!writeOwner) stopActiveTurn();
 }
 
-/** Abort any in-flight AI turn. Exported so a tab can halt its own run when it
+/** Abort any in-flight AI turn — used by the Stop button and when this tab
  *  loses write-ownership (another tab took control). */
-export function stopActiveTurn(): void {
+function stopActiveTurn(): void {
   // Anthropic stops via AbortSignal through the SDK; local (WebLLM) ignores the
   // signal, so interruptLocal() is what halts it mid-token.
   state.inFlightController?.abort();
@@ -2004,9 +2008,11 @@ async function runTurnWithStallRetry(apiKey: string | undefined, toggles: ChatTo
   // a session mid-turn the active bucket changes out from under us, so we
   // remember the starting bucket and re-home the chat once the turn settles.
   let turnStartBucket = state.sessionId;
-  // Remember which model is driving this session so reopening it restores the
-  // same provider/model.
-  recordSessionAiPreference();
+  // NOTE: don't record the session's AI preference here. On turn start the
+  // active model may be a *fallback* (the session's remembered model was
+  // unavailable), and recording it would erase the real preference instead of
+  // letting it snap back. The preference is recorded only on a deliberate model
+  // / provider pick (the picker + settings/local modals below).
   while (true) {
     attempt++;
     const controller = new AbortController();

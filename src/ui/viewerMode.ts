@@ -14,8 +14,7 @@
 
 import { onOwnershipChange } from '../storage/sessionLock';
 import { onStateChange } from '../storage/sessionManager';
-import { setReadOnly } from '../editor/codeEditor';
-import { isLocked as isColorLocked } from '../color/editorLock';
+import { setReadOnlyReason } from '../editor/editorAccess';
 
 let viewer = false;
 let overlay: HTMLElement | null = null;
@@ -27,9 +26,10 @@ export function isReadOnlyViewer(): boolean {
 }
 
 function applyAccess(): void {
-  // Keyboard bypasses the pointer scrim, so hold the editor read-only too
-  // (composing with the color-region lock).
-  setReadOnly(viewer || isColorLocked());
+  // Keyboard bypasses the pointer scrim, so hold the editor read-only too. This
+  // composes with the color-region lock via editorAccess (read-only if either
+  // reason is active), so neither can clear the other's read-only state.
+  setReadOnlyReason('viewer', viewer);
   renderOverlay();
 }
 

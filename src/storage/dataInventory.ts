@@ -71,7 +71,7 @@ export function listLocalStorageEntries(): LocalStorageEntry[] {
     for (let i = 0; i < localStorage.length; i++) {
       const key = localStorage.key(i);
       if (!key) continue;
-      if (!(key.startsWith('partwright') || key === 'editor-auto-format')) continue;
+      if (!(key.startsWith('partwright') || key.startsWith('pw-') || key === 'editor-auto-format')) continue;
       const value = localStorage.getItem(key) ?? '';
       out.push({ key, value, bytes: value.length });
     }

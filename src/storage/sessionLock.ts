@@ -95,6 +95,16 @@ function becomeLeader(): void {
   owned = true;
   writeToken(currentSessionId);
   emit();
+  // Compare-after-write: if two tabs claimed near-simultaneously (e.g. two
+  // viewers both promoting after a leader died without clearing its token), the
+  // later writer's id wins the token. Re-read after a short jittered delay and
+  // step down if we lost, so any dual-leader window self-closes within ~300ms.
+  const claimed = currentSessionId;
+  setTimeout(() => {
+    if (!owned || currentSessionId !== claimed) return;
+    const tok = readToken(claimed);
+    if (tok && tok.tabId !== tabId) becomeViewer();
+  }, 80 + Math.floor(Math.random() * 200));
 }
 
 function becomeViewer(): void {
