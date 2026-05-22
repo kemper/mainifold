@@ -62,14 +62,19 @@ export async function recordUsage(
   const db = await openPartwrightDB();
   const txn = db.transaction(KEYS_STORE, 'readwrite');
   const store = txn.objectStore(KEYS_STORE);
-  const existing = await reqToPromise(store.get(provider)) as KeyRecord | undefined;
-  if (existing) {
+  // Issue the put inside the get's callback so both requests live in the same
+  // transaction. Awaiting between get and put lets IndexedDB auto-commit the
+  // txn before the put is queued (TransactionInactiveError / lost update).
+  const getReq = store.get(provider);
+  getReq.onsuccess = () => {
+    const existing = getReq.result as KeyRecord | undefined;
+    if (!existing) return;
     existing.lastUsed = Date.now();
     existing.totalInputTokens += inputTokens;
     existing.totalOutputTokens += outputTokens;
     existing.totalCostUsd += costUsd;
     store.put(existing);
-  }
+  };
   await txComplete(txn);
 }
 

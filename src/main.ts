@@ -53,6 +53,7 @@ import { exportGLB, buildGLB } from './export/gltf';
 import { exportSTL, buildSTL } from './export/stl';
 import { exportOBJ, buildOBJ } from './export/obj';
 import { export3MF, build3MF } from './export/threemf';
+import { assertFiniteMesh } from './export/meshClean';
 import { exportSessionJSON, exportRawCode, buildSessionJSON, buildRawCode } from './export/session';
 import { blobToBase64, downloadBlob } from './export/download';
 import {
@@ -113,7 +114,7 @@ import { setBucketTolerance as setPaintBucketTolerance, getBucketTolerance as ge
 import { initEditorLock, syncLockState, setUnlockHandlers } from './color/editorLock';
 import { buildAdjacency, findCoplanarRegion, findConnectedFromSeed, resolveSeed, findNearestTriangle } from './color/adjacency';
 import { findSlabTriangles } from './color/slabPaint';
-import { findBoxTriangles } from './color/boxPaint';
+import { findBoxTriangles, findShapeTriangles } from './color/boxPaint';
 import { computeFaceGroups } from './color/faceGroups';
 import {
   getSessionIdFromURL,
@@ -380,8 +381,8 @@ function rehydrateColorRegions(geometryData: Record<string, unknown> | null): { 
       const { normal, offset, thickness } = region.descriptor;
       triangles = findSlabTriangles(mesh, normal, offset, thickness);
     } else if (region.descriptor.kind === 'box') {
-      const { center, size, quaternion } = region.descriptor;
-      triangles = findBoxTriangles(mesh, { center, size, quaternion });
+      const { center, size, quaternion, shape } = region.descriptor;
+      triangles = findShapeTriangles(mesh, shape ?? 'box', { center, size, quaternion });
     } else if (region.descriptor.kind === 'byLabel') {
       // Labels are runtime state — manifold-3d assigns fresh
       // originalIDs on every run, so we re-resolve by name from the
@@ -954,16 +955,27 @@ async function main() {
     onOpenCatalog: () => { void showCatalogPage(); },
     onRun: () => runCode(),
     onExportGLB: async () => {
-      try { await exportGLB(); } catch (e) { console.error('GLB export error:', e); }
+      try {
+        if (currentMeshData) assertFiniteMesh(currentMeshData);
+        await exportGLB();
+      } catch (e) {
+        showToast(e instanceof Error ? e.message : 'GLB export failed', { variant: 'warn' });
+      }
     },
     onExportSTL: () => {
-      if (currentMeshData) exportSTL(currentMeshData);
+      if (!currentMeshData) return;
+      try { exportSTL(currentMeshData); }
+      catch (e) { showToast(e instanceof Error ? e.message : 'STL export failed', { variant: 'warn' }); }
     },
     onExportOBJ: () => {
-      if (currentMeshData) exportOBJ(hasColorRegions() ? applyTriColors(currentMeshData) : currentMeshData);
+      if (!currentMeshData) return;
+      try { exportOBJ(hasColorRegions() ? applyTriColors(currentMeshData) : currentMeshData); }
+      catch (e) { showToast(e instanceof Error ? e.message : 'OBJ export failed', { variant: 'warn' }); }
     },
     onExport3MF: () => {
-      if (currentMeshData) export3MF(hasColorRegions() ? applyTriColors(currentMeshData) : currentMeshData);
+      if (!currentMeshData) return;
+      try { export3MF(hasColorRegions() ? applyTriColors(currentMeshData) : currentMeshData); }
+      catch (e) { showToast(e instanceof Error ? e.message : '3MF export failed', { variant: 'warn' }); }
     },
     onExportSessionJSON: async () => {
       if (!getState().session) {
@@ -1059,7 +1071,7 @@ async function main() {
   const AUTO_FORMAT_OFF_CLASS = 'shrink-0 px-2 py-0.5 rounded text-xs leading-none border text-zinc-500 border-zinc-700 hover:text-zinc-300';
   function syncAutoFormatToggleUI(): void {
     const on = getAutoFormat();
-    autoFormatToggle.textContent = on ? 'Auto' : 'Auto';
+    autoFormatToggle.textContent = on ? 'Auto ✓' : 'Auto';
     autoFormatToggle.title = on ? 'Auto-format on — click to disable' : 'Auto-format off — click to enable';
     autoFormatToggle.className = on ? AUTO_FORMAT_ON_CLASS : AUTO_FORMAT_OFF_CLASS;
   }
@@ -1070,7 +1082,9 @@ async function main() {
     syncAutoFormatToggleUI();
   });
   document.addEventListener('keydown', (e) => {
-    if (e.shiftKey && e.altKey && e.key === 'F') {
+    // Use e.code (physical key) — on macOS, Option+Shift+F composes a dead-key
+    // character so e.key is no longer 'F' and the shortcut would never fire.
+    if (e.shiftKey && e.altKey && e.code === 'KeyF') {
       e.preventDefault();
       formatCode();
     }
@@ -1757,6 +1771,7 @@ async function main() {
     /** Export current model as GLB download. Optional filename override. */
     async exportGLB(filename?: string) {
       assertString(filename, 'exportGLB(filename)', { optional: true });
+      if (currentMeshData) assertFiniteMesh(currentMeshData);
       await exportGLB(filename);
     },
 
@@ -1787,6 +1802,7 @@ async function main() {
     /** Build a GLB and return its bytes as base64. Same blob as exportGLB(). */
     async exportGLBData(filename?: string) {
       assertString(filename, 'exportGLBData(filename)', { optional: true });
+      if (currentMeshData) assertFiniteMesh(currentMeshData);
       const built = await buildGLB(filename);
       registerExportFromBuilt(built, 'GLB');
       return {
