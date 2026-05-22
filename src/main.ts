@@ -29,7 +29,7 @@ import { initViewport, updateMesh, setClipping, setClipZ, getClipState, getCamer
 import { renderCompositeCanvas, renderSingleView, renderSliceSVG, setImages as _setImages, clearImages as _clearImages, getImages as _getImages, buildViewCamera, RENDER_VIEW_MODES, STANDARD_VIEWS, type AttachedImage, type RenderViewMode } from './renderer/multiview';
 import { generateId } from './storage/db';
 import { setPhantom, clearPhantom, hasPhantom, type PhantomOptions } from './renderer/phantomGeometry';
-import { initEditor, setValue, getValue, setLanguage as setEditorLanguage, setEditorDiagnostics, clearEditorDiagnostics, revealFirstDiagnostic, formatCode, getAutoFormat, setAutoFormat } from './editor/codeEditor';
+import { initEditor, setValue, getValue, getSelection, setLanguage as setEditorLanguage, setEditorDiagnostics, clearEditorDiagnostics, revealFirstDiagnostic, formatCode, getAutoFormat, setAutoFormat } from './editor/codeEditor';
 import { createLayout, type TabName } from './ui/layout';
 import { createToolbar, isAutoRun, setAutoRun, setToolbarLanguage, setAiToolbarState } from './ui/toolbar';
 import { installKeyboardShortcuts } from './ui/keyboardShortcuts';
@@ -112,7 +112,8 @@ import { addTextAnnotationAtAnchor, setFontSize as setAnnotateFontSize, getFontS
 import { restoreView as restoreAnnotationViewById } from './annotations/selectMode';
 import { applyTriColors, applyTriColorsIfVisible, hasRegions as hasColorRegions, onChange as onColorRegionsChange, onVisibilityChange as onPaintVisibilityChange, clearRegions, serialize as serializeRegions, addRegion, getRegions, removeRegion, removeLastRegion, redoLastRegion, setRegionVisibility, buildTriColors, createEmptyTriColors, overlayPainted, type SerializedColorRegion } from './color/regions';
 import { setBucketTolerance as setPaintBucketTolerance, getBucketTolerance as getPaintBucketTolerance, setBrushRadius as setPaintBrushRadius, getBrushRadius as getPaintBrushRadius } from './color/paintMode';
-import { initEditorLock, syncLockState, setUnlockHandlers } from './color/editorLock';
+import { initEditorLock, syncLockState, setUnlockHandlers, isLocked } from './color/editorLock';
+import { initInsertPalette, toggleInsertPalette } from './ui/insertPalette';
 import { buildAdjacency, findCoplanarRegion, findConnectedFromSeed, resolveSeed, findNearestTriangle } from './color/adjacency';
 import { findSlabTriangles } from './color/slabPaint';
 import { findBoxTriangles, findShapeTriangles } from './color/boxPaint';
@@ -955,6 +956,7 @@ async function main() {
       void syncRouteFromURL();
     },
     onOpenCatalog: () => { void showCatalogPage(); },
+    onToggleInsert: () => { toggleInsertPalette(); },
     onRun: () => runCode(),
     onExportGLB: async () => {
       try {
@@ -1514,6 +1516,19 @@ async function main() {
   initDimensionsToggle(clipControls);
   initAnnotateUI(clipControls);
   initPaintUI(clipControls);
+  initInsertPalette(clipControls, {
+    getLanguage: () => getActiveLanguage() as 'manifold-js' | 'scad',
+    getCode: () => getValue(),
+    setCode: (code: string) => setValue(code),
+    getSelection: () => getSelection(),
+    run: (code?: string) => runCode(code),
+    isLocked: () => isLocked(),
+    showToast: (msg, opts) => showToast(msg, opts),
+    getMeshData: () => currentMeshData,
+    getCamera: () => getCamera(),
+    getCanvas: () => getCanvas(),
+    onOpen: () => { if (isPaintOpen()) closePaintMenu(); },
+  });
   // Declared before initMeasureToggle is called so the assignment inside it
   // doesn't hit a let-TDZ error (the same `let` lower in this function is
   // hoisted to a binding, but only initialized when execution reaches it).
