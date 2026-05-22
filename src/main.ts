@@ -88,6 +88,8 @@ import { maybeStartTour, resetTour, startTour } from './ui/tour';
 import { initTheme, getTheme, setTheme } from './ui/theme';
 import type { Theme } from './ui/theme';
 import { initPaintUI, isPaintOpen, forceDeactivate as closePaintMenu } from './color/paintUI';
+import { initSimplifyUI, isSimplifyOpen, refreshSimplifyIfOpen, forceDeactivate as closeSimplifyMenu, type SimplifyHandlers } from './ui/simplifyUI';
+import { simplifyToTriangleBudget, type SimplifyResult } from './geometry/simplify';
 import { updatePaintMesh, setOnRegionPainted, isActive as isPaintActive } from './color/paintMode';
 import { initAnnotateUI, isAnnotateOpen, closeMenu as closeAnnotateMenu } from './annotations/annotateUI';
 import { isActive as isSelectActive, getSelectedId as getSelectedAnnotationId } from './annotations/selectMode';
@@ -1508,16 +1510,130 @@ async function main() {
   // Wire up clip controls
   initClipControls(clipControls);
 
+  // Declared up here (before the simplify bridge and initMeasureToggle that
+  // reference it) so neither the closure capture below nor the assignment inside
+  // initMeasureToggle hits a let-TDZ error.
+  let closeMeasureIfActive: () => boolean = () => false;
+
+  // === Simplify (mesh decimation) bridge ===
+  // The simplify panel reduces the live model's triangle count. Because that
+  // changes mesh topology — not something derivable from the parametric code —
+  // it operates on the rendered result: the baseline is the full-detail mesh
+  // captured when the panel opens, previews swap the live mesh in place (so
+  // exports use it), and "Save as version" bakes the reduced mesh into a new
+  // imported-style version. The baseline persists across panel open/close and
+  // is cleared whenever a code run replaces the geometry.
+  let simplifyBaselineMesh: MeshData | null = null;
+
+  // Replace the live geometry with `mesh`: rebuild the queryable Manifold and
+  // refresh the viewport, paint-adjacency map, stats, and clip bounds. Mirrors
+  // the tail of runCodeSync so exports / slicing / measurements stay correct.
+  function applyLiveGeometry(mesh: MeshData): void {
+    currentMeshData = mesh;
+    if (currentManifold && typeof currentManifold.delete === 'function') {
+      try { currentManifold.delete(); } catch { /* already deleted */ }
+    }
+    const mod = getModule();
+    currentManifold = mod && mesh ? mod.Manifold.ofMesh(mesh) : null;
+    updateMesh(mesh);
+    updatePaintMesh(mesh);
+    updateGeometryData();
+    syncClipSliderBounds();
+  }
+
+  const simplifyHandlers: SimplifyHandlers = {
+    open(userInitiated) {
+      if (userInitiated) {
+        // Don't let two overlay panels share the top-right slot.
+        if (isPaintOpen()) closePaintMenu();
+        if (isAnnotateOpen()) closeAnnotateMenu();
+        closeMeasureIfActive();
+      }
+      if (!currentMeshData) {
+        return { ok: false, reason: 'Run some code first — there’s no model to simplify.' };
+      }
+      if (!currentManifold) {
+        return { ok: false, reason: 'Simplify needs a solid (manifold) model. Render-only imports can’t be reduced.' };
+      }
+      if (hasColorRegions()) {
+        return { ok: false, reason: 'Clear paint regions before simplifying — reducing triangles would invalidate them.' };
+      }
+      if (!simplifyBaselineMesh) simplifyBaselineMesh = currentMeshData;
+      return {
+        ok: true,
+        info: {
+          baseTriangles: simplifyBaselineMesh.numTri,
+          currentTriangles: currentMeshData.numTri,
+        },
+      };
+    },
+
+    preview(targetTriangles) {
+      if (!simplifyBaselineMesh) return null;
+      const mod = getModule();
+      if (!mod) return null;
+      const bbox = bboxFromMesh(simplifyBaselineMesh);
+      const diag = bbox
+        ? Math.hypot(bbox.max[0] - bbox.min[0], bbox.max[1] - bbox.min[1], bbox.max[2] - bbox.min[2])
+        : 0;
+      if (!(diag > 0)) return null;
+
+      const baseManifold = mod.Manifold.ofMesh(simplifyBaselineMesh);
+      let result: SimplifyResult | null = null;
+      try {
+        result = simplifyToTriangleBudget(baseManifold, targetTriangles, diag * 0.5);
+      } finally {
+        if (baseManifold && typeof baseManifold.delete === 'function') {
+          try { baseManifold.delete(); } catch { /* already deleted */ }
+        }
+      }
+      if (!result) {
+        applyLiveGeometry(simplifyBaselineMesh);
+        return null;
+      }
+      applyLiveGeometry(result.mesh);
+      return { triangleCount: result.triangleCount };
+    },
+
+    reset() {
+      if (simplifyBaselineMesh) applyLiveGeometry(simplifyBaselineMesh);
+    },
+
+    async save() {
+      const baseline = simplifyBaselineMesh;
+      if (!getState().session) {
+        return { ok: false, message: 'Open a session before saving.' };
+      }
+      if (!currentMeshData || !baseline || currentMeshData.numTri >= baseline.numTri) {
+        return { ok: false, message: 'Reduce the model first, then save.' };
+      }
+      try {
+        const reduced = currentMeshData;
+        const baked = toImportedMesh(`simplified-${reduced.numTri}tri`, reduced);
+        const code = generateImportCode([baked], { manifold: true });
+        setActiveImports([baked]);
+        setValue(code);
+        await runCodeSync(code);
+        const thumbnail = await captureThumbnail();
+        const geometryData = getGeometryDataObj();
+        await saveVersion(code, geometryData, thumbnail, 'simplified', undefined, {
+          force: true,
+          importedMeshes: [baked],
+        });
+        return { ok: true, message: `Saved as a new version (${reduced.numTri.toLocaleString()} triangles).` };
+      } catch (e) {
+        return { ok: false, message: `Save failed: ${(e as Error).message}` };
+      }
+    },
+  };
+
   // Wire up viewport overlay buttons
   initWireframeToggle(clipControls);
   initGridToggle(clipControls);
   initDimensionsToggle(clipControls);
   initAnnotateUI(clipControls);
   initPaintUI(clipControls);
-  // Declared before initMeasureToggle is called so the assignment inside it
-  // doesn't hit a let-TDZ error (the same `let` lower in this function is
-  // hoisted to a binding, but only initialized when execution reaches it).
-  let closeMeasureIfActive: () => boolean = () => false;
+  initSimplifyUI(clipControls, simplifyHandlers);
   initMeasureToggle(clipControls);
   initOrbitLockToggle(clipControls);
   initEscapeMenuClose();
@@ -5666,6 +5782,10 @@ async function main() {
 
       updateGeometryData(elapsed, src);
       syncClipSliderBounds();
+      // A fresh run replaces the geometry, so any simplify baseline is stale.
+      // Drop it and let an open panel re-snapshot the new mesh.
+      simplifyBaselineMesh = null;
+      refreshSimplifyIfOpen();
       setStatus(statusBar, 'ready', 'Ready');
     }
     return true;
@@ -5756,6 +5876,7 @@ async function main() {
       if (getMeasureState().active) {
         close();
       } else {
+        closeSimplifyMenu();
         activateMeasure();
         setMeasureLock(true);
         measureBtn.className = activeClass;
@@ -5777,6 +5898,7 @@ async function main() {
       let closed = false;
       if (isAnnotateOpen()) { closeAnnotateMenu(); closed = true; }
       if (isPaintOpen()) { closePaintMenu(); closed = true; }
+      if (isSimplifyOpen()) { closeSimplifyMenu(); closed = true; }
       if (closeMeasureIfActive()) closed = true;
       if (getClipState().enabled) { setClipping(false); syncClipUI(); closed = true; }
       if (closed) e.preventDefault();
