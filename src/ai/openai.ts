@@ -294,7 +294,40 @@ function buildOpenaiMessages(history: ChatMessage[]): OpenAIMessage[] {
       if (content !== null) out.push({ role: 'user', content });
     }
   }
-  return out;
+  return sanitizeOpenaiToolMessages(out);
+}
+
+/** OpenAI 400s if an assistant message carrying `tool_calls` isn't followed
+ *  by a `tool` message for every tool_call_id before the next turn ("The
+ *  following tool_call_ids did not have response messages"). A turn that
+ *  ends right after the model emits tool calls — user Stop, stall watchdog,
+ *  or the spend cap tripping before results are posted — leaves a dangling
+ *  assistant message in history, so the next send fails.
+ *
+ *  Mirror anthropic.ts's `sanitizeToolUse`: inject a synthetic error result
+ *  for any unanswered id. Keyed off the GLOBAL set of answered ids (not a
+ *  positional scan) so an image tool-result — which surfaces the image on a
+ *  `user` message wedged between `tool` messages — doesn't read as a gap. */
+function sanitizeOpenaiToolMessages(messages: OpenAIMessage[]): OpenAIMessage[] {
+  const answered = new Set<string>();
+  for (const m of messages) {
+    if (m.role === 'tool' && m.tool_call_id) answered.add(m.tool_call_id);
+  }
+  for (let i = 0; i < messages.length; i++) {
+    const m = messages[i];
+    if (m.role !== 'assistant' || !m.tool_calls || m.tool_calls.length === 0) continue;
+    const missing = m.tool_calls.filter(tc => !answered.has(tc.id));
+    if (missing.length === 0) continue;
+    const synthetic: OpenAIMessage[] = missing.map(tc => ({
+      role: 'tool',
+      tool_call_id: tc.id,
+      content: 'Tool call was interrupted and did not complete.',
+    }));
+    messages.splice(i + 1, 0, ...synthetic);
+    for (const s of synthetic) if (s.tool_call_id) answered.add(s.tool_call_id);
+    i += synthetic.length;
+  }
+  return messages;
 }
 
 function collectAssistantText(blocks: ChatBlock[]): string {

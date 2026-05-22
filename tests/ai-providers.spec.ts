@@ -205,6 +205,52 @@ test.describe('Multi-provider AI', () => {
     expect(sent.max_tokens).toBeUndefined();
   });
 
+  test('OpenAI repairs a dangling tool_call left by an interrupted turn', async ({ page }) => {
+    // Regression: a turn that ends right after the model emits tool calls
+    // (Stop / stall / spend cap before results post) leaves an assistant
+    // tool_calls message with no tool result. OpenAI 400s on the next send
+    // ("tool_call_ids did not have response messages") unless we inject a
+    // synthetic result, the way the Anthropic builder already does.
+    await page.goto('/editor');
+    await page.waitForSelector('#ai-panel');
+    const sentBody = await page.evaluate(async () => {
+      const openai = await import('/src/ai/openai.ts');
+      let captured = '';
+      const origFetch = window.fetch;
+      // @ts-expect-error test stub
+      window.fetch = async (_input: unknown, init: { body?: string }) => {
+        captured = String(init?.body ?? '');
+        const body = 'data: {"choices":[{"delta":{"content":"ok"},"finish_reason":null}]}\n\ndata: {"choices":[{"delta":{},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n';
+        return new Response(new Blob([body]), { status: 200, headers: { 'Content-Type': 'text/event-stream' } });
+      };
+      try {
+        const history = [
+          // Assistant emitted a tool call...
+          { id: 'a1', sessionId: 's', role: 'assistant', blocks: [], toolCalls: [{ id: 'call_DANGLING', name: 'runIsolated', input: {} }], createdAt: 0, seq: 0 },
+          // ...but the turn ended; the user just typed feedback (no toolResults).
+          { id: 'u1', sessionId: 's', role: 'user', blocks: [{ type: 'text', text: 'looks good, add a handle' }], createdAt: 0, seq: 1 },
+        ];
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        await openai.streamTurn({ apiKey: 'k', model: 'gpt-5-mini', systemPrompt: 'sys', systemSuffix: '', history: history as any, tools: [] });
+      } finally {
+        window.fetch = origFetch;
+      }
+      return captured;
+    });
+    const sent = JSON.parse(sentBody);
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const msgs = sent.messages as any[];
+    const toolMsgs = msgs.filter(m => m.role === 'tool' && m.tool_call_id === 'call_DANGLING');
+    expect(toolMsgs).toHaveLength(1);
+    // The synthetic result must sit after the assistant tool_calls message
+    // and before the user's feedback, so the invariant holds.
+    const assistantIdx = msgs.findIndex(m => Array.isArray(m.tool_calls));
+    const toolIdx = msgs.findIndex(m => m.tool_call_id === 'call_DANGLING');
+    const userIdx = msgs.findIndex(m => m.role === 'user' && typeof m.content === 'string' && m.content.includes('add a handle'));
+    expect(assistantIdx).toBeLessThan(toolIdx);
+    expect(toolIdx).toBeLessThan(userIdx);
+  });
+
   test('settings modal has a tab per provider', async ({ page }) => {
     await page.goto('/editor');
     await page.evaluate(() => { try { localStorage.setItem('partwright-tour-completed', '1'); } catch {} });
