@@ -8,7 +8,7 @@ import { runTurn, pushQueuedBlocks } from '../ai/agentWorkerClient';
 import { listMessages, GLOBAL_CHAT_BUCKET, putMessages, deleteMessages, getKey, clearChat, mergeChatBucket } from '../ai/db';
 import { proposeCompaction } from '../ai/compaction';
 import { captureIsoViews, fileToImageSource } from '../ai/images';
-import { loadSettings, saveSettings, setAnthropicModel, setOpenaiModel, setGeminiModel, setProvider, setLocalModel, setToggles, providerLabel, ANTHROPIC_MODEL_OPTIONS, OPENAI_MODEL_OPTIONS, GEMINI_MODEL_OPTIONS, MAX_ITERATIONS_OPTIONS, MAX_SPEND_OPTIONS, type AiSettings } from '../ai/settings';
+import { loadSettings, saveSettings, setAnthropicModel, setOpenaiModel, setGeminiModel, setProvider, setLocalModel, setToggles, providerLabel, ANTHROPIC_MODEL_OPTIONS, OPENAI_MODEL_OPTIONS, GEMINI_MODEL_OPTIONS, MAX_ITERATIONS_OPTIONS, MAX_SPEND_OPTIONS, THINKING_OPTIONS, type AiSettings } from '../ai/settings';
 import { buildLocalSystemPrompt, buildMediumLocalSystemPrompt, buildSystemPrompt, loadAiMd } from '../ai/systemPrompt';
 import { estimateTurnCostUsd, formatUsd } from '../ai/cost';
 import { generateId } from '../storage/db';
@@ -388,6 +388,22 @@ function renderOwnerBanner(): void {
   takeover.addEventListener('click', () => requestTakeover());
   ownerBannerEl.append(msg, takeover);
   ownerBannerEl.classList.remove('hidden');
+}
+
+/** Insert or replace a message in the in-memory transcript, keeping it
+ *  ordered by `seq`. Replaces in place when the id is already present
+ *  (re-persist of the same message), otherwise splices it into the right
+ *  slot. Used by the mid-turn callbacks that surface tool results and
+ *  drained queued messages before the turn fully completes. */
+function upsertHistoryMessage(msg: ChatMessage): void {
+  const idx = state.history.findIndex(m => m.id === msg.id);
+  if (idx >= 0) {
+    state.history[idx] = msg;
+    return;
+  }
+  const insertAt = state.history.findIndex(m => m.seq > msg.seq);
+  if (insertAt === -1) state.history.push(msg);
+  else state.history.splice(insertAt, 0, msg);
 }
 
 // === DOM construction ===
@@ -995,6 +1011,28 @@ function renderToggleStrip(): void {
     saveSettings(setToggles(loadSettings(), { maxSpend: spendCap.value as ChatToggles['maxSpend'] }));
   });
   toggleStripEl.appendChild(spendCap);
+
+  // Thinking level — how much the model reasons before answering. Maps
+  // per-provider to Anthropic extended-thinking budget_tokens, Gemini
+  // thinkingBudget (+ surfaced thought parts), and OpenAI reasoning_effort.
+  // Off (the default) sends no thinking request, so it's the cheapest and
+  // reproduces the pre-feature behavior. No effect on local models.
+  const thinkSel = document.createElement('select');
+  thinkSel.className = 'px-1.5 py-0.5 rounded text-[10px] bg-zinc-800 border border-zinc-700 text-zinc-300 focus:outline-none';
+  thinkSel.title = 'Thinking: how much the model reasons before it answers. Maps to Anthropic extended-thinking budget, Gemini thinkingBudget, and OpenAI reasoning_effort. Off = no extended reasoning (cheapest, fastest). Higher levels help on hard spatial/assembly problems but cost more output tokens. No effect on local models (their reasoning is handled by the model itself).';
+  for (const opt of THINKING_OPTIONS) {
+    const o = document.createElement('option');
+    o.value = opt.id;
+    o.textContent = `🧠 ${opt.label}`;
+    o.title = opt.hint;
+    thinkSel.appendChild(o);
+  }
+  thinkSel.value = toggles.thinking;
+  thinkSel.addEventListener('change', () => {
+    saveSettings(setToggles(loadSettings(), { thinking: thinkSel.value as ChatToggles['thinking'] }));
+    renderCostMeter();
+  });
+  toggleStripEl.appendChild(thinkSel);
 }
 
 function togglePill(label: string, on: boolean, tooltip: string, onClick: () => void): HTMLButtonElement {
@@ -1979,14 +2017,7 @@ async function runTurnWithStallRetry(apiKey: string | undefined, toggles: ChatTo
         // insert it ourselves at the right seq position — otherwise
         // renderTranscript can't show the human's bubble until end-of-turn
         // reload, and the user thinks their message vanished.
-        const idx = state.history.findIndex(m => m.id === msg.id);
-        if (idx >= 0) {
-          state.history[idx] = msg;
-        } else {
-          const insertAt = state.history.findIndex(m => m.seq > msg.seq);
-          if (insertAt === -1) state.history.push(msg);
-          else state.history.splice(insertAt, 0, msg);
-        }
+        upsertHistoryMessage(msg);
         renderTranscript();
         setTransientStatus('Queued message delivered to the AI.');
       },
@@ -2051,6 +2082,16 @@ async function runTurnWithStallRetry(apiKey: string | undefined, toggles: ChatTo
       },
       onToolResult: (_id, _name, result) => {
         if (result.isError) setTransientStatus('A tool errored. The agent will retry or surface the issue.');
+      },
+      onToolResultsPersisted: msg => {
+        // Surface tool result bubbles — including renderView / renderViews
+        // snapshots — in the live transcript as the agent works. The
+        // tool_result user message is persisted by chatLoop but isn't pushed
+        // through onUserPersisted, so without this it would only appear after
+        // a session reload. renderToolResultBubble auto-expands image-bearing
+        // results, so the rendering shows without the user expanding anything.
+        upsertHistoryMessage(msg);
+        renderTranscript();
       },
       onError: err => {
         errorLog.capture({ level: 'error', source: 'ai', message: err.message, detail: err.stack });

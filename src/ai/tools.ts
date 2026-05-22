@@ -222,7 +222,7 @@ const ALL_TOOLS: ToolDefinition[] = [
   },
   {
     name: 'probePixel',
-    description: 'Click in your own perception. Translates a pixel in a renderView image back to a world-space surface hit on the mesh: {point, normal, distance, triangleId} or null when the pixel is background. The view must match the renderView call (same elevation/azimuth/ortho/size). This is THE tool for organic geometry: render → identify the feature visually → probePixel to get exact coords → paintConnected or paintNear. The returned point is exactly on the mesh surface (raycast, not snap), so paintRegion-style seed-precision worries are gone. Front-most hit = occlusion correct.',
+    description: 'Click in your own perception. Translates a pixel in a renderView image back to a world-space surface hit on the mesh: {point, normal, distance, triangleId, nextStep}. The view must match the renderView call (same elevation/azimuth/ortho/size). This is THE tool for organic geometry: render → identify the feature visually → probePixel to get exact coords → paintConnected or paintNear. The returned point is exactly on the mesh surface (raycast, not snap), so paintRegion-style seed-precision worries are gone. Front-most hit = occlusion correct. A background pixel does NOT fail — it returns {hit:false, modelPixelBounds, hint} reporting where the model projects in this view, so just re-aim inside those bounds and probe again (pixel estimates off a render carry ±10-20px error, so the occasional miss is normal).',
     input_schema: {
       type: 'object',
       properties: {
@@ -289,12 +289,13 @@ const ALL_TOOLS: ToolDefinition[] = [
   },
   {
     name: 'renderViews',
-    description: 'Render MULTIPLE labeled angles as ONE composite PNG. THIS IS HOW YOU SEE YOUR WORK reliably — a single angle can hide an asymmetric error that another angle catches. Costs ~1500-2500 input tokens. Default `views: "auto"` picks angles by the model\'s bounding box: flat disks get [Top, Iso] (a front elevation of a disk is a useless sliver), tall columns get [Front, Right, Iso] (the top of a column is a useless dot), everything else gets [Front, Top, Iso]. Use `tri` or `all` to force a specific set.',
+    description: 'Render MULTIPLE labeled angles as ONE composite PNG. THIS IS HOW YOU SEE YOUR WORK reliably — a single angle can hide an asymmetric error that another angle catches. Costs ~1500-2500 input tokens at the default size. Default `views: "auto"` picks angles by the model\'s bounding box: flat disks get [Top, Iso] (a front elevation of a disk is a useless sliver), tall columns get [Front, Right, Iso] (the top of a column is a useless dot), everything else gets [Front, Top, Iso]. `tri`/`all` force a set; `box` renders all 6 orthographic faces (front/back/left/right/top/bottom) — use it for the FINAL all-faces check, because back/left/bottom are never shown by auto/tri/all and that is exactly where an unseen mistake hides. For total control pass an explicit `angles` list. While iterating keep `size` small (default 320); for the final inspection bump it (512-768) for a sharper read.',
     input_schema: {
       type: 'object',
       properties: {
-        views: { type: 'string', enum: [...RENDER_VIEW_MODES], description: '"auto" (default) picks angles from the model aspect ratio. "tri" = front + top + iso (3 cells). "all" = front + right + top + iso (4 cells).' },
-        size: { type: 'integer', description: 'Pixel size per cell. Default 320.' },
+        views: { type: 'string', enum: [...RENDER_VIEW_MODES], description: '"auto" (default) picks angles from the model aspect ratio. "tri" = front + top + iso (3 cells). "all" = front + right + top + iso (4 cells). "box" = all 6 orthographic faces front/back/left/right/top/bottom (guaranteed all-faces check). Ignored when `angles` is given.' },
+        angles: { type: 'array', description: 'Explicit list of camera angles; overrides `views`. Same angle semantics as renderView. Use to put specific suspect angles side-by-side in one composite.', items: { type: 'object', properties: { elevation: { type: 'number', description: '0 = side, 90 = top, -90 = bottom.' }, azimuth: { type: 'number', description: '0 = front, 90 = right, 180 = back, 270 = left.' }, ortho: { type: 'boolean', description: 'true = orthographic. Default false.' }, label: { type: 'string', description: 'Optional caption for the cell.' } }, required: ['elevation', 'azimuth'] } },
+        size: { type: 'integer', description: 'Pixel size per cell. Default 320. Raise to 512-768 for a high-resolution final check; larger costs more tokens.' },
       },
     },
   },
@@ -995,9 +996,12 @@ function executeRenderView(api: PartwrightAPI, input: Record<string, unknown>): 
 
 async function executeRenderViews(api: PartwrightAPI, input: Record<string, unknown>): Promise<ToolExecResult> {
   const result = await api.renderViews(input) as string | { error: string } | null | undefined;
+  const angles = input.angles as unknown[] | undefined;
   const views = (input.views as string | undefined) ?? 'auto';
   const size = (input.size as number | undefined) ?? 320;
-  const label = `views: ${views} composite (${size}px per cell)`;
+  const label = angles && angles.length > 0
+    ? `views: ${angles.length} custom angles (${size}px per cell)`
+    : `views: ${views} composite (${size}px per cell)`;
   return wrapImageResult(result, 'renderViews', label);
 }
 

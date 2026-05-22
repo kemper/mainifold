@@ -119,6 +119,13 @@ export interface RunTurnCallbacks {
    *  re-render the transcript so the user sees their queued message land
    *  immediately, without waiting for the turn to fully complete. */
   onUserMessageUpdated?: (msg: ChatMessage) => void;
+  /** The tool_result user turn for a completed tool batch has been
+   *  persisted, carrying any images the tools returned (renderView /
+   *  renderViews snapshots, slice profiles, paint previews). The panel
+   *  drops the result bubbles into the live transcript here so the user
+   *  sees what the agent saw as it works — without this, tool results
+   *  (and their renderings) only surface after a session reload. */
+  onToolResultsPersisted?: (msg: ChatMessage) => void;
   /** A "thinking" beat — fires when a turn begins, when each tool starts,
    *  and on a wall-clock interval while waiting for the first text delta.
    *  Use to keep an indicator alive so the user knows we haven't frozen. */
@@ -236,12 +243,15 @@ export async function runTurn(input: RunTurnInput, callbacks: RunTurnCallbacks =
     };
 
     const apiCallStart = Date.now();
-    const requestSummary = `${workingHistory.length} msg(s), ${tools.length} tool def(s), vision=${toggles.vision.views ? 'on' : 'off'}`;
+    const requestSummary = `${workingHistory.length} msg(s), ${tools.length} tool def(s), vision=${toggles.vision.views ? 'on' : 'off'}, thinking=${toggles.thinking}`;
     let result;
     try {
       if (toggles.provider === 'anthropic') {
         if (!apiKey) throw new Error('Anthropic API key is required.');
-        const apiMessages = buildApiMessages(workingHistory);
+        // Replay captured thinking blocks only when thinking is on for this
+        // turn — required so the tool-use loop doesn't 400 on a tool_use that
+        // isn't preceded by its signed thinking block.
+        const apiMessages = buildApiMessages(workingHistory, { replayThinking: toggles.thinking !== 'off' });
         result = await streamTurn({
           apiKey,
           model: toggles.anthropicModel,
@@ -249,6 +259,7 @@ export async function runTurn(input: RunTurnInput, callbacks: RunTurnCallbacks =
           systemSuffix: toggleSuffix(toggles),
           apiMessages,
           tools,
+          thinking: toggles.thinking,
         }, streamCallbacks, signal);
       } else if (toggles.provider === 'openai') {
         // sendMessage passes the active provider's key as `apiKey`; fall
@@ -262,6 +273,7 @@ export async function runTurn(input: RunTurnInput, callbacks: RunTurnCallbacks =
           systemSuffix: toggleSuffix(toggles),
           history: workingHistory,
           tools,
+          thinking: toggles.thinking,
         }, streamCallbacks, signal);
       } else if (toggles.provider === 'gemini') {
         const geminiKey = apiKey ?? await getApiKey('gemini');
@@ -273,6 +285,7 @@ export async function runTurn(input: RunTurnInput, callbacks: RunTurnCallbacks =
           systemSuffix: toggleSuffix(toggles),
           history: workingHistory,
           tools,
+          thinking: toggles.thinking,
         }, streamCallbacks, signal);
       } else {
         if (!toggles.localModel) throw new Error('No local model is selected. Open AI settings → Local model.');
@@ -345,6 +358,9 @@ export async function runTurn(input: RunTurnInput, callbacks: RunTurnCallbacks =
       role: 'assistant',
       blocks: assistantBlocks,
       toolCalls: result.toolCalls.length > 0 ? result.toolCalls : undefined,
+      // Anthropic thinking blocks (with signatures) for tool-loop replay;
+      // undefined for every other provider.
+      thinkingBlocks: result.thinkingBlocks && result.thinkingBlocks.length > 0 ? result.thinkingBlocks : undefined,
       usage: result.usage,
       costUsd: turnCost,
       createdAt: Date.now(),
@@ -446,6 +462,7 @@ export async function runTurn(input: RunTurnInput, callbacks: RunTurnCallbacks =
     toolResultMsg.toolResults = toolResults;
     await putMessages([toolResultMsg]);
     workingHistory = [...workingHistory, toolResultMsg];
+    callbacks.onToolResultsPersisted?.(toolResultMsg);
 
     // Drain anything the human queued while we were thinking, streaming,
     // or running tools. Merging into the same user turn that carries the

@@ -8,7 +8,7 @@ npm run build        # Production build to dist/
 npm run test:e2e     # Run Playwright smoke tests (auto-starts dev server)
 ```
 
-Open `http://localhost:5173/editor?view=ai` to start with the 4 isometric views visible (instead of the interactive viewport). This is the recommended URL for AI agents — all views are visible on page load without clicking any tabs.
+Open `http://localhost:5173/editor` to go straight to the editor. AI agents drive the tool via the `window.partwright` console API and see geometry by calling the render tools (`renderViews`/`renderView`), so there is no special view to preselect.
 
 Requires COEP/COOP headers (configured in vite.config.ts) for SharedArrayBuffer / WASM threads.
 
@@ -104,7 +104,7 @@ After any changes that touch routing, Vite config, index.html, or initialization
    - `manifold.wasm` loads without 403 (check Network tab) — if 403, check `server.fs.strict` in vite.config.ts
    - COEP/COOP headers are present on responses (check Response Headers)
 4. **Help page**: Click the `?` icon in the toolbar — should navigate to `/help` and show the help content. "Back" should return to the editor.
-5. **AI agent bypass**: `http://localhost:5173/editor?view=ai` should skip the landing page and go straight to the editor with AI Views tab selected.
+5. **AI agent bypass**: `http://localhost:5173/editor` should skip the landing page and go straight to the editor (Interactive tab). `window.partwright.renderViews({views:"box"})` returns a 6-face composite PNG data URL.
 6. **Session loading**: Click a session tile on the landing page — should load the session code in the editor, show the session name in the session bar, and update the URL to `/editor?session=<id>`.
 7. **Build**: `npm run build` should succeed with no TypeScript errors.
 8. **Paint mode**: Click the Paint button in the viewport overlay. A color picker panel should appear. Click a face on the model — it should paint the coplanar region in the selected color. The Paint button badge should show the region count.
@@ -135,7 +135,16 @@ All providers share the same chat loop (`src/ai/chatLoop.ts`), the same tool sch
 
 #### Thinking box (reasoning models)
 
-Gemini 3 thinking models emit their reasoning as `thought:true` text parts (we opt in with `generationConfig.thinkingConfig.includeThoughts`). `gemini.ts` routes those to a separate channel (`StreamResult.thinking` + the `onThinking` stream callback) so they never bleed into the answer bubble. `chatLoop` persists the reasoning as a `'thinking'` `ChatBlock` (rendered above the answer); the panel shows a live indigo preview box while it streams (`renderLiveThinkingBox`), then collapses it into an expand/contract box (`renderThinkingBox`) once the next step — answer text or a tool call — begins. The `onThinking` delta beats the stall watchdog (via `onProgress({phase:'thinking'})`), so a long silent think doesn't trip a spurious abort. `'thinking'` blocks are display-only: no provider's request builder replays them as model text (Gemini's turn-to-turn continuity rides on `thoughtSignature` on tool calls, not the prose). Other providers leave `thinking` undefined (Anthropic extended thinking isn't enabled; OpenAI reasoning models hide their CoT; local `<think>` blocks are still stripped).
+Gemini 3 thinking models emit their reasoning as `thought:true` text parts (we opt in with `generationConfig.thinkingConfig.includeThoughts`). `gemini.ts` routes those to a separate channel (`StreamResult.thinking` + the `onThinking` stream callback) so they never bleed into the answer bubble. `chatLoop` persists the reasoning as a `'thinking'` `ChatBlock` (rendered above the answer); the panel shows a live indigo preview box while it streams (`renderLiveThinkingBox`), then collapses it into an expand/contract box (`renderThinkingBox`) once the next step — answer text or a tool call — begins. The `onThinking` delta beats the stall watchdog (via `onProgress({phase:'thinking'})`), so a long silent think doesn't trip a spurious abort. `'thinking'` blocks are display-only: no provider's request builder replays them as model text (re-feeding the prose wastes tokens).
+
+#### Thinking level (the 🧠 pill)
+
+`ChatToggles.thinking` (`off` | `low` | `medium` | `high`, default **off**) is a per-session knob in the toggle strip, sourced from `THINKING_LEVELS` in `types.ts`. Each provider maps it to its own wire format at request build time, so 'off' sends no thinking request at all and reproduces the pre-feature behavior:
+
+- **Anthropic** — `low/medium/high` enable extended thinking with `budget_tokens` 2048/8192/16384 (`THINKING_BUDGET` in `anthropic.ts`), and `max_tokens` is floated above the budget (the API requires `>`). Because the agent is a tool-use loop, the API requires the signed `thinking` block to precede each `tool_use` on replay: `collectResult` captures the blocks (with `signature`, plus any `redacted_thinking`) into `ChatMessage.thinkingBlocks`, and `assistantBlocksToApi` re-emits them first — but only when thinking is on for the current request (`buildApiMessages(history, { replayThinking })`). Sending them with thinking off, or replaying display prose, is never done. This path can't be exercised offline (no network in tests/sandbox), so it's covered by request-shape unit tests rather than a live round-trip.
+- **Gemini** — `off` only flips `includeThoughts:false` (deliberately NOT `thinkingBudget:0`, which some Pro models reject); `low/medium/high` set `includeThoughts:true` + a growing `thinkingBudget`. Note: this changed Gemini from always-on thinking to opt-in.
+- **OpenAI** — maps to `reasoning_effort` (`low/medium/high`), sent only for reasoning models (`gpt-5*`, `o1/o3/o4` — sniffed by `isReasoningModel`) so the 4o/4.1 chat models don't 400. 'off' omits the param. OpenAI hides reasoning-model CoT, so this controls cost/quality but never surfaces a thinking box.
+- **Local** — no effect (WebLLM models reason on their own; `<think>` is still stripped).
 
 #### Cross-provider review
 
@@ -170,11 +179,10 @@ Static site, no backend. Vanilla TypeScript + Vite.
 
 - `src/geometry/engine.ts` — manifold-3d WASM init + code execution
 - `src/renderer/viewport.ts` — Three.js interactive viewport
-- `src/renderer/multiview.ts` — 4 isometric view grid (always visible)
+- `src/renderer/multiview.ts` — Offscreen multi-angle render API (`renderViews`/`renderView`/`renderCompositeCanvas` for thumbnails)
 - `src/editor/codeEditor.ts` — CodeMirror editor
 - `src/ui/layout.ts` — Split-pane layout
 - `src/ui/toolbar.ts` — Top toolbar
-- `src/ui/panels.ts` — Views panel wiring
 - `src/geometry/crossSection.ts` — Z-slice to SVG/polygons
 - `src/export/gltf.ts` — GLB export
 - `src/export/stl.ts` — STL export
@@ -206,15 +214,13 @@ The app uses path-based routing for top-level pages and query parameters for vie
 - `/help` — Help/docs page
 
 **Query parameters** (on `/editor`):
-- `?view=ai` — AI Views tab
-- `?view=elevations` — Elevations tab
 - `?gallery` — Gallery tab
 - `?diff` — Diff tab (side-by-side code + stat comparison between two versions)
 - `?notes` — Notes tab
 - `?session=<id>` — Active session
 - `?session=<id>&v=3` — Specific version
 
-AI agent URLs like `/editor?view=ai` bypass the landing page entirely. Tab switching is handled in `src/ui/layout.ts` (`switchTab`). Session/version state is handled in `src/storage/sessionManager.ts` (`updateURL`). Page-level routing is in `src/main.ts`.
+Any `/editor` URL bypasses the landing page entirely. Tab switching is handled in `src/ui/layout.ts` (`switchTab`). Session/version state is handled in `src/storage/sessionManager.ts` (`updateURL`). Page-level routing is in `src/main.ts`.
 
 ### Browser History (Back Button) Preservation
 
@@ -256,7 +262,7 @@ Don't export functions unless they're imported elsewhere. When removing usage of
 
 ### Internal Links and Paths
 
-When referencing app routes in HTML/JS strings (links, prompts, instructions), use root-relative paths (`/ai.md`, `/editor?view=ai`), not paths with a subdirectory prefix. The app is served from the root, and hardcoded path prefixes break both development and deployment.
+When referencing app routes in HTML/JS strings (links, prompts, instructions), use root-relative paths (`/ai.md`, `/editor`), not paths with a subdirectory prefix. The app is served from the root, and hardcoded path prefixes break both development and deployment.
 
 ### Duplicated Logic
 
