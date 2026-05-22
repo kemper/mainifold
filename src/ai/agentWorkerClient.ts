@@ -61,6 +61,7 @@ async function handleMessage(event: MessageEvent): Promise<void> {
       case 'onUserPersisted':      cb.onUserPersisted?.(args[0] as ChatMessage); break;
       case 'onAssistantStart':     cb.onAssistantStart?.(args[0] as string); break;
       case 'onAssistantText':      cb.onAssistantText?.(args[0] as string); break;
+      case 'onAssistantThinking':  cb.onAssistantThinking?.(args[0] as string); break;
       case 'onToolStart':          cb.onToolStart?.(args[0] as string, args[1] as string); break;
       case 'onToolResult':         cb.onToolResult?.(args[0] as string, args[1] as string, args[2] as PersistedToolResult); break;
       case 'onAssistantPersisted': cb.onAssistantPersisted?.(args[0] as ChatMessage); break;

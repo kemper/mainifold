@@ -36,8 +36,12 @@ function isBinarySTL(bytes: Uint8Array): boolean {
   const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
   const triCount = view.getUint32(80, true);
   const expectedSize = 84 + triCount * 50;
-  if (bytes.byteLength === expectedSize) return true;
-  // No size match — check the prefix; absence of `solid` is a strong binary signal.
+  // Exact match, or a binary file with trailing padding some exporters append.
+  // (An ASCII file's bytes 80..83 decode to a huge triCount, so its expectedSize
+  // dwarfs any real file — this branch can only be true for genuine binary STLs,
+  // even when the 80-byte header happens to start with "solid".)
+  if (triCount > 0 && bytes.byteLength >= expectedSize) return true;
+  // No size signal — check the prefix; absence of `solid` is a strong binary signal.
   const head = new TextDecoder('utf-8', { fatal: false }).decode(bytes.subarray(0, 5)).toLowerCase();
   return head !== ASCII_DETECT_PREFIX;
 }

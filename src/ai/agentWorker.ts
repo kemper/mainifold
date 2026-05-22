@@ -96,6 +96,7 @@ self.onmessage = async (event: MessageEvent) => {
       onUserPersisted:      (m) => post('onUserPersisted', m),
       onAssistantStart:     (id) => post('onAssistantStart', id),
       onAssistantText:      (d) => post('onAssistantText', d),
+      onAssistantThinking:  (d) => post('onAssistantThinking', d),
       onToolStart:          (id, n) => post('onToolStart', id, n),
       onToolResult:         (id, n, r) => post('onToolResult', id, n, r),
       onAssistantPersisted: (m) => post('onAssistantPersisted', m),

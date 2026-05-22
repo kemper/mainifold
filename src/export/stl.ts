@@ -13,8 +13,13 @@ export function buildSTL(meshData: MeshData, customName?: string): BuiltExport {
   const buffer = new ArrayBuffer(bufferSize);
   const view = new DataView(buffer);
 
-  // Header (80 bytes) — include session name if available
-  const header = getExportTitle();
+  // Header (80 bytes) — include session name if available. The header must be
+  // plain ASCII: setUint8 truncates each code unit to one byte, so a multi-byte
+  // char (e.g. the em-dash getExportTitle puts between "name — label") would
+  // otherwise write garbage. Normalize dashes and drop other non-ASCII.
+  const header = getExportTitle()
+    .replace(/[‒-―]/g, '-')
+    .replace(/[^\x20-\x7E]/g, '?');
   for (let i = 0; i < Math.min(header.length, 80); i++) {
     view.setUint8(i, header.charCodeAt(i));
   }
