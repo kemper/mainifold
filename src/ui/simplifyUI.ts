@@ -66,6 +66,10 @@ let appliedTarget = 0;
 // state) — set every time the applied result changes.
 let appliedCount = 0;
 let applying = false;
+// A geometry change (code run) can land while an apply is yielding; defer the
+// panel re-snapshot until the apply finishes so it doesn't tear down the live
+// progress bar or re-enable the locked controls mid-reduction.
+let pendingRefresh = false;
 
 export function initSimplifyUI(controlsContainer: HTMLElement, h: SimplifyHandlers): void {
   handlers = h;
@@ -126,6 +130,9 @@ function openPanel(): void {
  *  baseline). */
 function refresh(userInitiated: boolean): void {
   if (!handlers) return;
+  // The search yields to the event loop, so a code run can call this mid-apply.
+  // Defer until runApply's finally so we don't disturb the in-flight reduction.
+  if (applying) { pendingRefresh = true; return; }
   // A refresh under a finished apply: clear any leftover progress chrome.
   showProgress(false);
   const res = handlers.open(userInitiated);
@@ -194,9 +201,10 @@ function clampTarget(raw: number): number {
   return Math.max(min, Math.min(max, Math.round(raw)));
 }
 
-/** The target the controls currently express (slider/number input). */
+/** The target the controls currently express (the number input mirrors the
+ *  slider, so it's the single source of truth). */
 function currentTarget(): number {
-  return clampTarget(Number(numberInput?.value ?? slider?.value ?? appliedTarget));
+  return clampTarget(numberInput ? Number(numberInput.value) : appliedTarget);
 }
 
 function updateApplyEnabled(): void {
@@ -273,6 +281,12 @@ async function runApply(): Promise<void> {
     applying = false;
     showProgress(false);
     setControlsDisabled(false);
+    // Replay any geometry change that arrived while we were applying, now that
+    // the controls are unlocked and the bar is down.
+    if (pendingRefresh) {
+      pendingRefresh = false;
+      refresh(false);
+    }
   }
 }
 
