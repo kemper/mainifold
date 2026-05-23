@@ -9,6 +9,7 @@ import { addRegion, getRegions } from './regions';
 import { getScene, getMeshGroup, getRenderer, addPointerSuppressor, isPointerOverModel } from '../renderer/viewport';
 import { activate as activateSlabDrag, deactivate as deactivateSlabDrag, onMeshChanged as onSlabDragMeshChanged } from './slabDrag';
 import { activate as activateBoxDrag, deactivate as deactivateBoxDrag, onMeshChanged as onBoxDragMeshChanged } from './boxDrag';
+import { smoothEdgeForResolution } from './slabPaint';
 import type { BrushShape } from './subdivide';
 export { setSlabAxis, getSlabAxis } from './slabDrag';
 
@@ -63,8 +64,8 @@ let airbrushSmooth = true;
  *  (and the interior subdivision target). Higher = finer dots, smoother edge,
  *  more triangles. Shares the brush's 1024 ceiling; because the airbrush refines
  *  its whole footprint (fill), triangle count grows with the divisor squared, so
- *  very high values lean on buildStrokeMesh's MAX_TRIANGLES cap rather than
- *  running away. */
+ *  very high values lean on the airbrush refine region's triangle budget
+ *  (AIRBRUSH_MAX_FILL_TRIANGLES in subdivide.ts) rather than running away. */
 let airbrushSmoothDivisor = 24;
 export const AIRBRUSH_SMOOTH_DIVISOR_MIN = 4;
 export const AIRBRUSH_SMOOTH_DIVISOR_MAX = 1024;
@@ -245,6 +246,29 @@ export function setAirbrushSmoothDivisor(n: number): void {
 
 export function getAirbrushSmoothDivisor(): number {
   return airbrushSmoothDivisor;
+}
+
+/** Slab / oriented-shape smoothing. When on, the slab and box tools subdivide
+ *  the mesh near the painted region's boundary so its edge follows the analytic
+ *  shape instead of the coarse base tessellation. On by default, mirroring the
+ *  brush. The resolution sets the target boundary edge length = model bbox
+ *  diagonal / resolution (higher = finer), sharing the brush's min/max bounds. */
+let shapeSmooth = true;
+let shapeSmoothResolution = 256;
+
+export function setShapeSmooth(on: boolean): void { shapeSmooth = on; }
+export function isShapeSmooth(): boolean { return shapeSmooth; }
+export function setShapeSmoothResolution(n: number): void {
+  shapeSmoothResolution = Math.max(SMOOTH_DIVISOR_MIN, Math.min(SMOOTH_DIVISOR_MAX, Math.round(n)));
+}
+export function getShapeSmoothResolution(): number { return shapeSmoothResolution; }
+
+/** Smoothing fields to stamp onto a slab/box descriptor at paint time, resolved
+ *  against `mesh` at the current shape-smoothing settings. With smoothing off
+ *  the fields refine nothing (preserving the original blocky edge). */
+export function shapeSmoothDescriptorFields(mesh: MeshData): { smooth: boolean; maxEdge: number } {
+  if (!shapeSmooth) return { smooth: false, maxEdge: 0 };
+  return { smooth: true, maxEdge: smoothEdgeForResolution(mesh, shapeSmoothResolution) };
 }
 
 export function setOnRegionPainted(fn: () => void): void {

@@ -158,8 +158,9 @@ test.describe('airbrush', () => {
       const paintedColored = pw.listRegions()[0].triangles;
 
       const sv = await pw.runAndSave(pw.getCode(), 'airbrush-v');
-      // Re-run the bare code so the refined mesh is gone, then reload the version.
-      await pw.run(`const { Manifold } = api; return Manifold.cube([20, 20, 4], true);`);
+      // Clear colors so the refined mesh drops back to the coarse base, then
+      // reload: loadVersion re-runs the code and replays the airbrush descriptor.
+      pw.clearColors();
       const baseTri = pw.getMesh().numTri;
       await pw.loadVersion({ index: sv.version.index });
       return {
