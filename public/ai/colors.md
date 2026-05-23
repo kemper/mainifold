@@ -277,14 +277,15 @@ const b = await partwright.probePixel({ pixel: [160, 110], view: { elevation: 30
 partwright.paintStroke({
   points: [a.point, b.point],   // ordered surface points; a single point stamps a rounded dot
   radius: 3,                     // mesh units, > 0
-  maxEdge: 0.2,                  // target triangle edge near the boundary (mesh units); smaller = smoother + more triangles. Defaults to radius/16
+  resolution: 256,               // smoothness: target edge = radius / resolution. Higher = smoother + more triangles. Default 256, range 2–1024
+  // maxEdge: 0.1,               // OR: absolute target edge length (mesh units); overrides resolution
   shape: 'circle',               // circle | square | diamond
   color: [0.9, 0.2, 0.2],
 });
-// -> { id, name, triangles, maxEdge, meshTriangleCount } or { error }
+// -> { id, name, triangles, resolution, maxEdge, meshTriangleCount } or { error }
 ```
 
-The refinement keeps subdividing the boundary triangles until they fall below `maxEdge`, so it adapts to coarse meshes (a flat plate that's two giant triangles still gets a clean circle). Size `maxEdge` to the feature: for a crisp ring on a 10-unit-wide part, `maxEdge: 0.1` is far smoother than anything a fixed pass count would give.
+The refinement keeps subdividing the boundary triangles until they fall below the target edge, so it adapts to coarse meshes (a flat plate that's two giant triangles still gets a clean circle). Use `resolution` for the normal smoothness knob; reach for the absolute `maxEdge` override when you need exact edge sizing (e.g. `maxEdge: 0.1` for a crisp ring on a 10-unit part).
 
 **Paint by visual reasoning (organic / character meshes).** When bounding boxes won't separate the features (a hand from a sleeve at the same Z; an ear from a head), use `probePixel` + `paintConnected`. `probePixel` translates a pixel position in a rendered view back to an exact surface point + normal + triangleId — essentially clicking in your own perception. `paintConnected` then flood-fills from that seed, gated by deviation from the SEED normal, so it stays on the feature without bleeding to side faces with different orientations.
 

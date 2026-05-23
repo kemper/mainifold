@@ -6,7 +6,7 @@ import type { MeshData } from '../geometry/types';
 import { pickFace } from './facePicker';
 import { buildAdjacency, findCoplanarRegion, getTriangleNormal, type AdjacencyGraph } from './adjacency';
 import { addRegion, getRegions } from './regions';
-import { getScene, getMeshGroup, getRenderer, addPointerSuppressor, isPointerOverModel, setWireframeVisible, isWireframeVisible } from '../renderer/viewport';
+import { getScene, getMeshGroup, getRenderer, addPointerSuppressor, isPointerOverModel } from '../renderer/viewport';
 import { activate as activateSlabDrag, deactivate as deactivateSlabDrag, onMeshChanged as onSlabDragMeshChanged } from './slabDrag';
 import { activate as activateBoxDrag, deactivate as deactivateBoxDrag, onMeshChanged as onBoxDragMeshChanged } from './boxDrag';
 import type { BrushShape } from './subdivide';
@@ -17,30 +17,26 @@ export type { BrushShape };
 
 let active = false;
 let currentColor: [number, number, number] = [1, 0.2, 0.2]; // default red
-let currentTool: PaintTool = 'bucket';
+let currentTool: PaintTool = 'brush';
 let bucketTolerance = 0.9995;
-/** Brush radius in mesh units. 0 = single-triangle (legacy behavior); >0 = paint
- *  every triangle whose centroid is within `brushRadius` of the picked surface
- *  point. */
-let brushRadius = 0;
+/** Brush radius in mesh units. Default 1. 0 = single-triangle (legacy). */
+let brushRadius = 1;
 let brushShape: BrushShape = 'circle';
 /** When on (and radius > 0), a brush stroke subdivides the triangles its edge
  *  crosses so the painted region's outline is smooth/rounded instead of
- *  following the existing tessellation. */
-let brushSmooth = false;
-/** Smooth-edge quality preset (1..4 = Coarse/Medium/Fine/Ultra). Maps to a
- *  target triangle edge of `brushRadius / SMOOTH_QUALITY_DIVISOR[level]`, so the
- *  refinement adapts to brush size and base-mesh coarseness rather than running
- *  a fixed number of passes. Higher = smoother edge + more triangles. */
-let brushSmoothQuality = 3;
-/** Divisor of the brush radius per quality level (index 1..4). The painted-edge
- *  facet count scales with the divisor (≈2π·divisor), independent of radius, so
- *  finer levels stay affordable. */
-const SMOOTH_QUALITY_DIVISOR: Record<number, number> = { 1: 16, 2: 32, 3: 64, 4: 128 };
+ *  following the existing tessellation. On by default. */
+let brushSmooth = true;
+/** Smooth-edge detail: the brush radius is divided by this to get the target
+ *  triangle edge length near the stroke boundary (higher = finer/smoother +
+ *  more triangles). The painted-edge facet count scales with it (≈2π·divisor),
+ *  independent of radius, so finer values stay affordable. */
+let brushSmoothDivisor = 256;
+export const SMOOTH_DIVISOR_MIN = 2;
+export const SMOOTH_DIVISOR_MAX = 1024;
 
 /** Target edge length (mesh units) for the active brush settings. */
 export function brushTargetEdge(): number {
-  return brushRadius / (SMOOTH_QUALITY_DIVISOR[brushSmoothQuality] ?? 16);
+  return brushRadius / brushSmoothDivisor;
 }
 /** Surface points sampled along the in-progress smooth stroke. */
 let strokeSamples: [number, number, number][] = [];
@@ -59,11 +55,10 @@ let brushRingBuiltShape: BrushShape | '' = '';
 // Filled footprint preview (smooth brush only) — a translucent disc/square/
 // diamond in the paint color showing the rounded area that will actually be
 // painted, instead of the jagged set of existing triangles the brush covers.
-// The drag preview accumulates one fan per recorded sample into a single
-// growing buffer (appended in place, not rebuilt each mousemove).
+// Rebuilt only when a new (decimated) sample is recorded — not on every
+// mousemove — so a drag stays cheap without the per-event geometry churn.
 let brushFillMesh: THREE.Mesh | null = null;
-let fillPositions: Float32Array | null = null;
-let fillUsed = 0; // floats written into fillPositions
+let fillStamps: { point: [number, number, number]; normal: [number, number, number] }[] = [];
 
 // Brush drag state
 let brushPainting = false;
@@ -76,10 +71,6 @@ let mouseDownOffModel = false;
 
 // Teardown for the capture-phase pointer suppressor registered on activate.
 let removeSuppressor: (() => void) | null = null;
-
-// Wireframe edges are important for aiming paint, so paint mode forces them on
-// and restores whatever the user had when it deactivates.
-let wireframeBeforePaint = false;
 
 // Callbacks
 let onRegionPainted: (() => void) | null = null;
@@ -148,12 +139,12 @@ export function isBrushSmooth(): boolean {
   return brushSmooth;
 }
 
-export function setBrushSmoothQuality(level: number): void {
-  brushSmoothQuality = Math.max(1, Math.min(4, Math.round(level)));
+export function setBrushSmoothDivisor(n: number): void {
+  brushSmoothDivisor = Math.max(SMOOTH_DIVISOR_MIN, Math.min(SMOOTH_DIVISOR_MAX, Math.round(n)));
 }
 
-export function getBrushSmoothQuality(): number {
-  return brushSmoothQuality;
+export function getBrushSmoothDivisor(): number {
+  return brushSmoothDivisor;
 }
 
 /** True when the active brush settings will subdivide the mesh on commit. */
@@ -205,9 +196,6 @@ export function activate(): void {
   if (active) return;
   active = true;
 
-  wireframeBeforePaint = isWireframeVisible();
-  setWireframeVisible(true);
-
   if (currentMesh && !adjacency) {
     // Fallback: pre-warm callback hasn't fired yet (e.g. user opened paint
     // immediately after execution). Build synchronously now.
@@ -238,8 +226,6 @@ export function deactivate(): void {
   if (!active) return;
   active = false;
   adjacency = null;
-
-  setWireframeVisible(wireframeBeforePaint);
 
   if (removeSuppressor) { removeSuppressor(); removeSuppressor = null; }
 
@@ -668,76 +654,76 @@ function buildFanPositions(shape: BrushShape, r: number): number[] {
   return out;
 }
 
-/** Append one translucent footprint fan (oriented to the surface normal) to the
- *  live preview, growing the backing buffer in place. O(1) per call — the drag
- *  handler calls this once per recorded sample instead of rebuilding the whole
- *  trail every mousemove. clearBrushFill (via clearHighlight) resets it between
- *  strokes / for a fresh hover disc. */
+/** Append a stamp to the live preview and rebuild it. Called once per recorded
+ *  (decimated) sample, not per mousemove. */
 function appendBrushFillStamp(point: [number, number, number], normal: [number, number, number]): void {
-  if (brushRadius <= 0) return;
-  const local = buildFanPositions(brushShape, brushRadius);
-  const need = fillUsed + local.length;
-
-  let grew = false;
-  if (!fillPositions || need > fillPositions.length) {
-    const cap = Math.max(need, fillPositions ? fillPositions.length * 2 : local.length * 8);
-    const next = new Float32Array(cap);
-    if (fillPositions) next.set(fillPositions.subarray(0, fillUsed));
-    fillPositions = next;
-    grew = true;
-  }
-
-  const n = new THREE.Vector3(normal[0], normal[1], normal[2]);
-  if (n.lengthSq() < 1e-9) n.set(0, 0, 1); else n.normalize();
-  const q = new THREE.Quaternion().setFromUnitVectors(new THREE.Vector3(0, 0, 1), n);
-  const off = n.clone().multiplyScalar(0.02); // lift off the surface to avoid z-fighting
-  const v = new THREE.Vector3();
-  let w = fillUsed;
-  for (let i = 0; i < local.length; i += 3) {
-    v.set(local[i], local[i + 1], local[i + 2]).applyQuaternion(q);
-    fillPositions[w++] = v.x + point[0] + off.x;
-    fillPositions[w++] = v.y + point[1] + off.y;
-    fillPositions[w++] = v.z + point[2] + off.z;
-  }
-  fillUsed = w;
-
-  if (!brushFillMesh) {
-    const geo = new THREE.BufferGeometry();
-    geo.setAttribute('position', new THREE.BufferAttribute(fillPositions, 3));
-    // depthTest off so the cursor preview always reads on top of the surface
-    // (matches the brush ring); it's a transient overlay, not real geometry.
-    const mat = new THREE.MeshBasicMaterial({
-      color: new THREE.Color(currentColor[0], currentColor[1], currentColor[2]),
-      transparent: true,
-      opacity: 0.45,
-      side: THREE.DoubleSide,
-      depthTest: false,
-      depthWrite: false,
-    });
-    brushFillMesh = new THREE.Mesh(geo, mat);
-    brushFillMesh.name = 'brush-fill';
-    brushFillMesh.renderOrder = 1000;
-    brushFillMesh.frustumCulled = false; // positions grow without recomputing bounds
-    getMeshGroup().add(brushFillMesh);
-  } else if (grew) {
-    // Backing array was reallocated — point the geometry at the new buffer.
-    brushFillMesh.geometry.setAttribute('position', new THREE.BufferAttribute(fillPositions, 3));
-  }
-
-  const geo = brushFillMesh.geometry as THREE.BufferGeometry;
-  geo.setDrawRange(0, fillUsed / 3);
-  (geo.attributes.position as THREE.BufferAttribute).needsUpdate = true;
+  fillStamps.push({ point: [point[0], point[1], point[2]], normal: [normal[0], normal[1], normal[2]] });
+  rebuildBrushFill();
 }
 
-function clearBrushFill(): void {
+/** Build the filled-footprint preview from the current stamps: one fan per
+ *  stamp, oriented to its surface normal, in a single mesh. Semi-transparent
+ *  but depth-writing so overlapping coplanar stamps along a drag reject each
+ *  other (one even layer, no darkening where they overlap). */
+function rebuildBrushFill(): void {
+  disposeBrushFillMesh();
+  if (brushRadius <= 0 || fillStamps.length === 0) return;
+
+  const local = buildFanPositions(brushShape, brushRadius);
+  const positions = new Float32Array(local.length * fillStamps.length);
+  const q = new THREE.Quaternion();
+  const up = new THREE.Vector3(0, 0, 1);
+  const v = new THREE.Vector3();
+  const off = new THREE.Vector3();
+  let w = 0;
+  for (const s of fillStamps) {
+    const n = new THREE.Vector3(s.normal[0], s.normal[1], s.normal[2]);
+    if (n.lengthSq() < 1e-9) n.set(0, 0, 1); else n.normalize();
+    q.setFromUnitVectors(up, n);
+    off.copy(n).multiplyScalar(0.02); // lift off the surface to avoid z-fighting
+    for (let i = 0; i < local.length; i += 3) {
+      v.set(local[i], local[i + 1], local[i + 2]).applyQuaternion(q);
+      positions[w++] = v.x + s.point[0] + off.x;
+      positions[w++] = v.y + s.point[1] + off.y;
+      positions[w++] = v.z + s.point[2] + off.z;
+    }
+  }
+
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+  // Same render structure as the (proven-visible) hover highlight — depthTest on
+  // with polygonOffset to sit just in front of the surface — but OPAQUE so
+  // overlapping stamps along a drag don't blend into a darker patch (an opaque
+  // layer over an opaque layer is the same colour). This also matches the opaque
+  // paint result, so the preview reads as "this will be painted solid".
+  const mat = new THREE.MeshBasicMaterial({
+    color: new THREE.Color(currentColor[0], currentColor[1], currentColor[2]),
+    transparent: true,
+    opacity: 1,
+    side: THREE.DoubleSide,
+    depthTest: true,
+    depthWrite: false,
+    polygonOffset: true,
+    polygonOffsetFactor: -1,
+  });
+  brushFillMesh = new THREE.Mesh(geo, mat);
+  brushFillMesh.name = 'brush-fill';
+  brushFillMesh.renderOrder = 1000;
+  getMeshGroup().add(brushFillMesh);
+}
+
+function disposeBrushFillMesh(): void {
   if (brushFillMesh) {
     brushFillMesh.parent?.remove(brushFillMesh);
     brushFillMesh.geometry.dispose();
     (brushFillMesh.material as THREE.Material).dispose();
     brushFillMesh = null;
   }
-  fillPositions = null;
-  fillUsed = 0;
+}
+
+function clearBrushFill(): void {
+  disposeBrushFillMesh();
+  fillStamps = [];
 }
 
 function setsEqual(a: Set<number>, b: Set<number>): boolean {

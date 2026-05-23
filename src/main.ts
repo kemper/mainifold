@@ -118,7 +118,7 @@ import { setColor as setAnnotateColor, setWidth as setAnnotateWidth, getWidth as
 import { addTextAnnotationAtAnchor, setFontSize as setAnnotateFontSize, getFontSize as getAnnotateFontSize } from './annotations/textMode';
 import { restoreView as restoreAnnotationViewById } from './annotations/selectMode';
 import { applyTriColors, applyTriColorsIfVisible, hasRegions as hasColorRegions, onChange as onColorRegionsChange, onVisibilityChange as onPaintVisibilityChange, clearRegions, serialize as serializeRegions, addRegion, getRegions, removeRegion, removeLastRegion, redoLastRegion, setRegionVisibility, setRegionTriangles, buildTriColors, createEmptyTriColors, overlayPainted, type SerializedColorRegion, type RegionDescriptor } from './color/regions';
-import { setBucketTolerance as setPaintBucketTolerance, getBucketTolerance as getPaintBucketTolerance, setBrushRadius as setPaintBrushRadius, getBrushRadius as getPaintBrushRadius, setBrushSmooth as setPaintBrushSmooth, isBrushSmooth as isPaintBrushSmooth, setBrushSmoothQuality as setPaintBrushSmoothQuality, getBrushSmoothQuality as getPaintBrushSmoothQuality } from './color/paintMode';
+import { setBucketTolerance as setPaintBucketTolerance, getBucketTolerance as getPaintBucketTolerance, setBrushRadius as setPaintBrushRadius, getBrushRadius as getPaintBrushRadius, setBrushSmooth as setPaintBrushSmooth, isBrushSmooth as isPaintBrushSmooth, setBrushSmoothDivisor as setPaintBrushSmoothDivisor, getBrushSmoothDivisor as getPaintBrushSmoothDivisor, SMOOTH_DIVISOR_MIN, SMOOTH_DIVISOR_MAX } from './color/paintMode';
 import { buildStrokeMesh, strokeFootprintTriangles, childrenByParent, type BrushStroke, type BrushShape } from './color/subdivide';
 import { initEditorLock, syncLockState, setUnlockHandlers } from './color/editorLock';
 import { buildAdjacency, findCoplanarRegion, findConnectedFromSeed, resolveSeed, findNearestTriangle, type AdjacencyGraph } from './color/adjacency';
@@ -4800,22 +4800,23 @@ async function main() {
     /** Smooth-brush settings for the UI brush tool. When smooth is on (and the
      *  brush has a radius), a stroke subdivides the triangles its edge crosses
      *  until they are below a target edge length, so the painted outline is
-     *  rounded regardless of base-mesh coarseness. `quality` is 1..4
-     *  (Coarse/Medium/Fine/Ultra → target edge = brush radius / 4,8,16,32). */
+     *  rounded regardless of base-mesh coarseness. `divisor` is the detail
+     *  control: target edge = brush radius / divisor (2..1024; higher =
+     *  smoother + more triangles). */
     getBrushSmooth() {
-      return { smooth: isPaintBrushSmooth(), quality: getPaintBrushSmoothQuality() };
+      return { smooth: isPaintBrushSmooth(), divisor: getPaintBrushSmoothDivisor() };
     },
     setBrushSmooth(on: boolean) {
       if (typeof on !== 'boolean') return { error: 'setBrushSmooth(on): on must be a boolean' };
       setPaintBrushSmooth(on);
       return { smooth: on };
     },
-    setBrushSmoothQuality(level: number) {
-      if (typeof level !== 'number' || !Number.isFinite(level)) {
-        return { error: 'setBrushSmoothQuality(level): level must be a finite number in 1..4' };
+    setBrushSmoothDivisor(divisor: number) {
+      if (typeof divisor !== 'number' || !Number.isFinite(divisor)) {
+        return { error: `setBrushSmoothDivisor(divisor): divisor must be a finite number in ${SMOOTH_DIVISOR_MIN}..${SMOOTH_DIVISOR_MAX}` };
       }
-      setPaintBrushSmoothQuality(level);
-      return { quality: getPaintBrushSmoothQuality() };
+      setPaintBrushSmoothDivisor(divisor);
+      return { divisor: getPaintBrushSmoothDivisor() };
     },
 
     /** Paint a smooth brush stroke along world-space surface points, subdividing
@@ -4823,10 +4824,11 @@ async function main() {
      *  equivalent of `paintNear`, but for a swept path and with edge
      *  tessellation). `points` are surface points — obtain them from
      *  `probePixel` against a rendered view. `radius` is in mesh units.
-     *  `maxEdge` (optional) is the target triangle edge length near the stroke
-     *  boundary in mesh units — smaller = smoother + more triangles; it defaults
-     *  to `radius / 16`. Pick it relative to the feature you want (e.g. for a
-     *  crisp circle on a 10-unit-wide part, `maxEdge: 0.1`). `shape` is
+     *  `resolution` is the smoothness detail (target triangle edge = radius /
+     *  resolution; higher = smoother + more triangles), default 256, clamped to
+     *  2..1024 — the same knob as the UI slider. `maxEdge` (optional) overrides
+     *  it with an absolute target edge length in
+     *  mesh units (e.g. `maxEdge: 0.1` for crisp 0.1-unit edges). `shape` is
      *  circle|square|diamond. This MUTATES the working mesh's tessellation
      *  (triangle count grows near the stroke) and is more expensive than the
      *  region selectors — prefer `paintNear`/`paintInBox`/`paintConnected` for
@@ -4836,12 +4838,13 @@ async function main() {
       radius?: number;
       color?: number[];
       shape?: string;
+      resolution?: number;
       maxEdge?: number;
       name?: string;
     }) {
       if (!currentMeshData) return { error: 'No geometry loaded — run code first, then paint.' };
       if (!opts || typeof opts !== 'object') return { error: 'paintStroke(opts): opts object required' };
-      const { points, radius, color, shape, maxEdge, name } = opts;
+      const { points, radius, color, shape, resolution, maxEdge, name } = opts;
       if (!Array.isArray(points) || points.length === 0) {
         return { error: 'paintStroke: points must be a non-empty array of [x,y,z] surface points (use probePixel to get them)' };
       }
@@ -4858,11 +4861,16 @@ async function main() {
       if (!Array.isArray(color) || color.length !== 3 || color.some(c => typeof c !== 'number' || !Number.isFinite(c))) {
         return { error: 'paintStroke: color must be [r,g,b] with each channel in 0..1' };
       }
+      if (resolution !== undefined && (typeof resolution !== 'number' || !Number.isFinite(resolution) || resolution <= 0)) {
+        return { error: 'paintStroke: resolution must be a positive finite number (radius / resolution = target edge) when provided' };
+      }
       if (maxEdge !== undefined && (typeof maxEdge !== 'number' || !Number.isFinite(maxEdge) || maxEdge <= 0)) {
         return { error: 'paintStroke: maxEdge must be a positive finite number (mesh units) when provided' };
       }
       const shp: BrushShape = (shape === 'square' || shape === 'diamond') ? shape : 'circle';
-      const target = maxEdge !== undefined ? maxEdge : radius / 16;
+      // maxEdge (absolute) overrides; otherwise radius / resolution, default 256.
+      const res = Math.max(SMOOTH_DIVISOR_MIN, Math.min(SMOOTH_DIVISOR_MAX, resolution ?? 256));
+      const target = maxEdge !== undefined ? maxEdge : radius / res;
       const region = addRegion(
         typeof name === 'string' && name ? name : `Region ${getRegions().length + 1}`,
         [color[0], color[1], color[2]],
@@ -4880,6 +4888,7 @@ async function main() {
         id: region.id,
         name: region.name,
         triangles: region.triangles.size,
+        resolution: maxEdge !== undefined ? undefined : res,
         maxEdge: target,
         meshTriangleCount: currentMeshData?.numTri ?? 0,
       };

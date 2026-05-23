@@ -25,38 +25,34 @@ async function openEditor(page: import('playwright/test').Page) {
 }
 
 test.describe('smooth paintbrush', () => {
-  test('smooth toggle and fineness selector appear with the brush tool', async ({ page }) => {
+  test('brush is the default tool with smoothing on and a detail slider', async ({ page }) => {
     await openEditor(page);
     await page.locator('#paint-toggle').dispatchEvent('click');
     await page.waitForSelector('#paint-picker-panel:not(.hidden)');
 
+    // Brush is the default tool, so the smooth toggle shows immediately and
+    // smoothing is on by default.
     const smoothBtn = page.locator('#paint-picker-panel button:has-text("Smooth edges")');
-    // Hidden until the brush tool is active (bucket is the default).
-    await expect(smoothBtn).toBeHidden();
-
-    await page.locator('#paint-picker-panel button:has-text("Brush")').dispatchEvent('click');
     await expect(smoothBtn).toBeVisible();
-    await expect(smoothBtn).toContainText('Off');
-
-    // Fineness buttons are hidden until smoothing is turned on.
-    const fineMed = page.locator('#paint-picker-panel button:has-text("Medium")');
-    await expect(fineMed).toBeHidden();
-
-    await smoothBtn.dispatchEvent('click');
     await expect(smoothBtn).toContainText('On');
-    await expect(fineMed).toBeVisible();
 
-    // All four quality presets are present once smoothing is on.
-    for (const lbl of ['Coarse', 'Fine', 'Ultra']) {
-      await expect(page.locator(`#paint-picker-panel button:has-text("${lbl}")`)).toBeVisible();
-    }
+    // The detail control is a typeable slider (range 2..1024), visible while on.
+    const detailSlider = page.locator('#paint-picker-panel input[type="range"][title*="Smooth-edge detail"]');
+    await expect(detailSlider).toBeVisible();
+    await expect(detailSlider).toHaveAttribute('max', '1024');
+    await expect(detailSlider).toHaveAttribute('min', '2');
 
-    // The toggle is reflected in the partwright config.
+    // Defaults: smooth on, divisor 256.
     const cfg = await page.evaluate(() => {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       return (window as any).partwright.getBrushSmooth();
     });
-    expect(cfg.smooth).toBe(true);
+    expect(cfg).toMatchObject({ smooth: true, divisor: 256 });
+
+    // Turning smoothing off hides the detail slider.
+    await smoothBtn.dispatchEvent('click');
+    await expect(smoothBtn).toContainText('Off');
+    await expect(detailSlider).toBeHidden();
   });
 
   test('a smooth-mode brush drag commits a stroke and subdivides', async ({ page }) => {
@@ -70,7 +66,7 @@ test.describe('smooth paintbrush', () => {
       await pw.run(`const { Manifold } = api; return Manifold.cube([40, 40, 3], true);`);
       pw.setBrushSize(4);
       pw.setBrushSmooth(true);
-      pw.setBrushSmoothQuality(3);
+      pw.setBrushSmoothDivisor(64);
     });
     await page.locator('#paint-toggle').dispatchEvent('click');
     await page.waitForSelector('#paint-picker-panel:not(.hidden)');
@@ -97,24 +93,26 @@ test.describe('smooth paintbrush', () => {
     expect(out.after).toBeGreaterThan(out.before); // the stroke subdivided the mesh
   });
 
-  test('setBrushSmooth / setBrushSmoothQuality validate and round-trip', async ({ page }) => {
+  test('setBrushSmooth / setBrushSmoothDivisor validate, clamp, and round-trip', async ({ page }) => {
     await openEditor(page);
     const result = await page.evaluate(() => {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const pw = (window as any).partwright;
       const badBool = pw.setBrushSmooth('yes');
       const okBool = pw.setBrushSmooth(true);
-      const badLvl = pw.setBrushSmoothQuality('lots');
-      const clampHi = pw.setBrushSmoothQuality(99);
-      const okLvl = pw.setBrushSmoothQuality(2);
-      return { badBool, okBool, badLvl, clampHi, okLvl, cfg: pw.getBrushSmooth() };
+      const badNum = pw.setBrushSmoothDivisor('lots');
+      const clampHi = pw.setBrushSmoothDivisor(99999);
+      const clampLo = pw.setBrushSmoothDivisor(0);
+      const ok = pw.setBrushSmoothDivisor(300);
+      return { badBool, okBool, badNum, clampHi, clampLo, ok, cfg: pw.getBrushSmooth() };
     });
     expect(result.badBool.error).toBeTruthy();
     expect(result.okBool.smooth).toBe(true);
-    expect(result.badLvl.error).toBeTruthy();
-    expect(result.clampHi.quality).toBe(4); // clamped to max
-    expect(result.okLvl.quality).toBe(2);
-    expect(result.cfg).toMatchObject({ smooth: true, quality: 2 });
+    expect(result.badNum.error).toBeTruthy();
+    expect(result.clampHi.divisor).toBe(1024); // clamped to max
+    expect(result.clampLo.divisor).toBe(2);     // clamped to min
+    expect(result.ok.divisor).toBe(300);
+    expect(result.cfg).toMatchObject({ smooth: true, divisor: 300 });
   });
 
   test('paintStroke subdivides the rim and paints, keeping triangle count lean', async ({ page }) => {
@@ -221,6 +219,29 @@ test.describe('smooth paintbrush', () => {
     expect(out.badRadius.error).toBeTruthy();
     expect(out.badColor.error).toBeTruthy();
     expect(out.offModel.error).toBeTruthy(); // nothing within the footprint
+  });
+
+  test('paintStroke resolution defaults to 256, is settable, and maxEdge overrides', async ({ page }) => {
+    await openEditor(page);
+    const out = await page.evaluate(async () => {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const pw = (window as any).partwright;
+      await pw.run(`const { Manifold } = api; return Manifold.cube([40, 40, 4], true);`);
+      pw.clearColors();
+      const def = pw.paintStroke({ points: [[0, 0, 2]], radius: 8, color: [1, 0, 0] });
+      const defTri = pw.getMesh().numTri;
+      pw.clearColors();
+      const coarse = pw.paintStroke({ points: [[0, 0, 2]], radius: 8, resolution: 32, color: [1, 0, 0] });
+      const coarseTri = pw.getMesh().numTri;
+      pw.clearColors();
+      const abs = pw.paintStroke({ points: [[0, 0, 2]], radius: 8, maxEdge: 0.5, color: [1, 0, 0] });
+      return { def, defTri, coarse, coarseTri, abs };
+    });
+    expect(out.def.resolution).toBe(256);          // default
+    expect(out.def.maxEdge).toBeCloseTo(8 / 256, 5);
+    expect(out.coarse.resolution).toBe(32);        // settable
+    expect(out.defTri).toBeGreaterThan(out.coarseTri); // 256 is finer than 32
+    expect(out.abs.maxEdge).toBe(0.5);             // maxEdge override wins
   });
 
   test('a smooth stroke survives save + reload', async ({ page }) => {

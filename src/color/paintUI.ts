@@ -16,8 +16,10 @@ import {
   getBrushShape,
   setBrushSmooth,
   isBrushSmooth,
-  setBrushSmoothQuality,
-  getBrushSmoothQuality,
+  setBrushSmoothDivisor,
+  getBrushSmoothDivisor,
+  SMOOTH_DIVISOR_MIN,
+  SMOOTH_DIVISOR_MAX,
   setSlabAxis,
   getSlabAxis,
   previewTriangles,
@@ -506,30 +508,49 @@ function createBrushControls(): HTMLElement {
   const smoothToggle = document.createElement('button');
   smoothToggle.title = 'Subdivide the mesh under the brush so the painted edge is smooth/rounded instead of following triangle boundaries. Adds triangles near the stroke and requires a brush size above 0.';
 
+  // Detail slider: brush radius ÷ value = target triangle edge near the stroke.
+  // Higher = smoother edge + more triangles. Typeable for precision.
   const fineRow = document.createElement('div');
-  fineRow.className = 'grid grid-cols-4 gap-1 mt-1';
-  const fineButtons: Record<number, HTMLButtonElement> = {};
-  for (const [level, lbl, tip] of [
-    [1, 'Coarse', 'Target edge ≈ brush radius / 16 — chunky, fewest extra triangles'],
-    [2, 'Medium', 'Target edge ≈ brush radius / 32'],
-    [3, 'Fine', 'Target edge ≈ brush radius / 64 — smooth (default)'],
-    [4, 'Ultra', 'Target edge ≈ brush radius / 128 — smoothest, most triangles'],
-  ] as const) {
-    const btn = document.createElement('button');
-    btn.textContent = lbl;
-    btn.title = tip;
-    btn.className = axisButtonClass(level === getBrushSmoothQuality());
-    btn.addEventListener('click', () => {
-      setBrushSmoothQuality(level);
-      for (const [k, b] of Object.entries(fineButtons)) b.className = axisButtonClass(Number(k) === getBrushSmoothQuality());
-    });
-    fineRow.appendChild(btn);
-    fineButtons[level] = btn;
-  }
+  fineRow.className = 'flex items-center gap-2 mt-1';
+
+  const detailSlider = document.createElement('input');
+  detailSlider.type = 'range';
+  detailSlider.min = String(SMOOTH_DIVISOR_MIN);
+  detailSlider.max = String(SMOOTH_DIVISOR_MAX);
+  detailSlider.step = '1';
+  detailSlider.value = String(getBrushSmoothDivisor());
+  detailSlider.className = 'flex-1 accent-blue-500 min-w-0';
+  detailSlider.title = 'Smooth-edge detail: brush radius ÷ this = target triangle edge. Higher = smoother edge, more triangles.';
+
+  const detailInput = document.createElement('input');
+  detailInput.type = 'number';
+  detailInput.min = String(SMOOTH_DIVISOR_MIN);
+  detailInput.max = String(SMOOTH_DIVISOR_MAX);
+  detailInput.step = '1';
+  detailInput.value = String(getBrushSmoothDivisor());
+  detailInput.className = 'w-16 px-1 py-0.5 text-[11px] bg-zinc-900/70 border border-zinc-600/60 rounded text-zinc-200 text-right tabular-nums';
+  detailInput.title = `Detail (brush radius ÷ this = target edge). ${SMOOTH_DIVISOR_MIN}–${SMOOTH_DIVISOR_MAX}.`;
+
+  detailSlider.addEventListener('input', () => {
+    setBrushSmoothDivisor(parseInt(detailSlider.value, 10));
+    detailInput.value = String(getBrushSmoothDivisor());
+  });
+  const applyDetail = (): void => {
+    const raw = parseInt(detailInput.value, 10);
+    if (!Number.isFinite(raw)) { detailInput.value = String(getBrushSmoothDivisor()); return; }
+    setBrushSmoothDivisor(raw);
+    detailSlider.value = String(getBrushSmoothDivisor());
+    detailInput.value = String(getBrushSmoothDivisor());
+  };
+  detailInput.addEventListener('change', applyDetail);
+  detailInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') { applyDetail(); detailInput.blur(); } });
+
+  fineRow.appendChild(detailSlider);
+  fineRow.appendChild(detailInput);
 
   const smoothHelp = document.createElement('div');
   smoothHelp.className = 'text-[10px] text-zinc-500 mt-1';
-  smoothHelp.textContent = 'Edge auto-scales to brush size · finer → more triangles';
+  smoothHelp.textContent = 'Smooth-edge detail · higher → smoother, more triangles';
 
   const syncSmoothToggle = (): void => {
     const on = isBrushSmooth();
