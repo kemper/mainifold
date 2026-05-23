@@ -599,7 +599,7 @@ function createAirbrushControls(): HTMLElement {
   wrap.appendChild(sizeRow);
 
   // Strength (core density) and Softness (feathered-rim width) as 0–100% sliders.
-  wrap.appendChild(makePercentControl('Strength', 'How densely paint lands in the core (lower = a lighter dusting)', getAirbrushStrength, setAirbrushStrength, 5));
+  wrap.appendChild(makePercentControl('Strength', 'Opacity of the solid core — 100% = a solid centre with a soft edge (lightest mesh); lower = a fully-dithered dusting (more triangles)', getAirbrushStrength, setAirbrushStrength, 5));
   wrap.appendChild(makePercentControl('Softness', 'Width of the feathered, fading rim (0 = hard edge)', getAirbrushSoftness, setAirbrushSoftness, 0));
 
   // Smooth edges — refine the spray footprint finer so the dithered rim reads as

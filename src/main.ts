@@ -460,7 +460,7 @@ function collectRefineRegions(descriptors: RegionDescriptor[]): RefineRegion[] {
     if (d.kind === 'brushStroke') {
       regions.push(brushRefineRegion(descriptorToStroke(d)));
     } else if (d.kind === 'airbrush') {
-      regions.push(airbrushRefineRegion(d.samples, d.radius, d.maxEdge > 0 ? d.maxEdge : d.radius / 10));
+      regions.push(airbrushRefineRegion(d.samples, d.radius, d.maxEdge > 0 ? d.maxEdge : d.radius / 10, d.strength, d.softness));
     } else if (d.kind === 'slab' && descriptorRefines(d)) {
       regions.push(slabRefineRegion(d.normal, d.offset, d.thickness, d.maxEdge!));
     } else if (d.kind === 'box' && descriptorRefines(d)) {
@@ -678,7 +678,7 @@ function rebuildPaintedGeometry(): void {
 function appendStrokeRefine(descriptor: Extract<RegionDescriptor, { kind: 'brushStroke' | 'airbrush' }>): void {
   if (!currentMeshData) return;
   const region = descriptor.kind === 'airbrush'
-    ? airbrushRefineRegion(descriptor.samples, descriptor.radius, descriptor.maxEdge > 0 ? descriptor.maxEdge : descriptor.radius / 10)
+    ? airbrushRefineRegion(descriptor.samples, descriptor.radius, descriptor.maxEdge > 0 ? descriptor.maxEdge : descriptor.radius / 10, descriptor.strength, descriptor.softness)
     : brushRefineRegion(descriptorToStroke(descriptor));
   const { mesh, childToParent } = buildRefinedMesh(currentMeshData, [region]);
   const parentToChildren = childrenByParent(childToParent);
@@ -5186,7 +5186,7 @@ async function main() {
           kind: 'airbrush',
           samples,
           radius,
-          strength: strength ?? 0.85,
+          strength: strength ?? 1,
           softness: softness ?? 0.5,
           seed: seed !== undefined ? (seed | 0) : ((Math.random() * 0x7fffffff) | 0),
           maxEdge: maxEdge !== undefined ? maxEdge : radius / 10,

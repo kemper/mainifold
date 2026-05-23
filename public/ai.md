@@ -266,7 +266,7 @@ partwright.paintRegion({point, normal, color, name?, tolerance?})         // buc
 partwright.paintNearestRegion({point, color, searchRadius?, name?})       // snap-to-nearest variant
 partwright.paintNear({point, radius, normalCone?, color, name?})          // sphere selector
 partwright.paintStroke({points, radius, resolution?, maxEdge?, shape?, color, name?}) // SMOOTH brush: subdivides mesh for a rounded painted edge (see note below)
-partwright.paintAirbrush({points, radius, strength?, softness?, seed?, maxEdge?, color, name?}) // AIRBRUSH: soft edge via coverage dither (no blending — one solid colour per triangle)
+partwright.paintAirbrush({points, radius, strength?, softness?, seed?, maxEdge?, color, name?}) // AIRBRUSH: solid core + dithered soft edge (no blending — one solid colour per triangle). strength 1 (default) = solid core, only the edge subdivides (lightest mesh); <1 dithers the whole disc
 partwright.paintInBox({box, normalCone?, color, name?})                   // AABB selector
 partwright.paintInOrientedBox({box: {center, size, quaternion?}, color, smooth?, resolution?, maxEdge?})  // rotated box selector (same as UI Box tool); SMOOTH edges by default
 partwright.paintFaces({triangleIds, color, name?})                        // explicit triangle ids

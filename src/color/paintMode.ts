@@ -44,8 +44,10 @@ export const SMOOTH_DIVISOR_MAX = 1024;
 // --- Airbrush tool settings -------------------------------------------------
 /** Airbrush radius in mesh units (the spray cone). */
 let airbrushRadius = 2;
-/** Paint density through the core, 0..1. */
-let airbrushStrength = 0.85;
+/** Core opacity, 0..1. At 1 the core paints solid (one colour, no dither) and
+ *  only the feathered edge is dithered — the cheap, default case. Below 1 the
+ *  whole footprint dithers (a lighter dusting), which costs more triangles. */
+let airbrushStrength = 1;
 /** Feathered-rim fraction of the radius, 0..1 (0 = hard disc, 1 = all fade). */
 let airbrushSoftness = 0.5;
 export const AIRBRUSH_STRENGTH_MIN = 0.05;

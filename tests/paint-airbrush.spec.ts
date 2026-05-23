@@ -41,7 +41,7 @@ test.describe('airbrush', () => {
 
     // Defaults exposed on the window API.
     const cfg = await page.evaluate(() => (window as any).partwright.getAirbrush()); // eslint-disable-line @typescript-eslint/no-explicit-any
-    expect(cfg).toMatchObject({ radius: 2, strength: 0.85, softness: 0.5 });
+    expect(cfg).toMatchObject({ radius: 2, strength: 1, softness: 0.5 });
   });
 
   test('airbrush has a smooth-edges control (toggle + detail) wired to the API', async ({ page }) => {
@@ -103,6 +103,25 @@ test.describe('airbrush', () => {
     expect(out.r.triangles).toBeGreaterThan(0);
     expect(out.after).toBeGreaterThan(out.before); // interior was refined for fine speckle
     expect(out.regions).toBe(1);
+  });
+
+  test('a very fine spray stays bounded (solid core + capped feather)', async ({ page }) => {
+    await openEditor(page);
+    const out = await page.evaluate(async () => {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const pw = (window as any).partwright;
+      // Big face + a tiny target edge: the old full-disc fill exploded to
+      // millions of triangles on one click. With a solid core (strength 1) only
+      // the feather is refined, and the hard budget caps even that.
+      await pw.run(`const { Manifold } = api; return Manifold.cube([60, 60, 4], true);`);
+      const before = pw.getMesh().numTri;
+      const r = pw.paintAirbrush({ points: [[0, 0, 2]], radius: 15, strength: 1, softness: 0.5, seed: 1, maxEdge: 15 / 1024, color: [1, 0, 0] });
+      return { r, before, after: pw.getMesh().numTri };
+    });
+    expect(out.r.error).toBeFalsy();
+    expect(out.r.triangles).toBeGreaterThan(0);
+    expect(out.after).toBeGreaterThan(out.before);   // the feather was refined + painted
+    expect(out.after).toBeLessThan(150_000);         // bounded — was millions before
   });
 
   test('strength and softness change coverage monotonically (fixed seed)', async ({ page }) => {

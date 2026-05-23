@@ -59,12 +59,11 @@ export interface RefineRegion {
    *  its footprint so its stochastic speckle reads as fine dots; brush / slab /
    *  shape leave this off (rim-only) because their interior paints solid. */
   fill?: boolean;
-  /** Optional triangle budget for a `fill` region. Soft cap, checked after each
-   *  pass: the pass that crosses it still completes, so the final mesh can
-   *  overshoot up to ~4x (also bounded by MAX_PASSES). Only `fill` regions set it
-   *  — interior refinement is area-quadratic in 1/maxEdge, so without it a fine
-   *  airbrush could explode the mesh; rim refinement is boundary-bounded and
-   *  needs none. */
+  /** Optional hard triangle budget for a `fill` region. Checked before each pass
+   *  (in buildRefinedMesh): a pass that would cross it is skipped, so the mesh
+   *  never exceeds the budget. Only `fill` regions set it — filling an area is
+   *  quadratic in 1/maxEdge, so without it a fine airbrush could explode the
+   *  mesh; rim refinement is boundary-bounded and needs none. */
   maxTriangles?: number;
 }
 
@@ -74,11 +73,12 @@ export interface RefineRegion {
  *  warning and a live triangle count instead of silently degrading quality. */
 const MAX_PASSES = 16;
 
-/** Triangle budget for a single `fill` (airbrush) refine region. Interior
- *  refinement is area-quadratic in 1/maxEdge, so a fine airbrush is capped here
- *  to stay responsive (the rim-only brush/slab/shape paths are naturally bounded
- *  and uncapped). */
-const AIRBRUSH_MAX_FILL_TRIANGLES = 1_500_000;
+/** Hard triangle budget for a single `fill` (airbrush) refine region, enforced
+ *  as a pre-pass check so a stroke can never exceed it. Even though the airbrush
+ *  now subdivides only its feathered edge band, a wide, very-fine spray could
+ *  still add a lot; this keeps a single click bounded and responsive (the
+ *  rim-only brush/slab/shape paths are naturally bounded and uncapped). */
+const AIRBRUSH_MAX_FILL_TRIANGLES = 100_000;
 
 /** True when `p` is within the brush footprint of any of the stroke's samples,
  *  using the shape's distance metric (circle = Euclidean, square = Chebyshev,
@@ -178,20 +178,75 @@ export function brushRefineRegion(stroke: BrushStroke): RefineRegion {
   return { aabb: strokeAabb(stroke), maxEdge, classify: brushClassifier(stroke) };
 }
 
-/** Build a refine region for an airbrush footprint. Unlike the rim-only brush,
- *  the airbrush fills its whole interior so its speckle reads as fine dots
- *  throughout — area-quadratic in the divisor, hence the triangle budget. */
+/** Squared distance from a point to its nearest stroke sample. */
+function nearestSampleDist2(px: number, py: number, pz: number, samples: [number, number, number][]): number {
+  let best = Infinity;
+  for (let i = 0; i < samples.length; i++) {
+    const dx = px - samples[i][0], dy = py - samples[i][1], dz = pz - samples[i][2];
+    const d2 = dx * dx + dy * dy + dz * dz;
+    if (d2 < best) best = d2;
+  }
+  return best;
+}
+
+/** Classify a triangle against the airbrush's feathered EDGE band — the annulus
+ *  between `innerR` (solid-core edge) and `outerR` (the radius). Only that band
+ *  needs subdivision: the solid core paints as whole coarse triangles and the
+ *  exterior never paints, so the triangle cost tracks the thin edge, not the
+ *  whole disc. With `innerR === 0` (a translucent spray with no fully-solid
+ *  core) it degrades to the full footprint. */
+function airbrushFeatherClassifier(
+  samples: [number, number, number][],
+  innerR: number,
+  outerR: number,
+): TriClassifier {
+  const inner2 = innerR * innerR;
+  const outer2 = outerR * outerR;
+  return (a, b, c) => {
+    const da = nearestSampleDist2(a[0], a[1], a[2], samples);
+    const db = nearestSampleDist2(b[0], b[1], b[2], samples);
+    const dc = nearestSampleDist2(c[0], c[1], c[2], samples);
+    const inBand = (d: number): boolean => d >= inner2 && d <= outer2;
+    if (inBand(da) && inBand(db) && inBand(dc)) return 'inside';
+    // Entirely within the solid core → never subdivide (it paints solid).
+    if (da < inner2 && db < inner2 && dc < inner2) return 'outside';
+    // Entirely beyond the outer radius → outside, unless the band still grazes
+    // the triangle (a small spray sitting inside one big face).
+    if (da > outer2 && db > outer2 && dc > outer2) {
+      for (let s = 0; s < samples.length; s++) {
+        const sp = samples[s];
+        const cp = closestPointOnTriangle(sp[0], sp[1], sp[2], a[0], a[1], a[2], b[0], b[1], b[2], c[0], c[1], c[2]);
+        const dx = cp[0] - sp[0], dy = cp[1] - sp[1], dz = cp[2] - sp[2];
+        if (dx * dx + dy * dy + dz * dz <= outer2) return 'straddle';
+      }
+      return 'outside';
+    }
+    return 'straddle';
+  };
+}
+
+/** Build a refine region for an airbrush footprint. The dense core paints as
+ *  whole coarse triangles (one solid colour, no dither), so only the feathered
+ *  EDGE band is subdivided + dithered — the triangle cost tracks the thin edge,
+ *  not the whole disc. A `strength` below 1 has no fully-solid core (every cell
+ *  dithers), so its `innerR` is 0 and the whole footprint feathers; the hard
+ *  triangle budget is the backstop there. */
 export function airbrushRefineRegion(
   samples: [number, number, number][],
   radius: number,
   maxEdge: number,
+  strength: number,
+  softness: number,
 ): RefineRegion {
-  const stroke: BrushStroke = { samples, radius, shape: 'circle', maxEdge };
   const target = maxEdge > 0 ? maxEdge : radius / 10;
+  // The core paints solid only when coverage reaches 1 (strength >= 1); below
+  // that every cell is a dither, so there is no core to skip.
+  const innerR = strength >= 1 ? Math.max(0, 1 - softness) * radius : 0;
+  const stroke: BrushStroke = { samples, radius, shape: 'circle', maxEdge: target };
   return {
     aabb: strokeAabb(stroke),
     maxEdge: target,
-    classify: brushClassifier(stroke),
+    classify: airbrushFeatherClassifier(samples, innerR, radius),
     fill: true,
     maxTriangles: AIRBRUSH_MAX_FILL_TRIANGLES,
   };
@@ -434,10 +489,12 @@ export function buildRefinedMesh(
     for (let pass = 0; pass < MAX_PASSES; pass++) {
       const selected = selectByClassify(mesh, region);
       if (selected.size === 0) break;
+      // Hard budget: a 1→4 split turns each selected triangle into 4 (net +3).
+      // Skip a pass that would cross the budget, so the cap never overshoots.
+      if (region.maxTriangles && mesh.numTri + selected.size * 3 > region.maxTriangles) break;
       const { mesh: nm, childToParent } = subdivideSelected(mesh, selected);
       mesh = nm;
       comp = composeMaps(comp, childToParent);
-      if (region.maxTriangles && mesh.numTri >= region.maxTriangles) break;
     }
   }
   return { mesh, childToParent: comp };
