@@ -41,7 +41,7 @@ const MAX_TRIANGLES = 1_500_000;
 /** True when `p` is within the brush footprint of any of the stroke's samples,
  *  using the shape's distance metric (circle = Euclidean, square = Chebyshev,
  *  diamond = L1). */
-export function withinFootprint(
+function withinFootprint(
   px: number, py: number, pz: number,
   stroke: BrushStroke,
 ): boolean {
@@ -109,7 +109,7 @@ function maxEdgeLen2(a: number[], b: number[], c: number[]): number {
  *  the stopping condition). Catches the brush-smaller-than-a-triangle case via a
  *  closest-point test so a small brush in the middle of a big face still
  *  tessellates. */
-export function selectStrokeTriangles(mesh: MeshData, stroke: BrushStroke, maxEdge: number): Set<number> {
+function selectStrokeTriangles(mesh: MeshData, stroke: BrushStroke, maxEdge: number): Set<number> {
   const { triVerts, numTri } = mesh;
   const selected = new Set<number>();
   const r2 = stroke.radius * stroke.radius;
@@ -183,7 +183,7 @@ export function strokeFootprintTriangles(mesh: MeshData, stroke: BrushStroke): S
  *  Returns the new mesh plus `childToParent`: for each output triangle, the
  *  index of the input triangle it came from (so callers can carry per-triangle
  *  data — e.g. existing colour regions — across the split). */
-export function subdivideSelected(
+function subdivideSelected(
   mesh: MeshData,
   selected: Set<number>,
 ): { mesh: MeshData; childToParent: Int32Array } {
@@ -247,29 +247,32 @@ export function subdivideSelected(
 /** Rebuild a refined mesh from a pristine base mesh and an ordered list of
  *  brush strokes. Each stroke refines the (possibly already-refined) mesh near
  *  its own footprint until the boundary triangles fall below `stroke.maxEdge`.
- *  Returns the refined mesh and a `childToParent` map from each final triangle
- *  back to its base-mesh triangle index — used to carry non-stroke colour
- *  regions across the refinement. */
+ *  Returns the refined mesh, a `childToParent` map from each final triangle back
+ *  to its base-mesh triangle index (used to carry non-stroke colour regions
+ *  across the refinement), and `capped`: true when subdivision stopped early
+ *  because the mesh hit MAX_TRIANGLES (so a stroke couldn't reach its target
+ *  detail — the caller should surface that). */
 export function buildStrokeMesh(
   base: MeshData,
   strokes: BrushStroke[],
-): { mesh: MeshData; childToParent: Int32Array } {
+): { mesh: MeshData; childToParent: Int32Array; capped: boolean } {
   let mesh = base;
   let comp: Int32Array = new Int32Array(base.numTri);
   for (let i = 0; i < comp.length; i++) comp[i] = i;
+  let capped = false;
 
   for (const stroke of strokes) {
-    const target = stroke.maxEdge > 0 ? stroke.maxEdge : stroke.radius / 16;
+    const target = stroke.maxEdge > 0 ? stroke.maxEdge : stroke.radius / 256;
     for (let pass = 0; pass < MAX_PASSES; pass++) {
       const selected = selectStrokeTriangles(mesh, stroke, target);
       if (selected.size === 0) break;
       const { mesh: nm, childToParent } = subdivideSelected(mesh, selected);
       mesh = nm;
       comp = composeMaps(comp, childToParent);
-      if (nm.numTri > MAX_TRIANGLES) break;
+      if (nm.numTri > MAX_TRIANGLES) { capped = true; break; }
     }
   }
-  return { mesh, childToParent: comp };
+  return { mesh, childToParent: comp, capped };
 }
 
 function composeMaps(parentToBase: Int32Array, childToParent: Int32Array): Int32Array {

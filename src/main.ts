@@ -395,23 +395,39 @@ function applyVersionAnnotations(version: Version | null | undefined): void {
 function collectStrokeDescriptors(descriptors: RegionDescriptor[]): BrushStroke[] {
   const strokes: BrushStroke[] = [];
   for (const d of descriptors) {
-    if (d.kind === 'brushStroke') {
-      strokes.push({ samples: d.samples, radius: d.radius, shape: d.shape, maxEdge: d.maxEdge > 0 ? d.maxEdge : d.radius / 16 });
-    }
+    if (d.kind === 'brushStroke') strokes.push(descriptorToStroke(d));
   }
   return strokes;
 }
 
 /** Refine a base mesh under the given strokes. Returns the mesh unchanged with
  *  `parentToChildren: null` when there are no strokes (the common case — no
- *  subdivision, identity mapping). */
+ *  subdivision, identity mapping). `capped` is true when subdivision stopped at
+ *  the triangle ceiling (a stroke couldn't reach its requested detail). */
 function refineMeshForStrokes(
   base: MeshData,
   strokes: BrushStroke[],
-): { mesh: MeshData; parentToChildren: Map<number, number[]> | null } {
-  if (strokes.length === 0) return { mesh: base, parentToChildren: null };
-  const { mesh, childToParent } = buildStrokeMesh(base, strokes);
-  return { mesh, parentToChildren: childrenByParent(childToParent) };
+): { mesh: MeshData; parentToChildren: Map<number, number[]> | null; capped: boolean } {
+  if (strokes.length === 0) return { mesh: base, parentToChildren: null, capped: false };
+  const { mesh, childToParent, capped } = buildStrokeMesh(base, strokes);
+  return { mesh, parentToChildren: childrenByParent(childToParent), capped };
+}
+
+/** True when the last refine hit the triangle ceiling, so the console
+ *  `paintStroke` can report it. */
+let lastRefineCapped = false;
+let detailCappedWarnedAt = 0;
+
+/** Surface the "couldn't subdivide further — mesh is at the detail ceiling"
+ *  condition so the user understands why a stroke came out coarse (instead of it
+ *  silently happening). Debounced; goes to the diagnostic log (⚠ panel) via
+ *  console.warn. The actionable fix is to Clear colors or lower Edge smoothing. */
+function notifyDetailCapped(triangleCount: number): void {
+  const now = Date.now();
+  if (now - detailCappedWarnedAt < 4000) return;
+  detailCappedWarnedAt = now;
+  // eslint-disable-next-line no-console
+  console.warn(`Smooth paint: detail limit reached (~${triangleCount.toLocaleString()} triangles). Clear colors or lower "Edge smoothing" to keep painting at full resolution.`);
 }
 
 /** Map base-mesh triangle ids onto the refined mesh. With no subdivision
@@ -432,11 +448,12 @@ function remapTriangleIds(ids: Iterable<number>, parentToChildren: Map<number, n
 function resolveDescriptorTriangles(
   descriptor: RegionDescriptor,
   mesh: MeshData,
-  adjacency: AdjacencyGraph,
+  adjacency: AdjacencyGraph | null,
   parentToChildren: Map<number, number[]> | null,
 ): Set<number> {
   switch (descriptor.kind) {
     case 'coplanar': {
+      if (!adjacency) return new Set<number>();
       const { seedPoint, seedNormal, normalTolerance } = descriptor;
       const seedTri = resolveSeed(seedPoint, seedNormal, mesh, adjacency, normalTolerance);
       return seedTri >= 0 ? findCoplanarRegion(seedTri, adjacency, normalTolerance) : new Set<number>();
@@ -461,6 +478,7 @@ function resolveDescriptorTriangles(
       return ids ? remapTriangleIds(ids, parentToChildren) : new Set<number>();
     }
     case 'connectedFromSeed': {
+      if (!adjacency) return new Set<number>();
       const { seedPoint, seedNormal, maxDeviationDeg } = descriptor;
       // Find the closest triangle to the seed point — robust across re-runs
       // because triangle indices are unstable but world-space points are not.
@@ -486,8 +504,14 @@ function resolveDescriptorTriangles(
       return triangles;
     }
     case 'brushStroke':
-      return strokeFootprintTriangles(mesh, { samples: descriptor.samples, radius: descriptor.radius, shape: descriptor.shape, maxEdge: descriptor.maxEdge > 0 ? descriptor.maxEdge : descriptor.radius / 16 });
+      return strokeFootprintTriangles(mesh, descriptorToStroke(descriptor));
   }
+}
+
+/** Normalize a brushStroke descriptor to a BrushStroke, filling a sane default
+ *  maxEdge (matching the default detail divisor) for any malformed/legacy data. */
+function descriptorToStroke(d: Extract<RegionDescriptor, { kind: 'brushStroke' }>): BrushStroke {
+  return { samples: d.samples, radius: d.radius, shape: d.shape, maxEdge: d.maxEdge > 0 ? d.maxEdge : d.radius / 256 };
 }
 
 /** True when any in-memory region is a smooth brush stroke (which drives mesh
@@ -551,13 +575,15 @@ function rebuildPaintedGeometry(): void {
   const base = paintBaseMesh;
   if (!base) return;
   const strokes = collectStrokeDescriptors(getRegions().map(r => r.descriptor));
-  const { mesh, parentToChildren } = refineMeshForStrokes(base, strokes);
+  const { mesh, parentToChildren, capped } = refineMeshForStrokes(base, strokes);
   currentMeshData = mesh;
   updatePaintMesh(mesh);
   const adjacency = buildAdjacency(mesh);
   for (const region of getRegions()) {
     setRegionTriangles(region.id, resolveDescriptorTriangles(region.descriptor, mesh, adjacency, parentToChildren));
   }
+  lastRefineCapped = capped;
+  if (capped) notifyDetailCapped(mesh.numTri);
   paintedColorRefresh();
   syncLockState();
 }
@@ -568,21 +594,30 @@ function rebuildPaintedGeometry(): void {
  *  triangles)); only the new stroke is resolved by footprint. This is the hot
  *  path while painting and keeps each stroke ~constant-time regardless of how
  *  many strokes precede it. */
-function appendStrokeRefine(newRegionId: number, descriptor: Extract<RegionDescriptor, { kind: 'brushStroke' }>): void {
+function appendStrokeRefine(descriptor: Extract<RegionDescriptor, { kind: 'brushStroke' }>): void {
   if (!currentMeshData) return;
-  const stroke: BrushStroke = { samples: descriptor.samples, radius: descriptor.radius, shape: descriptor.shape, maxEdge: descriptor.maxEdge > 0 ? descriptor.maxEdge : descriptor.radius / 16 };
-  const { mesh, childToParent } = buildStrokeMesh(currentMeshData, [stroke]);
+  const { mesh, childToParent, capped } = buildStrokeMesh(currentMeshData, [descriptorToStroke(descriptor)]);
   const parentToChildren = childrenByParent(childToParent);
   currentMeshData = mesh;
   updatePaintMesh(mesh);
+  // Re-resolve regions exactly as a full rebuild / reload would, so the live
+  // result matches what reload reconstructs (determinism). Explicit sets
+  // (triangles/byLabel index the base tessellation / runtime labelMap) are
+  // carried forward across this split; every spatial/footprint/flood descriptor
+  // is re-resolved by descriptor — its children near the split may fall outside
+  // the region, which a naive parent→children carry would wrongly keep.
+  const needsAdj = getRegions().some(r => r.descriptor.kind === 'coplanar' || r.descriptor.kind === 'connectedFromSeed');
+  const adjacency = needsAdj ? buildAdjacency(mesh) : null;
   for (const region of getRegions()) {
-    if (region.id === newRegionId) {
-      setRegionTriangles(region.id, strokeFootprintTriangles(mesh, stroke));
-    } else {
-      // Carry the prior triangle set onto the locally-refined mesh.
+    const d = region.descriptor;
+    if (d.kind === 'triangles' || d.kind === 'byLabel') {
       setRegionTriangles(region.id, remapTriangleIds(region.triangles, parentToChildren));
+    } else {
+      setRegionTriangles(region.id, resolveDescriptorTriangles(d, mesh, adjacency, parentToChildren));
     }
   }
+  lastRefineCapped = capped;
+  if (capped) notifyDetailCapped(mesh.numTri);
   paintedColorRefresh();
   syncLockState();
 }
@@ -617,12 +652,9 @@ function reconcilePaintedGeometry(): void {
   // Pure append: exactly one new stroke on the end, prior strokes unchanged.
   if (strokesNow.length === lastStrokeList.length + 1 && prefixRefEqual(strokesNow, lastStrokeList)) {
     const newDesc = strokesNow[strokesNow.length - 1] as Extract<RegionDescriptor, { kind: 'brushStroke' }>;
-    const newRegion = getRegions().find(r => r.descriptor === newDesc);
-    if (newRegion) {
-      appendStrokeRefine(newRegion.id, newDesc);
-      lastStrokeList = strokesNow;
-      return;
-    }
+    appendStrokeRefine(newDesc);
+    lastStrokeList = strokesNow;
+    return;
   }
 
   rebuildPaintedGeometry();
@@ -4871,6 +4903,7 @@ async function main() {
       // maxEdge (absolute) overrides; otherwise radius / resolution, default 256.
       const res = Math.max(SMOOTH_DIVISOR_MIN, Math.min(SMOOTH_DIVISOR_MAX, resolution ?? 256));
       const target = maxEdge !== undefined ? maxEdge : radius / res;
+      lastRefineCapped = false;
       const region = addRegion(
         typeof name === 'string' && name ? name : `Region ${getRegions().length + 1}`,
         [color[0], color[1], color[2]],
@@ -4891,6 +4924,7 @@ async function main() {
         resolution: maxEdge !== undefined ? undefined : res,
         maxEdge: target,
         meshTriangleCount: currentMeshData?.numTri ?? 0,
+        ...(lastRefineCapped ? { capped: true, note: 'Mesh hit the triangle ceiling, so this stroke could not reach the requested detail. Clear colors or use fewer/coarser strokes.' } : {}),
       };
     },
 

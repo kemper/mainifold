@@ -1,12 +1,13 @@
 // Smooth paintbrush: subdivides the mesh under a brush stroke so the painted
 // region's edge is rounded instead of following the existing tessellation.
 //
-// Covers the UI controls (smooth toggle + fineness selector), the
+// Covers the UI controls (smooth toggle + detail slider), the
 // window.partwright config + paintStroke API, and the core invariants:
 //   - a stroke grows the triangle count (subdivision happened)
-//   - the refined mesh stays watertight (every edge shared by exactly 2 tris)
-//   - finer subdivision yields more triangles
+//   - refinement is rim-only (lean), with intentional hairline T-junctions
+//   - finer detail yields more triangles
 //   - clearing the stroke restores the original tessellation
+//   - a stroke overlapping another region resolves the same live and on reload
 //
 // Uses dispatchEvent('click') to dodge the first-run onboarding backdrop, and
 // drives painting through paintStroke (same code path as the UI smooth brush)
@@ -71,6 +72,9 @@ test.describe('smooth paintbrush', () => {
     await page.locator('#paint-toggle').dispatchEvent('click');
     await page.waitForSelector('#paint-picker-panel:not(.hidden)');
     await page.locator('#paint-picker-panel button:has-text("Brush")').dispatchEvent('click');
+    // Let the viewport auto-frame the new mesh so the centre ray reliably hits
+    // it (otherwise a synthetic mousedown can miss before the camera settles).
+    await page.waitForTimeout(150);
 
     const out = await page.evaluate(async () => {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -242,6 +246,33 @@ test.describe('smooth paintbrush', () => {
     expect(out.coarse.resolution).toBe(32);        // settable
     expect(out.defTri).toBeGreaterThan(out.coarseTri); // 256 is finer than 32
     expect(out.abs.maxEdge).toBe(0.5);             // maxEdge override wins
+  });
+
+  test('a region overlapping a smooth stroke resolves the same live and on reload', async ({ page }) => {
+    await openEditor(page);
+    const out = await page.evaluate(async () => {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const pw = (window as any).partwright;
+      await pw.createSession('overlap-determinism');
+      await pw.run(`const { Manifold } = api; return Manifold.cube([40, 40, 6], true);`);
+      // A box region over the top half, then a smooth stroke straddling its edge
+      // (subdivides triangles the box's centroid test treats as in/out).
+      const boxRegion = pw.paintInBox({ box: { min: [-20, -20, 2.9], max: [20, 20, 3.1] }, color: [0, 0, 1], name: 'Top' });
+      pw.paintStroke({ points: [[0, 0, 3]], radius: 8, resolution: 64, color: [1, 0, 0] });
+      const liveBoxTris = pw.listRegions().find((r: { id: number }) => r.id === boxRegion.id).triangles;
+      const liveMeshTris = pw.getMesh().numTri;
+
+      const sv = await pw.runAndSave(pw.getCode(), 'overlap-v');
+      await pw.run(`const { Manifold } = api; return Manifold.cube([40, 40, 6], true);`);
+      await pw.loadVersion({ index: sv.version.index });
+      const reloaded = pw.listRegions();
+      const reloadBox = reloaded.find((r: { name: string }) => r.name === 'Top');
+      return { liveBoxTris, liveMeshTris, reloadBoxTris: reloadBox?.triangles ?? -1, reloadMeshTris: pw.getMesh().numTri };
+    });
+
+    // Incremental (live) append must match the full re-resolve on reload.
+    expect(out.reloadMeshTris).toBe(out.liveMeshTris);
+    expect(out.reloadBoxTris).toBe(out.liveBoxTris);
   });
 
   test('a smooth stroke survives save + reload', async ({ page }) => {
