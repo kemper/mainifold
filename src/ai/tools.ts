@@ -957,7 +957,7 @@ const ALL_TOOLS: ToolDefinition[] = [
   },
   {
     name: 'splitForPrinting',
-    description: 'Split a model too big for the build volume into bed-sized chunks, drilling matching dowel-pin holes across each cut so the printed pieces register and glue together. The chunks are arranged in a row and saved as a new version. By default it only cuts X/Y (keeping flat bottoms for bed adhesion); enable Z via `axes`. Use after checkPrintability reports the model exceeds the bed AND the user wants it at full size rather than scaled down. Returns {partCount, grid, holeCount, notes, saved}.',
+    description: 'Auto-split a model too big for the build volume into bed-sized chunks (axis-aligned grid), drilling matching dowel-pin holes across each cut so the printed pieces register and glue together. Each chunk is added to the session as its own PART (visible in the parts rail). By default it only cuts X/Y (keeping flat bottoms for bed adhesion); enable Z via `axes`. Use after checkPrintability reports the model exceeds the bed AND the user wants it at full size rather than scaled down. For a single user-chosen cut at an arbitrary angle (with peg/screw/dovetail connectors), use splitAlongPlane instead. Returns {partCount, grid, holeCount, notes, parts}.',
     input_schema: {
       type: 'object',
       properties: {
@@ -977,6 +977,38 @@ const ALL_TOOLS: ToolDefinition[] = [
         },
         save: { type: 'boolean', description: 'Save the result as a new version (default true).' },
       },
+    },
+  },
+  {
+    name: 'splitAlongPlane',
+    description: 'Split the model along ONE arbitrary plane (a point on it + a normal), applying the chosen connector across the cut, and emit the two pieces as new parts in the session. Connectors: "dowel" (matching holes for a rod), "peg" (integral peg + socket), "screw" (bolt counterbore + hex nut pocket), "dovetail" (self-locking tapered key), or "none". Use for a user-directed cut at a chosen location/angle — e.g. "cut this in half vertically with a dovetail". (The in-app gizmo calls this with its plane; you can call it directly with explicit coordinates.) Returns {partCount, connectorCount, notes, parts}.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        plane: {
+          type: 'object',
+          description: 'The cut plane.',
+          properties: {
+            point: { type: 'array', items: { type: 'number' }, minItems: 3, maxItems: 3, description: 'A point the plane passes through [x, y, z].' },
+            normal: { type: 'array', items: { type: 'number' }, minItems: 3, maxItems: 3, description: 'Plane normal [x, y, z] (need not be unit length).' },
+          },
+          required: ['point', 'normal'],
+        },
+        connector: {
+          type: 'object',
+          description: 'Connector across the cut.',
+          properties: {
+            type: { type: 'string', enum: ['none', 'dowel', 'peg', 'screw', 'dovetail'], description: 'Default "dowel".' },
+            diameter: { type: 'number', description: 'Pin/peg/screw ⌀ (mm). Default 5.' },
+            depth: { type: 'number', description: 'How far the connector reaches into each side (mm). Default 8.' },
+            width: { type: 'number', description: 'Dovetail key width (mm). Default 12.' },
+            clearance: { type: 'number', description: 'Assembly fit clearance (mm).' },
+          },
+        },
+        count: { type: 'integer', description: 'How many connectors to distribute across the cut (0–8). Default 2.' },
+        save: { type: 'boolean', description: 'Emit the pieces as new parts (default true). Pass false to just preview the plan.' },
+      },
+      required: ['plane'],
     },
   },
 ];
@@ -1028,7 +1060,7 @@ const ALWAYS_AVAILABLE = new Set([
 ]);
 
 const RUN_GATED = new Set(['runCode']);
-const SAVE_GATED = new Set(['runAndSave', 'loadVersion', 'saveVersion', 'scaleModel', 'splitForPrinting']);
+const SAVE_GATED = new Set(['runAndSave', 'loadVersion', 'saveVersion', 'scaleModel', 'splitForPrinting', 'splitAlongPlane']);
 const PAINT_GATED = new Set(['paintRegion', 'paintFaces', 'paintNear', 'paintStroke', 'paintInBox', 'paintInOrientedBox', 'paintSlab', 'paintNearestRegion', 'paintComponent', 'paintByLabel', 'paintByLabels', 'paintConnected', 'undoLastPaint', 'redoLastPaint', 'removeRegion', 'clearColors', 'copyColorsFromVersion']);
 /** Tools that ship a PNG back to the model via a multimodal content
  *  block. Gated by the Views vision toggle so the user can disable
@@ -1052,7 +1084,7 @@ export function buildToolList(toggles: ChatToggles): ToolDefinition[] {
       // scaleModel / splitForPrinting transform the rendered mesh and bake a
       // version; they don't execute user code, so (like loadVersion/saveVersion)
       // they only need the saveVersions scope, not runCode.
-      const nonRunning = t.name === 'loadVersion' || t.name === 'saveVersion' || t.name === 'scaleModel' || t.name === 'splitForPrinting';
+      const nonRunning = t.name === 'loadVersion' || t.name === 'saveVersion' || t.name === 'scaleModel' || t.name === 'splitForPrinting' || t.name === 'splitAlongPlane';
       return nonRunning ? toggles.scope.saveVersions : (toggles.scope.runCode && toggles.scope.saveVersions);
     }
     if (PAINT_GATED.has(t.name)) return toggles.scope.paintFaces;
@@ -1456,6 +1488,8 @@ async function dispatch(api: PartwrightAPI, name: string, input: Record<string, 
       return api.scaleModel(input);
     case 'splitForPrinting':
       return api.splitForPrinting(input);
+    case 'splitAlongPlane':
+      return api.splitAlongPlane(input);
     default:
       throw new Error(`Unknown tool: ${name}`);
   }

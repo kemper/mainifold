@@ -10,8 +10,17 @@
 import type { PrinterSettings } from '../geometry/printerSettings';
 import { PRINTER_PRESETS } from '../geometry/printerSettings';
 import type { PrintabilityReport } from '../geometry/printability';
+import type { ConnectorType } from '../geometry/splitConnectors';
 
 type ActionResult = Record<string, unknown> & { error?: string };
+
+/** Connector settings the panel collects, shared by both split modes. */
+export interface ConnectorUI {
+  type: ConnectorType;
+  size: number;   // ⌀ for dowel/peg/screw, key width for dovetail
+  depth: number;
+  count: number;
+}
 
 export interface PrintToolsHandlers {
   /** Snapshot state + close sibling overlays when the user opens the panel. */
@@ -21,14 +30,31 @@ export interface PrintToolsHandlers {
   check(): PrintabilityReport | { error: string };
   scaleToFit(): Promise<ActionResult>;
   scaleUniform(factor: number): Promise<ActionResult>;
-  split(): Promise<ActionResult>;
+  /** Auto-cut to fit the build volume (axis-aligned grid). */
+  splitAuto(connector: ConnectorUI): Promise<ActionResult>;
+  /** Cut along the interactive gizmo plane. */
+  splitPlane(connector: ConnectorUI): Promise<ActionResult>;
+  /** Show/hide the interactive split-plane gizmo in the viewport. */
+  setPlaneGizmo(on: boolean): void;
+  /** Switch the gizmo between move and rotate. */
+  setPlaneMode(mode: 'translate' | 'rotate'): void;
 }
+
+const CONNECTOR_OPTIONS: { id: ConnectorType; label: string }[] = [
+  { id: 'dowel', label: 'Dowel pins (holes)' },
+  { id: 'peg', label: 'Pegs + sockets' },
+  { id: 'screw', label: 'Screw / bolt' },
+  { id: 'dovetail', label: 'Dovetail key' },
+  { id: 'none', label: 'None (plain cut)' },
+];
 
 const BTN_INACTIVE = 'px-3 py-2 md:px-2 md:py-1 rounded text-sm md:text-xs bg-zinc-800/80 backdrop-blur text-zinc-400 [@media(hover:hover)]:hover:text-zinc-200 [@media(hover:hover)]:hover:bg-zinc-700/80 transition-colors border border-zinc-600/50';
 const BTN_ACTIVE = 'px-3 py-2 md:px-2 md:py-1 rounded text-sm md:text-xs bg-blue-500/20 backdrop-blur text-blue-400 [@media(hover:hover)]:hover:bg-blue-500/30 transition-colors border border-blue-500/30';
 const ACTION_BTN = 'w-full px-2 py-1.5 rounded text-xs font-medium bg-blue-500/30 text-blue-200 [@media(hover:hover)]:hover:bg-blue-500/40 transition-colors border border-blue-500/50 disabled:opacity-40 disabled:cursor-not-allowed';
 const SECTION_LABEL = 'block text-[10px] text-zinc-500 uppercase tracking-wider mb-1 font-medium';
 const NUM_INPUT = 'w-full px-1.5 py-1 text-xs text-right rounded bg-zinc-900/80 border border-zinc-600/60 text-zinc-200 focus:outline-none focus:border-blue-500/60';
+const TAB_ACTIVE = 'flex-1 px-2 py-1 rounded text-[11px] bg-blue-500/30 text-blue-200 border border-blue-500/50';
+const TAB_INACTIVE = 'flex-1 px-2 py-1 rounded text-[11px] bg-zinc-800/70 text-zinc-400 border border-zinc-600/50 [@media(hover:hover)]:hover:text-zinc-200';
 
 let printBtn: HTMLButtonElement | null = null;
 let panel: HTMLElement | null = null;
@@ -44,6 +70,15 @@ let nozzleInput: HTMLInputElement | null = null;
 let reportEl: HTMLElement | null = null;
 let statusEl: HTMLElement | null = null;
 let factorInput: HTMLInputElement | null = null;
+let splitMode: 'auto' | 'plane' = 'auto';
+let splitAutoBtn: HTMLButtonElement | null = null;
+let splitPlaneBtn: HTMLButtonElement | null = null;
+let planeControlsEl: HTMLElement | null = null;
+let connTypeSel: HTMLSelectElement | null = null;
+let connSize: HTMLInputElement | null = null;
+let connDepth: HTMLInputElement | null = null;
+let connCount: HTMLInputElement | null = null;
+let splitActionBtn: HTMLButtonElement | null = null;
 
 export function initPrintToolsUI(controlsContainer: HTMLElement, h: PrintToolsHandlers): void {
   handlers = h;
@@ -84,6 +119,7 @@ function openPanel(): void {
   panel.classList.remove('hidden');
   if (printBtn) printBtn.className = BTN_ACTIVE;
   loadSettingsIntoForm();
+  applySplitMode('auto'); // start with the gizmo off
   setStatus('');
   if (reportEl) reportEl.innerHTML = '';
 }
@@ -91,10 +127,31 @@ function openPanel(): void {
 function closePanel(): void {
   panel?.classList.add('hidden');
   if (printBtn) printBtn.className = BTN_INACTIVE;
+  handlers?.setPlaneGizmo(false); // never leave the gizmo lingering in the viewport
 }
 
 function setStatus(text: string): void {
   if (statusEl) statusEl.textContent = text;
+}
+
+function currentConnector(): ConnectorUI {
+  return {
+    type: (connTypeSel?.value as ConnectorType) ?? 'dowel',
+    size: Math.max(0.1, Number(connSize?.value) || 5),
+    depth: Math.max(0.1, Number(connDepth?.value) || 8),
+    count: Math.max(0, Math.min(8, Math.round(Number(connCount?.value) || 2))),
+  };
+}
+
+/** Toggle between auto (fit-bed grid) and plane (interactive gizmo) split modes. */
+function applySplitMode(m: 'auto' | 'plane'): void {
+  splitMode = m;
+  const plane = m === 'plane';
+  if (splitAutoBtn) splitAutoBtn.className = plane ? TAB_INACTIVE : TAB_ACTIVE;
+  if (splitPlaneBtn) splitPlaneBtn.className = plane ? TAB_ACTIVE : TAB_INACTIVE;
+  if (planeControlsEl) planeControlsEl.style.display = plane ? 'flex' : 'none';
+  if (splitActionBtn) splitActionBtn.textContent = plane ? 'Split along plane' : 'Split to fit bed';
+  handlers?.setPlaneGizmo(plane);
 }
 
 function loadSettingsIntoForm(): void {
@@ -165,7 +222,11 @@ function renderReport(report: PrintabilityReport | { error: string }): void {
   }
 }
 
-async function runAction(fn: () => Promise<ActionResult> | ActionResult, runningMsg: string): Promise<void> {
+async function runAction(
+  fn: () => Promise<ActionResult> | ActionResult,
+  runningMsg: string,
+  onSuccess?: (res: ActionResult) => void,
+): Promise<void> {
   if (busy) return;
   busy = true;
   setStatus(runningMsg);
@@ -176,6 +237,7 @@ async function runAction(fn: () => Promise<ActionResult> | ActionResult, running
       setStatus(res.error as string);
     } else {
       setStatus('');
+      onSuccess?.(res); // may set its own success message — runs AFTER the clear
     }
   } catch (e) {
     setStatus(`Failed: ${(e as Error).message}`);
@@ -313,23 +375,96 @@ function buildPanel(): HTMLElement {
 
   const splitLabel = document.createElement('label');
   splitLabel.className = SECTION_LABEL;
-  splitLabel.textContent = 'Split for printing';
+  splitLabel.textContent = 'Split for printing → parts';
   p.appendChild(splitLabel);
 
-  const splitBtn = document.createElement('button');
-  splitBtn.className = ACTION_BTN;
-  splitBtn.textContent = 'Split to fit bed';
-  splitBtn.title = 'Cut an oversized model into bed-sized pieces with alignment pin holes';
-  splitBtn.addEventListener('click', () => {
-    void runAction(async () => {
-      const r = await handlers!.split();
-      if (r && !('error' in r && r.error) && typeof r.partCount === 'number') {
-        setStatus(`Split into ${r.partCount} pieces${typeof r.holeCount === 'number' && r.holeCount > 0 ? ` · ${r.holeCount} pin holes` : ''}.`);
-      }
-      return r;
-    }, 'Splitting…');
+  // Mode tabs: auto (fit-bed grid) vs interactive plane.
+  const modeRow = document.createElement('div');
+  modeRow.className = 'flex gap-1 mb-2';
+  splitAutoBtn = document.createElement('button');
+  splitAutoBtn.id = 'print-split-auto';
+  splitAutoBtn.className = TAB_ACTIVE;
+  splitAutoBtn.textContent = 'Auto (fit bed)';
+  splitAutoBtn.addEventListener('click', () => { if (!busy) applySplitMode('auto'); });
+  splitPlaneBtn = document.createElement('button');
+  splitPlaneBtn.id = 'print-split-plane';
+  splitPlaneBtn.className = TAB_INACTIVE;
+  splitPlaneBtn.textContent = 'Plane';
+  splitPlaneBtn.title = 'Drag / rotate a cutting plane in the viewport';
+  splitPlaneBtn.addEventListener('click', () => { if (!busy) applySplitMode('plane'); });
+  modeRow.appendChild(splitAutoBtn);
+  modeRow.appendChild(splitPlaneBtn);
+  p.appendChild(modeRow);
+
+  // Plane move/rotate controls (shown only in plane mode).
+  planeControlsEl = document.createElement('div');
+  planeControlsEl.className = 'gap-1 mb-2';
+  planeControlsEl.style.display = 'none';
+  const moveBtn = document.createElement('button');
+  moveBtn.className = TAB_ACTIVE;
+  moveBtn.textContent = 'Move';
+  const rotateBtn = document.createElement('button');
+  rotateBtn.className = TAB_INACTIVE;
+  rotateBtn.textContent = 'Rotate';
+  const setPlaneSub = (mode: 'translate' | 'rotate') => {
+    moveBtn.className = mode === 'translate' ? TAB_ACTIVE : TAB_INACTIVE;
+    rotateBtn.className = mode === 'rotate' ? TAB_ACTIVE : TAB_INACTIVE;
+    handlers?.setPlaneMode(mode);
+  };
+  moveBtn.addEventListener('click', () => setPlaneSub('translate'));
+  rotateBtn.addEventListener('click', () => setPlaneSub('rotate'));
+  planeControlsEl.appendChild(moveBtn);
+  planeControlsEl.appendChild(rotateBtn);
+  p.appendChild(planeControlsEl);
+
+  // Connector controls (shared by both modes).
+  const connLabel = document.createElement('label');
+  connLabel.className = SECTION_LABEL;
+  connLabel.textContent = 'Connector';
+  p.appendChild(connLabel);
+  connTypeSel = document.createElement('select');
+  connTypeSel.className = `${NUM_INPUT} text-left mb-2`;
+  for (const o of CONNECTOR_OPTIONS) {
+    const opt = document.createElement('option');
+    opt.value = o.id;
+    opt.textContent = o.label;
+    connTypeSel.appendChild(opt);
+  }
+  p.appendChild(connTypeSel);
+
+  const connRow = document.createElement('div');
+  connRow.className = 'grid grid-cols-3 gap-1.5 mb-2';
+  const mkConn = (val: number, ph: string, title: string): HTMLInputElement => {
+    const i = document.createElement('input');
+    i.type = 'number'; i.className = NUM_INPUT; i.value = String(val); i.min = '0'; i.placeholder = ph; i.title = title;
+    connRow.appendChild(i);
+    return i;
+  };
+  connSize = mkConn(5, 'Size', 'Connector ⌀ / key width (mm)');
+  connDepth = mkConn(8, 'Depth', 'Depth into each side (mm)');
+  connCount = mkConn(2, 'Count', 'Number of connectors across the cut');
+  p.appendChild(connRow);
+
+  splitActionBtn = document.createElement('button');
+  splitActionBtn.id = 'print-split-btn';
+  splitActionBtn.className = ACTION_BTN;
+  splitActionBtn.textContent = 'Split to fit bed';
+  splitActionBtn.title = 'Cut into pieces and add each as a new part';
+  splitActionBtn.addEventListener('click', () => {
+    const connector = currentConnector();
+    const planeMode = splitMode === 'plane';
+    void runAction(
+      () => (planeMode ? handlers!.splitPlane(connector) : handlers!.splitAuto(connector)),
+      'Splitting…',
+      (r) => {
+        if (typeof r.partCount === 'number') {
+          setStatus(`Split into ${r.partCount} part${r.partCount === 1 ? '' : 's'} — added to the parts list.`);
+          applySplitMode('auto'); // model is now the first piece; clear the gizmo
+        }
+      },
+    );
   });
-  p.appendChild(splitBtn);
+  p.appendChild(splitActionBtn);
 
   statusEl = document.createElement('div');
   statusEl.className = 'text-[11px] text-zinc-400 mt-2 min-h-[14px]';

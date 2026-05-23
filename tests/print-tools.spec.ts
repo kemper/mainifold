@@ -17,8 +17,10 @@ type PW = {
   getGeometryData: () => Geo;
   checkPrintability: (opts?: unknown) => { ok?: boolean; bedFit?: { fits: boolean }; checks?: { id: string; level: string }[]; error?: string };
   scaleModel: (opts: unknown) => Promise<{ dimensions?: [number, number, number]; error?: string }>;
-  splitForPrinting: (opts?: unknown) => Promise<{ partCount?: number; holeCount?: number; error?: string }>;
+  splitForPrinting: (opts?: unknown) => Promise<{ partCount?: number; holeCount?: number; parts?: { count: number }; error?: string }>;
+  splitAlongPlane: (opts: unknown) => Promise<{ partCount?: number; connectorCount?: number; parts?: { count: number }; error?: string }>;
   createSession: (name?: string) => Promise<unknown>;
+  listParts: () => Promise<{ id: string; name: string }[]>;
 };
 
 async function waitForEngine(page: Page) {
@@ -86,6 +88,34 @@ test.describe('Print tools', () => {
     expect(res.partCount ?? 0).toBeGreaterThanOrEqual(2);
   });
 
+  test('splitAlongPlane cuts a model in two with a dovetail connector', async ({ page }) => {
+    await openEditor(page);
+    const res = await page.evaluate(async () => {
+      const pw = (window as unknown as { partwright: PW }).partwright;
+      await pw.run('const { Manifold } = api; return Manifold.cube([60,40,30], true).translate([0,0,15]);');
+      // Vertical plane through the centre (normal +X), dovetail key.
+      return pw.splitAlongPlane({ plane: { point: [0, 0, 15], normal: [1, 0, 0] }, connector: { type: 'dovetail', width: 12 }, count: 1, save: false });
+    });
+    expect(res.error).toBeUndefined();
+    expect(res.partCount).toBe(2);
+  });
+
+  test('splitForPrinting emits a part per chunk into the session', async ({ page }) => {
+    await openEditor(page);
+    const result = await page.evaluate(async () => {
+      const pw = (window as unknown as { partwright: PW }).partwright;
+      await pw.createSession('split-parts-test');
+      await pw.run('const { Manifold } = api; return Manifold.cube([400,400,80], true).translate([0,0,40]);');
+      const before = (await pw.listParts()).length;
+      const r = await pw.splitForPrinting({ connector: { type: 'pin' } });
+      const after = (await pw.listParts()).length;
+      return { partCount: r.partCount ?? 0, before, after };
+    });
+    expect(result.partCount).toBeGreaterThanOrEqual(2);
+    // Original part preserved + one new part per chunk.
+    expect(result.after).toBe(result.before + result.partCount);
+  });
+
   test('the Print panel opens and renders a printability report', async ({ page }) => {
     await openEditor(page);
     await page.evaluate(async () => {
@@ -100,5 +130,29 @@ test.describe('Print tools', () => {
     await page.locator('#print-check-btn').dispatchEvent('click');
     // The report lists individual checks — the watertight one always renders.
     await expect(page.locator('#print-report')).toContainText(/Watertight|print-ready|Printable|blocker/i, { timeout: 10_000 });
+  });
+
+  test('the Print panel split button cuts an oversized model into parts', async ({ page }) => {
+    await openEditor(page);
+    const before = await page.evaluate(async () => {
+      const pw = (window as unknown as { partwright: PW }).partwright;
+      await pw.createSession('panel-split-test');
+      await pw.run('const { Manifold } = api; return Manifold.cube([400,400,80], true).translate([0,0,40]);');
+      return (await pw.listParts()).length;
+    });
+
+    await page.locator('#print-tools-toggle').dispatchEvent('click');
+    await page.waitForSelector('#print-tools-panel:not(.hidden)');
+    // Plane-mode toggle exists (interactive gizmo path).
+    await expect(page.locator('#print-split-plane')).toBeVisible();
+
+    await page.locator('#print-split-btn').dispatchEvent('click'); // default: auto fit-bed
+    await expect(page.locator('#print-tools-panel')).toContainText(/Split into \d+ part/i, { timeout: 15_000 });
+
+    const after = await page.evaluate(async () => {
+      const pw = (window as unknown as { partwright: PW }).partwright;
+      return (await pw.listParts()).length;
+    });
+    expect(after).toBeGreaterThan(before);
   });
 });

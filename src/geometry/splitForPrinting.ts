@@ -11,6 +11,7 @@
 // (a single multi-component mesh) for preview / baking as a version.
 
 import type { MeshData } from './types';
+import { buildConnector, type ConnectorSpec } from './splitConnectors';
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
@@ -255,4 +256,152 @@ export function splitForPrinting(module: any, mesh: MeshData, opts: SplitOptions
     holeCount,
     notes,
   };
+}
+
+// ── Arbitrary-plane split (manual cut) ──────────────────────────────────────
+
+export interface PlaneSpec {
+  /** A point the cut plane passes through. */
+  point: Vec3;
+  /** Plane normal (need not be unit). */
+  normal: Vec3;
+}
+
+export interface PlaneSplitResult {
+  parts: MeshData[];
+  partCount: number;
+  connectorCount: number;
+  notes: string[];
+}
+
+function dot(a: Vec3, b: Vec3): number { return a[0] * b[0] + a[1] * b[1] + a[2] * b[2]; }
+function cross(a: Vec3, b: Vec3): Vec3 { return [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]]; }
+function len3(a: Vec3): number { return Math.hypot(a[0], a[1], a[2]); }
+function norm3(a: Vec3): Vec3 | null { const l = len3(a); if (l < 1e-9) return null; return [a[0] / l, a[1] / l, a[2] / l]; }
+
+function meshCentroid(mesh: MeshData): Vec3 {
+  const b = meshBounds(mesh)!;
+  return [(b.min[0] + b.max[0]) / 2, (b.min[1] + b.max[1]) / 2, (b.min[2] + b.max[2]) / 2];
+}
+
+/** Distribute up to `count` connector points across the cut plane, keeping only
+ *  those that fall inside the solid (tested by intersecting a probe with M),
+ *  ordered nearest-to-centre first. */
+function pickPlanePositions(Manifold: any, M: any, plane: PlaneSpec, n: Vec3, extent: number, count: number, probeSize: number): Vec3[] {
+  const ref: Vec3 = Math.abs(n[2]) < 0.9 ? [0, 0, 1] : [1, 0, 0];
+  const u = norm3(cross(ref, n))!;
+  const v = cross(n, u); // unit (n, u orthonormal)
+  const fracs = [0, -0.35, 0.35, -0.6, 0.6];
+  const candidates: { p: Vec3; d: number }[] = [];
+  for (const fu of fracs) {
+    for (const fv of fracs) {
+      const p: Vec3 = [
+        plane.point[0] + (u[0] * fu + v[0] * fv) * extent,
+        plane.point[1] + (u[1] * fu + v[1] * fv) * extent,
+        plane.point[2] + (u[2] * fu + v[2] * fv) * extent,
+      ];
+      candidates.push({ p, d: Math.hypot(fu, fv) });
+    }
+  }
+  candidates.sort((a, b) => a.d - b.d);
+  const out: Vec3[] = [];
+  for (const c of candidates) {
+    if (out.length >= count) break;
+    const probe = Manifold.cube([probeSize, probeSize, probeSize], true).translate(c.p);
+    let inside = false;
+    const inter = M.intersect(probe);
+    try { inside = !inter.isEmpty(); } catch { inside = false; }
+    del(inter); del(probe);
+    if (inside) out.push(c.p);
+  }
+  return out;
+}
+
+/** Cut a manifold along one arbitrary plane into two parts, applying the chosen
+ *  connector (dowel / peg / screw / dovetail) across the cut. */
+export function planeSplit(
+  module: any,
+  mesh: MeshData,
+  plane: PlaneSpec,
+  spec: ConnectorSpec,
+  opts?: { count?: number },
+): PlaneSplitResult | { error: string } {
+  const { Manifold } = module;
+  const bb = meshBounds(mesh);
+  if (!bb) return { error: 'no geometry to split' };
+  const n = norm3(plane.normal);
+  if (!n) return { error: 'split plane normal must be non-zero' };
+
+  let M: any;
+  try {
+    M = Manifold.ofMesh({ numProp: mesh.numProp, vertProperties: mesh.vertProperties, triVerts: mesh.triVerts });
+    if (!M || M.isEmpty()) { del(M); return { error: 'split needs a solid (manifold) model — this geometry is empty or render-only.' }; }
+  } catch (e) {
+    return { error: `split needs a solid (manifold) model: ${e instanceof Error ? e.message : String(e)}` };
+  }
+
+  const notes: string[] = [];
+  const offset = dot(plane.point, n);
+  const extent = len3(bb.dim) / 2;
+
+  // ── Connectors ────────────────────────────────────────────────────────────
+  const count = Math.max(0, Math.min(8, opts?.count ?? 2));
+  const positions = spec.type === 'none' || count === 0
+    ? []
+    : pickPlanePositions(Manifold, M, plane, n, extent, count, Math.max(2, (spec.diameter ?? 5)));
+
+  let drillUnion: any = null;
+  const addPositive: any[] = [];
+  const subNegative: any[] = [];
+  for (const p of positions) {
+    const g = buildConnector(module, p, n, spec);
+    if (!g) continue;
+    if (g.drillBoth) drillUnion = drillUnion === null ? g.drillBoth : (() => { const m = drillUnion.add(g.drillBoth); del(drillUnion); del(g.drillBoth); return m; })();
+    if (g.addPositive) addPositive.push(g.addPositive);
+    if (g.subNegative) subNegative.push(g.subNegative);
+  }
+  if (drillUnion) { const m = M.subtract(drillUnion); del(drillUnion); del(M); M = m; }
+
+  // ── Cut ─────────────────────────────────────────────────────────────────
+  let halves: any[];
+  try {
+    halves = M.splitByPlane(n, offset);
+  } catch (e) {
+    del(M);
+    for (const a of addPositive) del(a);
+    for (const s of subNegative) del(s);
+    return { error: `plane cut failed: ${e instanceof Error ? e.message : String(e)}` };
+  }
+  del(M);
+
+  // Apply per-side connector geometry to whichever half is positive.
+  const out: MeshData[] = [];
+  let connectorCount = positions.length;
+  for (let i = 0; i < halves.length; i++) {
+    let half = halves[i];
+    let empty = true;
+    try { empty = half.isEmpty(); } catch { empty = true; }
+    if (empty) { del(half); continue; }
+    const positive = dot(meshCentroid(toMeshDataCopy(half)), n) > offset;
+    if (positive) {
+      for (const a of addPositive) { const m = half.add(a); del(half); half = m; }
+    } else {
+      for (const s of subNegative) { const m = half.subtract(s); del(half); half = m; }
+    }
+    out.push(toMeshDataCopy(half));
+    del(half);
+  }
+  for (const a of addPositive) del(a);
+  for (const s of subNegative) del(s);
+
+  if (out.length < 2) {
+    notes.push('The plane did not divide the model into two pieces — reposition it so it passes through the solid.');
+  }
+  if (spec.type !== 'none') {
+    notes.push(connectorCount > 0
+      ? `${connectorCount} ${spec.type} connector${connectorCount === 1 ? '' : 's'} across the cut.`
+      : 'No connectors placed (plane missed the solid at the sampled points).');
+  }
+
+  return { parts: out, partCount: out.length, connectorCount, notes };
 }

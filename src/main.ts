@@ -98,7 +98,9 @@ import { initPrintToolsUI, isPrintToolsOpen, forceDeactivate as closePrintToolsM
 import { simplifyToTriangleBudget, type SimplifyResult } from './geometry/simplify';
 import { analyzePrintability } from './geometry/printability';
 import { scaleModelMesh, type ScaleSpec } from './geometry/transform';
-import { splitForPrinting as computeSplitForPrinting, type SplitConnector } from './geometry/splitForPrinting';
+import { splitForPrinting as computeSplitForPrinting, planeSplit, type SplitConnector, type PlaneSpec } from './geometry/splitForPrinting';
+import type { ConnectorSpec, ConnectorType } from './geometry/splitConnectors';
+import { activate as activateSplitPlane, deactivate as deactivateSplitPlane, getSplitPlane, setSplitPlaneMode } from './ui/splitPlaneGizmo';
 import { loadPrinterSettings, savePrinterSettings, type PrinterSettings } from './geometry/printerSettings';
 import { updatePaintMesh, setOnRegionPainted, isActive as isPaintActive } from './color/paintMode';
 import { initAnnotateUI, isAnnotateOpen, closeMenu as closeAnnotateMenu } from './annotations/annotateUI';
@@ -1931,6 +1933,34 @@ async function main() {
       importedMeshes: [baked],
     });
     return version ? { id: version.id, index: version.index, label: version.label } : null;
+  }
+
+  // Emit each mesh as its own new Part in the active session (used by the split
+  // tools so every printable piece lands in the parts rail). The original part
+  // is left intact. Switches to the first new part when done.
+  async function createPartsFromMeshes(meshes: MeshData[], baseName: string): Promise<{ count: number; partNames: string[] }> {
+    const partNames: string[] = [];
+    let firstId: string | null = null;
+    for (let i = 0; i < meshes.length; i++) {
+      const partName = `${baseName} ${i + 1}`;
+      const part = await createPart(partName);
+      if (!part) break;
+      if (firstId === null) firstId = part.id;
+      const baked = toImportedMesh(`${baseName}-${i + 1}`, meshes[i]);
+      setActiveImports([baked]);
+      const code = generateImportCode([baked], { manifold: true });
+      setValue(code);
+      await runCodeSync(code);
+      const thumbnail = await captureThumbnail();
+      const geometryData = getGeometryDataObj();
+      await saveVersion(code, geometryData, thumbnail, partName, undefined, { force: true, importedMeshes: [baked] });
+      partNames.push(part.name);
+    }
+    if (firstId) {
+      const version = await changePart(firstId);
+      await loadPartIntoEditor(version);
+    }
+    return { count: partNames.length, partNames };
   }
 
   const simplifyHandlers: SimplifyHandlers = {
@@ -3885,9 +3915,59 @@ async function main() {
         axes: opts?.axes,
       });
       if ('error' in res) return res;
-      applyLiveGeometry(res.layout);
-      const saved = opts?.save === false ? null : await bakeCurrentAsVersion(`split ${res.partCount} parts`);
-      return { partCount: res.partCount, grid: res.grid, holeCount: res.holeCount, notes: res.notes, saved };
+      if (opts?.save === false) {
+        return { partCount: res.partCount, grid: res.grid, holeCount: res.holeCount, notes: res.notes, saved: null };
+      }
+      if (!getState().session) {
+        applyLiveGeometry(res.layout);
+        return { partCount: res.partCount, grid: res.grid, holeCount: res.holeCount, notes: [...res.notes, 'Open a session to split into separate parts — showed the laid-out preview instead.'], saved: null };
+      }
+      const parts = await createPartsFromMeshes(res.parts, 'Piece');
+      return { partCount: res.partCount, grid: res.grid, holeCount: res.holeCount, notes: res.notes, parts };
+    },
+
+    /** Split the model along one arbitrary plane (point + normal), applying the
+     *  chosen connector across the cut, and emit the two pieces as new parts.
+     *  Used by the interactive split-plane gizmo and available to the AI. */
+    async splitAlongPlane(opts: {
+      plane: { point: [number, number, number]; normal: [number, number, number] };
+      connector?: { type?: ConnectorType; diameter?: number; depth?: number; width?: number; clearance?: number };
+      count?: number;
+      save?: boolean;
+    }) {
+      const check = guard(() => {
+        const o = assertObject(opts, 'splitAlongPlane(opts)')!;
+        assertNoUnknownKeys(o, ['plane', 'connector', 'count', 'save'], 'splitAlongPlane(opts)');
+        const plane = assertObject(o.plane, 'splitAlongPlane(opts).plane')!;
+        assertNoUnknownKeys(plane, ['point', 'normal'], 'splitAlongPlane(opts).plane');
+        assertNumberTuple(plane.point, 3, 'splitAlongPlane(opts).plane.point');
+        assertNumberTuple(plane.normal, 3, 'splitAlongPlane(opts).plane.normal');
+        assertNumber(o.count, 'splitAlongPlane(opts).count', { optional: true, min: 0, max: 8, integer: true });
+        assertBoolean(o.save, 'splitAlongPlane(opts).save', { optional: true });
+        if (o.connector !== undefined) {
+          const c = assertObject(o.connector, 'splitAlongPlane(opts).connector')!;
+          assertNoUnknownKeys(c, ['type', 'diameter', 'depth', 'width', 'clearance'], 'splitAlongPlane(opts).connector');
+          if (c.type !== undefined) assertEnum(c.type, ['none', 'dowel', 'peg', 'screw', 'dovetail'], 'splitAlongPlane(opts).connector.type');
+          assertNumber(c.diameter, 'splitAlongPlane(opts).connector.diameter', { optional: true, min: 0.1 });
+          assertNumber(c.depth, 'splitAlongPlane(opts).connector.depth', { optional: true, min: 0.1 });
+          assertNumber(c.width, 'splitAlongPlane(opts).connector.width', { optional: true, min: 0.1 });
+          assertNumber(c.clearance, 'splitAlongPlane(opts).connector.clearance', { optional: true, min: 0 });
+        }
+        return true;
+      });
+      if (typeof check === 'object' && check !== null && 'error' in check) return check;
+      if (!currentMeshData) return { error: 'No geometry loaded — run code first.' };
+      const mod = getModule();
+      if (!mod) return { error: 'Engine not ready.' };
+      const settings = loadPrinterSettings();
+      const spec: ConnectorSpec = { type: 'dowel', clearance: settings.clearance, ...opts.connector };
+      const res = planeSplit(mod, currentMeshData, opts.plane as PlaneSpec, spec, { count: opts.count });
+      if ('error' in res) return res;
+      if (opts.save === false || !getState().session) {
+        return { partCount: res.partCount, connectorCount: res.connectorCount, notes: res.notes, saved: null };
+      }
+      const parts = await createPartsFromMeshes(res.parts, 'Piece');
+      return { partCount: res.partCount, connectorCount: res.connectorCount, notes: res.notes, parts };
     },
 
     /** Create a session and populate it with multiple versions in one call */
@@ -5936,7 +6016,19 @@ async function main() {
     check: () => partwrightAPI.checkPrintability(),
     scaleToFit: () => partwrightAPI.scaleModel({ fit: {} }),
     scaleUniform: (factor) => partwrightAPI.scaleModel({ factor }),
-    split: () => partwrightAPI.splitForPrinting({}),
+    splitAuto: (c) => partwrightAPI.splitForPrinting({
+      connector: { type: c.type === 'none' ? 'none' : 'pin', diameter: c.size, depth: c.depth, count: c.count },
+    }),
+    splitPlane: (c) => partwrightAPI.splitAlongPlane({
+      plane: getSplitPlane(),
+      connector: { type: c.type, diameter: c.size, depth: c.depth, width: c.size },
+      count: c.count,
+    }),
+    setPlaneGizmo: (on) => {
+      if (on) { if (currentMeshData) activateSplitPlane(currentMeshData); }
+      else deactivateSplitPlane();
+    },
+    setPlaneMode: (m) => setSplitPlaneMode(m),
   };
   initPrintToolsUI(clipControls, printToolsHandlers);
 
