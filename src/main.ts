@@ -3856,6 +3856,19 @@ async function main() {
           assertNumber(o.margin, 'splitForPrinting(opts).margin', { optional: true, min: 0, max: 0.5 });
           assertNumber(o.gap, 'splitForPrinting(opts).gap', { optional: true, min: 0 });
           assertBoolean(o.save, 'splitForPrinting(opts).save', { optional: true });
+          if (o.axes !== undefined) {
+            const ax = assertArray(o.axes, 'splitForPrinting(opts).axes');
+            for (let i = 0; i < ax.length; i++) assertEnum(ax[i], ['x', 'y', 'z'], `splitForPrinting(opts).axes[${i}]`);
+          }
+          if (o.connector !== undefined) {
+            const c = assertObject(o.connector, 'splitForPrinting(opts).connector')!;
+            assertNoUnknownKeys(c, ['type', 'diameter', 'depth', 'clearance', 'count'], 'splitForPrinting(opts).connector');
+            if (c.type !== undefined) assertEnum(c.type, ['none', 'pin'], 'splitForPrinting(opts).connector.type');
+            assertNumber(c.diameter, 'splitForPrinting(opts).connector.diameter', { optional: true, min: 0.1 });
+            assertNumber(c.depth, 'splitForPrinting(opts).connector.depth', { optional: true, min: 0.1 });
+            assertNumber(c.clearance, 'splitForPrinting(opts).connector.clearance', { optional: true, min: 0 });
+            assertNumber(c.count, 'splitForPrinting(opts).connector.count', { optional: true, min: 1, integer: true });
+          }
         }
         return true;
       });
@@ -3867,7 +3880,7 @@ async function main() {
       const res = computeSplitForPrinting(mod, currentMeshData, {
         bed: opts?.bed ?? settings.bed,
         margin: opts?.margin,
-        connector: opts?.connector ?? { type: 'pin', clearance: settings.clearance },
+        connector: opts?.connector ? { clearance: settings.clearance, ...opts.connector } : { type: 'pin', clearance: settings.clearance },
         gap: opts?.gap,
         axes: opts?.axes,
       });

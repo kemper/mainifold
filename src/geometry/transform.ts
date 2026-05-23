@@ -94,6 +94,7 @@ export function scaleMeshData(mesh: MeshData, vector: Vec3): MeshData {
     numVert: mesh.numVert,
     numTri: mesh.numTri,
     numProp: mesh.numProp,
+    ...(mesh.triColors ? { triColors: mesh.triColors.slice() } : {}),
     ...(mesh.mergeFromVert ? { mergeFromVert: mesh.mergeFromVert.slice() } : {}),
     ...(mesh.mergeToVert ? { mergeToVert: mesh.mergeToVert.slice() } : {}),
     ...(mesh.runIndex ? { runIndex: mesh.runIndex.slice() } : {}),
