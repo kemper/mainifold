@@ -1,7 +1,8 @@
 // Smoke tests for the Simplify overlay tool:
 //  - the panel opens from the viewport overlay and shows a slider + a typeable
 //    "max triangles" input bounded by the model's current triangle count
-//  - dragging the target down reduces the live model; Reset restores it
+//  - setting a target alone does nothing; clicking Apply reduces the live
+//    model; Reset restores it
 //  - "Save as version" bakes the reduced mesh into a new saved version
 //
 // Uses dispatchEvent('click') instead of .click() to dodge the onboarding tour
@@ -48,7 +49,7 @@ test.describe('Simplify tool', () => {
     await expect(page.locator('#simplify-original')).toContainText(base.toLocaleString());
   });
 
-  test('reducing the target lowers the live triangle count, and Reset restores it', async ({ page }) => {
+  test('setting a target does nothing until Apply; Apply reduces and Reset restores', async ({ page }) => {
     const base = await openEditorWithSphere(page);
 
     await page.locator('#simplify-toggle').dispatchEvent('click');
@@ -56,7 +57,14 @@ test.describe('Simplify tool', () => {
 
     const target = Math.max(50, Math.round(base / 4));
     await page.locator('#simplify-input').fill(String(target));
-    // The input is debounced; wait for the model to actually shrink.
+
+    // Setting the target no longer touches the live model — that's Apply's job.
+    // Apply becomes enabled, but the mesh stays at full detail until clicked.
+    await expect(page.locator('#simplify-apply')).toBeEnabled();
+    expect(await triangleCount(page)).toBe(base);
+
+    // Apply runs the reduction; wait for the model to actually shrink.
+    await page.locator('#simplify-apply').dispatchEvent('click');
     await page.waitForFunction(
       (b) => {
         const pw = (window as unknown as { partwright: { getGeometryData(): { triangleCount?: number } } }).partwright;
@@ -101,6 +109,7 @@ test.describe('Simplify tool', () => {
 
     const target = Math.max(50, Math.round(base / 4));
     await page.locator('#simplify-input').fill(String(target));
+    await page.locator('#simplify-apply').dispatchEvent('click');
     await page.waitForFunction(
       (b) => {
         const pw = (window as unknown as { partwright: { getGeometryData(): { triangleCount?: number } } }).partwright;
@@ -119,5 +128,66 @@ test.describe('Simplify tool', () => {
     });
     expect(versions.length).toBe(before + 1);
     expect(versions[versions.length - 1].label).toBe('simplified');
+  });
+
+  test('Save as version preserves an unsaved edited original as its own version', async ({ page }) => {
+    const base = await openEditorWithSphere(page);
+
+    // Commit a baseline sphere as a saved version.
+    await page.evaluate(async () => {
+      const pw = (window as unknown as { partwright: { runAndSave(code: string, label?: string): Promise<unknown> } }).partwright;
+      await pw.runAndSave('const { Manifold } = api; return Manifold.sphere(10, 64);', 'sphere');
+    });
+
+    // Edit the model WITHOUT saving (different radius → different code, same
+    // triangle budget). This unsaved original is what should be preserved when
+    // the simplified mesh gets baked into a version.
+    await page.evaluate(async () => {
+      const pw = (window as unknown as { partwright: { run(code: string): Promise<unknown> } }).partwright;
+      await pw.run('const { Manifold } = api; return Manifold.sphere(12, 64);');
+    });
+
+    const before = await page.evaluate(async () => {
+      const pw = (window as unknown as { partwright: { listVersions(): Promise<unknown[]> } }).partwright;
+      return (await pw.listVersions()).length;
+    });
+
+    await page.locator('#simplify-toggle').dispatchEvent('click');
+    await page.waitForSelector('#simplify-panel:not(.hidden)');
+
+    const target = Math.max(50, Math.round(base / 4));
+    await page.locator('#simplify-input').fill(String(target));
+    await page.waitForFunction(
+      (b) => {
+        const pw = (window as unknown as { partwright: { getGeometryData(): { triangleCount?: number } } }).partwright;
+        return (pw.getGeometryData().triangleCount ?? b) < b;
+      },
+      base,
+      { timeout: 10000 },
+    );
+
+    await page.locator('#simplify-save').dispatchEvent('click');
+    // The status line calls out that the original was preserved, not just saved.
+    await expect(page.locator('#simplify-status')).toContainText('original', { timeout: 10000 });
+
+    const indices = await page.evaluate(async () => {
+      const pw = (window as unknown as { partwright: { listVersions(): Promise<{ index: number; label: string | null }[]> } }).partwright;
+      return (await pw.listVersions()).map(v => ({ index: v.index, label: v.label }));
+    });
+
+    // Two new versions: the preserved original, then the baked simplified import.
+    expect(indices.length).toBe(before + 2);
+    expect(indices[indices.length - 1].label).toBe('simplified');
+
+    // The second-newest version is the edited radius-12 sphere — a real geometry
+    // version, not an import, and distinct from the saved radius-10 baseline.
+    const originalIndex = indices[indices.length - 2].index;
+    const original = await page.evaluate(async (idx) => {
+      const pw = (window as unknown as { partwright: { loadVersion(t: { index: number }): Promise<{ code?: string }> } }).partwright;
+      return await pw.loadVersion({ index: idx });
+    }, originalIndex);
+    expect(original.code ?? '').toContain('Manifold.sphere');
+    expect(original.code ?? '').toContain('12');
+    expect(original.code ?? '').not.toContain('api.imports');
   });
 });

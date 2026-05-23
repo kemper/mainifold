@@ -9,8 +9,9 @@
 //   7. Footer
 
 import { listSessions, type Session } from '../storage/sessionManager';
-import { getLatestVersion, getVersionCount } from '../storage/db';
+import { getSessionLatestVersion, getSessionVersionCount } from '../storage/db';
 import { partwrightMarkSvg } from './brand';
+import { showUninstallModal } from './uninstallModal';
 import { getTheme, onThemeChange, toggleTheme } from './theme';
 import type { ExportedSession } from '../storage/sessionManager';
 
@@ -34,7 +35,18 @@ interface FeaturedCatalogEntry {
   thumbnailUrl: string | null;
 }
 
-const FEATURED_CATALOG_IDS = ['twisted-vase', 'retro-rocket', 'chess-rook', 'christmas-tree'];
+/** Number of catalog entries to show in the "What you can build" section. */
+const FEATURED_CATALOG_COUNT = 8;
+
+/** Fisher-Yates shuffle — returns a new array in random order. */
+function shuffleArray<T>(arr: T[]): T[] {
+  const copy = arr.slice();
+  for (let i = copy.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [copy[i], copy[j]] = [copy[j], copy[i]];
+  }
+  return copy;
+}
 
 export async function createLandingPage(
   container: HTMLElement,
@@ -252,11 +264,8 @@ async function loadFeaturedCatalogEntries(): Promise<FeaturedCatalogEntry[]> {
     const res = await fetch('/catalog/manifest.json', { cache: 'no-cache' });
     if (!res.ok) return [];
     const manifest = await res.json() as { entries: CatalogManifestEntry[] };
-    const byId = new Map(manifest.entries.map(e => [e.id, e]));
-    const featured = FEATURED_CATALOG_IDS
-      .map(id => byId.get(id))
-      .filter((e): e is CatalogManifestEntry => Boolean(e));
-    const list = featured.length > 0 ? featured : manifest.entries.slice(0, 4);
+    const shuffled = shuffleArray(manifest.entries);
+    const list = shuffled.slice(0, FEATURED_CATALOG_COUNT);
 
     return await Promise.all(list.map(async (manifestEntry) => {
       try {
@@ -465,8 +474,8 @@ async function buildRecentSessions(callbacks: LandingCallbacks): Promise<HTMLEle
   const tileData = await Promise.all(
     sessions.slice(0, 12).map(async (session) => {
       const [latestVersion, versionCount] = await Promise.all([
-        getLatestVersion(session.id),
-        getVersionCount(session.id),
+        getSessionLatestVersion(session.id),
+        getSessionVersionCount(session.id),
       ]);
       return { session, latestVersion, versionCount };
     }),
@@ -558,6 +567,16 @@ function buildFooter(): HTMLElement {
   const copyright = document.createElement('div');
   copyright.textContent = `© ${new Date().getFullYear()} Partwright. Open source.`;
   footer.appendChild(copyright);
+
+  // Low-emphasis "start fresh" escape hatch — discoverable but well out of the
+  // primary click path. Opens a modal to delete chosen categories of local
+  // data (recovery valve for corruption / schema changes).
+  const reset = document.createElement('button');
+  reset.type = 'button';
+  reset.className = 'mt-2 text-zinc-700 hover:text-red-400 transition-colors';
+  reset.textContent = 'Uninstall / start fresh';
+  reset.addEventListener('click', () => { void showUninstallModal(); });
+  footer.appendChild(reset);
 
   return footer;
 }

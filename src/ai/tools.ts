@@ -372,6 +372,16 @@ const ALL_TOOLS: ToolDefinition[] = [
     },
   },
   {
+    name: 'saveVersion',
+    description: 'Snapshot the CURRENT editor code, geometry, color regions, and annotations as a new gallery version WITHOUT re-running the code. Use this to persist a painted/annotated state — unlike runAndSave it does NOT re-execute the code, so it won\'t re-resolve color regions against regenerated triangles (re-running new geometry with colors in memory misaligns them). For committing a code change, prefer runAndSave (runs + validates + saves in one call). Returns {id, index, label} on success, {skipped, reason} when nothing changed since the current version, or {error} if no session is active.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        label: { type: 'string', description: 'Short label for the gallery version. Defaults to v<index>.' },
+      },
+    },
+  },
+  {
     name: 'addSessionNote',
     description: 'Append a durable note to the session log. Notes survive compaction and are visible to future agents. Prefix with one of [REQUIREMENT], [DECISION], [FEEDBACK], [MEASUREMENT], [ATTEMPT], [TODO].',
     input_schema: {
@@ -449,6 +459,23 @@ const ALL_TOOLS: ToolDefinition[] = [
     },
   },
   {
+    name: 'paintStroke',
+    description: 'Paint a SMOOTH brush stroke along a path of surface points, subdividing the mesh under the stroke so the painted edge is rounded (not stair-stepped along triangle boundaries). This is the only paint tool that changes the tessellation — it is more expensive than the region selectors, so reach for `paintNear`/`paintInBox`/`paintConnected`/`paintRegion` first and use this ONLY when a visibly rounded painted edge matters (e.g. a curved racing stripe, a soft-edged logo patch). Get `points` from `probePixel` against a rendered view (render → pick pixels along the desired stroke → probePixel each → pass the world-space hits here). `radius` is in mesh units. `resolution` sets smoothness (target triangle edge = radius / resolution; higher = smoother + more triangles), default 256, range 2–1024. For absolute control, `maxEdge` overrides it with a target edge length in mesh units (e.g. maxEdge 0.1 for crisp 0.1-unit edges). `shape` is circle (default), square, or diamond.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        points: { type: 'array', items: { type: 'array', items: { type: 'number' }, minItems: 3, maxItems: 3 }, description: 'Ordered world-space surface points [[x,y,z], ...] along the stroke path (from probePixel). A single point stamps a rounded dot.' },
+        radius: { type: 'number', description: 'Brush radius in mesh units (must be > 0).' },
+        resolution: { type: 'number', description: 'Smoothness detail: target triangle edge = radius / resolution. Higher = smoother + more triangles. Default 256, clamped 2–1024.' },
+        maxEdge: { type: 'number', description: 'Optional absolute override for the target edge length (mesh units). Takes precedence over resolution.' },
+        shape: { type: 'string', enum: ['circle', 'square', 'diamond'], description: 'Brush footprint shape. Default "circle".' },
+        color: { type: 'array', items: { type: 'number' }, minItems: 3, maxItems: 3 },
+        name: { type: 'string' },
+      },
+      required: ['points', 'radius', 'color'],
+    },
+  },
+  {
     name: 'paintInBox',
     description: 'Paint every triangle whose centroid is inside the axis-aligned box (optionally constrained by a normal cone). One call. Use for "paint the top half / the right rim / everything below z=0". Pass `topOnly: true` to skip side walls and the bottom face — the most common over-paint cause. On fan-topology meshes (cylinder/revolve/linear_extrude surfaces), pass `coverageMode: "fully_inside"` and/or `maxTriangleArea` to avoid long radial triangles bleeding paint outside the box.',
     input_schema: {
@@ -467,7 +494,7 @@ const ALL_TOOLS: ToolDefinition[] = [
   },
   {
     name: 'paintInOrientedBox',
-    description: 'Paint every triangle whose centroid lies inside a rotated oriented bounding box (OBB). Same selector as the UI Box paint tool. Reach for this when paintInBox catches the wrong faces because the feature is at an angle to the world axes — diagonal handles, tilted lids, rotated wings, etc. Defaults to the identity quaternion (no rotation) when `quaternion` is omitted, making it equivalent to paintInBox with the same center+size.',
+    description: 'Paint every triangle whose centroid lies inside a rotated oriented bounding box (OBB). Same selector as the UI Box paint tool. Reach for this when paintInBox catches the wrong faces because the feature is at an angle to the world axes — diagonal handles, tilted lids, rotated wings, etc. Defaults to the identity quaternion (no rotation) when `quaternion` is omitted, making it equivalent to paintInBox with the same center+size. The painted edge is SMOOTHED by default — the mesh is subdivided near the box faces so the edge follows the box, not the coarse tessellation. Pass `smooth: false` to keep the blocky edge, or tune `resolution` / `maxEdge`.',
     input_schema: {
       type: 'object',
       properties: {
@@ -483,13 +510,16 @@ const ALL_TOOLS: ToolDefinition[] = [
         },
         color: { type: 'array', items: { type: 'number' }, minItems: 3, maxItems: 3 },
         name: { type: 'string' },
+        smooth: { type: 'boolean', description: 'Smooth the painted edge by subdividing the mesh near the box faces. Default true; pass false for the raw (blocky) tessellation.' },
+        resolution: { type: 'number', description: 'Smoothing detail: target boundary edge = model bbox diagonal / resolution. Higher = smoother + more triangles. Default 256, range 2–1024.' },
+        maxEdge: { type: 'number', description: 'Optional absolute override for the target boundary edge length (mesh units). Takes precedence over resolution.' },
       },
       required: ['box', 'color'],
     },
   },
   {
     name: 'paintSlab',
-    description: 'Paint everything in a Z-slab (or arbitrary-axis slab). One call. Use for "paint the rim of this disk", "paint the side walls", "paint the top 5mm". Same coverageMode / maxTriangleArea options as the other selectors.',
+    description: 'Paint everything in a Z-slab (or arbitrary-axis slab). One call. Use for "paint the rim of this disk", "paint the side walls", "paint the top 5mm". Same coverageMode / maxTriangleArea options as the other selectors. The two slab edges are SMOOTHED by default — the mesh is subdivided along them so the painted band has clean straight edges across coarse faces. Pass `smooth: false` to keep the blocky edge, or tune `resolution` / `maxEdge`.',
     input_schema: {
       type: 'object',
       properties: {
@@ -501,6 +531,9 @@ const ALL_TOOLS: ToolDefinition[] = [
         maxTriangleArea: { type: 'number', description: 'Skip triangles larger than this.' },
         color: { type: 'array', items: { type: 'number' }, minItems: 3, maxItems: 3 },
         name: { type: 'string' },
+        smooth: { type: 'boolean', description: 'Smooth the slab edges by subdividing the mesh along them. Default true; pass false for the raw (blocky) tessellation.' },
+        resolution: { type: 'number', description: 'Smoothing detail: target boundary edge = model bbox diagonal / resolution. Higher = smoother + more triangles. Default 256, range 2–1024.' },
+        maxEdge: { type: 'number', description: 'Optional absolute override for the target boundary edge length (mesh units). Takes precedence over resolution.' },
       },
       required: ['offset', 'thickness', 'color'],
     },
@@ -544,6 +577,11 @@ const ALL_TOOLS: ToolDefinition[] = [
   {
     name: 'redoLastPaint',
     description: 'Reapply the most recently undone paint operation. Use after an over-eager undoLastPaint.',
+    input_schema: { type: 'object', properties: {} },
+  },
+  {
+    name: 'listRegions',
+    description: 'List every committed color region on the current mesh, in paint order. Each entry: {id, name, color, source, triangles (count), order, visible, bbox, centroid}. Returns [] when nothing is painted. This is the inventory you read to get a region id/name for removeRegion, paintExplain, and assertPaint — sibling of listComponents (mesh pieces) and listLabels (api.label features).',
     input_schema: { type: 'object', properties: {} },
   },
   {
@@ -737,27 +775,55 @@ const ALL_TOOLS: ToolDefinition[] = [
     },
   },
   {
-    name: 'createSession',
-    description: 'Create a new named session and make it active. Returns {id, url, galleryUrl}. Call before runAndSave when there is no active session, or when starting a new design.',
+    name: 'listParts',
+    description: 'List the parts in the active session: [{id, name, order, isCurrent}]. A session can hold multiple parts — independent objects, each with its own code and version history. The current part is what runCode / runAndSave / paint / export act on.',
+    input_schema: { type: 'object', properties: {} },
+  },
+  {
+    name: 'getCurrentPart',
+    description: 'Return the active part {id, name, order}, or null when no session is open.',
+    input_schema: { type: 'object', properties: {} },
+  },
+  {
+    name: 'createPart',
+    description: 'Create a new, empty part in the active session and switch to it. The editor resets to a starter snippet; call runAndSave to commit its first version. Use to model a second (third, …) object in the same session.',
     input_schema: {
       type: 'object',
       properties: {
-        name: { type: 'string', description: 'Session name (e.g. "Castle v2").' },
+        name: { type: 'string', description: 'Optional part name (e.g. "Lid"). Auto-named "Part N" when omitted.' },
       },
     },
   },
   {
-    name: 'listSessions',
-    description: 'List all sessions saved in this browser. Returns [{id, name, updated}] newest first. Use to find a session to open, or to check what work exists.',
-    input_schema: { type: 'object', properties: {} },
-  },
-  {
-    name: 'openSession',
-    description: 'Open an existing session by id (from listSessions). Makes it the active session. Always call getSessionContext() after opening to read notes and version history.',
+    name: 'changePart',
+    description: "Switch the active part. Pass the part id from listParts(). Loads that part's latest version into the editor/viewport; all later code, paint, and version operations act on it.",
     input_schema: {
       type: 'object',
       properties: {
-        id: { type: 'string', description: 'Session id from listSessions().' },
+        id: { type: 'string', description: 'Part id from listParts().' },
+      },
+      required: ['id'],
+    },
+  },
+  {
+    name: 'renamePart',
+    description: 'Rename a part. Pass its id (from listParts) and the new name.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        id: { type: 'string', description: 'Part id from listParts().' },
+        name: { type: 'string', description: 'New part name.' },
+      },
+      required: ['id', 'name'],
+    },
+  },
+  {
+    name: 'deletePart',
+    description: "Delete a part and all its versions. Refuses to delete a session's last remaining part. If the active part is deleted, an adjacent part becomes active.",
+    input_schema: {
+      type: 'object',
+      properties: {
+        id: { type: 'string', description: 'Part id from listParts().' },
       },
       required: ['id'],
     },
@@ -864,6 +930,10 @@ const ALWAYS_AVAILABLE = new Set([
   'findFaces',
   'listComponents',
   'listLabels',
+  // listRegions is a pure read, not a paint mutation, so it stays always-on
+  // even when paintFaces is disabled — its consumers paintExplain/assertPaint
+  // are always-available and need a region id to target.
+  'listRegions',
   'probePixel',
   'paintPreview',
   'paintExplain',
@@ -872,17 +942,20 @@ const ALWAYS_AVAILABLE = new Set([
   'query',
   'modifyAndTest',
   'probeRay',
-  'createSession',
-  'listSessions',
-  'openSession',
+  'listParts',
+  'getCurrentPart',
+  'createPart',
+  'changePart',
+  'renamePart',
+  'deletePart',
   'assertPaint',
   'sliceAtZVisual',
   'paintInCylinder',
 ]);
 
 const RUN_GATED = new Set(['runCode']);
-const SAVE_GATED = new Set(['runAndSave', 'loadVersion']);
-const PAINT_GATED = new Set(['paintRegion', 'paintFaces', 'paintNear', 'paintInBox', 'paintInOrientedBox', 'paintSlab', 'paintNearestRegion', 'paintComponent', 'paintByLabel', 'paintByLabels', 'paintConnected', 'undoLastPaint', 'redoLastPaint', 'removeRegion', 'clearColors', 'copyColorsFromVersion']);
+const SAVE_GATED = new Set(['runAndSave', 'loadVersion', 'saveVersion']);
+const PAINT_GATED = new Set(['paintRegion', 'paintFaces', 'paintNear', 'paintStroke', 'paintInBox', 'paintInOrientedBox', 'paintSlab', 'paintNearestRegion', 'paintComponent', 'paintByLabel', 'paintByLabels', 'paintConnected', 'undoLastPaint', 'redoLastPaint', 'removeRegion', 'clearColors', 'copyColorsFromVersion']);
 /** Tools that ship a PNG back to the model via a multimodal content
  *  block. Gated by the Views vision toggle so the user can disable
  *  vision spend in one place — when off, the agent has to reason from
@@ -898,9 +971,12 @@ export function buildToolList(toggles: ChatToggles): ToolDefinition[] {
     if (ALWAYS_AVAILABLE.has(t.name)) return true;
     if (RUN_GATED.has(t.name)) return toggles.scope.runCode;
     if (SAVE_GATED.has(t.name)) {
-      // loadVersion is non-mutating but gating it under saveVersions keeps
-      // the model from rewinding state when the user has paused commits.
-      return t.name === 'loadVersion' ? toggles.scope.saveVersions : (toggles.scope.runCode && toggles.scope.saveVersions);
+      // loadVersion (rewind) and saveVersion (snapshot) don't execute code,
+      // so they only need the saveVersions scope. Gating loadVersion here also
+      // keeps the model from rewinding state when the user has paused commits.
+      // runAndSave runs first, so it additionally needs the runCode scope.
+      const nonRunning = t.name === 'loadVersion' || t.name === 'saveVersion';
+      return nonRunning ? toggles.scope.saveVersions : (toggles.scope.runCode && toggles.scope.saveVersions);
     }
     if (PAINT_GATED.has(t.name)) return toggles.scope.paintFaces;
     if (NOTES_GATED.has(t.name)) return toggles.scope.sessionNotes;
@@ -1154,6 +1230,8 @@ async function dispatch(api: PartwrightAPI, name: string, input: Record<string, 
       return api.listVersions();
     case 'loadVersion':
       return api.loadVersion({ index: input.index as number });
+    case 'saveVersion':
+      return api.saveVersion(input.label as string | undefined);
     case 'addSessionNote':
       return api.addSessionNote(input.text as string);
     case 'listSessionNotes':
@@ -1166,6 +1244,8 @@ async function dispatch(api: PartwrightAPI, name: string, input: Record<string, 
       return api.paintFaces(input);
     case 'paintNear':
       return api.paintNear(input);
+    case 'paintStroke':
+      return api.paintStroke(input);
     case 'paintInBox':
       return api.paintInBox(input);
     case 'paintInOrientedBox':
@@ -1243,6 +1323,8 @@ async function dispatch(api: PartwrightAPI, name: string, input: Record<string, 
       return api.undoLastPaint();
     case 'redoLastPaint':
       return api.redoLastPaint();
+    case 'listRegions':
+      return api.listRegions();
     case 'removeRegion':
       return api.removeRegion(input.id as number);
     case 'clearColors':
@@ -1271,12 +1353,18 @@ async function dispatch(api: PartwrightAPI, name: string, input: Record<string, 
     }
     case 'probeRay':
       return api.probeRay(input.origin, input.direction);
-    case 'createSession':
-      return api.createSession(input.name as string | undefined);
-    case 'listSessions':
-      return api.listSessions();
-    case 'openSession':
-      return api.openSession(input.id as string);
+    case 'listParts':
+      return api.listParts();
+    case 'getCurrentPart':
+      return api.getCurrentPart();
+    case 'createPart':
+      return api.createPart(input.name as string | undefined);
+    case 'changePart':
+      return api.changePart(input.id as string);
+    case 'renamePart':
+      return api.renamePart(input.id as string, input.name as string);
+    case 'deletePart':
+      return api.deletePart(input.id as string);
     case 'assertPaint':
       return api.assertPaint(input);
     case 'paintInCylinder':

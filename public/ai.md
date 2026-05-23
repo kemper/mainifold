@@ -101,11 +101,11 @@ The main reference splits into focused subdocs. **Fetch each by calling `readDoc
 - **Driving the UI with clicks/keystrokes** -- CodeMirror's auto-close-brackets will corrupt your code. Use `partwright.setCode()` and `partwright.run()` instead.
 - **Forgetting `return`** -- code runs in `new Function()`, so a trailing expression is NOT automatically returned. You must write `return Manifold.cube(...)`.
 - **Hand-rolling curve math instead of using helpers** -- if you need a smooth surface or curve, check the verb table above. `Curves.loft` / BOSL2 `skin()` are far more reliable than a hand-written polygon-sampling loop.
-- **Skipping sessions** -- always create a session (`createSession`) and save versions (`runAndSave`) so the user can review your work in the gallery.
+- **Not saving versions** -- a session is always open for you; save your work with `runAndSave` so the user can review it in the gallery.
 - **Skipping visual verification** -- stats alone can't catch visual defects. After structural changes, call `renderViews()`; `renderViews({views: "box"})` is the only set that shows the back, left, and bottom faces.
 - **Flush boolean placement** -- shapes must overlap by at least 0.5 units to union correctly. Merely touching at a face produces disconnected components.
 - **Tapering to a near-point on printed geometry** -- `scaleTop=[0.01, 0.01]` or chamfers that collapse the top to sub-millimeter area look fine in `geometry-data` but FDM slicers silently drop sub-extrusion-width layers, so the cap disappears on the print. See [/ai/print-safety.md](/ai/print-safety.md).
-- **Not reading session context before modifying** -- when opening an existing session, always call `getSessionContext()` first and read the notes/version history before making changes. See [Resuming a session](#resuming-a-session).
+- **Not reading session context before modifying** -- when resuming work in an established session, call `getSessionContext()` first and read the notes/version history before making changes. See [Resuming a session](#resuming-a-session).
 - **Branching off a prior version by hand** -- don't chain `loadVersion` -> `getCode` -> modify -> `runAndSave`. A silent failure (blocked return value, stale buffer) can drop parts of the parent. Use [`forkVersion({index} | {id}, transformFn, label, assertions?)`](#forking-a-prior-version) instead -- it loads the parent's code server-side, applies your transform, validates, and saves atomically.
 - **Passing a bare index or id instead of `{index}` / `{id}`** -- `loadVersion` and `forkVersion` take an object with exactly one of `{index: number}` or `{id: string}`, e.g. `loadVersion({index: 2})` or `loadVersion({id: "Kx3Pq9mA2wEr"})`. Bare `loadVersion(2)` will return `{error: "...target must be { index: number } or { id: string }..."}`.
 - **Passing the wrong object shape to `setImages`, `setReferenceGeometry`, `query`, `runAndAssert`, etc.** -- the API rejects unknown keys and wrong-type values. See [Argument validation](#argument-validation).
@@ -227,7 +227,11 @@ partwright.listTextAnnotations()
 partwright.addTextAnnotation({anchor, text})
 partwright.clearAnnotations()
 
-// Sessions -- save/compare design iterations
+// Sessions -- save/compare design iterations.
+// NOTE: the in-app chat agent is scoped to the ONE session already open and
+// has no session create/open/list tools — just use runAndSave. The
+// create/open/list/clear console methods below are for the browser console and
+// the external Claude Code agent only.
 await partwright.createSession(name?)    // -> {id, url, galleryUrl}
 await partwright.runAndSave(code, label?, assertions?) // Assert+save in one call -> {passed?, geometry, version, diff, galleryUrl}
 await partwright.createSessionWithVersions(name, [{code, label},...]) // Batch create
@@ -242,6 +246,18 @@ await partwright.listSessions()          // -> [{id, name, updated}]
 await partwright.openSession(id)         // Open existing session
 await partwright.clearAllSessions()      // Delete all sessions & versions
 
+// Parts -- multiple independent objects within one session. Each part has its
+// own code + version history; the CURRENT part is what every other method
+// (run, save, paint, export, listVersions, ...) acts on. Versions are scoped
+// per part. Use parts for several distinct objects in one session (e.g. a box
+// and its lid); save them as separate STLs/parts, or model each in isolation.
+partwright.listParts()                   // -> [{id, name, order, isCurrent}]
+partwright.getCurrentPart()              // -> {id, name, order} or null
+await partwright.createPart(name?)       // New empty part + switch to it -> {id, name, order}
+await partwright.changePart(id)          // Switch active part (loads its latest version)
+await partwright.renamePart(id, name)    // Rename a part
+await partwright.deletePart(id)          // Delete a part + its versions (refuses the last one)
+
 // Color regions -- tag face regions with a color. Full API in /ai/colors.md.
 // Quick reference (~30 methods total):
 partwright.probePixel({pixel, view})                                      // pixel-in-render -> {point, normal, distance, triangleId}
@@ -249,10 +265,11 @@ partwright.paintConnected({seed, maxDeviationDeg?, color, name?})         // BFS
 partwright.paintRegion({point, normal, color, name?, tolerance?})         // bucket: coplanar flood-fill (edge-bounded)
 partwright.paintNearestRegion({point, color, searchRadius?, name?})       // snap-to-nearest variant
 partwright.paintNear({point, radius, normalCone?, color, name?})          // sphere selector
+partwright.paintStroke({points, radius, resolution?, maxEdge?, shape?, color, name?}) // SMOOTH brush: subdivides mesh for a rounded painted edge (see note below)
 partwright.paintInBox({box, normalCone?, color, name?})                   // AABB selector
-partwright.paintInOrientedBox({box: {center, size, quaternion?}, color})  // rotated box selector (same as UI Box tool)
+partwright.paintInOrientedBox({box: {center, size, quaternion?}, color, smooth?, resolution?, maxEdge?})  // rotated box selector (same as UI Box tool); SMOOTH edges by default
 partwright.paintFaces({triangleIds, color, name?})                        // explicit triangle ids
-partwright.paintSlab({axis|normal, offset, thickness, color, name?})      // planar range
+partwright.paintSlab({axis|normal, offset, thickness, color, name?, smooth?, resolution?, maxEdge?})  // planar range; SMOOTH edges by default
 partwright.paintByLabel({label, color, name?})                            // by api.label() name (manifold-js only)
 partwright.paintByLabels([{label, color, name?}, ...])                    // batch sibling
 partwright.paintComponent({index, color, name?, topOnly?})                // by listComponents() index
@@ -269,6 +286,7 @@ partwright.removeRegion(id) / setRegionVisibility(id, visible)            // per
 partwright.hideRegion(id) / showRegion(id) / clearColors()
 partwright.getBucketTolerance() / setBucketTolerance(t)                   // UI bucket tool config
 partwright.getBrushSize() / setBrushSize(r)                               // UI brush tool config
+partwright.getBrushSmooth() / setBrushSmooth(on) / setBrushSmoothDivisor(2..1024) // UI smooth-brush config (detail = radius ÷ divisor)
 
 // Notes -- track design context, decisions, and measurements
 await partwright.addSessionNote(text)    // -> {id, text, timestamp}
@@ -474,9 +492,28 @@ Before exporting anything intended for printing, **call `readDoc({name: "print-s
 
 Color regions tag a coplanar set of triangles with an RGB color. Regions are persisted on the saved version, ride through GLB and 3MF exports (vertex colors / `<basematerials>` `pid` attributes), and show as swatch badges in the gallery. They do **not** modify the geometry. STL and OBJ exports drop them — formats don't carry color.
 
-The paint helpers are exposed both as tool calls (`paintRegion`, `paintFaces`, `paintNear`, `paintInBox`, `paintSlab`, `paintNearestRegion`, `paintComponent`, `paintByLabel`, `paintByLabels`, `paintConnected`, `paintPreview`, `paintExplain`, `findFaces`, `probePixel`, `probeRay`, `getMeshSummary`, `listComponents`, `listLabels`, `undoLastPaint`, `redoLastPaint`, `removeRegion`, `clearColors`) and on `window.partwright`.
+The paint helpers are exposed both as tool calls (`paintRegion`, `paintFaces`, `paintNear`, `paintStroke`, `paintInBox`, `paintSlab`, `paintNearestRegion`, `paintComponent`, `paintByLabel`, `paintByLabels`, `paintConnected`, `paintPreview`, `paintExplain`, `findFaces`, `probePixel`, `probeRay`, `getMeshSummary`, `listComponents`, `listLabels`, `undoLastPaint`, `redoLastPaint`, `removeRegion`, `clearColors`) and on `window.partwright`.
 
 Before painting anything substantial, **call `readDoc({name: "colors"})`** for the picker decision tree (which `paint*` for which intent), the labelled-construction workflow, vision-driven painting with `probePixel`/`paintConnected`, undo/redo, and export behavior.
+
+### `paintStroke` — smooth, rounded painted edges (use sparingly)
+
+All the other selectors paint whole existing triangles, so a painted edge follows the tessellation (stair-stepped on coarse meshes). `paintStroke` instead **subdivides the mesh under the stroke** so the painted region's outline is rounded — the smooth-brush equivalent of dragging a paintbrush. It is the only paint tool that changes the triangle count, so it costs more (a mesh rebuild) than the region selectors.
+
+Reach for it **only when a visibly rounded painted edge matters** (a curved stripe, a soft-edged patch). For ordinary fills, `paintNear` / `paintInBox` / `paintConnected` / `paintRegion` are cheaper and sufficient.
+
+Drive it by vision, not by guessing coordinates: render a view, pick pixels along the desired path, `probePixel` each to get world-space surface points, then pass them as `points`:
+
+```js
+// Render → probe a few pixels along the stroke → paint a smooth stroke through them.
+const a = await partwright.probePixel({ pixel: [120, 90],  view: { elevation: 30, azimuth: 45 } });
+const b = await partwright.probePixel({ pixel: [160, 110], view: { elevation: 30, azimuth: 45 } });
+partwright.paintStroke({ points: [a.point, b.point], radius: 3, resolution: 256, color: [0.9, 0.2, 0.2] });
+```
+
+`resolution` is the smoothness detail (target triangle edge = radius / resolution; higher = smoother + more triangles), default **256**, range 2–1024. For absolute control pass `maxEdge` instead (target edge in mesh units, e.g. `maxEdge: 0.1` for crisp 0.1-unit edges) — it overrides resolution. A single point stamps a rounded dot.
+
+`paintSlab` and `paintInOrientedBox` share the same subdivision pipeline: their analytic boundary (slab planes / box faces) is **smoothed by default**, so a slab band or box patch gets a clean edge across coarse faces and reconstructs deterministically on reload. Same knobs — `smooth` (default true), `resolution` (model bbox diagonal / resolution, default 256), and `maxEdge` (absolute override). Pass `smooth: false` for the old blocky behavior. The id-baking selectors (`paintInBox`, `paintNear`, `paintInCylinder`, `paintFaces`, …) can't be smoothed — they lock onto existing triangles; refine the model mesh first if you need a finer edge from them.
 
 ## Common gotchas
 
