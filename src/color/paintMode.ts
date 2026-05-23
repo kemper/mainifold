@@ -54,34 +54,28 @@ export const AIRBRUSH_STRENGTH_MIN = 0.05;
 export const AIRBRUSH_STRENGTH_MAX = 1;
 export const AIRBRUSH_SOFTNESS_MIN = 0;
 export const AIRBRUSH_SOFTNESS_MAX = 1;
-/** The airbrush's coarse (smooth-off) grain: it refines and dithers at
- *  radius / GRAIN, so the speckle's dot size — and the triangle count it adds —
- *  scale with the brush, staying bounded and radius-independent. */
-const AIRBRUSH_GRAIN = 10;
-/** When on, the airbrush refines finer (radius / airbrushSmoothDivisor instead
- *  of the coarse grain) so its speckled rim reads as a smooth gradient rather
- *  than chunky dots. On by default. Softness still controls the rim's width. */
+/** When on, the airbrush refines the mesh under each droplet so the droplets are
+ *  smooth round circles; off, droplets fall on the base tessellation (chunky on
+ *  a coarse mesh, already fine on a dense one). On by default. */
 let airbrushSmooth = true;
-/** Smooth-edge detail for the airbrush: radius / this = grain / dither-cell size
- *  (and the interior subdivision target). Higher = finer dots, smoother edge,
- *  more triangles. Shares the brush's 1024 ceiling; because the airbrush refines
- *  its whole footprint (fill), triangle count grows with the divisor squared, so
- *  very high values lean on the airbrush refine region's triangle budget
- *  (AIRBRUSH_MAX_FILL_TRIANGLES in subdivide.ts) rather than running away. */
-let airbrushSmoothDivisor = 24;
+/** Droplet grain: radius / this = droplet radius, so higher = smaller droplets =
+ *  a finer spray (and more triangles, still bounded by the refine budget). The
+ *  range is modest because the airbrush draws actual circles — going finer than
+ *  the eye/printer resolves just adds triangles. */
+let airbrushSmoothDivisor = 16;
 export const AIRBRUSH_SMOOTH_DIVISOR_MIN = 4;
-export const AIRBRUSH_SMOOTH_DIVISOR_MAX = 1024;
+export const AIRBRUSH_SMOOTH_DIVISOR_MAX = 32;
 
 /** Target edge length (mesh units) for the active brush settings. */
 export function brushTargetEdge(): number {
   return brushRadius / brushSmoothDivisor;
 }
 
-/** Grain / dither cell size (mesh units) for the active airbrush settings.
- *  Smooth edges on → the finer detail divisor; off → the coarse default grain. */
+/** Droplet radius (mesh units) for the active airbrush settings, baked into the
+ *  region descriptor's `maxEdge` slot. Smoothing off uses a coarse grain (big
+ *  droplets); on uses the finer grain slider. */
 export function airbrushTargetEdge(): number {
-  const divisor = airbrushSmooth ? airbrushSmoothDivisor : AIRBRUSH_GRAIN;
-  return airbrushRadius / divisor;
+  return airbrushRadius / (airbrushSmooth ? airbrushSmoothDivisor : 6);
 }
 
 /** Radius of the active stroke tool (airbrush has its own radius). */

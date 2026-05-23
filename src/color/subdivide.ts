@@ -226,26 +226,28 @@ function airbrushFeatherClassifier(
 }
 
 /** Build a refine region for an airbrush footprint. The dense core paints as
- *  whole coarse triangles (one solid colour, no dither), so only the feathered
- *  EDGE band is subdivided + dithered — the triangle cost tracks the thin edge,
- *  not the whole disc. A `strength` below 1 has no fully-solid core (every cell
- *  dithers), so its `innerR` is 0 and the whole footprint feathers; the hard
- *  triangle budget is the backstop there. */
+ *  whole coarse triangles (one solid colour); beyond it the spray is a scatter
+ *  of round droplets. Only the feathered EDGE band is refined — to about a third
+ *  of a droplet, so each droplet is a smooth little circle rather than one chunky
+ *  triangle — keeping the cost on the thin edge, not the whole disc. A `strength`
+ *  below 1 has no fully-solid core, so its `innerR` is 0 and the whole footprint
+ *  is treated as feather; the triangle budget is the backstop there. */
 export function airbrushRefineRegion(
   samples: [number, number, number][],
   radius: number,
-  maxEdge: number,
+  dabRadius: number,
   strength: number,
   softness: number,
 ): RefineRegion {
-  const target = maxEdge > 0 ? maxEdge : radius / 10;
+  const dab = dabRadius > 0 ? dabRadius : radius / 12;
+  const roundEdge = dab / 3;
   // The core paints solid only when coverage reaches 1 (strength >= 1); below
-  // that every cell is a dither, so there is no core to skip.
+  // that every droplet may have gaps, so there is no fully-solid core to skip.
   const innerR = strength >= 1 ? Math.max(0, 1 - softness) * radius : 0;
-  const stroke: BrushStroke = { samples, radius, shape: 'circle', maxEdge: target };
+  const stroke: BrushStroke = { samples, radius, shape: 'circle', maxEdge: roundEdge };
   return {
     aabb: strokeAabb(stroke),
-    maxEdge: target,
+    maxEdge: roundEdge,
     classify: airbrushFeatherClassifier(samples, innerR, radius),
     fill: true,
     maxTriangles: AIRBRUSH_MAX_FILL_TRIANGLES,
@@ -300,15 +302,15 @@ export function strokeFootprintTriangles(mesh: MeshData, stroke: BrushStroke): S
 }
 
 // ---------------------------------------------------------------------------
-// Airbrush — soft-edged paint via stochastic density falloff.
+// Airbrush — a solid core ringed by round droplets that thin to a soft edge.
 //
 // No alpha or colour blending is ever used: every triangle is painted fully or
-// not at all, so each one stays a single printable colour. The "soft" edge is a
-// dither — triangles near the stroke centre are painted with probability
-// `strength`, thinning to zero across a `softness`-wide rim. The decision is
-// made per grain CELL (not per triangle) and keyed by a stored seed, so the
-// speckle is deterministic: it reproduces exactly when a saved version reloads
-// and stays stable as the mesh is subdivided under the stroke.
+// not at all, so each one stays a single printable colour. The dense core paints
+// solid; beyond it the spray is a scatter of round DROPLETS (circles of radius
+// `dabR`) on a world-space lattice, each point kept with a falloff probability so
+// they pack solid near the core and thin to isolated dots at the rim. Keyed by a
+// stored seed + the world lattice, so the speckle is deterministic: it
+// reproduces across reloads and re-subdivision.
 // ---------------------------------------------------------------------------
 
 export interface AirbrushStroke {
@@ -324,15 +326,16 @@ export interface AirbrushStroke {
   /** Stable per-stroke seed so the speckle reproduces across reloads but
    *  differs between strokes. */
   seed: number;
-  /** Grain cell size in mesh units — also the interior subdivision target. The
-   *  paint decision is made per cell of this size, so it is identical no matter
-   *  how finely the mesh is later subdivided. */
+  /** Droplet radius in mesh units (also the lattice spacing), stored in the
+   *  descriptor's `maxEdge` slot. The refine target is a third of this so each
+   *  droplet renders as a smooth circle. */
   maxEdge: number;
 }
 
-/** Probability a point at normalized distance `dn` (0 at centre, 1 at the rim)
- *  is painted: a `strength`-dense core, then a linear fade to 0 across the outer
- *  `softness` fraction of the radius. */
+/** Droplet keep-probability at normalized distance `dn` (0 at centre, 1 at the
+ *  rim): a `strength`-dense core, then a linear fade to 0 across the outer
+ *  `softness` fraction of the radius. Each lattice point becomes a droplet with
+ *  this probability, so droplets pack solid in the core and thin out at the rim. */
 export function airbrushProbability(dn: number, strength: number, softness: number): number {
   if (dn >= 1) return 0;
   if (dn < 0) dn = 0;
@@ -352,9 +355,12 @@ function cellHash(qx: number, qy: number, qz: number, seed: number): number {
   return (h >>> 0) / 4294967296;
 }
 
-/** Triangles the airbrush paints: centroid within the (round) footprint, kept
- *  with the falloff probability via a per-cell deterministic dither. Run against
- *  the refined mesh (interior filled to `maxEdge`) so the speckle is fine. */
+/** Triangles the airbrush paints. The dense core (coverage 1) paints solid;
+ *  beyond it the spray is a scatter of round DROPLETS — circles of radius `dabR`
+ *  centred on a world-space lattice (spacing `dabR`), each lattice point kept
+ *  with the falloff probability. A triangle is painted when its centroid is in
+ *  the solid core or inside any kept droplet. Deterministic from the seed + the
+ *  world lattice, so it reproduces across reloads and re-subdivision. */
 export function airbrushFootprintTriangles(mesh: MeshData, stroke: AirbrushStroke): Set<number> {
   const { triVerts, numTri, vertProperties, numProp } = mesh;
   const out = new Set<number>();
@@ -363,10 +369,31 @@ export function airbrushFootprintTriangles(mesh: MeshData, stroke: AirbrushStrok
   const r2 = r * r;
   const strength = Math.max(0, Math.min(1, stroke.strength));
   const softness = Math.max(0, Math.min(1, stroke.softness));
-  const cell = stroke.maxEdge > 0 ? stroke.maxEdge : r / 10;
+  const dabR = stroke.maxEdge > 0 ? stroke.maxEdge : r / 12;
+  const g = dabR;                 // lattice spacing == droplet radius → packs solid when dense
+  const dab2 = dabR * dabR;
+  const innerR = strength >= 1 ? Math.max(0, 1 - softness) * r : 0;
+  const innerR2 = innerR * innerR;
   const seed = stroke.seed | 0;
   const samples = stroke.samples;
-  const box = strokeAabb({ samples, radius: r, shape: 'circle', maxEdge: cell });
+  const box = strokeAabb({ samples, radius: r, shape: 'circle', maxEdge: dabR });
+
+  // Is lattice point (ix,iy,iz) a kept droplet centre? Cached — each point is
+  // tested by up to 27 surrounding triangles.
+  const keptCache = new Map<string, boolean>();
+  const isDroplet = (ix: number, iy: number, iz: number): boolean => {
+    const key = ix + ',' + iy + ',' + iz;
+    const cached = keptCache.get(key);
+    if (cached !== undefined) return cached;
+    const dn2 = nearestSampleDist2(ix * g, iy * g, iz * g, samples);
+    let kept = false;
+    if (dn2 <= r2) {
+      const cov = airbrushProbability(Math.sqrt(dn2) / r, strength, softness);
+      kept = cov >= 1 ? true : (cov > 0 && cellHash(ix, iy, iz, seed) < cov);
+    }
+    keptCache.set(key, kept);
+    return kept;
+  };
 
   for (let t = 0; t < numTri; t++) {
     const v0 = triVerts[t * 3], v1 = triVerts[t * 3 + 1], v2 = triVerts[t * 3 + 2];
@@ -376,23 +403,24 @@ export function airbrushFootprintTriangles(mesh: MeshData, stroke: AirbrushStrok
     if (triOutsideAabb([ax, ay, az], [bx, by, bz], [cx2, cy2, cz2], box)) continue;
     const cx = (ax + bx + cx2) / 3, cy = (ay + by + cy2) / 3, cz = (az + bz + cz2) / 3;
 
-    // Nearest sample, Euclidean (the airbrush is round).
-    let best2 = Infinity;
-    for (let s = 0; s < samples.length; s++) {
-      const dx = cx - samples[s][0], dy = cy - samples[s][1], dz = cz - samples[s][2];
-      const d2 = dx * dx + dy * dy + dz * dz;
-      if (d2 < best2) best2 = d2;
+    const dn2 = nearestSampleDist2(cx, cy, cz, samples);
+    if (dn2 > r2) continue;
+    if (dn2 <= innerR2) { out.add(t); continue; }      // solid core
+
+    // Droplet test: any kept lattice point within dabR of the centroid (a point
+    // within dabR == g of the centroid is in the 3×3×3 cell neighbourhood).
+    const gi = Math.round(cx / g), gj = Math.round(cy / g), gk = Math.round(cz / g);
+    let painted = false;
+    for (let di = -1; di <= 1 && !painted; di++) {
+      for (let dj = -1; dj <= 1 && !painted; dj++) {
+        for (let dk = -1; dk <= 1 && !painted; dk++) {
+          const ix = gi + di, iy = gj + dj, iz = gk + dk;
+          const ddx = cx - ix * g, ddy = cy - iy * g, ddz = cz - iz * g;
+          if (ddx * ddx + ddy * ddy + ddz * ddz <= dab2 && isDroplet(ix, iy, iz)) painted = true;
+        }
+      }
     }
-    if (best2 > r2) continue;
-
-    const p = airbrushProbability(Math.sqrt(best2) / r, strength, softness);
-    if (p <= 0) continue;
-    if (p >= 1) { out.add(t); continue; }
-
-    // Decide per grain cell so the speckle is identical regardless of how finely
-    // the mesh is later subdivided under (or near) this stroke.
-    const qx = Math.floor(cx / cell), qy = Math.floor(cy / cell), qz = Math.floor(cz / cell);
-    if (cellHash(qx, qy, qz, seed) < p) out.add(t);
+    if (painted) out.add(t);
   }
   return out;
 }

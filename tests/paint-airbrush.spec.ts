@@ -50,18 +50,18 @@ test.describe('airbrush', () => {
     await page.waitForSelector('#paint-picker-panel:not(.hidden)');
     await page.locator('#paint-picker-panel button:has-text("Airbrush")').dispatchEvent('click');
 
-    // Smooth edges is on by default, with a detail slider (range 4..1024) visible.
+    // Smooth edges is on by default, with a grain slider (range 4..32) visible.
     const smoothBtn = page.locator('#airbrush-smooth-toggle');
     await expect(smoothBtn).toBeVisible();
     await expect(smoothBtn).toContainText('On');
     const detail = page.locator('#airbrush-smooth-detail');
     await expect(detail).toBeVisible();
     await expect(detail).toHaveAttribute('min', '4');
-    await expect(detail).toHaveAttribute('max', '1024');
+    await expect(detail).toHaveAttribute('max', '32');
 
     // Defaults exposed on the window API.
     const cfg = await page.evaluate(() => (window as any).partwright.getAirbrush()); // eslint-disable-line @typescript-eslint/no-explicit-any
-    expect(cfg).toMatchObject({ smooth: true, smoothDivisor: 24 });
+    expect(cfg).toMatchObject({ smooth: true, smoothDivisor: 16 });
 
     // Turning it off hides the detail slider.
     await smoothBtn.dispatchEvent('click');
@@ -77,17 +77,17 @@ test.describe('airbrush', () => {
         badNum: pw.setAirbrushSmoothDivisor('lots'),
         clampHi: pw.setAirbrushSmoothDivisor(99999),
         clampLo: pw.setAirbrushSmoothDivisor(0),
-        ok: pw.setAirbrushSmoothDivisor(40),
+        ok: pw.setAirbrushSmoothDivisor(20),
         cfg: pw.getAirbrush(),
       };
     });
     expect(api.badBool.error).toBeTruthy();
     expect(api.okBool.smooth).toBe(true);
     expect(api.badNum.error).toBeTruthy();
-    expect(api.clampHi.divisor).toBe(1024); // clamped to max
+    expect(api.clampHi.divisor).toBe(32); // clamped to max
     expect(api.clampLo.divisor).toBe(4);  // clamped to min
-    expect(api.ok.divisor).toBe(40);
-    expect(api.cfg).toMatchObject({ smooth: true, smoothDivisor: 40 });
+    expect(api.ok.divisor).toBe(20);
+    expect(api.cfg).toMatchObject({ smooth: true, smoothDivisor: 20 });
   });
 
   test('paintAirbrush paints a region and subdivides the mesh', async ({ page }) => {
@@ -144,9 +144,9 @@ test.describe('airbrush', () => {
     });
     expect(out.coarseErr).toBeFalsy();
     expect(out.fineErr).toBeFalsy();
-    expect(out.base).toBeGreaterThan(15000);                // a genuinely detailed base
-    expect(out.addedCoarse).toBeGreaterThan(0);             // feather still subdivides despite the big base
-    expect(out.addedFine).toBeGreaterThan(out.addedCoarse); // higher detail = finer, NOT coarser
+    expect(out.base).toBeGreaterThan(15000);                       // a genuinely detailed base
+    expect(out.addedCoarse).toBeGreaterThan(8000);                 // feather subdivides substantially despite the big base (was ~0 when starved)
+    expect(out.addedFine).toBeGreaterThanOrEqual(out.addedCoarse); // higher detail is finer or equal, never coarser
   });
 
   test('strength and softness change coverage monotonically (fixed seed)', async ({ page }) => {
