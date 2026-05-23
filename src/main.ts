@@ -1043,28 +1043,54 @@ async function main() {
     await renderAndSaveCombined(generateImportCode(combined, { manifold: true }), combined, 'added mesh');
   }
 
+  // The default example and the new-session/new-part starters are throwaway
+  // scaffolding, not user work — they shouldn't be preserved or block seeding.
+  function isStarterCode(code: string): boolean {
+    const t = code.trim();
+    if (t === '' || t === defaultCode.trim()) return true;
+    return ['New session', 'New part'].some(
+      c => t === `// ${c}\nconst { Manifold } = api;\nreturn Manifold.cube([10, 10, 10], true);`,
+    );
+  }
+
   // True when the current part holds nothing worth preserving: no saved version
-  // and the editor is empty or still showing the untouched default starter. Such
-  // a part can be freely seeded/replaced by an import without losing user work.
+  // and the editor is still showing throwaway starter scaffolding. Such a part
+  // can be freely seeded/replaced by an import without losing user work.
   function currentPartIsExpendable(): boolean {
     const state = getState();
     if (!state.currentPart || state.currentVersion) return false;
-    const code = getValue().trim();
-    return code === '' || code === defaultCode.trim();
+    return isStarterCode(getValue());
   }
 
-  // Save the current part's editor content as a version before an import switches
-  // away from it, so unsaved (non-default) work is never silently dropped. No-op
-  // when the editor is empty/default or already matches the saved version.
+  // Save the current part's editor content as a version before something
+  // switches away from it (import, part switch, merge), so unsaved work is never
+  // silently dropped. No-op for read-only viewers, starter scaffolding, or when
+  // the editor already matches the saved version.
   async function preserveCurrentEditsIfNeeded(): Promise<void> {
+    if (isReadOnlyViewer()) return;
     const state = getState();
     if (!state.session || !state.currentPart) return;
     const code = getValue();
-    const trimmed = code.trim();
-    if (!trimmed || trimmed === defaultCode.trim()) return;
+    if (isStarterCode(code)) return;
     if (state.currentVersion && state.currentVersion.code === code) return;
     const thumbnail = await captureThumbnail();
     await saveVersion(code, enrichGeometryDataWithColors(getGeometryDataObj()), thumbnail);
+  }
+
+  // The current part's component meshes, taken from what's actually rendered so
+  // it works whether or not the part has a saved version. Import-based parts keep
+  // their imports as separate components; everything else (hand-written code) is
+  // baked from the live mesh. Returns null when there's no manifold geometry to
+  // contribute (empty or render-only).
+  function currentPartLiveComponents(label: string): ImportedMesh[] | null {
+    const cv = getState().currentVersion;
+    if (cv && !codeIsRenderOnly(cv.code) && isPureImportCode(cv.code, (cv.importedMeshes ?? []) as ImportedMesh[])) {
+      return (cv.importedMeshes ?? []) as ImportedMesh[];
+    }
+    if (currentMeshData && !codeIsRenderOnly(getValue())) {
+      return [meshDataToImportedMesh(currentMeshData, label, 'mesh')];
+    }
+    return null;
   }
 
   // Dispatch a parsed mesh. With no session open it imports as a new session;
@@ -1140,19 +1166,21 @@ async function main() {
 
     showToast('Merging…', { variant: 'neutral' });
 
-    const sourceVersion = await getLatestVersion(source.id);
-    if (!sourceVersion) { showToast(`"${source.name}" has no geometry to merge.`, { variant: 'warn' }); return; }
-    const sourceComponents = await partComponentMeshes(sourceVersion, source.name);
-    if (!sourceComponents || sourceComponents.length === 0) {
-      showToast(`Couldn't merge "${source.name}" — it isn't a manifold.`, { variant: 'warn' });
+    // Current part: use the live rendered geometry so an unsaved hand-coded part
+    // merges fine (no need to save a version first).
+    const targetComponents = currentPartLiveComponents(target.name);
+    if (targetComponents === null) {
+      showToast(`Couldn't merge — "${target.name}" has no manifold geometry to combine.`, { variant: 'warn' });
       return;
     }
 
-    const targetComponents = state.currentVersion
-      ? await partComponentMeshes(state.currentVersion, target.name)
-      : [];
-    if (targetComponents === null) {
-      showToast(`Couldn't merge — "${target.name}" isn't a manifold.`, { variant: 'warn' });
+    // Source part: not loaded, so bake it from its latest saved version. Parts
+    // are auto-preserved on switch, so a part you've worked on has one.
+    const sourceVersion = await getLatestVersion(source.id);
+    if (!sourceVersion) { showToast(`Open "${source.name}" and run it once so it has geometry to merge.`, { variant: 'warn' }); return; }
+    const sourceComponents = await partComponentMeshes(sourceVersion, source.name);
+    if (!sourceComponents || sourceComponents.length === 0) {
+      showToast(`Couldn't merge "${source.name}" — its code didn't produce a manifold mesh.`, { variant: 'warn' });
       return;
     }
 
@@ -1552,6 +1580,9 @@ async function main() {
   // Parts rail — IDE-style list of the session's parts.
   createPartList(partsRail, {
     onSelectPart: async (partId: string) => {
+      // Preserve unsaved work in the part we're leaving so switching away never
+      // loses it (and so it stays mergeable later).
+      await preserveCurrentEditsIfNeeded();
       const version = await changePart(partId);
       await loadPartIntoEditor(version);
     },
@@ -1559,6 +1590,7 @@ async function main() {
       // Structural part edits are leader-only — a read-only viewer must not
       // write to the shared session (mirrors the run/save guard).
       if (isReadOnlyViewer()) return;
+      await preserveCurrentEditsIfNeeded();
       await createPart();
       startNewPartInEditor();
     },
