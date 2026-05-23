@@ -399,13 +399,13 @@ const ALL_TOOLS: ToolDefinition[] = [
   },
   {
     name: 'readDoc',
-    description: 'Fetch one of the topic-specific docs from /ai/<name>.md. Use this when the core ai.md points you at a subdoc and you need its full content before writing code. Names: curves, bosl2, colors, print-safety, reference-images, file-io, annotations.',
+    description: 'Fetch one of the topic-specific docs from /ai/<name>.md. Use this when the core ai.md points you at a subdoc and you need its full content before writing code. Names: curves, bosl2, colors, print-safety, reference-images, file-io, annotations, relief.',
     input_schema: {
       type: 'object',
       properties: {
         name: {
           type: 'string',
-          enum: ['curves', 'bosl2', 'colors', 'print-safety', 'reference-images', 'file-io', 'annotations'],
+          enum: ['curves', 'bosl2', 'colors', 'print-safety', 'reference-images', 'file-io', 'annotations', 'relief'],
           description: 'Subdoc name without the .md extension.',
         },
       },
@@ -885,6 +885,44 @@ const ALL_TOOLS: ToolDefinition[] = [
       required: ['rMin', 'rMax', 'zMin', 'zMax', 'color'],
     },
   },
+  {
+    name: 'importImageAsRelief',
+    description: 'Generate a HueForge-style relief (heightmap) Part from an image. Creates a new session whose geometry is a stepped relief built from the image; paint its surface afterward with the normal paint tools (AMS-friendly). `src` is a data: or http(s) image URL. `mode`: "luminance" (brightness→height, default), "quantized" (cluster colors into height bands and pre-seed color regions), or "ai" (treated as luminance). `options` overrides common knobs. After creation, paint, then read getReliefSwapGuide() for the single-nozzle swap plan.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        src: { type: 'string', description: 'Image data: URL or http(s) URL.' },
+        mode: { type: 'string', enum: ['luminance', 'quantized', 'ai'], description: 'Image→height mapping. Default luminance.' },
+        options: {
+          type: 'object',
+          description: 'Common relief knobs to override.',
+          properties: {
+            widthMm: { type: 'number' },
+            layerHeight: { type: 'number' },
+            baseThickness: { type: 'number' },
+            maxHeight: { type: 'number' },
+            resolution: { type: 'integer', description: 'Max grid columns (<=256).' },
+            smoothing: { type: 'number' },
+          },
+        },
+      },
+      required: ['src'],
+    },
+  },
+  {
+    name: 'getReliefSwapGuide',
+    description: 'Return the advisory single-nozzle filament-swap guide for the current relief: ordered swaps {atLayer, atZ, color, filamentName?}, derived height bands, totals, a printability score (0..1), and warnings where horizontal color variation cannot be reproduced on a single nozzle (use AMS or constrain paint to Z-slabs there). Reflects the current painting — call after painting.',
+    input_schema: { type: 'object', properties: {} },
+  },
+  {
+    name: 'setReliefPreviewMode',
+    description: 'Switch the relief optical preview: "flat" (raw paint), "ams" (glossy filament look), or "single-nozzle" (simulates light through the translucent layer stack — what a single-nozzle swap print would look like). Affects what renderView/renderViews show, so set "single-nozzle" before rendering to self-check a HueForge.',
+    input_schema: {
+      type: 'object',
+      properties: { mode: { type: 'string', enum: ['flat', 'ams', 'single-nozzle'] } },
+      required: ['mode'],
+    },
+  },
 ];
 
 const ALWAYS_AVAILABLE = new Set([
@@ -928,6 +966,9 @@ const ALWAYS_AVAILABLE = new Set([
   'assertPaint',
   'sliceAtZVisual',
   'paintInCylinder',
+  'importImageAsRelief',
+  'getReliefSwapGuide',
+  'setReliefPreviewMode',
 ]);
 
 const RUN_GATED = new Set(['runCode']);
@@ -1043,7 +1084,7 @@ function detectLanguageMismatch(code: string): string | null {
  *  `tools.ts` to import the engine module statically. The function lives
  *  in `src/geometry/engine.ts` and is already loaded by the app shell at
  *  startup, so a require-style lookup via `window.partwright` is safe. */
-const SUBDOC_NAMES = new Set(['curves', 'bosl2', 'colors', 'print-safety', 'reference-images', 'file-io', 'annotations']);
+const SUBDOC_NAMES = new Set(['curves', 'bosl2', 'colors', 'print-safety', 'reference-images', 'file-io', 'annotations', 'relief']);
 
 /** Fetch a topic subdoc by short name. Same fetch path for Anthropic and
  *  local providers — both run inside the user's browser tab, so this is
@@ -1344,6 +1385,12 @@ async function dispatch(api: PartwrightAPI, name: string, input: Record<string, 
       return api.assertPaint(input);
     case 'paintInCylinder':
       return api.paintInCylinder(input);
+    case 'importImageAsRelief':
+      return api.importImageAsRelief(input);
+    case 'getReliefSwapGuide':
+      return api.getReliefSwapGuide();
+    case 'setReliefPreviewMode':
+      return api.setReliefPreviewMode(input.mode);
     default:
       throw new Error(`Unknown tool: ${name}`);
   }

@@ -27,6 +27,10 @@ export interface ToolbarCallbacks {
   onImportFile: (file: File) => void | Promise<void>;
   /** Re-import a blob already held in the inbox (e.g. recent-imports re-click). */
   onImportInboxEntry: (entry: ImportInboxEntry) => void | Promise<void>;
+  /** Open the image→relief (HueForge) import wizard. */
+  onCreateRelief: () => void;
+  /** Toggle the Relief Studio overlay panel. */
+  onToggleReliefStudio: () => void;
   onOpenCatalog: () => void;
   onLanguageSwitch: (lang: 'manifold-js' | 'scad') => void;
   onGoHome: () => void;
@@ -250,6 +254,18 @@ export function createToolbar(
   });
   importDropdown.appendChild(chooseFileOpt);
 
+  importDropdown.appendChild(createDivider());
+  importDropdown.appendChild(createSectionHeader('Create'));
+  const reliefOpt = createDescribedItem(
+    'Image → Relief (HueForge)…',
+    'Turn an image into a paintable height-relief for HueForge-style prints.',
+  );
+  reliefOpt.addEventListener('click', () => {
+    importDropdown.classList.add('hidden');
+    callbacks.onCreateRelief();
+  });
+  importDropdown.appendChild(reliefOpt);
+
   // Recent Imports section — populated from the import inbox.
   const importRecentDivider = createDivider();
   const importRecentHeaderRow = document.createElement('div');
@@ -339,6 +355,11 @@ export function createToolbar(
   });
 
   toolbar.appendChild(importWrapper);
+
+  const btnRelief = createButton('btn-relief', '✦ Relief');
+  btnRelief.title = 'Toggle the Relief Studio (HueForge-style painting)';
+  btnRelief.addEventListener('click', () => callbacks.onToggleReliefStudio());
+  toolbar.appendChild(btnRelief);
 
   // Export dropdown
   const exportWrapper = document.createElement('div');

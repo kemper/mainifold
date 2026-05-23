@@ -1,0 +1,508 @@
+// Wizard modal that turns an imported image into a HueForge-style relief
+// (heightmap). The user picks an image, chooses a mapping mode, tunes the
+// knobs, watches a live grayscale/colored preview, and clicks Create. Mesh
+// generation itself is the host's job — this modal only resolves options and
+// hands back the source ImageData via onCreate.
+
+import type { ReliefOptions, ReliefImportMode } from '../relief/types';
+import { DEFAULT_RELIEF_OPTIONS } from '../relief/types';
+import { sampleImageToGrid } from '../relief/imageToRelief';
+import { createModalShell } from './modalShell';
+import { BUTTON_PRIMARY, BUTTON_CANCEL } from './styleConstants';
+
+export interface ReliefImportModalOptions {
+  aiAvailable: boolean;
+  // Called when the user clicks "AI assist"; returns option overrides to merge.
+  onAiAssist?: (image: ImageData, opts: ReliefOptions) => Promise<Partial<ReliefOptions> & { note?: string }>;
+  // Called on Create with the chosen image + resolved options + a base name.
+  onCreate: (image: ImageData, opts: ReliefOptions, sourceName: string) => void | Promise<void>;
+}
+
+const PREVIEW_PX = 220;
+const DEBOUNCE_MS = 120;
+const MAX_RESOLUTION = 256;
+
+interface ModeDef {
+  id: ReliefImportMode;
+  label: string;
+}
+
+const MODES: ModeDef[] = [
+  { id: 'luminance', label: 'Luminance' },
+  { id: 'quantized', label: 'Color levels' },
+  { id: 'ai', label: 'AI assist' },
+];
+
+// Only one relief wizard at a time; createModalShell already enforces a single
+// shell, but we keep our own flag to short-circuit re-entrant opens cleanly.
+let isOpen = false;
+
+export function openReliefImportModal(options: ReliefImportModalOptions): void {
+  if (isOpen) return;
+  isOpen = true;
+
+  const opts: ReliefOptions = structuredClone(DEFAULT_RELIEF_OPTIONS);
+  let image: ImageData | null = null;
+  let baseName = 'relief';
+  let creating = false;
+  let previewTimer: number | undefined;
+
+  const shell = createModalShell({
+    title: 'Image → Relief (HueForge)',
+    maxWidth: 'xl',
+    scrollable: true,
+    onClose: () => {
+      if (previewTimer !== undefined) window.clearTimeout(previewTimer);
+      isOpen = false;
+    },
+  });
+
+  // --- Source picker -------------------------------------------------------
+  const pickRow = document.createElement('div');
+  pickRow.className = 'flex items-center gap-3';
+
+  const fileInput = document.createElement('input');
+  fileInput.type = 'file';
+  fileInput.accept = 'image/*';
+  fileInput.className = 'hidden';
+
+  const pickBtn = document.createElement('button');
+  pickBtn.type = 'button';
+  pickBtn.className = 'px-3 py-1.5 rounded-lg text-xs font-medium bg-zinc-700 text-zinc-100 hover:bg-zinc-600 transition-colors';
+  pickBtn.textContent = 'Choose image…';
+  pickBtn.addEventListener('click', () => fileInput.click());
+
+  const thumb = document.createElement('img');
+  thumb.className = 'w-12 h-12 rounded border border-zinc-700 object-cover hidden bg-zinc-900';
+
+  const sourceLabel = document.createElement('span');
+  sourceLabel.className = 'text-[11px] text-zinc-400 truncate flex-1 min-w-0';
+  sourceLabel.textContent = 'No image selected';
+
+  pickRow.append(fileInput, pickBtn, thumb, sourceLabel);
+  shell.body.appendChild(pickRow);
+
+  // --- Mode selector -------------------------------------------------------
+  const modeRow = document.createElement('div');
+  modeRow.className = 'flex rounded-lg overflow-hidden border border-zinc-700';
+  const modeButtons = new Map<ReliefImportMode, HTMLButtonElement>();
+
+  for (const def of MODES) {
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'flex-1 px-3 py-1.5 text-xs font-medium transition-colors';
+    btn.textContent = def.label;
+    const enabled = def.id !== 'ai' || options.aiAvailable;
+    if (!enabled) {
+      btn.disabled = true;
+      btn.classList.add('opacity-40', 'cursor-not-allowed');
+      btn.title = 'Connect an AI provider to enable';
+    } else {
+      btn.addEventListener('click', () => {
+        opts.mode = def.id;
+        syncMode();
+        schedulePreview();
+      });
+    }
+    modeButtons.set(def.id, btn);
+    modeRow.appendChild(btn);
+  }
+  shell.body.appendChild(modeRow);
+
+  // --- AI assist note caption ---------------------------------------------
+  const aiNote = document.createElement('p');
+  aiNote.className = 'text-[11px] text-indigo-300 leading-snug hidden';
+
+  // --- Knob sections -------------------------------------------------------
+  const knobs = document.createElement('div');
+  knobs.className = 'flex flex-col gap-4';
+
+  const commonSection = makeSection('Geometry');
+  const luminanceSection = makeSection('Luminance mapping');
+  const quantizedSection = makeSection('Color levels');
+
+  // Common knobs — always visible.
+  numberControl(commonSection.grid, 'Width', 'mm', () => opts.common.widthMm, v => (opts.common.widthMm = v), { min: 1, max: 1000, step: 1 });
+  numberControl(commonSection.grid, 'Layer height', 'mm', () => opts.common.layerHeight, v => (opts.common.layerHeight = v), { min: 0.02, max: 1, step: 0.01 });
+  numberControl(commonSection.grid, 'Base thickness', 'mm', () => opts.common.baseThickness, v => (opts.common.baseThickness = v), { min: 0, max: 20, step: 0.1 });
+  numberControl(commonSection.grid, 'Max height', 'mm', () => opts.common.maxHeight, v => (opts.common.maxHeight = v), { min: 0.1, max: 50, step: 0.1 });
+  sliderControl(commonSection.grid, 'Resolution', 'cols', () => opts.common.resolution, v => (opts.common.resolution = v), { min: 8, max: MAX_RESOLUTION, step: 1, int: true });
+  sliderControl(commonSection.grid, 'Smoothing', 'px', () => opts.common.smoothing, v => (opts.common.smoothing = v), { min: 0, max: 10, step: 1, int: true });
+
+  // Luminance knobs — luminance + ai modes.
+  checkboxControl(luminanceSection.grid, 'Invert (bright = short)', () => opts.luminance.invert, v => (opts.luminance.invert = v));
+  sliderControl(luminanceSection.grid, 'Gamma', '', () => opts.luminance.gamma, v => (opts.luminance.gamma = v), { min: 0.2, max: 3, step: 0.05 });
+  sliderControl(luminanceSection.grid, 'Levels', '', () => opts.luminance.levels, v => (opts.luminance.levels = v), { min: 2, max: 32, step: 1, int: true });
+
+  // Quantized knobs — quantized mode only.
+  sliderControl(quantizedSection.grid, 'Clusters', '', () => opts.quantized.clusters, v => (opts.quantized.clusters = v), { min: 2, max: 12, step: 1, int: true });
+  selectControl(quantizedSection.grid, 'Color space', () => opts.quantized.colorSpace, v => (opts.quantized.colorSpace = v), [
+    { value: 'rgb', label: 'RGB' },
+    { value: 'lab', label: 'Lab' },
+  ]);
+  checkboxControl(quantizedSection.grid, 'Dither', () => opts.quantized.dither, v => (opts.quantized.dither = v));
+
+  knobs.append(commonSection.root, luminanceSection.root, quantizedSection.root);
+  shell.body.append(aiNote, knobs);
+
+  // --- Live preview --------------------------------------------------------
+  const previewWrap = document.createElement('div');
+  previewWrap.className = 'flex flex-col items-center gap-1.5 border-t border-zinc-700 pt-3';
+
+  const canvas = document.createElement('canvas');
+  canvas.className = 'rounded border border-zinc-700 bg-zinc-900 max-w-full';
+  canvas.style.imageRendering = 'pixelated';
+
+  const stat = document.createElement('div');
+  stat.className = 'text-[11px] text-zinc-400 font-mono';
+  stat.textContent = 'Load an image to preview.';
+
+  previewWrap.append(canvas, stat);
+  shell.body.appendChild(previewWrap);
+
+  // --- AI assist button (in the body, above the footer) --------------------
+  let aiBtn: HTMLButtonElement | undefined;
+  if (options.aiAvailable) {
+    aiBtn = document.createElement('button');
+    aiBtn.type = 'button';
+    aiBtn.className = 'self-start px-3 py-1.5 rounded-lg text-xs font-medium bg-indigo-600 text-white hover:bg-indigo-500 transition-colors disabled:opacity-50 disabled:cursor-default';
+    aiBtn.textContent = '✦ AI assist';
+    aiBtn.addEventListener('click', runAiAssist);
+    shell.body.appendChild(aiBtn);
+  }
+
+  // --- Footer --------------------------------------------------------------
+  const cancelBtn = document.createElement('button');
+  cancelBtn.type = 'button';
+  cancelBtn.className = BUTTON_CANCEL;
+  cancelBtn.textContent = 'Cancel';
+  cancelBtn.addEventListener('click', () => shell.close());
+
+  const createBtn = document.createElement('button');
+  createBtn.type = 'button';
+  createBtn.className = BUTTON_PRIMARY;
+  createBtn.textContent = 'Create relief';
+  createBtn.addEventListener('click', runCreate);
+
+  shell.footer.append(cancelBtn, createBtn);
+
+  // --- File handling -------------------------------------------------------
+  fileInput.addEventListener('change', () => {
+    const file = fileInput.files?.[0];
+    if (!file) return;
+    baseName = file.name.replace(/\.[^.]+$/, '') || 'relief';
+    const url = URL.createObjectURL(file);
+    const loader = new Image();
+    loader.addEventListener('load', () => {
+      const off = document.createElement('canvas');
+      off.width = loader.naturalWidth;
+      off.height = loader.naturalHeight;
+      const ctx = off.getContext('2d');
+      if (ctx) {
+        ctx.drawImage(loader, 0, 0);
+        try {
+          image = ctx.getImageData(0, 0, off.width, off.height);
+        } catch {
+          image = null;
+        }
+      }
+      URL.revokeObjectURL(url);
+      thumb.src = ''; // will be replaced by a data URL thumbnail below
+      thumb.classList.remove('hidden');
+      // Reuse the offscreen canvas for a tiny thumbnail (no extra blob URL).
+      thumb.src = off.toDataURL('image/png');
+      sourceLabel.textContent = `${baseName} — ${off.width}×${off.height}`;
+      renderPreview();
+      syncEnabled();
+    });
+    loader.addEventListener('error', () => {
+      URL.revokeObjectURL(url);
+      image = null;
+      sourceLabel.textContent = 'Could not read image';
+      syncEnabled();
+    });
+    loader.src = url;
+  });
+
+  // --- AI assist flow ------------------------------------------------------
+  async function runAiAssist(): Promise<void> {
+    if (!aiBtn || !image || !options.onAiAssist) return;
+    aiBtn.disabled = true;
+    const original = aiBtn.textContent;
+    aiBtn.textContent = '✦ Thinking…';
+    try {
+      const result = await options.onAiAssist(image, opts);
+      mergeOptions(opts, result);
+      if (result.note) {
+        aiNote.textContent = result.note;
+        aiNote.classList.remove('hidden');
+      }
+      refreshControls();
+      syncMode();
+      renderPreview();
+    } catch (err) {
+      aiNote.textContent = `AI assist failed: ${err instanceof Error ? err.message : String(err)}`;
+      aiNote.classList.remove('hidden');
+    } finally {
+      aiBtn.disabled = false;
+      aiBtn.textContent = original;
+    }
+  }
+
+  // --- Create flow ---------------------------------------------------------
+  async function runCreate(): Promise<void> {
+    if (!image || creating) return;
+    creating = true;
+    createBtn.disabled = true;
+    createBtn.classList.add('opacity-60', 'cursor-default');
+    const original = createBtn.textContent;
+    createBtn.textContent = 'Generating…';
+    try {
+      await options.onCreate(image, opts, baseName);
+      shell.close();
+    } catch (err) {
+      creating = false;
+      createBtn.disabled = false;
+      createBtn.classList.remove('opacity-60', 'cursor-default');
+      createBtn.textContent = original;
+      aiNote.textContent = `Create failed: ${err instanceof Error ? err.message : String(err)}`;
+      aiNote.classList.remove('hidden');
+    }
+  }
+
+  // --- Preview rendering ---------------------------------------------------
+  function schedulePreview(): void {
+    if (previewTimer !== undefined) window.clearTimeout(previewTimer);
+    previewTimer = window.setTimeout(renderPreview, DEBOUNCE_MS);
+  }
+
+  function renderPreview(): void {
+    if (!image) return;
+    const grid = sampleImageToGrid(image, opts);
+    const w = grid.width;
+    const h = grid.height;
+    canvas.width = w;
+    canvas.height = h;
+    // Display size: fit the long edge into PREVIEW_PX, preserving aspect.
+    const scale = PREVIEW_PX / Math.max(w, h);
+    canvas.style.width = `${Math.round(w * scale)}px`;
+    canvas.style.height = `${Math.round(h * scale)}px`;
+
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return;
+    const out = ctx.createImageData(w, h);
+    const data = out.data;
+    const maxH = opts.common.maxHeight > 0 ? opts.common.maxHeight : 1;
+
+    if (opts.mode === 'quantized' && grid.colors) {
+      const colors = grid.colors;
+      for (let i = 0; i < w * h; i++) {
+        const o = i * 4;
+        const c = i * 3;
+        data[o] = colors[c];
+        data[o + 1] = colors[c + 1];
+        data[o + 2] = colors[c + 2];
+        data[o + 3] = 255;
+      }
+    } else {
+      for (let i = 0; i < w * h; i++) {
+        const g = Math.max(0, Math.min(255, Math.round((grid.heights[i] / maxH) * 255)));
+        const o = i * 4;
+        data[o] = g;
+        data[o + 1] = g;
+        data[o + 2] = g;
+        data[o + 3] = 255;
+      }
+    }
+    ctx.putImageData(out, 0, 0);
+
+    const topTris = 2 * Math.max(0, w - 1) * Math.max(0, h - 1);
+    const detail = opts.mode === 'quantized'
+      ? `${opts.quantized.clusters} clusters`
+      : `${opts.luminance.levels} levels`;
+    stat.textContent = `${w}×${h} grid · ${topTris.toLocaleString()} top tris · ${detail}`;
+  }
+
+  // --- UI sync helpers -----------------------------------------------------
+  function syncMode(): void {
+    for (const [id, btn] of modeButtons) {
+      const active = id === opts.mode;
+      btn.classList.toggle('bg-blue-600', active);
+      btn.classList.toggle('text-white', active);
+      btn.classList.toggle('bg-zinc-800', !active && !btn.disabled);
+      btn.classList.toggle('text-zinc-300', !active && !btn.disabled);
+    }
+    // Luminance knobs serve both luminance and ai modes.
+    const showLum = opts.mode === 'luminance' || opts.mode === 'ai';
+    luminanceSection.root.classList.toggle('hidden', !showLum);
+    quantizedSection.root.classList.toggle('hidden', opts.mode !== 'quantized');
+  }
+
+  function syncEnabled(): void {
+    const ready = image !== null;
+    createBtn.disabled = !ready || creating;
+    createBtn.classList.toggle('opacity-60', !ready);
+    createBtn.classList.toggle('cursor-default', !ready);
+    if (aiBtn) aiBtn.disabled = !ready;
+  }
+
+  // Re-read every control's bound value back into its DOM widget (used after
+  // AI assist mutates `opts` out from under the inputs).
+  const controlRefreshers: Array<() => void> = [];
+  function refreshControls(): void {
+    for (const fn of controlRefreshers) fn();
+  }
+
+  // --- Initial paint -------------------------------------------------------
+  syncMode();
+  syncEnabled();
+
+  // Small local control factories. Each registers a refresher so AI-assisted
+  // option changes flow back into the widgets.
+
+  function makeSection(title: string): { root: HTMLDivElement; grid: HTMLDivElement } {
+    const root = document.createElement('div');
+    root.className = 'flex flex-col gap-2';
+    const heading = document.createElement('div');
+    heading.className = 'text-[11px] font-semibold uppercase tracking-wide text-zinc-500';
+    heading.textContent = title;
+    const grid = document.createElement('div');
+    grid.className = 'grid grid-cols-2 gap-x-4 gap-y-2.5';
+    root.append(heading, grid);
+    return { root, grid };
+  }
+
+  function fieldWrap(label: string, unit: string): { wrap: HTMLDivElement; labelRow: HTMLDivElement; valueEl: HTMLSpanElement } {
+    const wrap = document.createElement('div');
+    wrap.className = 'flex flex-col gap-1';
+    const labelRow = document.createElement('div');
+    labelRow.className = 'flex items-baseline justify-between gap-2';
+    const name = document.createElement('label');
+    name.className = 'text-[11px] text-zinc-300';
+    name.textContent = unit ? `${label} (${unit})` : label;
+    const valueEl = document.createElement('span');
+    valueEl.className = 'text-[11px] text-zinc-500 font-mono';
+    labelRow.append(name, valueEl);
+    wrap.appendChild(labelRow);
+    return { wrap, labelRow, valueEl };
+  }
+
+  function numberControl(
+    parent: HTMLElement,
+    label: string,
+    unit: string,
+    get: () => number,
+    set: (v: number) => void,
+    range: { min: number; max: number; step: number },
+  ): void {
+    const { wrap, valueEl } = fieldWrap(label, unit);
+    valueEl.remove();
+    const input = document.createElement('input');
+    input.type = 'number';
+    input.min = String(range.min);
+    input.max = String(range.max);
+    input.step = String(range.step);
+    input.value = String(get());
+    input.className = 'w-full px-2 py-1 rounded bg-zinc-900 border border-zinc-700 text-xs text-zinc-100 focus:outline-none focus:border-blue-500';
+    input.addEventListener('input', () => {
+      const v = Number(input.value);
+      if (!Number.isFinite(v)) return;
+      set(v);
+      schedulePreview();
+    });
+    controlRefreshers.push(() => { input.value = String(get()); });
+    wrap.appendChild(input);
+    parent.appendChild(wrap);
+  }
+
+  function sliderControl(
+    parent: HTMLElement,
+    label: string,
+    unit: string,
+    get: () => number,
+    set: (v: number) => void,
+    range: { min: number; max: number; step: number; int?: boolean },
+  ): void {
+    const { wrap, valueEl } = fieldWrap(label, unit);
+    const fmt = (v: number) => (range.int ? String(Math.round(v)) : v.toFixed(2));
+    valueEl.textContent = fmt(get());
+    const input = document.createElement('input');
+    input.type = 'range';
+    input.min = String(range.min);
+    input.max = String(range.max);
+    input.step = String(range.step);
+    input.value = String(get());
+    input.className = 'w-full accent-blue-500 cursor-pointer';
+    input.addEventListener('input', () => {
+      const v = range.int ? Math.round(Number(input.value)) : Number(input.value);
+      set(v);
+      valueEl.textContent = fmt(v);
+      schedulePreview();
+    });
+    controlRefreshers.push(() => {
+      input.value = String(get());
+      valueEl.textContent = fmt(get());
+    });
+    wrap.appendChild(input);
+    parent.appendChild(wrap);
+  }
+
+  function checkboxControl(
+    parent: HTMLElement,
+    label: string,
+    get: () => boolean,
+    set: (v: boolean) => void,
+  ): void {
+    const row = document.createElement('label');
+    row.className = 'flex items-center gap-2 cursor-pointer self-end h-full';
+    const input = document.createElement('input');
+    input.type = 'checkbox';
+    input.checked = get();
+    input.className = 'w-4 h-4 accent-blue-500 cursor-pointer';
+    input.addEventListener('change', () => {
+      set(input.checked);
+      schedulePreview();
+    });
+    controlRefreshers.push(() => { input.checked = get(); });
+    const text = document.createElement('span');
+    text.className = 'text-[11px] text-zinc-300';
+    text.textContent = label;
+    row.append(input, text);
+    parent.appendChild(row);
+  }
+
+  function selectControl<T extends string>(
+    parent: HTMLElement,
+    label: string,
+    get: () => T,
+    set: (v: T) => void,
+    choices: Array<{ value: T; label: string }>,
+  ): void {
+    const { wrap } = fieldWrap(label, '');
+    const select = document.createElement('select');
+    select.className = 'w-full px-2 py-1 rounded bg-zinc-900 border border-zinc-700 text-xs text-zinc-100 focus:outline-none focus:border-blue-500';
+    for (const c of choices) {
+      const opt = document.createElement('option');
+      opt.value = c.value;
+      opt.textContent = c.label;
+      select.appendChild(opt);
+    }
+    select.value = get();
+    select.addEventListener('change', () => {
+      set(select.value as T);
+      schedulePreview();
+    });
+    controlRefreshers.push(() => { select.value = get(); });
+    wrap.appendChild(select);
+    parent.appendChild(wrap);
+  }
+}
+
+// Deep-merge an AI-returned partial into the working options. Only the three
+// known nested groups are merged; the stray `note` field is ignored here.
+function mergeOptions(target: ReliefOptions, patch: Partial<ReliefOptions> & { note?: string }): void {
+  if (patch.mode) target.mode = patch.mode;
+  if (patch.common) Object.assign(target.common, patch.common);
+  if (patch.luminance) Object.assign(target.luminance, patch.luminance);
+  if (patch.quantized) Object.assign(target.quantized, patch.quantized);
+}

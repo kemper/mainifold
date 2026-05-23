@@ -76,6 +76,14 @@ import { showImportPreview, summarizeSessionImport } from './ui/importPreview';
 import { parseSTL } from './import/parsers/stl';
 import { generateImportCode } from './import/codegen';
 import { setActiveImports, type ImportedMesh } from './import/importedMesh';
+import { generateRelief } from './relief/imageToRelief';
+import { DEFAULT_RELIEF_OPTIONS, type ReliefOptions, type ReliefImportMode, type ReliefCommonOptions, type SeedRegion, type PreviewMode } from './relief/types';
+import { computeReliefTriColors, getSwapGuideFor, setPreviewMode as ctlSetReliefPreviewMode, getPreviewMode as ctlGetReliefPreviewMode, isPreviewActive as isReliefPreviewActive } from './relief/reliefController';
+import { setReliefSettings, getReliefSettings, updateReliefSettings, isReliefSession } from './relief/reliefSettings';
+import { listFilaments, hexToRgb } from './relief/filaments';
+import { meshBounds } from './color/slabPaint';
+import { openReliefImportModal } from './ui/reliefImportModal';
+import { mountReliefStudio, type ReliefStudioHandle } from './ui/reliefStudio';
 import type { BuiltExport } from './export/gltf';
 
 /** Register a freshly-built export blob in the inbox so it shows up in Recent Exports. */
@@ -752,21 +760,170 @@ async function main() {
   // so the imports survive a reload and so future saveVersion calls (which
   // carry forward `importedMeshes` from the prior version) have something to
   // build on.
-  async function importMeshPayload(mesh: ImportedMesh, sessionName: string, opts: { manifold: boolean } = { manifold: true }): Promise<{ sessionId: string }> {
+  async function importMeshPayload(mesh: ImportedMesh, sessionName: string, opts: { manifold: boolean; seedRegions?: SeedRegion[] } = { manifold: true }): Promise<{ sessionId: string }> {
     if (getActiveLanguage() !== 'manifold-js') await switchLanguage('manifold-js');
     const session = await createSession(sessionName, 'manifold-js');
     setActiveImports([mesh]);
     const code = generateImportCode([mesh], { manifold: opts.manifold });
     setValue(code);
     await runCodeSync(code);
+    if (opts.seedRegions && opts.seedRegions.length > 0) {
+      for (const seed of opts.seedRegions) {
+        addRegion(seed.name, seed.color, 'subtree', { kind: 'triangles', ids: seed.triangleIds }, new Set(seed.triangleIds));
+      }
+      if (currentMeshData) updateMesh(applyTriColorsIfVisible(currentMeshData), { skipAutoFrame: true });
+    }
     const thumbnail = await captureThumbnail();
-    const geometryData = getGeometryDataObj();
+    const geometryData = enrichGeometryDataWithColors(getGeometryDataObj());
     const label = opts.manifold ? 'imported' : 'imported (render-only)';
     await saveVersion(code, geometryData, thumbnail, label, undefined, {
       force: true,
       importedMeshes: [mesh],
     });
     return { sessionId: session.id };
+  }
+
+  // === Relief Studio (HueForge-style) ===
+  let reliefStudio: ReliefStudioHandle | null = null;
+
+  function currentLayerHeight(): number {
+    const sid = getState().session?.id ?? null;
+    return sid ? (getReliefSettings(sid)?.layerHeight ?? 0.08) : 0.08;
+  }
+
+  // Single source of truth for recoloring the displayed mesh: relief preview
+  // when active, otherwise the normal painted-region colors.
+  function refreshModelColors(): void {
+    if (!currentMeshData) return;
+    const preview = isReliefPreviewActive()
+      ? computeReliefTriColors(currentMeshData, currentLayerHeight())
+      : null;
+    if (preview) {
+      updateMesh({ ...currentMeshData, triColors: preview }, { skipAutoFrame: true });
+    } else {
+      updateMesh(applyTriColorsIfVisible(currentMeshData), { skipAutoFrame: true });
+    }
+  }
+
+  function showReliefStudio(): void {
+    if (!reliefStudio) return;
+    collapseEditor();
+    reliefStudio.show();
+    reliefStudio.refresh();
+  }
+
+  function toggleReliefStudio(): void {
+    if (!reliefStudio) return;
+    if (reliefStudio.isOpen()) {
+      reliefStudio.hide();
+      expandEditor();
+    } else {
+      showReliefStudio();
+    }
+  }
+
+  async function createReliefFromImageData(image: ImageData, options: ReliefOptions, sourceName: string): Promise<{ sessionId: string }> {
+    const result = generateRelief(image, options);
+    const mesh: ImportedMesh = {
+      id: generateId(),
+      filename: `${sourceName}.relief`,
+      format: 'relief',
+      vertProperties: result.mesh.vertProperties,
+      triVerts: result.mesh.triVerts,
+      numVert: result.mesh.numVert,
+      numTri: result.mesh.numTri,
+      numProp: result.mesh.numProp,
+    };
+    const { sessionId } = await importMeshPayload(mesh, sourceName, {
+      manifold: result.mesh.watertight,
+      seedRegions: result.seedRegions,
+    });
+    setReliefSettings(sessionId, {
+      isRelief: true,
+      layerHeight: options.common.layerHeight,
+      baseThickness: options.common.baseThickness,
+      previewMode: 'flat',
+      options,
+    });
+    showReliefStudio();
+    return { sessionId };
+  }
+
+  // Seed color regions from an imported HueForge's existing Z plateaus so the
+  // user can recolor each printed layer band. Reuses the slab selector.
+  function detectReliefLevels(): void {
+    if (!currentMeshData) return;
+    const bounds = meshBounds(currentMeshData);
+    const span = bounds.max[2] - bounds.min[2];
+    if (span <= 0) return;
+    const lh = currentLayerHeight();
+    const maxBands = 12;
+    const bandCount = Math.max(2, Math.min(maxBands, Math.round(span / Math.max(lh, span / maxBands))));
+    const thickness = span / bandCount;
+    const palette = listFilaments();
+    for (let i = 0; i < bandCount; i++) {
+      const offset = bounds.min[2] + i * thickness;
+      const tris = findSlabTriangles(currentMeshData, [0, 0, 1], offset, thickness);
+      if (tris.size === 0) continue;
+      const fil = palette[i % palette.length];
+      addRegion(`Level ${i + 1}`, hexToRgb(fil.hex), 'slab', { kind: 'slab', normal: [0, 0, 1], offset, thickness }, tris);
+    }
+    refreshModelColors();
+    reliefStudio?.refresh();
+  }
+
+  // Quick offline auto-tune used by the import wizard's "AI assist" button.
+  // (A hosted-LLM suggestion path can replace this; the hook is the same.)
+  function suggestReliefOptions(image: ImageData, opts: ReliefOptions): Partial<ReliefOptions> & { note?: string } {
+    const total = image.width * image.height;
+    if (total === 0) return { note: 'Could not analyze image.' };
+    const d = image.data;
+    const stride = Math.max(1, Math.floor(total / 4096));
+    let n = 0, sumL = 0, sumL2 = 0, sumSat = 0;
+    for (let i = 0; i < total; i += stride) {
+      const p = i * 4;
+      const r = d[p], g = d[p + 1], b = d[p + 2];
+      const l = (0.2126 * r + 0.7152 * g + 0.0722 * b) / 255;
+      sumL += l; sumL2 += l * l;
+      const mx = Math.max(r, g, b), mn = Math.min(r, g, b);
+      sumSat += mx > 0 ? (mx - mn) / mx : 0;
+      n++;
+    }
+    const mean = sumL / n;
+    const contrast = Math.sqrt(Math.max(0, sumL2 / n - mean * mean));
+    const sat = sumSat / n;
+    if (sat > 0.35) {
+      const clusters = Math.max(3, Math.min(8, Math.round(3 + sat * 6)));
+      return { mode: 'quantized', quantized: { ...opts.quantized, clusters }, note: `Colorful image — suggested Color levels with ${clusters} clusters.` };
+    }
+    const levels = Math.max(4, Math.min(24, Math.round(6 + contrast * 40)));
+    const invert = mean > 0.6;
+    return { mode: 'luminance', luminance: { ...opts.luminance, levels, invert }, note: `Tonal image — suggested Luminance relief with ${levels} levels${invert ? ' (inverted)' : ''}.` };
+  }
+
+  function openReliefImportFlow(): void {
+    openReliefImportModal({
+      aiAvailable: true,
+      onAiAssist: async (image, opts) => suggestReliefOptions(image, opts),
+      onCreate: async (image, opts, name) => { await createReliefFromImageData(image, opts, name || 'relief'); },
+    });
+  }
+
+  function dataUrlToImageData(src: string): Promise<ImageData> {
+    return new Promise((resolve, reject) => {
+      const img = new Image();
+      img.onload = () => {
+        const c = document.createElement('canvas');
+        c.width = img.naturalWidth;
+        c.height = img.naturalHeight;
+        const ctx = c.getContext('2d');
+        if (!ctx) { reject(new Error('no canvas 2d context')); return; }
+        ctx.drawImage(img, 0, 0);
+        resolve(ctx.getImageData(0, 0, c.width, c.height));
+      };
+      img.onerror = () => reject(new Error('image decode failed'));
+      img.src = src;
+    });
   }
 
   // Run a JSON session import end-to-end: validate, show the preview modal, import.
@@ -1065,6 +1222,8 @@ async function main() {
     },
     onImportFile: async (file) => { await handleImportFile(file); },
     onImportInboxEntry: handleReimportInboxEntry,
+    onCreateRelief: () => { openReliefImportFlow(); },
+    onToggleReliefStudio: () => { toggleReliefStudio(); },
     onToggleAi: () => { toggleAiPanel(); },
     onToggleDiagnostics: () => { toggleDiagnosticsPanel(); },
     onLanguageSwitch: async (lang: 'manifold-js' | 'scad') => {
@@ -1150,7 +1309,7 @@ async function main() {
   });
 
   // Create layout
-  const { editorContainer, editorErrorPanel, viewportPane, galleryContainer, versionsContainer, imagesContainer, diffContainer, notesContainer, dataContainer, statusBar, clipControls, formatBtn, autoFormatToggle, switchTab, partsRail, togglePartsRail } = createLayout(editorUI);
+  const { editorContainer, editorErrorPanel, viewportPane, galleryContainer, versionsContainer, imagesContainer, diffContainer, notesContainer, dataContainer, statusBar, clipControls, formatBtn, autoFormatToggle, switchTab, partsRail, togglePartsRail, collapseEditor, expandEditor } = createLayout(editorUI);
 
   // Parts rail — IDE-style list of the session's parts.
   createPartList(partsRail, {
@@ -1669,6 +1828,26 @@ async function main() {
   // Init measure tool
   initMeasureTool(getCanvas(), getCamera(), getMeshGroup(), viewportPane);
 
+  reliefStudio = mountReliefStudio(viewportPane, {
+    getLayerHeight: () => currentLayerHeight(),
+    setLayerHeight: (mm: number) => {
+      const sid = getState().session?.id ?? null;
+      if (sid) updateReliefSettings(sid, { layerHeight: mm });
+      refreshModelColors();
+      reliefStudio?.refresh();
+    },
+    getPreviewMode: () => ctlGetReliefPreviewMode(),
+    setPreviewMode: (mode: PreviewMode) => {
+      ctlSetReliefPreviewMode(mode);
+      const sid = getState().session?.id ?? null;
+      if (sid) updateReliefSettings(sid, { previewMode: mode });
+      refreshModelColors();
+    },
+    getSwapGuide: () => (currentMeshData ? getSwapGuideFor(currentMeshData, currentLayerHeight()) : null),
+    detectLevels: () => detectReliefLevels(),
+    onClose: () => { reliefStudio?.hide(); expandEditor(); },
+  });
+
   // Init editor — only auto-run if auto-run is enabled. Auto-runs drive the
   // live preview but defer error surfacing (no panel/markers/log mid-keystroke);
   // the idle + blur hooks surface the held-back error gently once typing settles.
@@ -1873,29 +2052,21 @@ async function main() {
 
   // When a color region is painted, re-render the mesh with colors and sync lock
   setOnRegionPainted(() => {
-    if (currentMeshData) {
-      const colored = applyTriColorsIfVisible(currentMeshData);
-      updateMesh(colored, { skipAutoFrame: true });
-    }
+    refreshModelColors();
     syncLockState();
   });
 
   // Also listen for any region change (e.g. clear) to re-render
   onColorRegionsChange(() => {
     syncLockState();
-    if (!isPaintActive()) return; // only auto-refresh while paint mode is on
-    if (currentMeshData) {
-      const colored = applyTriColorsIfVisible(currentMeshData);
-      updateMesh(colored, { skipAutoFrame: true });
-    }
+    if (!isPaintActive() && !isReliefPreviewActive()) return; // refresh while painting or relief-preview is on
+    refreshModelColors();
   });
 
   // Toggling paint visibility re-renders the viewport so colors
   // disappear/reappear immediately. Exports remain colored regardless.
   onPaintVisibilityChange(() => {
-    if (!currentMeshData) return;
-    const colored = applyTriColorsIfVisible(currentMeshData);
-    updateMesh(colored, { skipAutoFrame: true });
+    refreshModelColors();
   });
 
   editorReady = true;
@@ -1910,6 +2081,7 @@ async function main() {
   // If not on landing/help/catalog/404, load session or default code now
   if (!showLanding && !showHelpPage && !showCatalog && !show404 && engineOk) {
     await syncEditorFromURL();
+    if (isReliefSession(getState().session?.id)) showReliefStudio();
   }
 
   // Keep this tab's session state in sync with peer tabs that mutate the same
@@ -2624,6 +2796,38 @@ async function main() {
      *  strip; any other string is also valid. Multiple items may share a label.
      *  Replaces all currently attached images. If a session is active, also persists
      *  to IndexedDB. Returns the canonical list with assigned ids. */
+    /** Generate a HueForge-style relief Part from an image (data: or http(s) URL). */
+    async importImageAsRelief(args: { src: string; mode?: ReliefImportMode; options?: Partial<ReliefCommonOptions> }): Promise<{ sessionId: string } | { error: string }> {
+      if (!args || typeof args !== 'object') return { error: 'importImageAsRelief: expected an object { src, mode?, options? }' };
+      const src = (args as { src?: unknown }).src;
+      if (typeof src !== 'string' || src.length === 0) return { error: 'importImageAsRelief: src must be a non-empty data: or http(s) URL string' };
+      try {
+        const image = await dataUrlToImageData(src);
+        const opts: ReliefOptions = structuredClone(DEFAULT_RELIEF_OPTIONS);
+        const mode = (args as { mode?: unknown }).mode;
+        if (mode === 'luminance' || mode === 'quantized' || mode === 'ai') opts.mode = mode;
+        const o = (args as { options?: unknown }).options;
+        if (o && typeof o === 'object') opts.common = { ...opts.common, ...(o as Partial<ReliefCommonOptions>) };
+        return await createReliefFromImageData(image, opts, 'relief');
+      } catch (e) {
+        return { error: `importImageAsRelief failed: ${e instanceof Error ? e.message : String(e)}` };
+      }
+    },
+    /** The advisory single-nozzle filament-swap guide for the current relief. */
+    getReliefSwapGuide(): unknown {
+      if (!currentMeshData) return { error: 'getReliefSwapGuide: no geometry loaded — create or load a relief first.' };
+      return getSwapGuideFor(currentMeshData, currentLayerHeight());
+    },
+    /** Switch the relief optical preview mode: 'flat' | 'ams' | 'single-nozzle'. */
+    setReliefPreviewMode(mode: PreviewMode): { ok: true } | { error: string } {
+      if (mode !== 'flat' && mode !== 'ams' && mode !== 'single-nozzle') return { error: "setReliefPreviewMode: mode must be 'flat', 'ams', or 'single-nozzle'" };
+      ctlSetReliefPreviewMode(mode);
+      const sid = getState().session?.id ?? null;
+      if (sid) updateReliefSettings(sid, { previewMode: mode });
+      refreshModelColors();
+      reliefStudio?.refresh();
+      return { ok: true };
+    },
     setImages(images: Array<{ src: string; id?: string; label?: string }>): AttachedImage[] {
       const arr = assertArray(images, 'setImages(images)') as Array<Record<string, unknown>>;
       const items: AttachedImage[] = [];
