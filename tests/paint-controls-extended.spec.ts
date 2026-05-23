@@ -29,7 +29,7 @@ test.describe('extended paint controls', () => {
     // Brush is the default tool, so its controls are visible immediately.
     const brushHelp = page.locator('#paint-picker-panel >> text=Single triangle');
     await expect(brushHelp).toBeVisible();
-    const numberInput = page.locator('#paint-picker-panel input[type="number"][title*="mesh units"]');
+    const numberInput = page.locator('#paint-picker-panel input[type="number"][title*="Brush radius"]');
     await expect(numberInput).toBeVisible();
     // Default brush size is 1mm.
     await expect(numberInput).toHaveValue('1.0');
