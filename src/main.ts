@@ -1232,9 +1232,13 @@ async function main() {
   // geometry into the current one (or into a new part), per the user's pick.
   async function mergePartsFlow(): Promise<void> {
     if (isReadOnlyViewer()) return;
+    if (!getState().session || !getState().currentPart) return;
+    // Precreate a version for the current part if it has unsaved work, so the
+    // user never has to hit Save first before merging.
+    await preserveCurrentEditsIfNeeded();
     const state = getState();
-    if (!state.session || !state.currentPart) return;
     const currentPart = state.currentPart;
+    if (!currentPart) return;
     const others = state.parts.filter(p => p.id !== currentPart.id);
     if (others.length === 0) return;
     const choice = await showMergePartsModal({
