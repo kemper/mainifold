@@ -6,6 +6,8 @@
 // shapes/operations accumulate; OpenSCAD just appends statements (all
 // top-level geometry renders) and wraps statements for operations.
 
+import { fmt, type Vec3 } from './codegen';
+
 /** True for a `return` expression we're willing to overwrite automatically:
  *  a bare identifier (a managed part) or a single constructor call. A more
  *  complex hand-written return is preserved instead of being clobbered. */
@@ -123,4 +125,63 @@ export function replaceScadRanges(
   const headSep = head.length > 0 && !head.endsWith('\n') ? '\n' : '';
   const tailSep = tail.length > 0 ? '\n' : '';
   return `${head}${headSep}${block}${tailSep}${tail}`;
+}
+
+// ---------------------------------------------------------------------------
+// Moving a part (drag-gizmo writeback)
+// ---------------------------------------------------------------------------
+
+const NUM = '-?\\d*\\.?\\d+(?:[eE][+-]?\\d+)?';
+const TRIPLE = `\\[\\s*(${NUM})\\s*,\\s*(${NUM})\\s*,\\s*(${NUM})\\s*\\]`;
+
+function escapeRegExp(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+/** Add `delta` to the `[x, y, z]` vector literal inside a translate call,
+ *  preserving the surrounding text (`.translate([…])` or `translate([…])`). */
+function addDeltaToTranslate(call: string, delta: Vec3): string {
+  const re = new RegExp(TRIPLE);
+  return call.replace(re, (_full, a: string, b: string, c: string) =>
+    `[${fmt(parseFloat(a) + delta[0])}, ${fmt(parseFloat(b) + delta[1])}, ${fmt(parseFloat(c) + delta[2])}]`,
+  );
+}
+
+/** Shift a manifold-js part by `delta`: bump the trailing `.translate([…])` on
+ *  its declaration, or append one if it has none. Returns the code unchanged
+ *  when no `const <name> = …;` is found. */
+export function setPartTranslateDeltaJs(code: string, name: string, delta: Vec3): string {
+  const declRe = new RegExp(`(const\\s+${escapeRegExp(name)}\\s*=\\s*)([\\s\\S]*?)(;)`);
+  const m = declRe.exec(code);
+  if (!m) return code;
+  let rhs = m[2];
+
+  const transRe = new RegExp(`\\.translate\\(${TRIPLE}\\)`, 'g');
+  const matches = [...rhs.matchAll(transRe)];
+  if (matches.length > 0) {
+    const last = matches[matches.length - 1];
+    const updated = addDeltaToTranslate(last[0], delta);
+    rhs = rhs.slice(0, last.index!) + updated + rhs.slice(last.index! + last[0].length);
+  } else {
+    rhs = `${rhs}.translate([${fmt(delta[0])}, ${fmt(delta[1])}, ${fmt(delta[2])}])`;
+  }
+  return code.slice(0, m.index) + m[1] + rhs + m[3] + code.slice(m.index + m[0].length);
+}
+
+/** Shift an OpenSCAD part (located by its `// part: <name>` tag) by `delta`:
+ *  bump a leading `translate([…])`, or prepend one. */
+export function setPartTranslateDeltaScad(
+  code: string,
+  statement: { from: number; to: number },
+  delta: Vec3,
+): string {
+  const stmt = code.slice(statement.from, statement.to);
+  const leadRe = new RegExp(`^translate\\(${TRIPLE}\\)`);
+  let updated: string;
+  if (leadRe.test(stmt)) {
+    updated = stmt.replace(leadRe, (mm) => addDeltaToTranslate(mm, delta));
+  } else {
+    updated = `translate([${fmt(delta[0])}, ${fmt(delta[1])}, ${fmt(delta[2])}]) ${stmt}`;
+  }
+  return code.slice(0, statement.from) + updated + code.slice(statement.to);
 }

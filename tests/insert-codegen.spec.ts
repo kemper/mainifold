@@ -22,8 +22,10 @@ import {
   isSimpleReturnExpr,
   appendScadStatement,
   replaceScadRanges,
+  setPartTranslateDeltaJs,
+  setPartTranslateDeltaScad,
 } from '../src/insert/controller';
-import { primitiveEntry, unionBoxes, pickPart, type RegistryEntry } from '../src/insert/spatial';
+import { primitiveEntry, unionBoxes, pickPart, translateEntry, type RegistryEntry } from '../src/insert/spatial';
 
 test.describe('fmt', () => {
   test('trims trailing zeros and normalizes -0', () => {
@@ -304,6 +306,55 @@ test.describe('spatial — 3D pick math', () => {
     const u = unionBoxes([a, b]);
     expect(u?.box.min).toEqual([-1, -1, -1]);
     expect(u?.box.max).toEqual([12, 12, 12]);
+  });
+});
+
+test.describe('controller — move part (translate delta)', () => {
+  test('JS: bumps an existing trailing translate', () => {
+    const code = 'const { Manifold } = api;\nconst box = Manifold.cube([10, 10, 10], true).translate([5, 0, 0]);\nreturn box;';
+    const out = setPartTranslateDeltaJs(code, 'box', [1, 2, 3]);
+    expect(out).toContain('.translate([6, 2, 3])');
+  });
+
+  test('JS: appends a translate when the part has none', () => {
+    const code = 'const { Manifold } = api;\nconst ball = Manifold.sphere(6);\nreturn ball;';
+    const out = setPartTranslateDeltaJs(code, 'ball', [1, 0, -2]);
+    expect(out).toContain('const ball = Manifold.sphere(6).translate([1, 0, -2]);');
+  });
+
+  test('JS: can move an operation result', () => {
+    const code = 'const cut = box.subtract(ball);\nreturn cut;';
+    const out = setPartTranslateDeltaJs(code, 'cut', [0, 0, 5]);
+    expect(out).toContain('const cut = box.subtract(ball).translate([0, 0, 5]);');
+  });
+
+  test('JS: unknown part name is a no-op', () => {
+    const code = 'const a = Manifold.sphere(1);\nreturn a;';
+    expect(setPartTranslateDeltaJs(code, 'zzz', [1, 1, 1])).toBe(code);
+  });
+
+  test('SCAD: bumps a leading translate', () => {
+    const code = 'translate([5, 0, 0]) cube([1,1,1]); // part: box1';
+    const range = { from: 0, to: code.length };
+    const out = setPartTranslateDeltaScad(code, range, [0, 0, 2]);
+    expect(out).toBe('translate([5, 0, 2]) cube([1,1,1]); // part: box1');
+  });
+
+  test('SCAD: prepends a translate when the statement has none', () => {
+    const code = 'cube([1,1,1]); // part: box1';
+    const range = { from: 0, to: code.length };
+    const out = setPartTranslateDeltaScad(code, range, [1, 0, 0]);
+    expect(out).toBe('translate([1, 0, 0]) cube([1,1,1]); // part: box1');
+  });
+});
+
+test.describe('spatial — translateEntry', () => {
+  test('shifts center and bbox by the delta', () => {
+    const e = primitiveEntry({ kind: 'cube', name: 'b', size: [2, 2, 2], center: true });
+    const moved = translateEntry(e, [10, 0, -5]);
+    expect(moved.center).toEqual([10, 0, -5]);
+    expect(moved.box.min).toEqual([9, -1, -6]);
+    expect(moved.box.max).toEqual([11, 1, -4]);
   });
 });
 

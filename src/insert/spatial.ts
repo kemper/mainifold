@@ -62,6 +62,15 @@ export function primitiveEntry(spec: PrimitiveSpec): RegistryEntry {
   return { box: { min, max }, center: centerOf(min, max) };
 }
 
+/** Shift an entry's bbox + center by `delta` (used after a part is moved so
+ *  subsequent picks/operations track the new position). */
+export function translateEntry(entry: RegistryEntry, delta: Vec3): RegistryEntry {
+  return {
+    box: { min: add(entry.box.min, delta), max: add(entry.box.max, delta) },
+    center: add(entry.center, delta),
+  };
+}
+
 /** Union the bounding boxes of several entries (the result of an operation is
  *  pickable as the union of its operands). */
 export function unionBoxes(entries: RegistryEntry[]): RegistryEntry | null {

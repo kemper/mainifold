@@ -145,4 +145,26 @@ test.describe('Insert palette', () => {
     await page.getByRole('button', { name: 'Done', exact: true }).click();
     await expect(page.getByText('Intersect shapes')).toBeVisible();
   });
+
+  test('move mode: select a centered part and run the gizmo session', async ({ page }) => {
+    await gotoEditor(page);
+    await page.locator('#btn-insert').click();
+
+    // Insert a centered cube so the registry has a pickable part at the origin.
+    await page.locator(palette).getByRole('button', { name: 'Cube' }).click();
+    await page.getByRole('button', { name: 'Insert', exact: true }).click();
+
+    // Enter move mode (closes the palette, shows the instruction bar).
+    await page.locator(palette).getByRole('button', { name: 'Move' }).click();
+    await expect(page.getByText(/Click a shape to select/i)).toBeVisible();
+
+    // Click the framed model at canvas-center to select it — this constructs the
+    // TransformControls gizmo (verifies the path doesn't throw headless).
+    await page.locator('canvas').first().click();
+    await expect(page.getByText(/Moving/i)).toBeVisible({ timeout: 5000 });
+
+    // Exit cleanly.
+    await page.getByRole('button', { name: 'Done', exact: true }).click();
+    await expect(page.getByText(/Click a shape to select/i)).toBeHidden();
+  });
 });

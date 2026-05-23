@@ -12,8 +12,10 @@
 // module is the DOM/orchestration layer.
 
 import * as THREE from 'three';
+import { TransformControls } from 'three/addons/controls/TransformControls.js';
 import { createModalShell } from './modalShell';
 import { BUTTON_PRIMARY, BUTTON_CANCEL } from './styleConstants';
+import { getScene, setGizmoLock } from '../renderer/viewport';
 import {
   emitPrimitive,
   emitOperationJs,
@@ -28,8 +30,8 @@ import {
   type InsertLanguage,
   type Vec3,
 } from '../insert/codegen';
-import { addJsDeclaration, appendScadStatement, replaceScadRanges } from '../insert/controller';
-import { primitiveEntry, unionBoxes, pickPart, type RegistryEntry } from '../insert/spatial';
+import { addJsDeclaration, appendScadStatement, replaceScadRanges, setPartTranslateDeltaJs, setPartTranslateDeltaScad } from '../insert/controller';
+import { primitiveEntry, unionBoxes, pickPart, translateEntry, type RegistryEntry } from '../insert/spatial';
 import type { MeshData } from '../geometry/types';
 
 export interface InsertPaletteCallbacks {
@@ -167,6 +169,14 @@ function buildPanel(): HTMLElement {
     );
   });
   p.appendChild(opRow);
+
+  p.appendChild(sectionLabel('Edit'));
+  const editRow = document.createElement('div');
+  editRow.className = 'flex flex-wrap gap-1.5';
+  editRow.appendChild(
+    paletteButton('↔ Move', 'Select a shape in the 3D view and drag it to reposition it', startMoveSession),
+  );
+  p.appendChild(editRow);
 
   const hint = document.createElement('div');
   hint.className = 'text-[10px] text-zinc-500 leading-tight mt-2';
@@ -667,6 +677,195 @@ function partStatementFor(name: string): string | undefined {
 function partRangeFor(name: string): { from: number; to: number } | undefined {
   if (!cb || cb.getLanguage() !== 'scad') return undefined;
   return scanParts(cb.getCode(), 'scad').find(p => p.name === name)?.range;
+}
+
+// ---------------------------------------------------------------------------
+// Move mode (drag-gizmo reposition)
+// ---------------------------------------------------------------------------
+
+let moveCleanup: (() => void) | null = null;
+
+/** Enter "move" mode: click a registered part in the 3D view to select it, then
+ *  drag the translate gizmo to reposition it. Each drag rewrites that part's
+ *  `translate([…])` in the code by the drag delta and re-renders. */
+function startMoveSession(): void {
+  if (!cb) return;
+  if (moveCleanup) { moveCleanup(); }
+  if (cb.isLocked()) {
+    cb.showToast('Editor is locked by color regions — unlock to edit code.', { variant: 'warn' });
+    return;
+  }
+  const canvas = cb.getCanvas();
+  const camera = cb.getCamera();
+  if (!canvas || !camera || !cb.getMeshData()) {
+    cb.showToast('No model to move. Run your code first.', { variant: 'warn' });
+    return;
+  }
+  if (registry.size === 0) {
+    cb.showToast('Nothing is registered to move. Insert shapes via the palette first.', { variant: 'warn' });
+    return;
+  }
+
+  cb.onOpen?.(); // close paint/simplify so their gizmos don't fight ours
+  closeInsertPalette();
+
+  const scene = getScene();
+  let selectedName: string | null = null;
+  let baseline: THREE.Vector3 | null = null;
+  let proxy: THREE.Object3D | null = null;
+  let gizmo: TransformControls | null = null;
+  let helper: THREE.Object3D | null = null;
+
+  const bar = document.createElement('div');
+  bar.className =
+    'fixed left-1/2 -translate-x-1/2 bottom-6 z-50 flex items-center gap-2 px-3 py-2 rounded-lg bg-zinc-800/95 border border-zinc-600 shadow-xl text-xs text-zinc-100';
+  const msg = document.createElement('span');
+  msg.textContent = 'Click a shape to select, then drag the gizmo to move it.';
+  bar.appendChild(msg);
+  const doneBtn = document.createElement('button');
+  doneBtn.className = BUTTON_PRIMARY + ' !py-1';
+  doneBtn.textContent = 'Done';
+  bar.appendChild(doneBtn);
+  document.body.appendChild(bar);
+
+  const clearSelection = (): void => {
+    if (gizmo) { gizmo.detach(); gizmo.dispose(); gizmo = null; }
+    if (helper) { helper.parent?.remove(helper); helper = null; }
+    if (proxy) {
+      for (const child of [...proxy.children]) {
+        const ls = child as THREE.LineSegments;
+        ls.geometry?.dispose?.();
+        (ls.material as THREE.Material)?.dispose?.();
+      }
+      proxy.parent?.remove(proxy);
+      proxy = null;
+    }
+    selectedName = null;
+    baseline = null;
+    setGizmoLock(false);
+  };
+
+  const commitMove = (): void => {
+    if (!cb || !proxy || !baseline || !selectedName) return;
+    const delta: Vec3 = [
+      proxy.position.x - baseline.x,
+      proxy.position.y - baseline.y,
+      proxy.position.z - baseline.z,
+    ];
+    if (Math.abs(delta[0]) < 1e-5 && Math.abs(delta[1]) < 1e-5 && Math.abs(delta[2]) < 1e-5) return;
+
+    const lang = cb.getLanguage();
+    let newCode: string;
+    if (lang === 'scad') {
+      const part = scanParts(cb.getCode(), 'scad').find(p => p.name === selectedName);
+      if (!part?.range) {
+        cb.showToast('Could not locate that part in the SCAD code.', { variant: 'warn' });
+        return;
+      }
+      newCode = setPartTranslateDeltaScad(cb.getCode(), part.range, delta);
+    } else {
+      newCode = setPartTranslateDeltaJs(cb.getCode(), selectedName, delta);
+    }
+    cb.setCode(newCode);
+    cb.run(newCode);
+
+    const entry = registry.get(selectedName);
+    if (entry) registry.set(selectedName, translateEntry(entry, delta));
+    baseline = proxy.position.clone();
+  };
+
+  const selectPart = (name: string): void => {
+    clearSelection();
+    const entry = registry.get(name);
+    if (!entry) return;
+    selectedName = name;
+
+    proxy = new THREE.Object3D();
+    proxy.position.set(entry.center[0], entry.center[1], entry.center[2]);
+    scene.add(proxy);
+    baseline = proxy.position.clone();
+
+    const size: Vec3 = [
+      Math.max(0.01, entry.box.max[0] - entry.box.min[0]),
+      Math.max(0.01, entry.box.max[1] - entry.box.min[1]),
+      Math.max(0.01, entry.box.max[2] - entry.box.min[2]),
+    ];
+    const boxGeo = new THREE.BoxGeometry(size[0], size[1], size[2]);
+    const edges = new THREE.EdgesGeometry(boxGeo);
+    boxGeo.dispose();
+    const highlight = new THREE.LineSegments(
+      edges,
+      new THREE.LineBasicMaterial({ color: 0x60a5fa, transparent: true, opacity: 0.9, depthTest: false }),
+    );
+    highlight.renderOrder = 999;
+    proxy.add(highlight);
+
+    gizmo = new TransformControls(camera, canvas);
+    gizmo.setMode('translate');
+    gizmo.setSize(0.9);
+    gizmo.attach(proxy);
+    helper = gizmo.getHelper();
+    scene.add(helper);
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    gizmo.addEventListener('dragging-changed', (e: any) => {
+      setGizmoLock(e.value === true || gizmo!.axis !== null);
+      if (e.value === false) commitMove();
+    });
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    gizmo.addEventListener('axis-changed', (e: any) => {
+      setGizmoLock(e.value !== null || gizmo!.dragging);
+    });
+
+    msg.textContent = `Moving "${name}" — drag the gizmo. Click another shape to switch.`;
+    cb!.showToast(`Selected "${name}".`, { variant: 'neutral' });
+  };
+
+  const raycastPart = (clientX: number, clientY: number): string | null => {
+    const mesh = cb!.getMeshData();
+    if (!mesh) return null;
+    const rect = canvas.getBoundingClientRect();
+    const ndcX = ((clientX - rect.left) / rect.width) * 2 - 1;
+    const ndcY = -((clientY - rect.top) / rect.height) * 2 + 1;
+    const geom = meshDataToGeometry(mesh);
+    const tmp = new THREE.Mesh(geom, new THREE.MeshBasicMaterial({ side: THREE.DoubleSide }));
+    const ray = new THREE.Raycaster();
+    ray.setFromCamera(new THREE.Vector2(ndcX, ndcY), camera);
+    const hits = ray.intersectObject(tmp);
+    geom.dispose();
+    (tmp.material as THREE.Material).dispose();
+    if (hits.length === 0) return null;
+    const p: Vec3 = [hits[0].point.x, hits[0].point.y, hits[0].point.z];
+    const valid = new Set(scanParts(cb!.getCode(), cb!.getLanguage()).map(pp => pp.name));
+    return pickPart(p, registry, valid);
+  };
+
+  let downX = 0;
+  let downY = 0;
+  const onDown = (e: PointerEvent): void => { downX = e.clientX; downY = e.clientY; };
+  const onUp = (e: PointerEvent): void => {
+    if (gizmo && (gizmo.dragging || gizmo.axis !== null)) return; // interacting with the gizmo
+    if (Math.abs(e.clientX - downX) > 4 || Math.abs(e.clientY - downY) > 4) return; // orbit drag
+    const name = raycastPart(e.clientX, e.clientY);
+    if (name) selectPart(name);
+  };
+  canvas.addEventListener('pointerdown', onDown);
+  canvas.addEventListener('pointerup', onUp);
+
+  const endSession = (): void => {
+    clearSelection();
+    canvas.removeEventListener('pointerdown', onDown);
+    canvas.removeEventListener('pointerup', onUp);
+    document.removeEventListener('keydown', onKey);
+    bar.remove();
+    moveCleanup = null;
+  };
+
+  const onKey = (e: KeyboardEvent): void => { if (e.key === 'Escape') endSession(); };
+  document.addEventListener('keydown', onKey);
+
+  doneBtn.addEventListener('click', endSession);
+  moveCleanup = endSession;
 }
 
 function meshDataToGeometry(mesh: MeshData): THREE.BufferGeometry {
