@@ -32,12 +32,12 @@ test.describe('smooth paintbrush', () => {
 
     // Brush is the default tool, so the smooth toggle shows immediately and
     // smoothing is on by default.
-    const smoothBtn = page.locator('#paint-picker-panel button:has-text("Smooth edges")');
+    const smoothBtn = page.locator('#brush-smooth-toggle');
     await expect(smoothBtn).toBeVisible();
     await expect(smoothBtn).toContainText('On');
 
     // The detail control is a typeable slider (range 2..1024), visible while on.
-    const detailSlider = page.locator('#paint-picker-panel input[type="range"][title*="Smooth-edge detail"]');
+    const detailSlider = page.locator('#brush-smooth-detail');
     await expect(detailSlider).toBeVisible();
     await expect(detailSlider).toHaveAttribute('max', '1024');
     await expect(detailSlider).toHaveAttribute('min', '2');

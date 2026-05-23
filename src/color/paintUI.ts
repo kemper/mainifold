@@ -26,6 +26,12 @@ import {
   getAirbrushStrength,
   setAirbrushSoftness,
   getAirbrushSoftness,
+  setAirbrushSmooth,
+  isAirbrushSmooth,
+  setAirbrushSmoothDivisor,
+  getAirbrushSmoothDivisor,
+  AIRBRUSH_SMOOTH_DIVISOR_MIN,
+  AIRBRUSH_SMOOTH_DIVISOR_MAX,
   setSlabAxis,
   getSlabAxis,
   previewTriangles,
@@ -514,73 +520,18 @@ function createBrushControls(): HTMLElement {
 
   // Smooth edges — subdivide the mesh under the brush so the painted region's
   // outline is rounded instead of following the existing tessellation.
-  const smoothLabel = document.createElement('div');
-  smoothLabel.className = 'text-[10px] text-zinc-500 uppercase tracking-wider mb-1 mt-2 font-medium';
-  smoothLabel.textContent = 'Edge smoothing';
-
-  const smoothToggle = document.createElement('button');
-  smoothToggle.title = 'Subdivide the mesh under the brush so the painted edge is smooth/rounded instead of following triangle boundaries. Adds triangles near the stroke and requires a brush size above 0.';
-
-  // Detail slider: brush radius ÷ value = target triangle edge near the stroke.
-  // Higher = smoother edge + more triangles. Typeable for precision.
-  const fineRow = document.createElement('div');
-  fineRow.className = 'flex items-center gap-2 mt-1';
-
-  const detailSlider = document.createElement('input');
-  detailSlider.type = 'range';
-  detailSlider.min = String(SMOOTH_DIVISOR_MIN);
-  detailSlider.max = String(SMOOTH_DIVISOR_MAX);
-  detailSlider.step = '1';
-  detailSlider.value = String(getBrushSmoothDivisor());
-  detailSlider.className = 'flex-1 accent-blue-500 min-w-0';
-  detailSlider.title = 'Smooth-edge detail: brush radius ÷ this = target triangle edge. Higher = smoother edge, more triangles.';
-
-  const detailInput = document.createElement('input');
-  detailInput.type = 'number';
-  detailInput.min = String(SMOOTH_DIVISOR_MIN);
-  detailInput.max = String(SMOOTH_DIVISOR_MAX);
-  detailInput.step = '1';
-  detailInput.value = String(getBrushSmoothDivisor());
-  detailInput.className = 'w-16 px-1 py-0.5 text-[11px] bg-zinc-900/70 border border-zinc-600/60 rounded text-zinc-200 text-right tabular-nums';
-  detailInput.title = `Detail (brush radius ÷ this = target edge). ${SMOOTH_DIVISOR_MIN}–${SMOOTH_DIVISOR_MAX}.`;
-
-  detailSlider.addEventListener('input', () => {
-    setBrushSmoothDivisor(parseInt(detailSlider.value, 10));
-    detailInput.value = String(getBrushSmoothDivisor());
-  });
-  const applyDetail = (): void => {
-    const raw = parseInt(detailInput.value, 10);
-    if (!Number.isFinite(raw)) { detailInput.value = String(getBrushSmoothDivisor()); return; }
-    setBrushSmoothDivisor(raw);
-    detailSlider.value = String(getBrushSmoothDivisor());
-    detailInput.value = String(getBrushSmoothDivisor());
-  };
-  detailInput.addEventListener('change', applyDetail);
-  detailInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') { applyDetail(); detailInput.blur(); } });
-
-  fineRow.appendChild(detailSlider);
-  fineRow.appendChild(detailInput);
-
-  const smoothHelp = document.createElement('div');
-  smoothHelp.className = 'text-[10px] text-zinc-500 mt-1';
-  smoothHelp.textContent = 'Smooth-edge detail · higher → smoother, more triangles';
-
-  const syncSmoothToggle = (): void => {
-    const on = isBrushSmooth();
-    smoothToggle.className = on
-      ? 'w-full px-2 py-1 rounded text-[10px] bg-blue-500/30 text-blue-200 border border-blue-500/50 transition-colors text-center'
-      : 'w-full px-2 py-1 rounded text-[10px] bg-zinc-700/40 text-zinc-300 hover:bg-zinc-600/60 border border-transparent transition-colors text-center';
-    smoothToggle.textContent = on ? '◉ Smooth edges: On' : '○ Smooth edges: Off';
-    fineRow.classList.toggle('hidden', !on);
-    smoothHelp.classList.toggle('hidden', !on);
-  };
-  smoothToggle.addEventListener('click', () => { setBrushSmooth(!isBrushSmooth()); syncSmoothToggle(); });
-
-  wrap.appendChild(smoothLabel);
-  wrap.appendChild(smoothToggle);
-  wrap.appendChild(fineRow);
-  wrap.appendChild(smoothHelp);
-  syncSmoothToggle();
+  wrap.appendChild(makeSmoothEdgeControl({
+    isOn: isBrushSmooth,
+    setOn: setBrushSmooth,
+    getDivisor: getBrushSmoothDivisor,
+    setDivisor: setBrushSmoothDivisor,
+    min: SMOOTH_DIVISOR_MIN,
+    max: SMOOTH_DIVISOR_MAX,
+    radiusNoun: 'brush radius',
+    toggleTitle: 'Subdivide the mesh under the brush so the painted edge is smooth/rounded instead of following triangle boundaries. Adds triangles near the stroke and requires a brush size above 0.',
+    toggleId: 'brush-smooth-toggle',
+    detailId: 'brush-smooth-detail',
+  }));
 
   return wrap;
 }
@@ -642,6 +593,21 @@ function createAirbrushControls(): HTMLElement {
   // Strength (core density) and Softness (feathered-rim width) as 0–100% sliders.
   wrap.appendChild(makePercentControl('Strength', 'How densely paint lands in the core (lower = a lighter dusting)', getAirbrushStrength, setAirbrushStrength, 5));
   wrap.appendChild(makePercentControl('Softness', 'Width of the feathered, fading rim (0 = hard edge)', getAirbrushSoftness, setAirbrushSoftness, 0));
+
+  // Smooth edges — refine the spray footprint finer so the dithered rim reads as
+  // a smooth gradient instead of chunky speckle (Softness still sets its width).
+  wrap.appendChild(makeSmoothEdgeControl({
+    isOn: isAirbrushSmooth,
+    setOn: setAirbrushSmooth,
+    getDivisor: getAirbrushSmoothDivisor,
+    setDivisor: setAirbrushSmoothDivisor,
+    min: AIRBRUSH_SMOOTH_DIVISOR_MIN,
+    max: AIRBRUSH_SMOOTH_DIVISOR_MAX,
+    radiusNoun: 'airbrush radius',
+    toggleTitle: 'Refine the mesh under the airbrush so its speckled edge reads as a smooth gradient instead of chunky dots. Adds triangles across the spray footprint; Softness still controls how wide the fade is.',
+    toggleId: 'airbrush-smooth-toggle',
+    detailId: 'airbrush-smooth-detail',
+  }));
 
   const help = document.createElement('div');
   help.className = 'text-[10px] text-zinc-500 mt-1';
@@ -712,6 +678,97 @@ function makePercentControl(
   row.appendChild(input);
   row.appendChild(unit);
   wrap.appendChild(row);
+  return wrap;
+}
+
+/** A "Smooth edges" toggle + detail (radius ÷ divisor) slider, shared by the
+ *  brush and airbrush. The toggle flips a boolean and reveals the detail row;
+ *  the slider/number set the subdivision divisor (higher = smoother + more
+ *  triangles). Reads back through the getter so a clamped value shows in both. */
+function makeSmoothEdgeControl(opts: {
+  isOn: () => boolean;
+  setOn: (on: boolean) => void;
+  getDivisor: () => number;
+  setDivisor: (n: number) => void;
+  min: number;
+  max: number;
+  radiusNoun: string;
+  toggleTitle: string;
+  toggleId: string;
+  detailId: string;
+}): HTMLElement {
+  const wrap = document.createElement('div');
+
+  const smoothLabel = document.createElement('div');
+  smoothLabel.className = 'text-[10px] text-zinc-500 uppercase tracking-wider mb-1 mt-2 font-medium';
+  smoothLabel.textContent = 'Edge smoothing';
+
+  const smoothToggle = document.createElement('button');
+  smoothToggle.id = opts.toggleId;
+  smoothToggle.title = opts.toggleTitle;
+
+  // Detail slider: radius ÷ value = target triangle edge near the stroke.
+  // Higher = smoother edge + more triangles. Typeable for precision.
+  const fineRow = document.createElement('div');
+  fineRow.className = 'flex items-center gap-2 mt-1';
+
+  const detailSlider = document.createElement('input');
+  detailSlider.id = opts.detailId;
+  detailSlider.type = 'range';
+  detailSlider.min = String(opts.min);
+  detailSlider.max = String(opts.max);
+  detailSlider.step = '1';
+  detailSlider.value = String(opts.getDivisor());
+  detailSlider.className = 'flex-1 accent-blue-500 min-w-0';
+  detailSlider.title = `Smooth-edge detail: ${opts.radiusNoun} ÷ this = target triangle edge. Higher = smoother edge, more triangles.`;
+
+  const detailInput = document.createElement('input');
+  detailInput.type = 'number';
+  detailInput.min = String(opts.min);
+  detailInput.max = String(opts.max);
+  detailInput.step = '1';
+  detailInput.value = String(opts.getDivisor());
+  detailInput.className = 'w-16 px-1 py-0.5 text-[11px] bg-zinc-900/70 border border-zinc-600/60 rounded text-zinc-200 text-right tabular-nums';
+  detailInput.title = `Detail (${opts.radiusNoun} ÷ this = target edge). ${opts.min}–${opts.max}.`;
+
+  detailSlider.addEventListener('input', () => {
+    opts.setDivisor(parseInt(detailSlider.value, 10));
+    detailInput.value = String(opts.getDivisor());
+  });
+  const applyDetail = (): void => {
+    const raw = parseInt(detailInput.value, 10);
+    if (!Number.isFinite(raw)) { detailInput.value = String(opts.getDivisor()); return; }
+    opts.setDivisor(raw);
+    detailSlider.value = String(opts.getDivisor());
+    detailInput.value = String(opts.getDivisor());
+  };
+  detailInput.addEventListener('change', applyDetail);
+  detailInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') { applyDetail(); detailInput.blur(); } });
+
+  fineRow.appendChild(detailSlider);
+  fineRow.appendChild(detailInput);
+
+  const smoothHelp = document.createElement('div');
+  smoothHelp.className = 'text-[10px] text-zinc-500 mt-1';
+  smoothHelp.textContent = 'Smooth-edge detail · higher → smoother, more triangles';
+
+  const syncSmoothToggle = (): void => {
+    const on = opts.isOn();
+    smoothToggle.className = on
+      ? 'w-full px-2 py-1 rounded text-[10px] bg-blue-500/30 text-blue-200 border border-blue-500/50 transition-colors text-center'
+      : 'w-full px-2 py-1 rounded text-[10px] bg-zinc-700/40 text-zinc-300 hover:bg-zinc-600/60 border border-transparent transition-colors text-center';
+    smoothToggle.textContent = on ? '◉ Smooth edges: On' : '○ Smooth edges: Off';
+    fineRow.classList.toggle('hidden', !on);
+    smoothHelp.classList.toggle('hidden', !on);
+  };
+  smoothToggle.addEventListener('click', () => { opts.setOn(!opts.isOn()); syncSmoothToggle(); });
+
+  wrap.appendChild(smoothLabel);
+  wrap.appendChild(smoothToggle);
+  wrap.appendChild(fineRow);
+  wrap.appendChild(smoothHelp);
+  syncSmoothToggle();
+
   return wrap;
 }
 

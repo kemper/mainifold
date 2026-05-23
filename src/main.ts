@@ -118,7 +118,7 @@ import { setColor as setAnnotateColor, setWidth as setAnnotateWidth, getWidth as
 import { addTextAnnotationAtAnchor, setFontSize as setAnnotateFontSize, getFontSize as getAnnotateFontSize } from './annotations/textMode';
 import { restoreView as restoreAnnotationViewById } from './annotations/selectMode';
 import { applyTriColors, applyTriColorsIfVisible, hasRegions as hasColorRegions, onChange as onColorRegionsChange, onVisibilityChange as onPaintVisibilityChange, clearRegions, serialize as serializeRegions, addRegion, getRegions, removeRegion, removeLastRegion, redoLastRegion, setRegionVisibility, setRegionTriangles, buildTriColors, createEmptyTriColors, overlayPainted, type SerializedColorRegion, type RegionDescriptor } from './color/regions';
-import { setBucketTolerance as setPaintBucketTolerance, getBucketTolerance as getPaintBucketTolerance, setBrushRadius as setPaintBrushRadius, getBrushRadius as getPaintBrushRadius, setBrushSmooth as setPaintBrushSmooth, isBrushSmooth as isPaintBrushSmooth, setBrushSmoothDivisor as setPaintBrushSmoothDivisor, getBrushSmoothDivisor as getPaintBrushSmoothDivisor, SMOOTH_DIVISOR_MIN, SMOOTH_DIVISOR_MAX, setAirbrushRadius as setPaintAirbrushRadius, getAirbrushRadius as getPaintAirbrushRadius, setAirbrushStrength as setPaintAirbrushStrength, getAirbrushStrength as getPaintAirbrushStrength, setAirbrushSoftness as setPaintAirbrushSoftness, getAirbrushSoftness as getPaintAirbrushSoftness } from './color/paintMode';
+import { setBucketTolerance as setPaintBucketTolerance, getBucketTolerance as getPaintBucketTolerance, setBrushRadius as setPaintBrushRadius, getBrushRadius as getPaintBrushRadius, setBrushSmooth as setPaintBrushSmooth, isBrushSmooth as isPaintBrushSmooth, setBrushSmoothDivisor as setPaintBrushSmoothDivisor, getBrushSmoothDivisor as getPaintBrushSmoothDivisor, SMOOTH_DIVISOR_MIN, SMOOTH_DIVISOR_MAX, setAirbrushRadius as setPaintAirbrushRadius, getAirbrushRadius as getPaintAirbrushRadius, setAirbrushStrength as setPaintAirbrushStrength, getAirbrushStrength as getPaintAirbrushStrength, setAirbrushSoftness as setPaintAirbrushSoftness, getAirbrushSoftness as getPaintAirbrushSoftness, setAirbrushSmooth as setPaintAirbrushSmooth, isAirbrushSmooth as isPaintAirbrushSmooth, setAirbrushSmoothDivisor as setPaintAirbrushSmoothDivisor, getAirbrushSmoothDivisor as getPaintAirbrushSmoothDivisor, AIRBRUSH_SMOOTH_DIVISOR_MIN, AIRBRUSH_SMOOTH_DIVISOR_MAX } from './color/paintMode';
 import { buildStrokeMesh, strokeFootprintTriangles, airbrushFootprintTriangles, childrenByParent, type BrushStroke, type BrushShape } from './color/subdivide';
 import { initEditorLock, syncLockState, setUnlockHandlers } from './color/editorLock';
 import { buildAdjacency, findCoplanarRegion, findConnectedFromSeed, resolveSeed, findNearestTriangle, type AdjacencyGraph } from './color/adjacency';
@@ -4897,10 +4897,13 @@ async function main() {
      *  soft-edged region: each triangle is still painted fully or not at all
      *  (one solid, printable color), but coverage thins from the dense core out
      *  to a feathered rim. `strength` (0..1) is the core density; `softness`
-     *  (0..1) is the fraction of the radius that fades out. Programmatic
-     *  painters should use `paintAirbrush({point(s), radius})`. */
+     *  (0..1) is the fraction of the radius that fades out. `smooth` +
+     *  `smoothDivisor` (4..64) finely subdivide the spray so its edge reads as a
+     *  smooth gradient instead of chunky speckle (the airbrush analog of the
+     *  smooth brush). Programmatic painters should use
+     *  `paintAirbrush({point(s), radius})`. */
     getAirbrush() {
-      return { radius: getPaintAirbrushRadius(), strength: getPaintAirbrushStrength(), softness: getPaintAirbrushSoftness() };
+      return { radius: getPaintAirbrushRadius(), strength: getPaintAirbrushStrength(), softness: getPaintAirbrushSoftness(), smooth: isPaintAirbrushSmooth(), smoothDivisor: getPaintAirbrushSmoothDivisor() };
     },
     setAirbrushSize(radius: number) {
       if (typeof radius !== 'number' || !Number.isFinite(radius) || radius <= 0) {
@@ -4923,6 +4926,18 @@ async function main() {
       }
       setPaintAirbrushSoftness(softness);
       return { softness: getPaintAirbrushSoftness() };
+    },
+    setAirbrushSmooth(on: boolean) {
+      if (typeof on !== 'boolean') return { error: 'setAirbrushSmooth(on): on must be a boolean' };
+      setPaintAirbrushSmooth(on);
+      return { smooth: on };
+    },
+    setAirbrushSmoothDivisor(divisor: number) {
+      if (typeof divisor !== 'number' || !Number.isFinite(divisor)) {
+        return { error: `setAirbrushSmoothDivisor(divisor): divisor must be a finite number in ${AIRBRUSH_SMOOTH_DIVISOR_MIN}..${AIRBRUSH_SMOOTH_DIVISOR_MAX}` };
+      }
+      setPaintAirbrushSmoothDivisor(divisor);
+      return { divisor: getPaintAirbrushSmoothDivisor() };
     },
 
     /** Paint a smooth brush stroke along world-space surface points, subdividing

@@ -44,6 +44,52 @@ test.describe('airbrush', () => {
     expect(cfg).toMatchObject({ radius: 2, strength: 0.85, softness: 0.5 });
   });
 
+  test('airbrush has a smooth-edges control (toggle + detail) wired to the API', async ({ page }) => {
+    await openEditor(page);
+    await page.locator('#paint-toggle').dispatchEvent('click');
+    await page.waitForSelector('#paint-picker-panel:not(.hidden)');
+    await page.locator('#paint-picker-panel button:has-text("Airbrush")').dispatchEvent('click');
+
+    // Smooth edges is on by default, with a detail slider (range 4..64) visible.
+    const smoothBtn = page.locator('#airbrush-smooth-toggle');
+    await expect(smoothBtn).toBeVisible();
+    await expect(smoothBtn).toContainText('On');
+    const detail = page.locator('#airbrush-smooth-detail');
+    await expect(detail).toBeVisible();
+    await expect(detail).toHaveAttribute('min', '4');
+    await expect(detail).toHaveAttribute('max', '64');
+
+    // Defaults exposed on the window API.
+    const cfg = await page.evaluate(() => (window as any).partwright.getAirbrush()); // eslint-disable-line @typescript-eslint/no-explicit-any
+    expect(cfg).toMatchObject({ smooth: true, smoothDivisor: 24 });
+
+    // Turning it off hides the detail slider.
+    await smoothBtn.dispatchEvent('click');
+    await expect(smoothBtn).toContainText('Off');
+    await expect(detail).toBeHidden();
+
+    // Setters validate, clamp, and round-trip.
+    const api = await page.evaluate(() => {
+      const pw = (window as any).partwright; // eslint-disable-line @typescript-eslint/no-explicit-any
+      return {
+        badBool: pw.setAirbrushSmooth('yes'),
+        okBool: pw.setAirbrushSmooth(true),
+        badNum: pw.setAirbrushSmoothDivisor('lots'),
+        clampHi: pw.setAirbrushSmoothDivisor(99999),
+        clampLo: pw.setAirbrushSmoothDivisor(0),
+        ok: pw.setAirbrushSmoothDivisor(40),
+        cfg: pw.getAirbrush(),
+      };
+    });
+    expect(api.badBool.error).toBeTruthy();
+    expect(api.okBool.smooth).toBe(true);
+    expect(api.badNum.error).toBeTruthy();
+    expect(api.clampHi.divisor).toBe(64); // clamped to max
+    expect(api.clampLo.divisor).toBe(4);  // clamped to min
+    expect(api.ok.divisor).toBe(40);
+    expect(api.cfg).toMatchObject({ smooth: true, smoothDivisor: 40 });
+  });
+
   test('paintAirbrush paints a region and subdivides the mesh', async ({ page }) => {
     await openEditor(page);
     const out = await page.evaluate(() => {

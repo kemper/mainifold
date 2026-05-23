@@ -51,19 +51,33 @@ export const AIRBRUSH_STRENGTH_MIN = 0.05;
 export const AIRBRUSH_STRENGTH_MAX = 1;
 export const AIRBRUSH_SOFTNESS_MIN = 0;
 export const AIRBRUSH_SOFTNESS_MAX = 1;
-/** The airbrush refines (and dithers) at radius / GRAIN, so the speckle's dot
- *  size — and the triangle count it adds — scale with the brush, staying
- *  bounded and radius-independent. */
+/** The airbrush's coarse (smooth-off) grain: it refines and dithers at
+ *  radius / GRAIN, so the speckle's dot size — and the triangle count it adds —
+ *  scale with the brush, staying bounded and radius-independent. */
 const AIRBRUSH_GRAIN = 10;
+/** When on, the airbrush refines finer (radius / airbrushSmoothDivisor instead
+ *  of the coarse grain) so its speckled rim reads as a smooth gradient rather
+ *  than chunky dots. On by default. Softness still controls the rim's width. */
+let airbrushSmooth = true;
+/** Smooth-edge detail for the airbrush: radius / this = grain / dither-cell size
+ *  (and the interior subdivision target). Higher = finer dots, smoother edge,
+ *  more triangles. Capped well below the brush's ceiling because the airbrush
+ *  refines its whole footprint (fill), so the triangle count grows with the
+ *  square of the divisor. */
+let airbrushSmoothDivisor = 24;
+export const AIRBRUSH_SMOOTH_DIVISOR_MIN = 4;
+export const AIRBRUSH_SMOOTH_DIVISOR_MAX = 64;
 
 /** Target edge length (mesh units) for the active brush settings. */
 export function brushTargetEdge(): number {
   return brushRadius / brushSmoothDivisor;
 }
 
-/** Grain / dither cell size (mesh units) for the active airbrush settings. */
+/** Grain / dither cell size (mesh units) for the active airbrush settings.
+ *  Smooth edges on → the finer detail divisor; off → the coarse default grain. */
 export function airbrushTargetEdge(): number {
-  return airbrushRadius / AIRBRUSH_GRAIN;
+  const divisor = airbrushSmooth ? airbrushSmoothDivisor : AIRBRUSH_GRAIN;
+  return airbrushRadius / divisor;
 }
 
 /** Radius of the active stroke tool (airbrush has its own radius). */
@@ -214,6 +228,22 @@ export function setAirbrushSoftness(s: number): void {
 
 export function getAirbrushSoftness(): number {
   return airbrushSoftness;
+}
+
+export function setAirbrushSmooth(on: boolean): void {
+  airbrushSmooth = on;
+}
+
+export function isAirbrushSmooth(): boolean {
+  return airbrushSmooth;
+}
+
+export function setAirbrushSmoothDivisor(n: number): void {
+  airbrushSmoothDivisor = Math.max(AIRBRUSH_SMOOTH_DIVISOR_MIN, Math.min(AIRBRUSH_SMOOTH_DIVISOR_MAX, Math.round(n)));
+}
+
+export function getAirbrushSmoothDivisor(): number {
+  return airbrushSmoothDivisor;
 }
 
 export function setOnRegionPainted(fn: () => void): void {
