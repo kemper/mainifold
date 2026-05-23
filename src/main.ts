@@ -34,6 +34,7 @@ import { createLayout, type TabName } from './ui/layout';
 import { createToolbar, isAutoRun, setAutoRun, setToolbarLanguage, setAiToolbarState } from './ui/toolbar';
 import { installKeyboardShortcuts } from './ui/keyboardShortcuts';
 import { registerCommands } from './ui/commandPalette';
+import { showQualitySettingsModal } from './ui/qualitySettingsModal';
 import { combo, MOD_LABEL, SHIFT_LABEL, ALT_LABEL } from './ui/shortcutDefs';
 import { showToast } from './ui/toast';
 import { initAiPanel, setActiveSession as setAiActiveSession, toggleAiPanel } from './ui/aiPanel';
@@ -1314,7 +1315,6 @@ async function main() {
       updateAppHistory('/', 'push');
       void syncRouteFromURL();
     },
-    onOpenCatalog: () => { void showCatalogPage(); },
     onRun: () => runCode(),
     onExportGLB: actionExportGLB,
     onExportSTL: actionExportSTL,
@@ -1341,7 +1341,6 @@ async function main() {
     },
     onImportFile: async (file) => { await handleImportFile(file); },
     onImportInboxEntry: handleReimportInboxEntry,
-    onToggleDiagnostics: () => { toggleDiagnosticsPanel(); },
     onLanguageSwitch: async (lang: 'manifold-js' | 'scad') => {
       if (lang === getActiveLanguage()) return;
       // If current session has work, ask before switching
@@ -1425,7 +1424,11 @@ async function main() {
   });
 
   // Create layout
-  const { editorContainer, editorErrorPanel, viewportPane, galleryContainer, versionsContainer, imagesContainer, diffContainer, notesContainer, dataContainer, statusBar, clipControls, formatBtn, autoFormatToggle, switchTab, partsRail, togglePartsRail } = createLayout(editorUI, { onToggleAi: () => { toggleAiPanel(); } });
+  const { editorContainer, editorErrorPanel, viewportPane, galleryContainer, versionsContainer, imagesContainer, diffContainer, notesContainer, dataContainer, statusBar, clipControls, formatBtn, autoFormatToggle, switchTab, partsRail, togglePartsRail } = createLayout(editorUI, {
+    onToggleAi: () => { toggleAiPanel(); },
+    onOpenCatalog: () => { void showCatalogPage(); },
+    onToggleDiagnostics: () => { toggleDiagnosticsPanel(); },
+  });
 
   // Parts rail — IDE-style list of the session's parts.
   createPartList(partsRail, {
@@ -1532,6 +1535,8 @@ async function main() {
     { id: 'toggle-diagnostics', title: 'Toggle diagnostic log', hint: 'View', keywords: 'errors warnings console', run: () => toggleDiagnosticsPanel() },
     { id: 'open-catalog', title: 'Open catalog', hint: 'Navigate', keywords: 'examples premade browse', run: () => { void showCatalogPage(); } },
     { id: 'open-help', title: 'Open help', hint: 'Navigate', keywords: 'docs documentation guide', run: () => showHelp() },
+    { id: 'open-quality', title: 'Modeling quality settings', hint: 'Settings', keywords: 'resolution curve segments smoothness', run: () => showQualitySettingsModal() },
+    { id: 'retake-tour', title: 'Take the guided tour', hint: 'Help', keywords: 'onboarding walkthrough intro tutorial', run: () => { resetTour(); startTour(); } },
   ]);
 
   // Init gallery

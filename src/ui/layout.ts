@@ -1,4 +1,5 @@
 import { getMobilePane, onMobilePaneChange, setMobilePane } from './mobilePane';
+import { showQualitySettingsModal } from './qualitySettingsModal';
 
 export type TabName = 'interactive' | 'gallery' | 'versions' | 'images' | 'diff' | 'notes' | 'data';
 
@@ -30,6 +31,10 @@ export interface SwitchTabOptions {
 export interface CreateLayoutOptions {
   /** Toggle the AI chat drawer — wired to the AI item in the activity rail. */
   onToggleAi?: () => void;
+  /** Navigate to the catalog page (rail utility item). */
+  onOpenCatalog?: () => void;
+  /** Toggle the diagnostic log panel (rail utility item). */
+  onToggleDiagnostics?: () => void;
 }
 
 export function createLayout(appContainer: HTMLElement, opts: CreateLayoutOptions = {}): LayoutElements {
@@ -142,10 +147,12 @@ export function createLayout(appContainer: HTMLElement, opts: CreateLayoutOption
 
   const tabInteractive = createRailItem('Interactive', '3D View', '\ud83e\uddca', true);
   tabInteractive.title = 'Live 3D viewport \u2014 orbit, zoom, and inspect';
-  const tabGallery = createRailItem('Gallery', 'Gallery', '\ud83d\uddbc\ufe0f', false);
-  tabGallery.title = 'Compare saved versions side-by-side';
+  // Gallery is folded into Versions: the Versions pane shows the same thumbnail
+  // tiles plus rename/delete, so it's a superset. The `gallery` tab/route stays
+  // valid for deep links and the AI getViewState() contract, but no longer
+  // needs a separate rail item.
   const tabVersions = createRailItem('Versions', 'Versions', '🕒', false);
-  tabVersions.title = 'Manage saved versions — rename and delete';
+  tabVersions.title = 'Saved versions — thumbnails, rename, delete';
   const tabImages = createRailItem('Images', 'Images', '📷', false);
   tabImages.title = 'Reference images attached to this session';
   const tabDiff = createRailItem('Diff', 'Diff', '🔀', false);
@@ -156,22 +163,66 @@ export function createLayout(appContainer: HTMLElement, opts: CreateLayoutOption
   tabData.title = 'Browse everything Partwright has stored in this browser';
 
   rail.appendChild(tabInteractive);
-  rail.appendChild(tabGallery);
   rail.appendChild(tabVersions);
   rail.appendChild(tabImages);
   rail.appendChild(tabDiff);
   rail.appendChild(tabNotes);
   rail.appendChild(tabData);
 
-  // AI assistant — pinned to the bottom of the rail (desktop) / end of the
-  // strip (mobile). Toggles the chat drawer rather than a tab pane, and keeps
-  // the id `btn-ai` so setAiToolbarState, the tour, and tests stay wired up.
+  // === Bottom utility group ===
+  // Catalog, Settings (quality), Diagnostics, and Help move out of the top
+  // toolbar so it can slim down. `md:mt-auto` on the first item pushes the whole
+  // cluster to the bottom of the desktop rail. Element ids are preserved
+  // (btn-catalog, btn-quality, btn-diagnostics, btn-help, btn-ai) so the tour
+  // and existing tests keep finding them.
+  const railActionClass = 'flex items-center gap-2 shrink-0 whitespace-nowrap px-3 py-2.5 md:py-2 text-sm md:text-[13px] font-medium text-zinc-400 border-b-2 md:border-b-0 border-transparent [@media(hover:hover)]:hover:text-zinc-200 [@media(hover:hover)]:hover:bg-zinc-800/60 transition-colors';
+  const makeAction = (id: string, icon: string, label: string, onClick: () => void): HTMLButtonElement => {
+    const b = document.createElement('button');
+    b.id = id;
+    b.className = railActionClass;
+    b.innerHTML = `<span class="text-base leading-none w-5 text-center" aria-hidden="true">${icon}</span><span>${label}</span>`;
+    b.addEventListener('click', onClick);
+    return b;
+  };
+
+  const catalogNavBtn = makeAction('btn-catalog', '📚', 'Catalog', () => opts.onOpenCatalog?.());
+  catalogNavBtn.title = 'Browse the catalog of premade models';
+  // Separator + push-to-bottom anchor for the whole utility cluster.
+  catalogNavBtn.classList.add('md:mt-auto', 'md:border-t', 'md:border-zinc-800');
+
+  const qualityNavBtn = makeAction('btn-quality', '⚙', 'Settings', () => { showQualitySettingsModal(); });
+  qualityNavBtn.title = 'Modeling quality (default curve resolution)';
+  qualityNavBtn.setAttribute('aria-label', 'Modeling quality settings');
+
+  const diagNavBtn = makeAction('btn-diagnostics', '⚠', 'Diagnostics', () => opts.onToggleDiagnostics?.());
+  diagNavBtn.classList.add('relative');
+  diagNavBtn.title = 'Diagnostic log — errors and warnings';
+  diagNavBtn.setAttribute('aria-label', 'Diagnostic log');
+  const diagBadge = document.createElement('span');
+  diagBadge.id = 'diag-badge';
+  diagBadge.className = 'hidden absolute top-1 left-6 text-[8px] font-bold bg-red-500 text-white rounded-full min-w-[14px] h-[14px] flex items-center justify-center px-0.5 leading-none pointer-events-none';
+  diagNavBtn.appendChild(diagBadge);
+
+  const helpNavBtn = makeAction('btn-help', '?', 'Help', () => {
+    const record = window as unknown as Record<string, unknown>;
+    const showHelp = (record.__partwrightShowHelp ?? record.__mainifoldShowHelp) as (() => void) | undefined;
+    if (showHelp) showHelp();
+  });
+  helpNavBtn.title = 'Help';
+
+  // AI assistant — toggles the chat drawer rather than a tab pane. Keeps id
+  // `btn-ai` so setAiToolbarState, the tour, and tests stay wired up.
   const aiNavBtn = document.createElement('button');
   aiNavBtn.id = 'btn-ai';
-  aiNavBtn.className = 'flex items-center gap-2 shrink-0 whitespace-nowrap px-3 py-2.5 md:py-2 text-sm md:text-[13px] font-medium text-zinc-300 md:mt-auto border-b-2 md:border-b-0 border-transparent md:border-t md:border-zinc-800 [@media(hover:hover)]:hover:text-zinc-100 [@media(hover:hover)]:hover:bg-zinc-800/60 transition-colors';
+  aiNavBtn.className = railActionClass + ' text-zinc-300';
   aiNavBtn.title = 'AI chat — not connected. Click to connect an API key or local model.';
   aiNavBtn.innerHTML = '<span id="ai-status-dot" class="w-1.5 h-1.5 rounded-full shrink-0 bg-zinc-500"></span><span class="text-base leading-none w-5 text-center" aria-hidden="true">✦</span><span>AI</span>';
   if (opts.onToggleAi) aiNavBtn.addEventListener('click', opts.onToggleAi);
+
+  rail.appendChild(catalogNavBtn);
+  rail.appendChild(qualityNavBtn);
+  rail.appendChild(diagNavBtn);
+  rail.appendChild(helpNavBtn);
   rail.appendChild(aiNavBtn);
 
   // Reflect the drawer's open/closed state on the AI rail item.
@@ -219,8 +270,29 @@ export function createLayout(appContainer: HTMLElement, opts: CreateLayoutOption
   dataContainer.id = 'data-container';
   dataContainer.className = 'flex-1 min-h-0 overflow-auto bg-zinc-900 hidden p-4 flex flex-col';
 
-  const allTabs = [tabInteractive, tabGallery, tabVersions, tabImages, tabDiff, tabNotes, tabData];
-  const allPanes = [viewportPane, galleryContainer, versionsContainer, imagesContainer, diffContainer, notesContainer, dataContainer];
+  // Pane shown for each tab. `gallery` and `versions` both still exist (deep
+  // links + the AI getViewState() contract) but share one rail item.
+  const paneByTab: Record<TabName, HTMLElement> = {
+    interactive: viewportPane,
+    gallery: galleryContainer,
+    versions: versionsContainer,
+    images: imagesContainer,
+    diff: diffContainer,
+    notes: notesContainer,
+    data: dataContainer,
+  };
+  // Rail item highlighted for each tab — gallery + versions both map to Versions.
+  const railByTab: Record<TabName, HTMLButtonElement> = {
+    interactive: tabInteractive,
+    gallery: tabVersions,
+    versions: tabVersions,
+    images: tabImages,
+    diff: tabDiff,
+    notes: tabNotes,
+    data: tabData,
+  };
+  const navItems = [tabInteractive, tabVersions, tabImages, tabDiff, tabNotes, tabData];
+  const allPanes = Object.values(paneByTab);
 
   // Mobile-only pane toggle: lets the user swap between editor and viewport
   // when the layout is stacked. Hidden at md+ and on tabs that already hide
@@ -348,16 +420,10 @@ export function createLayout(appContainer: HTMLElement, opts: CreateLayoutOption
   // Shared tab activation logic (DOM toggling, editor visibility, events)
   function applyTab(tab: TabName) {
     _currentTab = tab;
-    const idx = tab === 'interactive' ? 0 : tab === 'gallery' ? 1 : tab === 'versions' ? 2 : tab === 'images' ? 3 : tab === 'diff' ? 4 : tab === 'notes' ? 5 : 6;
-    for (let i = 0; i < allPanes.length; i++) {
-      if (i === idx) {
-        allPanes[i].classList.remove('hidden');
-        allTabs[i].className = RAIL_ITEM_ACTIVE;
-      } else {
-        allPanes[i].classList.add('hidden');
-        allTabs[i].className = RAIL_ITEM_INACTIVE;
-      }
-    }
+    const activePane = paneByTab[tab];
+    for (const pane of allPanes) pane.classList.toggle('hidden', pane !== activePane);
+    const activeItem = railByTab[tab];
+    for (const item of navItems) item.className = item === activeItem ? RAIL_ITEM_ACTIVE : RAIL_ITEM_INACTIVE;
     syncPaneVisibility();
     window.dispatchEvent(new CustomEvent('tab-switched', { detail: { tab } }));
     window.dispatchEvent(new Event('resize'));
@@ -406,7 +472,6 @@ export function createLayout(appContainer: HTMLElement, opts: CreateLayoutOption
   }
 
   tabInteractive.addEventListener('click', () => switchTab('interactive'));
-  tabGallery.addEventListener('click', () => switchTab('gallery'));
   tabVersions.addEventListener('click', () => switchTab('versions'));
   tabImages.addEventListener('click', () => switchTab('images'));
   tabDiff.addEventListener('click', () => switchTab('diff'));
