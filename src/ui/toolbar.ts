@@ -28,8 +28,6 @@ export interface ToolbarCallbacks {
   /** Re-import a blob already held in the inbox (e.g. recent-imports re-click). */
   onImportInboxEntry: (entry: ImportInboxEntry) => void | Promise<void>;
   onOpenCatalog: () => void;
-  /** Toggle the click-to-insert shape & operation palette. */
-  onToggleInsert: () => void;
   onLanguageSwitch: (lang: 'manifold-js' | 'scad') => void;
   onGoHome: () => void;
   /** Toggle the AI chat side panel. */
@@ -208,13 +206,6 @@ export function createToolbar(
   const spacer = document.createElement('div');
   spacer.className = 'flex-1';
   toolbar.appendChild(spacer);
-
-  // Insert palette — toggles the floating shape & operation palette over the
-  // viewport (click-to-insert code for the active language).
-  const btnInsert = createButton('btn-insert', '\u2795 Insert');
-  btnInsert.title = 'Insert shapes and boolean operations as code';
-  btnInsert.addEventListener('click', callbacks.onToggleInsert);
-  toolbar.appendChild(btnInsert);
 
   // Catalog — navigates to /catalog where premade sessions are browsed.
   const btnCatalog = createButton('btn-catalog', '\u2630 Catalog');

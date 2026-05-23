@@ -1228,7 +1228,6 @@ async function main() {
       void syncRouteFromURL();
     },
     onOpenCatalog: () => { void showCatalogPage(); },
-    onToggleInsert: () => { toggleInsertPalette(); },
     onRun: () => runCode(),
     onExportGLB: actionExportGLB,
     onExportSTL: actionExportSTL,
@@ -2049,6 +2048,8 @@ async function main() {
       if (isSimplifyOpen()) closeSimplifyMenu();
     },
   });
+  // The Insert toggle lives in the editor header (above the code pane).
+  document.getElementById('btn-insert')?.addEventListener('click', () => toggleInsertPalette());
   initSimplifyUI(clipControls, simplifyHandlers);
   initMeasureToggle(clipControls);
   initOrbitLockToggle(clipControls);
