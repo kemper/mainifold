@@ -47,6 +47,15 @@ export function openReliefImportModal(options: ReliefImportModalOptions): void {
   let creating = false;
   let previewTimer: number | undefined;
 
+  // Registered by each knob factory below. Declared up here because the
+  // factories run during construction (when the knob controls are created) and
+  // would otherwise reference this const in its temporal dead zone, throwing
+  // mid-build and leaving the modal without its change handler / Create button.
+  const controlRefreshers: Array<() => void> = [];
+  function refreshControls(): void {
+    for (const fn of controlRefreshers) fn();
+  }
+
   const shell = createModalShell({
     title: 'Image → Relief (HueForge)',
     maxWidth: 'xl',
@@ -344,13 +353,6 @@ export function openReliefImportModal(options: ReliefImportModalOptions): void {
     createBtn.classList.toggle('opacity-60', !ready);
     createBtn.classList.toggle('cursor-default', !ready);
     if (aiBtn) aiBtn.disabled = !ready;
-  }
-
-  // Re-read every control's bound value back into its DOM widget (used after
-  // AI assist mutates `opts` out from under the inputs).
-  const controlRefreshers: Array<() => void> = [];
-  function refreshControls(): void {
-    for (const fn of controlRefreshers) fn();
   }
 
   // --- Initial paint -------------------------------------------------------

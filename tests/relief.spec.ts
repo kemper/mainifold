@@ -65,4 +65,51 @@ test.describe('Relief Studio', () => {
     await page.locator('#btn-import').click();
     await expect(page.getByText('Image → Relief (HueForge)…')).toBeVisible();
   });
+
+  // Regression: the wizard once threw mid-build (a const used in its temporal
+  // dead zone), so the modal rendered the picker button but never wired the
+  // file `change` handler — choosing an image did nothing. Exercise the real
+  // modal path end-to-end.
+  test('import wizard reacts to a chosen image and creates a relief', async ({ page }) => {
+    const errors: string[] = [];
+    page.on('pageerror', e => errors.push(e.message));
+
+    await page.goto('/editor');
+    await waitForEngine(page);
+
+    const dataUrl = await page.evaluate(() => {
+      const c = document.createElement('canvas');
+      c.width = 64; c.height = 48;
+      const x = c.getContext('2d')!;
+      for (let i = 0; i < 64; i++) { const v = Math.floor((i / 63) * 255); x.fillStyle = `rgb(${v},${v},${v})`; x.fillRect(i, 0, 1, 48); }
+      return c.toDataURL('image/png');
+    });
+    const buffer = Buffer.from(dataUrl.split(',')[1], 'base64');
+
+    await page.locator('#btn-import').click();
+    await page.getByText('Image → Relief (HueForge)…').click();
+    await expect(page.getByText('Image → Relief (HueForge)', { exact: true })).toBeVisible();
+
+    const input = page.locator('input[type="file"][accept="image/*"]');
+    await input.setInputFiles({ name: 'grad.png', mimeType: 'image/png', buffer });
+
+    // The wizard must react to the chosen image: live preview stat + an enabled
+    // Create button. (Both were absent when the modal crashed mid-build.)
+    await expect(page.locator('canvas.rounded + div')).toContainText('grid', { timeout: 5000 });
+    const createBtn = page.getByRole('button', { name: 'Create relief' });
+    await expect(createBtn).toBeEnabled();
+
+    await createBtn.click();
+    await expect.poll(
+      async () => page.evaluate(() => {
+        const g = (window as unknown as { partwright: { getGeometryData(): { triangleCount?: number } | null } }).partwright.getGeometryData();
+        return g?.triangleCount ?? 0;
+      }),
+      { timeout: 15_000 },
+    ).toBeGreaterThan(0);
+
+    // No uncaught errors from the relief flow (the pre-existing import.meta
+    // worker warning on plain loads is unrelated and filtered out).
+    expect(errors.filter(e => !e.includes('import.meta'))).toEqual([]);
+  });
 });
