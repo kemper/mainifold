@@ -1,4 +1,5 @@
 import * as THREE from 'three';
+import { Timer } from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import type { MeshData } from '../geometry/types';
 import { createDefaultMaterial, createWireframeMaterial } from './materials';
@@ -29,12 +30,29 @@ let controls: OrbitControls;
 let meshGroup: THREE.Group;
 let animationId: number;
 
-// Orbit lock state — orbit is disabled when any lock source is active
+// Orbit lock state — when locked, rotate/pan are disabled but zoom always works,
+// so wheel/two-finger-scroll keeps zooming the camera in every mode.
 let measureLock = false;
 let userLock = false;
+let gizmoLock = false;
+
+// Pointer suppressors — capture-phase pointerdown veto for OrbitControls.
+// Lets paint mode let orbit handle clicks that miss the model while keeping
+// model-hit clicks for painting.
+type PointerSuppressor = (event: PointerEvent) => boolean;
+const pointerSuppressors: PointerSuppressor[] = [];
+
+const raycasterForHit = new THREE.Raycaster();
+const ndcForHit = new THREE.Vector2();
 
 // Grid plane
 let grid: THREE.GridHelper;
+
+// Mesh edge (wireframe) overlay visibility. Hidden by default so the model
+// reads cleanly; paint mode forces it on (see paintMode.ts) and the viewport
+// toggle button lets the user override either way.
+let wireframeVisible = false;
+let wireframeChangeListener: ((visible: boolean) => void) | null = null;
 
 // Clipping plane state
 const clipPlane = new THREE.Plane(new THREE.Vector3(0, 0, -1), 0); // clips above Z
@@ -78,6 +96,45 @@ export function initViewport(container: HTMLElement): {
   controls.enableDamping = true;
   controls.dampingFactor = 0.1;
   controls.target.set(0, 0, 0);
+
+  // Capture-phase pointerdown gives paint tools the chance to veto OrbitControls'
+  // pointerdown per-event (e.g. let orbit handle clicks that miss the model).
+  canvas.addEventListener('pointerdown', (event) => {
+    for (const fn of pointerSuppressors) {
+      if (fn(event)) {
+        event.stopImmediatePropagation();
+        return;
+      }
+    }
+  }, { capture: true });
+
+  // Capture-phase wheel forwarder — re-dispatches wheel events that land on
+  // viewport overlays (paint picker panel, toolbar buttons, ...) onto the
+  // canvas so OrbitControls' zoom keeps working regardless of cursor location.
+  // Scrollable descendants still consume the wheel.
+  container.addEventListener('wheel', (event) => {
+    if (event.target === canvas) return; // OrbitControls owns canvas wheels
+    let el: HTMLElement | null = event.target as HTMLElement;
+    while (el && el !== container) {
+      if (isVerticallyScrollable(el)) return;
+      el = el.parentElement;
+    }
+    event.preventDefault();
+    canvas.dispatchEvent(new WheelEvent('wheel', {
+      deltaX: event.deltaX,
+      deltaY: event.deltaY,
+      deltaZ: event.deltaZ,
+      deltaMode: event.deltaMode,
+      clientX: event.clientX,
+      clientY: event.clientY,
+      ctrlKey: event.ctrlKey,
+      shiftKey: event.shiftKey,
+      altKey: event.altKey,
+      metaKey: event.metaKey,
+      bubbles: true,
+      cancelable: true,
+    }));
+  }, { capture: true, passive: false });
 
   // Lighting
   const ambient = new THREE.AmbientLight(0xffffff, 0.6);
@@ -145,12 +202,13 @@ export function initViewport(container: HTMLElement): {
   );
 
   // Animate
-  const clock = new THREE.Clock();
-  function animate() {
+  const timer = new Timer();
+  function animate(timestamp?: number) {
     animationId = requestAnimationFrame(animate);
-    const delta = clock.getDelta();
+    timer.update(timestamp);
+    const delta = timer.getDelta();
     updateGizmo(delta);
-    controls.enabled = !measureLock && !userLock && !isGizmoAnimating();
+    syncOrbitState();
     controls.update();
     renderer.render(scene, camera);
     renderGizmo(renderer);
@@ -187,6 +245,8 @@ export function updateMesh(meshData: MeshData, options?: { skipAutoFrame?: boole
 
   const solidMesh = new THREE.Mesh(geometry, solidMat);
   const wireMesh = new THREE.Mesh(geometry, wireMat);
+  wireMesh.name = 'wireframe';
+  wireMesh.visible = wireframeVisible;
 
   meshGroup.add(solidMesh);
   meshGroup.add(wireMesh);
@@ -421,13 +481,20 @@ export function getMeshGroup(): THREE.Group {
 
 // === Orbit lock API ===
 
-function syncOrbitEnabled(): void {
-  controls.enabled = !measureLock && !userLock && !isGizmoAnimating();
+// Locks gate rotate + pan; zoom is intentionally always enabled so
+// wheel / two-finger-scroll zooms the camera in every mode.
+function syncOrbitState(): void {
+  const animating = isGizmoAnimating();
+  const rotatePanLocked = animating || measureLock || userLock || gizmoLock;
+  controls.enabled = !animating;
+  controls.enableRotate = !rotatePanLocked;
+  controls.enablePan = !rotatePanLocked;
+  controls.enableZoom = !animating;
 }
 
 export function setMeasureLock(locked: boolean): void {
   measureLock = locked;
-  syncOrbitEnabled();
+  syncOrbitState();
 }
 
 const userOrbitLockListeners: Array<(locked: boolean) => void> = [];
@@ -435,7 +502,7 @@ const userOrbitLockListeners: Array<(locked: boolean) => void> = [];
 export function setUserOrbitLock(locked: boolean): void {
   if (userLock === locked) return;
   userLock = locked;
-  syncOrbitEnabled();
+  syncOrbitState();
   for (const fn of userOrbitLockListeners) fn(locked);
 }
 
@@ -451,6 +518,43 @@ export function onUserOrbitLockChange(fn: (locked: boolean) => void): () => void
   };
 }
 
+/** Transient lock raised by TransformControls (paint Box gizmo) while a handle
+ *  is being hovered or dragged so OrbitControls doesn't rotate at the same time. */
+export function setGizmoLock(locked: boolean): void {
+  if (gizmoLock === locked) return;
+  gizmoLock = locked;
+  syncOrbitState();
+}
+
+/** Register a capture-phase pointerdown veto. Returning true stops the event
+ *  from reaching OrbitControls so the caller can own the drag. */
+export function addPointerSuppressor(fn: PointerSuppressor): () => void {
+  pointerSuppressors.push(fn);
+  return () => {
+    const i = pointerSuppressors.indexOf(fn);
+    if (i >= 0) pointerSuppressors.splice(i, 1);
+  };
+}
+
+/** Raycast the visible model (first child of the mesh group) and report
+ *  whether the screen-space pointer lands on a triangle. */
+export function isPointerOverModel(event: { clientX: number; clientY: number }): boolean {
+  if (!meshGroup || meshGroup.children.length === 0) return false;
+  const solid = meshGroup.children[0];
+  if (!(solid instanceof THREE.Mesh)) return false;
+  const rect = renderer.domElement.getBoundingClientRect();
+  ndcForHit.x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
+  ndcForHit.y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
+  raycasterForHit.setFromCamera(ndcForHit, camera);
+  return raycasterForHit.intersectObject(solid).length > 0;
+}
+
+function isVerticallyScrollable(el: HTMLElement): boolean {
+  const style = getComputedStyle(el);
+  const overflowY = style.overflowY;
+  return (overflowY === 'auto' || overflowY === 'scroll') && el.scrollHeight > el.clientHeight;
+}
+
 export { setDimensionsVisible, isDimensionsVisible } from './dimensionLines';
 
 // === Grid visibility API ===
@@ -461,6 +565,27 @@ export function setGridVisible(visible: boolean): void {
 
 export function isGridVisible(): boolean {
   return grid.visible;
+}
+
+// === Wireframe (mesh edge) visibility API ===
+
+export function setWireframeVisible(visible: boolean): void {
+  if (wireframeVisible === visible) return;
+  wireframeVisible = visible;
+  meshGroup.children.forEach(child => {
+    if (child.name === 'wireframe') child.visible = visible;
+  });
+  wireframeChangeListener?.(visible);
+}
+
+export function isWireframeVisible(): boolean {
+  return wireframeVisible;
+}
+
+/** Subscribe to wireframe visibility changes so UI (the toggle button) stays
+ *  in sync whether the change came from the button or from paint mode. */
+export function onWireframeChange(cb: (visible: boolean) => void): void {
+  wireframeChangeListener = cb;
 }
 
 export function dispose(): void {

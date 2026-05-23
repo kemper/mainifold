@@ -5,9 +5,10 @@
 ```bash
 npm run dev          # Start dev server at http://localhost:5173
 npm run build        # Production build to dist/
+npm run test:e2e     # Run Playwright smoke tests (auto-starts dev server)
 ```
 
-Open `http://localhost:5173/editor?view=ai` to start with the 4 isometric views visible (instead of the interactive viewport). This is the recommended URL for AI agents — all views are visible on page load without clicking any tabs.
+Open `http://localhost:5173/editor` to go straight to the editor. AI agents drive the tool via the `window.partwright` console API and see geometry by calling the render tools (`renderViews`/`renderView`), so there is no special view to preselect.
 
 Requires COEP/COOP headers (configured in vite.config.ts) for SharedArrayBuffer / WASM threads.
 
@@ -20,15 +21,86 @@ Hosted on **Cloudflare Pages** with production custom domain `www.partwrightstud
 
 **All work should be merged to `staging` first.** Do not push directly to `main`. The workflow is:
 
-1. Create a feature branch, develop and test locally
-2. Merge to `staging` — auto-deploys for verification
-3. Once validated on staging, open a PR from `staging` → `main` for production release
+1. **Start from the latest `staging`.** Before writing any code, run `git fetch origin staging` and base your feature branch on `origin/staging`. Do this at the *start* of the task, not just before the final push.
+2. Before your final push or PR, sync with the latest staging: `git fetch origin staging`, then merge `origin/staging` into your branch (or rebase onto it if the branch hasn't been pushed yet), resolve any conflicts, and re-run `npm run build` + `npm run test:e2e`
+3. Merge to `staging` — auto-deploys for verification
+4. Once validated on staging, open a PR from `staging` → `main` for production release
+
+> **Always start from — and re-sync against — the latest `origin/staging`.** Branches cut from a stale staging produce noisy diffs and merge conflicts, and can quietly clobber recently merged work. Re-fetch and merge/rebase `origin/staging` right before your final push, and again before opening any PR.
+
+### Pull Requests — always open one when a task is complete
+
+When you finish an agent task, **create a pull request into `staging` as the final step.** This is a standing instruction that overrides any default "don't open a PR unless explicitly asked" behavior: treat task completion as the authorization to open the PR. Don't pause to ask whether to create one, and don't report a task as done without it.
+
+Skip the PR only when the user explicitly scoped you away from it — a request to "just commit" or "push to the branch" is *not* a request for a PR — or for a pure throwaway experiment. If you genuinely can't tell whether the work is a complete, reviewable unit, ask. Follow the [commit & PR conventions](#commit--pr-conventions) below for the title, prefix, and labels, and [After Opening a PR](#after-opening-a-pr) for the review pass and CI follow-up once it's up.
 
 - **Build command:** `npm run build`
 - **Output directory:** `dist/`
 - **SPA routing:** `public/_redirects` (`/* /index.html 200`)
 - **Headers:** `public/_headers` (COEP, COOP, CSP) — Cloudflare Pages serves these automatically
 - **Environment variable:** Set `SITE_URL` in Cloudflare Pages dashboard (Settings > Environment variables) to the production URL (`https://www.partwrightstudio.com`). This is used at build time by the `absoluteUrls` Vite plugin to make Open Graph image URLs and canonical links absolute. If `SITE_URL` is not set, the plugin falls back to `CF_PAGES_URL` (provided automatically by Cloudflare Pages for each deployment).
+
+## Browser Tests (Playwright)
+
+End-to-end smoke tests live in `tests/*.spec.ts` and run against a Vite dev
+server that Playwright starts automatically. Run them with:
+
+```bash
+npm run test:e2e               # full suite
+npx playwright test --grep "AI chat"   # one describe block
+npx playwright test --headed   # watch the browser run (local only)
+```
+
+**Run these whenever you touch UI, routing, or anything in `src/ai/` or
+`src/ui/ai*`** — the suite covers landing → editor → AI panel toggle →
+key modal → toggle pills → ai.md serving in ~15s.
+
+### Multi-environment browser detection
+
+`playwright.config.ts` auto-picks the right Chromium binary so the same
+test command works on a developer laptop and inside the Anthropic Claude
+Code on the web sandbox without per-environment setup:
+
+- **Sandbox** (`/opt/pw-browsers/` exists): config picks the highest
+  installed `chromium-N` directory and uses its `chrome` binary directly
+  via `launchOptions.executablePath`. The version pinned by the
+  `playwright` npm package may differ from what's cached, but the
+  installed browser still satisfies the test runner — no download
+  needed (which is good, because the sandbox often blocks Chrome for
+  Testing's CDN).
+- **Local laptop** (no `/opt/pw-browsers/`): config leaves
+  `executablePath` unset, and Playwright finds its own cache at
+  `~/.cache/ms-playwright/` (Linux) or `~/Library/Caches/ms-playwright/`
+  (macOS). Run `npx playwright install chromium` once on a new machine.
+
+If the auto-detection picks the wrong binary, override it at the shell:
+
+```bash
+PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH=/path/to/chrome npm run test:e2e
+```
+
+### When AI agents need to run a browser test
+
+1. Don't reinstall browsers blindly. Check `/opt/pw-browsers/` first; the
+   sandbox image already has Chromium. `playwright.config.ts` handles the
+   wiring.
+2. The default Desktop Chrome viewport (1280×720) clips the AI panel's
+   toggle strip. The config sets 1280×900 — keep it that way for
+   anything that interacts with elements in the bottom half of the
+   panel.
+3. Tiny flex children of recently-transformed parents sometimes fail
+   Playwright's viewport hit-test (`Element is outside of the viewport`).
+   When the bounding box is verifiably inside, prefer
+   `locator.dispatchEvent('click')` over `locator.click({ force: true })`
+   — the latter still enforces the viewport bound.
+4. Each Playwright test gets a fresh `BrowserContext`, so localStorage
+   and IndexedDB are isolated by default. **Don't add `localStorage.clear()`
+   in `beforeEach`** unless you mean it — it'll fire on `page.reload()`
+   inside a test too, breaking any "state persists across reload"
+   assertion.
+5. Tests must run with no external network. The `validateKey` flow hits
+   `api.anthropic.com`; assert on the surfaced error message, not on
+   whether the request succeeded.
 
 ## Smoke Test — Verifying the App Works
 
@@ -41,7 +113,7 @@ After any changes that touch routing, Vite config, index.html, or initialization
    - `manifold.wasm` loads without 403 (check Network tab) — if 403, check `server.fs.strict` in vite.config.ts
    - COEP/COOP headers are present on responses (check Response Headers)
 4. **Help page**: Click the `?` icon in the toolbar — should navigate to `/help` and show the help content. "Back" should return to the editor.
-5. **AI agent bypass**: `http://localhost:5173/editor?view=ai` should skip the landing page and go straight to the editor with AI Views tab selected.
+5. **AI agent bypass**: `http://localhost:5173/editor` should skip the landing page and go straight to the editor (Interactive tab). `window.partwright.renderViews({views:"box"})` returns a 6-face composite PNG data URL.
 6. **Session loading**: Click a session tile on the landing page — should load the session code in the editor, show the session name in the session bar, and update the URL to `/editor?session=<id>`.
 7. **Build**: `npm run build` should succeed with no TypeScript errors.
 8. **Paint mode**: Click the Paint button in the viewport overlay. A color picker panel should appear. Click a face on the model — it should paint the coplanar region in the selected color. The Paint button badge should show the region count.
@@ -49,10 +121,57 @@ After any changes that touch routing, Vite config, index.html, or initialization
 10. **Unlock modal**: Click "Unlock to edit" — a modal should appear with two options (preserve/destructive). Clicking "Unlock editor" with the default "preserve" option should save the colored version and create a new uncolored version. The editor should unlock.
 11. **Gallery badges**: Colored versions in the gallery should show small color-swatch dots next to the version label.
 12. **Color export**: With color regions painted, export GLB — the file should carry vertex colors. Export 3MF — the file should include `<basematerials>` and per-triangle `pid` attributes.
+13. **Annotations are per-version**: Annotate v1, save v2 (annotations persist into v2). Clear annotations, draw a different one, save v3. Navigating v1↔v2↔v3 should swap annotations to match each version (v1 empty, v2 first set, v3 second set). Importing a schema-1.2 file (top-level `annotations`) should attach those annotations to the latest version on import.
+14. **Local model picker**: Click the `✦ Connect AI` (or `✦ AI`) chip → in the modal, follow "Run a local model in your browser". A second modal lists Small / Medium / Large / Vision options with download sizes. The WebGPU banner shows green on Chrome/Edge/Safari 26+ and red elsewhere. The "Use this model" / "Download X GB" button only triggers a network request the first time; cached models show a "Downloaded" pill and skip straight to GPU load. Closing the tab during a download cancels it cleanly.
+15. **STL import**: Click Import → "Choose file…" → pick an `.stl`. A new session is created named after the file, the editor shows a short `return Manifold.ofMesh(api.imports[0])` wrapper, and the mesh renders in the viewport. The version label is "imported" and editing the wrapper (e.g. adding `.subtract(Manifold.cube([5,5,5], true))`) re-renders correctly. Closing and reopening the session must restore the imported mesh from IndexedDB.
 
 ## AI Agent Workflow & API Reference
 
 For the full Manifold/CrossSection API, `window.partwright` console API, session workflow, verification patterns, and photo-to-model workflow, see `public/ai.md`. The legacy `window.mainifold` alias remains available for older prompts.
+
+### In-app AI chat — four providers
+
+The right-side AI drawer can drive Partwright through any of:
+
+- **Anthropic (cloud)** — user pastes their own API key (`src/ai/anthropic.ts`). Streams from Anthropic's hosted Claude with prompt caching on the long system prompt + tool list.
+- **OpenAI (cloud)** — `src/ai/openai.ts`. Raw `fetch` against `/v1/chat/completions` with SSE streaming; no extra SDK.
+- **Google Gemini (cloud)** — `src/ai/gemini.ts`. Raw `fetch` against `generativelanguage.googleapis.com` with SSE streaming via `:streamGenerateContent?alt=sse`; no extra SDK. The Gemini wire format wants `functionResponse.response` as a plain object — `toFunctionResponseObject` unwraps the JSON-stringified tool result before sending, otherwise Gemini silently drops the message and returns zero candidates on the next turn.
+- **Local (WebGPU)** — runs a model entirely in the browser via [WebLLM](https://webllm.mlc.ai) (`src/ai/local.ts`). The user opts in from the AI settings modal and the weights download once into the browser cache. No API key, no network traffic per turn.
+
+API keys live in IndexedDB (`aiKeys` store, keyed by provider). `ChatToggles` carries a separate model id per provider (`anthropicModel`, `openaiModel`, `geminiModel`, `localModel`) so switching providers preserves each one's previous selection — see `activeModel(toggles)` in `src/ai/types.ts`.
+
+All providers share the same chat loop (`src/ai/chatLoop.ts`), the same tool schemas (`src/ai/tools.ts`), and the same `public/ai.md` system prompt (or its slim local variant) — only the request transport differs. `chatLoop` dispatches by `toggles.provider` via an if/else chain at the streamTurn call site. The WebLLM SDK is still loaded via dynamic `import()` so users who stick with hosted providers never pay the ~6 MB chunk download.
+
+#### Thinking box (reasoning models)
+
+Gemini 3 thinking models emit their reasoning as `thought:true` text parts (we opt in with `generationConfig.thinkingConfig.includeThoughts`). `gemini.ts` routes those to a separate channel (`StreamResult.thinking` + the `onThinking` stream callback) so they never bleed into the answer bubble. `chatLoop` persists the reasoning as a `'thinking'` `ChatBlock` (rendered above the answer); the panel shows a live indigo preview box while it streams (`renderLiveThinkingBox`), then collapses it into an expand/contract box (`renderThinkingBox`) once the next step — answer text or a tool call — begins. The `onThinking` delta beats the stall watchdog (via `onProgress({phase:'thinking'})`), so a long silent think doesn't trip a spurious abort. `'thinking'` blocks are display-only: no provider's request builder replays them as model text (re-feeding the prose wastes tokens).
+
+#### Thinking level (the 🧠 pill)
+
+`ChatToggles.thinking` (`off` | `low` | `medium` | `high`, default **off**) is a per-session knob in the toggle strip, sourced from `THINKING_LEVELS` in `types.ts`. Each provider maps it to its own wire format at request build time, so 'off' sends no thinking request at all and reproduces the pre-feature behavior:
+
+- **Anthropic** — `low/medium/high` enable extended thinking with `budget_tokens` 2048/8192/16384 (`THINKING_BUDGET` in `anthropic.ts`), and `max_tokens` is floated above the budget (the API requires `>`). Because the agent is a tool-use loop, the API requires the signed `thinking` block to precede each `tool_use` on replay: `collectResult` captures the blocks (with `signature`, plus any `redacted_thinking`) into `ChatMessage.thinkingBlocks`, and `assistantBlocksToApi` re-emits them first — but only when thinking is on for the current request (`buildApiMessages(history, { replayThinking })`). Sending them with thinking off, or replaying display prose, is never done. This path can't be exercised offline (no network in tests/sandbox), so it's covered by request-shape unit tests rather than a live round-trip.
+- **Gemini** — `off` only flips `includeThoughts:false` (deliberately NOT `thinkingBudget:0`, which some Pro models reject); `low/medium/high` set `includeThoughts:true` + a growing `thinkingBudget`. Note: this changed Gemini from always-on thinking to opt-in.
+- **OpenAI** — maps to `reasoning_effort` (`low/medium/high`), sent only for reasoning models (`gpt-5*`, `o1/o3/o4` — sniffed by `isReasoningModel`) so the 4o/4.1 chat models don't 400. 'off' omits the param. OpenAI hides reasoning-model CoT, so this controls cost/quality but never surfaces a thinking box.
+- **Local** — no effect (WebLLM models reason on their own; `<think>` is still stripped).
+
+#### Cross-provider review
+
+A "👁" button in the panel header opens `src/ui/aiReviewModal.ts`. The user picks a **different** provider/model than the one driving the chat, optionally types a focus prompt, and the reviewer is sent the current code + geometry stats + 4-iso snapshot + session notes via a single non-tool turn. The response lands as a `'review'` `ChatBlock` rendered with a distinct purple-bordered bubble in the transcript AND a `[REVIEW from <provider> / <model>] …` session note (so the primary agent picks it up on its next turn via `getSessionContext()`).
+
+#### AI Call Log (per-provider diagnostics)
+
+A "🩺" button in the panel header opens `src/ui/aiDiagnosticsModal.ts`. Shows the last 50 provider API calls from an in-memory ring buffer (`src/ai/diagnostics.ts`): provider/model/kind, duration, status, full error messages (errors auto-expand), token usage, stop reason, request summary. Filter (all/errors/successes), Clear, Copy JSON. This is distinct from the app-wide **Diagnostic Log** (`src/diagnostics/errorLog.ts`, toolbar ⚠ button) which captures uncaught errors/console warnings; the AI Call Log adds per-call detail (successes, tokens, the "empty_final" non-error case) the general log intentionally doesn't. To avoid double-listing, the AI Call Log mirrors to `console.info`/`console.debug` (not `warn`/`error`), and hard provider errors reach the app-wide log via `chatLoop`'s `onError → errorLog.capture({source:'ai'})`.
+
+#### Adding a new hosted provider
+
+1. Add the id to `Provider` in `src/ai/types.ts` and a `<name>Model` field to `ChatToggles` (+ default in `settings.ts`).
+2. Add a sibling case to `activeModel(toggles)`.
+3. Create `src/ai/<name>.ts` exporting `streamTurn`, `summarize`, `validateKey`, `resetClient` — same shape as `anthropic.ts`.
+4. Register pricing in `src/ai/cost.ts`'s `PROVIDER_PRICING`.
+5. Add a `<name>_MODEL_OPTIONS` array + `set<Name>Model` setter in `src/ai/settings.ts`.
+6. Add dispatch + compaction branches in `chatLoop.ts` / `compaction.ts`.
+7. Add a `buildHostedProviderSection(<name>, …)` call in `aiSettingsModal.ts`, a `PROVIDER_UI` entry in `aiKeyModal.ts`, and a `hostedConfig` entry in `aiPanel.ts`'s `renderModelPicker()`.
 
 Key rules:
 - **Always use sessions** for user-requested geometry — never create files in `examples/`
@@ -69,16 +188,20 @@ Static site, no backend. Vanilla TypeScript + Vite.
 
 - `src/geometry/engine.ts` — manifold-3d WASM init + code execution
 - `src/renderer/viewport.ts` — Three.js interactive viewport
-- `src/renderer/multiview.ts` — 4 isometric view grid (always visible)
+- `src/renderer/multiview.ts` — Offscreen multi-angle render API (`renderViews`/`renderView`/`renderCompositeCanvas` for thumbnails)
 - `src/editor/codeEditor.ts` — CodeMirror editor
 - `src/ui/layout.ts` — Split-pane layout
 - `src/ui/toolbar.ts` — Top toolbar
-- `src/ui/panels.ts` — Views panel wiring
+- `src/ui/commandPalette.ts` — Command palette (⌘K/Ctrl+K): action registry + searchable overlay
+- `src/ui/shortcutsOverlay.ts` — `?` keyboard cheat sheet (renders `shortcutDefs`)
 - `src/geometry/crossSection.ts` — Z-slice to SVG/polygons
 - `src/export/gltf.ts` — GLB export
 - `src/export/stl.ts` — STL export
 - `src/export/obj.ts` — OBJ export
 - `src/export/threemf.ts` — 3MF export (ZIP-packaged XML)
+- `src/import/parsers/stl.ts` — STL import (binary + ASCII)
+- `src/import/codegen.ts` — Generates `Manifold.ofMesh(api.imports[i])` wrapper code
+- `src/import/importedMesh.ts` — Active-imports register exposed to the sandbox as `api.imports`
 
 ## Coordinate System
 
@@ -98,18 +221,31 @@ The app uses path-based routing for top-level pages and query parameters for vie
 **Paths:**
 - `/` — Landing page (hero + recent sessions grid)
 - `/editor` — Editor view (code + viewport)
+- `/catalog` — Curated catalog of premade sessions
 - `/help` — Help/docs page
 
 **Query parameters** (on `/editor`):
-- `?view=ai` — AI Views tab
-- `?view=elevations` — Elevations tab
 - `?gallery` — Gallery tab
 - `?diff` — Diff tab (side-by-side code + stat comparison between two versions)
 - `?notes` — Notes tab
 - `?session=<id>` — Active session
 - `?session=<id>&v=3` — Specific version
 
-AI agent URLs like `/editor?view=ai` bypass the landing page entirely. Tab switching is handled in `src/ui/layout.ts` (`switchTab`). Session/version state is handled in `src/storage/sessionManager.ts` (`updateURL`). Page-level routing is in `src/main.ts`.
+Any `/editor` URL bypasses the landing page entirely. Tab switching is handled in `src/ui/layout.ts` (`switchTab`). Session/version state is handled in `src/storage/sessionManager.ts` (`updateURL`). Page-level routing is in `src/main.ts`.
+
+### Browser History (Back Button) Preservation
+
+`updateURL()` in `src/storage/sessionManager.ts` uses `history.replaceState`, not push. That is intentional for in-place updates within the editor (switching versions, naming a session) — those should not pollute the back stack. But it is a trap when navigating *into* the editor from another top-level page (`/`, `/catalog`, `/help`):
+
+- If you call any session-mutating function (`openSession`, `createSession`, `closeSession`, or anything that calls `importSessionPayload`) BEFORE pushing the editor history entry, that internal `replaceState` will overwrite the page you came from and break the browser back button.
+- **Always push the destination history entry first**, then run the state change. See `handleCatalogEntryLoad` and `openSessionFromLanding` in `src/main.ts` for the canonical ordering.
+- For in-page "Back" buttons on top-level pages (catalog, help), prefer `window.history.back()` when there's a real previous entry on the stack — falling back to `replace` (not push) when the page was loaded directly by URL. See the `helpHasAppBackTarget` / `catalogHasAppBackTarget` patterns.
+
+When adding a new top-level page or any cross-page navigation, walk through the flow before merging:
+
+1. Where am I coming from? What's already on the back stack?
+2. What does `window.location` look like after every async step (especially DB or session operations)?
+3. After landing on the destination, does the browser back button take me to the prior page, not two pages back?
 
 ### Resource Lifecycle
 
@@ -137,13 +273,25 @@ Don't export functions unless they're imported elsewhere. When removing usage of
 
 ### Internal Links and Paths
 
-When referencing app routes in HTML/JS strings (links, prompts, instructions), use root-relative paths (`/ai.md`, `/editor?view=ai`), not paths with a subdirectory prefix. The app is served from the root, and hardcoded path prefixes break both development and deployment.
+When referencing app routes in HTML/JS strings (links, prompts, instructions), use root-relative paths (`/ai.md`, `/editor`), not paths with a subdirectory prefix. The app is served from the root, and hardcoded path prefixes break both development and deployment.
 
 ### Duplicated Logic
 
 When two functions share identical logic (same DOM manipulation, same data transformation), extract the shared part into a single helper and have both callers use it. Copy-pasted logic drifts out of sync when one copy gets updated and the other doesn't.
 
+### Mobile-Friendly UI
+
+The app targets both desktop and mobile. The `md:` breakpoint (768 px) separates the stacked-mobile layout from the side-by-side desktop layout. When adding interactive or layout features, keep these rules in mind:
+
+- **Drag interactions**: Use the Pointer Events API (`pointerdown` / `pointermove` / `pointerup` + `setPointerCapture`) — it works identically for mouse, touch, and stylus. Never use mouse-only events (`mousedown`, `mousemove`) for draggable UI.
+- **Touch targets**: Draggable handles and small buttons must have a hit area of at least 44 × 44 px on mobile. Use a visually narrow stripe (1–2 px) centered inside a wider/taller transparent wrapper element (`w-5`, `h-5`, etc.) so the visual stays subtle but the target is fingertip-friendly.
+- **`touch-none`**: Add `touch-action: none` (Tailwind `touch-none`) to any draggable handle so the browser doesn't claim the gesture for scrolling before pointer-capture kicks in.
+- **Layout overlays**: Fixed overlays (like the AI panel) that push desktop content via `padding-right` on `#app` should skip that adjustment on mobile (`window.matchMedia('(min-width: 768px)').matches`). Stacked mobile layouts don't have a side-by-side viewport to push.
+- **Viewport-relative sizing**: Avoid hard-coded pixel widths for panel defaults that would exceed a phone screen. Test new panels/modals at 375 px wide.
+
 ### Commit & PR Conventions
+
+**Before opening (or updating) a PR, re-sync your branch with the latest `origin/staging`** — `git fetch origin staging`, then merge it in (or rebase onto it) — so the PR diff reflects only your changes and merges cleanly without re-introducing already-merged work. See the Deployment workflow above for the full sequence.
 
 PR titles, commit subjects, and PR labels feed the auto-generated release notes (`.github/release.yml`). Keep both consistent.
 
@@ -166,6 +314,29 @@ Subject is imperative and lowercase after the prefix: `feat: add light/dark mode
 - `ignore-for-release` — suppress from release notes (use for `chore:`/`refactor:` housekeeping that shouldn't appear in user-facing notes)
 
 Anything unlabeled lands in "Other Changes." That's fine for occasional internal cleanup, but features and fixes should always be labeled.
+
+### After Opening a PR
+
+Opening the PR (see [the standing instruction](#pull-requests--always-open-one-when-a-task-is-complete) in Deployment) isn't the finish line. Once it's up, do the following (the first two can run in parallel):
+
+**1. Kick off an automated review pass.** Right after pushing the initial PR, launch a review subagent (the Agent tool) over your branch diff against `origin/staging` and the code it touches. Have it hunt specifically for problems your change may have introduced:
+
+- **Defects** — logic errors, unhandled cases, broken or orphaned call sites in the new code.
+- **Functionality dropped in a merge** — features or code paths silently lost while resolving conflicts or re-syncing with `origin/staging`. Diff against what was there before, not just your own edits.
+- **Backwards-incompatible changes** — anything that breaks existing persisted data or files. Watch session/schema changes most closely: old sessions saved in IndexedDB, and previously exported files (GLB/3MF and any versioned schema), must still import and load. A schema bump needs a migration or back-compat read path, not a hard break.
+- **Security issues** — injection (command/SQL), XSS or unsafe HTML insertion, leaked API keys/secrets, or weakened CSP/COEP/COOP headers.
+
+Surface the results on the PR (a review comment, or fold clear fixes straight into the branch). If the pass turns up something ambiguous or large, raise it with the user rather than silently reworking.
+
+**2. Follow CI and auto-fix what you can.** Watch the PR's checks — the `npm run build` / `npm run test:e2e` workflow and the Cloudflare Pages deployment — and **auto-fix build or deployment failures when you can** by pushing a fix straight to the PR branch:
+
+1. Reproduce the failure locally first (`npm run build`, `npm run test:e2e`) so you're fixing the real cause, not guessing from the log.
+2. Re-sync with the latest `origin/staging` if the branch has drifted (see the Deployment workflow), then commit and push the fix to the same PR branch.
+3. Re-check CI after the push, and keep iterating until the checks are green.
+
+Only push fixes you're confident in — failures clearly caused by your own changes. If a failure is ambiguous, unrelated to your changes, or would require a large refactor or a risky/destructive change to resolve, stop and ask the user instead of pushing speculative fixes.
+
+**3. Keep the PR description in sync with the branch.** Any time you push new work to an open PR — review fixes, CI fixes, or follow-up commits that go beyond the PR's original scope — re-check the PR description and update it to cover the *totality* of the work now on the branch, not just what existed when the PR was first opened. Fold the new changes into the Summary, refresh the Test plan, and bring the title, prefix, and labels back in line with the [commit & PR conventions](#commit--pr-conventions) if the scope has grown. The description and the branch diff should never tell different stories — don't let the description silently drift behind the work.
 
 ## Common Errors
 

@@ -1,7 +1,13 @@
 // Notes panel — list, create, edit, delete session notes
 
-import { listSessionNotes, addSessionNote, getState, type SessionNote } from '../storage/sessionManager';
-import { deleteNote as dbDeleteNote, updateNote as dbUpdateNote } from '../storage/db';
+import {
+  listSessionNotes,
+  addSessionNote,
+  deleteSessionNote,
+  updateSessionNote,
+  getState,
+  type SessionNote,
+} from '../storage/sessionManager';
 
 let notesEl: HTMLElement | null = null;
 
@@ -119,7 +125,7 @@ function createNoteRow(note: SessionNote): HTMLElement {
   deleteBtn.className = 'text-xs text-zinc-500 hover:text-red-400 transition-colors';
   deleteBtn.textContent = 'Delete';
   deleteBtn.addEventListener('click', async () => {
-    await dbDeleteNote(note.id);
+    await deleteSessionNote(note.id);
     await refreshNotes();
   });
   actions.appendChild(deleteBtn);
@@ -168,7 +174,7 @@ function enterEditMode(row: HTMLElement, note: SessionNote): void {
   saveBtn.addEventListener('click', async () => {
     const newText = textarea.value.trim();
     if (!newText) return;
-    await dbUpdateNote(note.id, newText);
+    await updateSessionNote(note.id, newText);
     await refreshNotes();
   });
 

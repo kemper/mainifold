@@ -3,10 +3,11 @@ import { get3MFUnitString } from '../geometry/units';
 import { downloadBlob, getExportFilename, getExportTitle } from './download';
 import type { BuiltExport } from './gltf';
 import { buildZip } from './zip';
-import { cleanMeshForExport, DEFAULT_COLOR_HEX, triColorHex, hasAnyPainted } from './meshClean';
+import { assertFiniteMesh, cleanMeshForExport, DEFAULT_COLOR_HEX, triColorHex, hasAnyPainted } from './meshClean';
 
 /** Build a 3MF export blob without triggering a download. */
 export function build3MF(meshData: MeshData, customName?: string): BuiltExport {
+  assertFiniteMesh(meshData);
   const { triVerts, triColors } = meshData;
 
   const { remap, uniquePositions, validTris } = cleanMeshForExport(meshData);
@@ -115,7 +116,8 @@ ${triangles.join('\n')}
   return { blob, filename: getExportFilename('3mf', customName), mimeType };
 }
 
-export function export3MF(meshData: MeshData, customName?: string): void {
+export function export3MF(meshData: MeshData, customName?: string): string {
   const built = build3MF(meshData, customName);
   downloadBlob(built.blob, built.filename, '3MF');
+  return built.filename;
 }

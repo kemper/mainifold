@@ -2,6 +2,34 @@ import * as THREE from 'three';
 import { createWhiteMaterial, createBlackWireframeMaterial } from './materials';
 import type { MeshData } from '../geometry/types';
 import { buildStrokesGroup, disposeStrokesGroup } from '../annotations/annotationOverlay';
+import { presetIndex } from '../storage/db';
+
+/** Composite-render angle sets accepted by `partwright.renderViews`.
+ *  Single source of truth shared by the API surface (main.ts), the AI
+ *  tool schema (src/ai/tools.ts), and the per-turn system prompt. */
+export const RENDER_VIEW_MODES = ['auto', 'tri', 'all', 'box'] as const;
+export type RenderViewMode = typeof RENDER_VIEW_MODES[number];
+
+/** Standard camera angles used by `renderSingleView` consumers across
+ *  the app: the renderViews composite, the Show-AI iso-views capture,
+ *  and any future thumbnail caller. Each value is exactly the shape
+ *  `renderSingleView` accepts. Single source so the Front-elevation
+ *  semantics can't drift between callers. */
+export const STANDARD_VIEWS = {
+  front: { label: 'Front', elevation: 0,  azimuth: 0,   ortho: true  },
+  right: { label: 'Right', elevation: 0,  azimuth: 90,  ortho: true  },
+  top:   { label: 'Top',   elevation: 90, azimuth: 0,   ortho: true  },
+  iso:   { label: 'Iso',   elevation: 35, azimuth: 45,  ortho: false },
+} as const;
+export type StandardViewAngle = typeof STANDARD_VIEWS[keyof typeof STANDARD_VIEWS];
+
+/** Solid-shaded grey applied to triangles that have no color region.
+ *  Sits between the white render background and the brightest painted
+ *  RGB so silhouettes stay visible without overpowering painted
+ *  features. ~0.85 is roughly halfway in perceptual luminance between
+ *  white and middle-gray (#bfbfbf). Picking a value too dark obscures
+ *  pastel paints; too light and the mesh disappears against the bg. */
+const UNPAINTED_BASE = 0.85;
 
 interface ViewConfig {
   name: string;
@@ -43,9 +71,14 @@ function meshDataToGeometry(meshData: MeshData): THREE.BufferGeometry {
       const b = triColors[t * 3 + 2] / 255;
       const painted = (triColors as Uint8Array & { _painted?: Uint8Array })._painted;
       const isPainted = painted ? painted[t] === 1 : (r !== 0 || g !== 0 || b !== 0);
-      const cr = isPainted ? r : 1;
-      const cg = isPainted ? g : 1;
-      const cb = isPainted ? b : 1;
+      // Unpainted base is light gray, NOT pure white, so the mesh
+      // silhouette is visible against the white render background.
+      // Pure white made unpainted parts of a model invisible against
+      // the bg — only the painted patches showed, which read as
+      // "the renderer is broken" to a model reasoning from the image.
+      const cr = isPainted ? r : UNPAINTED_BASE;
+      const cg = isPainted ? g : UNPAINTED_BASE;
+      const cb = isPainted ? b : UNPAINTED_BASE;
 
       for (let v = 0; v < 3; v++) {
         colors[t * 9 + v * 3] = cr;
@@ -73,6 +106,31 @@ function meshDataToGeometry(meshData: MeshData): THREE.BufferGeometry {
 }
 
 let offRenderer: THREE.WebGLRenderer | null = null;
+let offRendererDisposeTimer: ReturnType<typeof setTimeout> | null = null;
+
+// Three.js retains compiled shader programs, framebuffers, and texture handles
+// inside WebGLRenderer that setSize() does not free. Browsers also cap a tab
+// at ~16 live WebGL contexts. We dispose the offscreen renderer after a short
+// idle window so GPU memory is reclaimed between user actions; the lazy branch
+// in getOffscreenRenderer re-creates it on the next render.
+const OFFSCREEN_IDLE_DISPOSE_MS = 10_000;
+
+function disposeOffscreenRenderer(): void {
+  if (!offRenderer) return;
+  // forceContextLoss releases the underlying WebGL context; dispose() alone
+  // leaves it counted against the per-tab context cap.
+  offRenderer.forceContextLoss();
+  offRenderer.dispose();
+  offRenderer = null;
+}
+
+function scheduleOffscreenDispose(): void {
+  if (offRendererDisposeTimer) clearTimeout(offRendererDisposeTimer);
+  offRendererDisposeTimer = setTimeout(() => {
+    offRendererDisposeTimer = null;
+    disposeOffscreenRenderer();
+  }, OFFSCREEN_IDLE_DISPOSE_MS);
+}
 
 function getOffscreenRenderer(size: number): THREE.WebGLRenderer {
   if (!offRenderer) {
@@ -80,97 +138,23 @@ function getOffscreenRenderer(size: number): THREE.WebGLRenderer {
     offRenderer.setPixelRatio(1);
   }
   offRenderer.setSize(size, size);
+  scheduleOffscreenDispose();
   return offRenderer;
 }
 
-/** Dispose scene contents (meshes, materials, lights) to prevent WebGL memory leaks */
+/** Dispose scene contents (meshes, geometries, materials) to prevent WebGL memory leaks */
 function disposeScene(scene: THREE.Scene): void {
   scene.traverse((obj) => {
     if (obj instanceof THREE.Mesh) {
-      obj.material?.dispose?.();
+      obj.geometry?.dispose();
+      if (Array.isArray(obj.material)) {
+        obj.material.forEach(m => m.dispose());
+      } else {
+        obj.material?.dispose?.();
+      }
     }
   });
-}
-
-export function renderViewsToContainer(container: HTMLElement, meshData: MeshData): void {
-  container.innerHTML = '';
-
-  const geometry = meshDataToGeometry(meshData);
-
-  const scene = new THREE.Scene();
-  scene.background = new THREE.Color(0x1e1e2e);
-
-  const ambient = new THREE.AmbientLight(0xffffff, 0.7);
-  scene.add(ambient);
-  const dir1 = new THREE.DirectionalLight(0xffffff, 0.6);
-  dir1.position.set(10, -10, 15);
-  scene.add(dir1);
-  const dir2 = new THREE.DirectionalLight(0xffffff, 0.3);
-  dir2.position.set(-10, 10, -5);
-  scene.add(dir2);
-
-  const hasColors = geometry.hasAttribute('color');
-  const solidMesh = new THREE.Mesh(geometry, createWhiteMaterial(hasColors));
-  const wireMesh = new THREE.Mesh(geometry, createBlackWireframeMaterial());
-  scene.add(solidMesh);
-  scene.add(wireMesh);
-
-  const box = new THREE.Box3().setFromBufferAttribute(
-    geometry.getAttribute('position') as THREE.BufferAttribute,
-  );
-  const center = box.getCenter(new THREE.Vector3());
-  const bsize = box.getSize(new THREE.Vector3());
-  const maxDim = Math.max(bsize.x, bsize.y, bsize.z);
-  const d = maxDim * 1.4;
-
-  const camera = new THREE.PerspectiveCamera(40, 1, 0.1, 1000);
-  const viewSize = 300;
-  const renderer = getOffscreenRenderer(viewSize);
-
-  const annotations = buildStrokesGroup(new THREE.Vector2(viewSize, viewSize));
-  if (annotations) scene.add(annotations);
-
-  // 2x2 grid that fills the container
-  const grid = document.createElement('div');
-  grid.className = 'grid grid-cols-2 grid-rows-2 gap-1 w-full h-full';
-
-  for (const view of VIEWS) {
-    const pos = view.position(d);
-    camera.position.set(center.x + pos[0], center.y + pos[1], center.z + pos[2]);
-    camera.up.set(view.up[0], view.up[1], view.up[2]);
-    camera.lookAt(center);
-    camera.updateProjectionMatrix();
-
-    renderer.render(scene, camera);
-
-    const canvas = document.createElement('canvas');
-    canvas.width = viewSize;
-    canvas.height = viewSize;
-    const ctx = canvas.getContext('2d')!;
-    ctx.drawImage(renderer.domElement, 0, 0);
-
-    // Label as caption below canvas, not overlaid
-    const wrapper = document.createElement('div');
-    wrapper.className = 'flex flex-col min-h-0';
-
-    canvas.className = 'w-full flex-1 block object-contain min-h-0';
-    wrapper.appendChild(canvas);
-
-    const label = document.createElement('div');
-    label.className = 'text-center text-xs text-zinc-500 font-mono py-0.5 bg-zinc-800 shrink-0';
-    label.textContent = view.name;
-    wrapper.appendChild(label);
-
-    grid.appendChild(wrapper);
-  }
-
-  container.appendChild(grid);
-  if (annotations) {
-    scene.remove(annotations);
-    disposeStrokesGroup(annotations);
-  }
-  disposeScene(scene);
-  geometry.dispose();
+  scene.clear();
 }
 
 export function renderCompositeCanvas(meshData: MeshData): HTMLCanvasElement {
@@ -250,48 +234,48 @@ export function renderCompositeCanvas(meshData: MeshData): HTMLCanvasElement {
   return compositeCanvas;
 }
 
-// === Reference images for comparison ===
+// === Attached images for elevation comparison ===
 
-export interface ReferenceImages {
-  front?: string;
-  right?: string;
-  back?: string;
-  left?: string;
-  top?: string;
-  perspective?: string;
+export interface AttachedImage {
+  id: string;
+  src: string;
+  /** Optional user-facing caption. Drives ordering via preset matching. */
+  label?: string;
 }
 
-let _referenceImages: ReferenceImages | null = null;
+let _images: AttachedImage[] = [];
 
-export function setReferenceImages(images: ReferenceImages): void {
-  _referenceImages = images;
+export function setImages(images: AttachedImage[]): void {
+  _images = images;
+  window.dispatchEvent(new Event('images-changed'));
 }
 
-export function clearReferenceImages(): void {
-  _referenceImages = null;
+export function clearImages(): void {
+  _images = [];
+  window.dispatchEvent(new Event('images-changed'));
 }
 
-export function getReferenceImages(): ReferenceImages | null {
-  return _referenceImages;
+export function getImages(): AttachedImage[] {
+  return _images;
 }
 
-// === Orthographic elevation views ===
-
-interface ElevationConfig {
-  name: string;
-  // Camera direction: where the camera looks FROM (multiplied by distance)
-  direction: [number, number, number];
-  up: [number, number, number];
-  refKey: keyof ReferenceImages; // which reference image to show alongside
+/** Stable sort: preset-matching labels first in preset order, others keep
+ *  their insertion order at the end. */
+export function sortImagesByPreset(images: readonly AttachedImage[]): AttachedImage[] {
+  return images
+    .map((item, idx) => ({ item, idx, p: presetIndex(item.label) }))
+    .sort((a, b) => {
+      const aHasPreset = a.p >= 0;
+      const bHasPreset = b.p >= 0;
+      if (aHasPreset && bHasPreset) return a.p - b.p;
+      if (aHasPreset) return -1;
+      if (bHasPreset) return 1;
+      return a.idx - b.idx;
+    })
+    .map(x => x.item);
 }
 
-const ELEVATIONS: ElevationConfig[] = [
-  { name: 'Front',  direction: [0, -1, 0],  up: [0, 0, 1], refKey: 'front' },
-  { name: 'Right',  direction: [1, 0, 0],   up: [0, 0, 1], refKey: 'right' },
-  { name: 'Back',   direction: [0, 1, 0],   up: [0, 0, 1], refKey: 'back' },
-  { name: 'Left',   direction: [-1, 0, 0],  up: [0, 0, 1], refKey: 'left' },
-  { name: 'Top',    direction: [0, 0, 1],   up: [0, 1, 0], refKey: 'top' },
-];
+// === Scene construction for offscreen single-view renders ===
 
 function createElevationScene(geometry: THREE.BufferGeometry, bgColor: number): THREE.Scene {
   const scene = new THREE.Scene();
@@ -306,210 +290,55 @@ function createElevationScene(geometry: THREE.BufferGeometry, bgColor: number): 
   scene.add(dir2);
   const hasColors = geometry.hasAttribute('color');
   const solidMesh = new THREE.Mesh(geometry, createWhiteMaterial(hasColors));
-  const wireMesh = new THREE.Mesh(geometry, createBlackWireframeMaterial());
   scene.add(solidMesh);
-  scene.add(wireMesh);
+  // Wireframe overlay obscures vertex-color verification on dense
+  // organic meshes — at 320px tile size, the 30% black edges of tens
+  // of thousands of triangles compound into a dark mass that washes
+  // out painted regions. Skip the wireframe when the mesh carries
+  // per-triangle colors (the user is in a paint workflow and wants
+  // to read colors, not topology). Keep it for uncolored renders
+  // where topology IS the subject.
+  if (!hasColors) {
+    const wireMesh = new THREE.Mesh(geometry, createBlackWireframeMaterial());
+    scene.add(wireMesh);
+  }
   return scene;
-}
-
-function setupOrthoCamera(
-  bsize: THREE.Vector3, center: THREE.Vector3,
-  elev: ElevationConfig, padding: number
-): THREE.OrthographicCamera {
-  // Determine visible extents based on viewing direction
-  const dir = elev.direction;
-  const upVec = elev.up;
-  // Cross product to get the "right" vector
-  const right = [
-    upVec[1] * dir[2] - upVec[2] * dir[1],
-    upVec[2] * dir[0] - upVec[0] * dir[2],
-    upVec[0] * dir[1] - upVec[1] * dir[0],
-  ];
-
-  // Project bounding box onto right and up axes to get visible extents
-  const bArr = [bsize.x, bsize.y, bsize.z];
-  let hExtent = 0, vExtent = 0;
-  for (let i = 0; i < 3; i++) {
-    hExtent += Math.abs(right[i]) * bArr[i];
-    vExtent += Math.abs(upVec[i]) * bArr[i];
-  }
-  const halfH = (hExtent / 2) * padding;
-  const halfV = (vExtent / 2) * padding;
-  const maxHalf = Math.max(halfH, halfV); // keep square aspect
-
-  const camera = new THREE.OrthographicCamera(-maxHalf, maxHalf, maxHalf, -maxHalf, 0.1, 1000);
-  const maxDim = Math.max(bsize.x, bsize.y, bsize.z);
-  camera.position.set(
-    center.x + dir[0] * maxDim * 2,
-    center.y + dir[1] * maxDim * 2,
-    center.z + dir[2] * maxDim * 2,
-  );
-  camera.up.set(upVec[0], upVec[1], upVec[2]);
-  camera.lookAt(center);
-  camera.updateProjectionMatrix();
-  return camera;
-}
-
-/** Render orthographic elevation views (front, right, back, left, top) to a container.
- *  When reference images are loaded, shows them in a compact row above the model elevations. */
-export function renderElevationsToContainer(container: HTMLElement, meshData: MeshData): void {
-  container.innerHTML = '';
-
-  // Wrapper div handles flex layout so we don't set inline display on the container
-  // (which would override the 'hidden' class when other tabs are active)
-  const outerWrap = document.createElement('div');
-  outerWrap.className = 'flex flex-col w-full h-full';
-
-  const geometry = meshDataToGeometry(meshData);
-  const scene = createElevationScene(geometry, 0x1e1e2e);
-
-  const box = new THREE.Box3().setFromBufferAttribute(
-    geometry.getAttribute('position') as THREE.BufferAttribute,
-  );
-  const center = box.getCenter(new THREE.Vector3());
-  const bsize = box.getSize(new THREE.Vector3());
-
-  const viewSize = 300;
-  const renderer = getOffscreenRenderer(viewSize);
-  const hasRef = _referenceImages !== null;
-
-  const annotations = buildStrokesGroup(new THREE.Vector2(viewSize, viewSize));
-  if (annotations) scene.add(annotations);
-
-  // Compact reference images row (above the elevation grid)
-  if (hasRef) {
-    const refSection = document.createElement('div');
-    refSection.className = 'pb-1 border-b border-zinc-700 shrink-0';
-
-    const refRow = document.createElement('div');
-    refRow.className = 'flex gap-1.5 items-center overflow-x-auto';
-
-    const refLabel = document.createElement('span');
-    refLabel.className = 'text-xs text-zinc-500 font-mono shrink-0 px-1';
-    refLabel.textContent = 'Refs:';
-    refRow.appendChild(refLabel);
-
-    const refKeys: (keyof ReferenceImages)[] = ['perspective', 'front', 'right', 'back', 'left', 'top'];
-    for (const key of refKeys) {
-      const src = _referenceImages![key];
-      if (!src) continue;
-
-      const refImg = document.createElement('img');
-      refImg.src = src;
-      refImg.className = 'h-16 object-contain rounded bg-zinc-950 border border-blue-500/30 cursor-pointer hover:border-blue-400 transition-colors shrink-0';
-      refImg.title = `${key.charAt(0).toUpperCase() + key.slice(1)} — click to enlarge`;
-      refImg.addEventListener('click', () => {
-        const overlay = document.createElement('div');
-        overlay.className = 'fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm';
-        overlay.addEventListener('click', (e) => { if (e.target === overlay) overlay.remove(); });
-        const img = document.createElement('img');
-        img.src = src;
-        img.className = 'max-w-[90vw] max-h-[90vh] object-contain rounded-lg shadow-2xl';
-        overlay.appendChild(img);
-        document.body.appendChild(overlay);
-        const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') { overlay.remove(); document.removeEventListener('keydown', onKey); } };
-        document.addEventListener('keydown', onKey);
-      });
-      refRow.appendChild(refImg);
-    }
-
-    refSection.appendChild(refRow);
-    outerWrap.appendChild(refSection);
-  }
-
-  // Elevation grid: 3 columns, fills remaining space
-  const grid = document.createElement('div');
-  grid.className = 'grid gap-1 flex-1 min-h-0';
-  grid.style.gridTemplateColumns = 'repeat(3, 1fr)';
-  grid.style.gridTemplateRows = 'repeat(2, 1fr)';
-
-  for (const elev of ELEVATIONS) {
-    const camera = setupOrthoCamera(bsize, center, elev, 1.3);
-    renderer.render(scene, camera);
-
-    const canvas = document.createElement('canvas');
-    canvas.width = viewSize;
-    canvas.height = viewSize;
-    const ctx = canvas.getContext('2d')!;
-    ctx.drawImage(renderer.domElement, 0, 0);
-
-    const wrapper = document.createElement('div');
-    wrapper.className = 'flex flex-col min-h-0';
-
-    canvas.className = 'w-full flex-1 block object-contain min-h-0';
-    wrapper.appendChild(canvas);
-
-    const label = document.createElement('div');
-    label.className = 'text-center text-xs text-zinc-500 font-mono py-0.5 bg-zinc-800 shrink-0';
-    label.textContent = elev.name;
-    wrapper.appendChild(label);
-
-    grid.appendChild(wrapper);
-  }
-
-  // 6th slot: isometric view
-  {
-    const isoCamera = new THREE.PerspectiveCamera(40, 1, 0.1, 1000);
-    const maxDim = Math.max(bsize.x, bsize.y, bsize.z);
-    const d = maxDim * 1.4;
-    isoCamera.position.set(center.x + d, center.y - d, center.z + d);
-    isoCamera.up.set(0, 0, 1);
-    isoCamera.lookAt(center);
-    isoCamera.updateProjectionMatrix();
-    renderer.render(scene, isoCamera);
-
-    const canvas = document.createElement('canvas');
-    canvas.width = viewSize;
-    canvas.height = viewSize;
-    const ctx = canvas.getContext('2d')!;
-    ctx.drawImage(renderer.domElement, 0, 0);
-
-    const wrapper = document.createElement('div');
-    wrapper.className = 'flex flex-col min-h-0';
-
-    canvas.className = 'w-full flex-1 block object-contain min-h-0';
-    wrapper.appendChild(canvas);
-
-    const label = document.createElement('div');
-    label.className = 'text-center text-xs text-zinc-500 font-mono py-0.5 bg-zinc-800 shrink-0';
-    label.textContent = 'Isometric';
-    wrapper.appendChild(label);
-
-    grid.appendChild(wrapper);
-  }
-
-  outerWrap.appendChild(grid);
-  container.appendChild(outerWrap);
-  if (annotations) {
-    scene.remove(annotations);
-    disposeStrokesGroup(annotations);
-  }
-  disposeScene(scene);
-  geometry.dispose();
 }
 
 /** Render a single view from any camera angle. Returns a data URL (PNG).
  *  For orthographic views, pass ortho: true.
  *  elevation/azimuth are in degrees: elevation 0 = horizon, 90 = top-down.
  *  azimuth 0 = front (-Y), 90 = right (+X), 180 = back (+Y), 270 = left (-X). */
-export function renderSingleView(meshData: MeshData, options: {
+/** Build the same THREE.Camera that `renderSingleView` would render
+ *  through for these options. Exported so `probePixel` (in
+ *  geometry/rayCast.ts) can replay the camera exactly and unproject
+ *  pixel coordinates back to world rays that hit the same triangles
+ *  the agent sees in the rendered image. Camera setup MUST match
+ *  renderSingleView byte-for-byte — both call sites read from this
+ *  function so they can't drift. */
+export function buildViewCamera(meshData: MeshData, options: {
   elevation?: number;
   azimuth?: number;
   ortho?: boolean;
-  size?: number;
-} = {}): string {
+}): THREE.Camera {
   const elevation = (options.elevation ?? 30) * Math.PI / 180;
   const azimuth = (options.azimuth ?? 315) * Math.PI / 180;
-  const viewSize = options.size ?? 500;
 
-  const geometry = meshDataToGeometry(meshData);
-  const scene = createElevationScene(geometry, 0xffffff);
-
-  const box = new THREE.Box3().setFromBufferAttribute(
-    geometry.getAttribute('position') as THREE.BufferAttribute,
-  );
-  const center = box.getCenter(new THREE.Vector3());
-  const bsize = box.getSize(new THREE.Vector3());
+  // Bounding box from the raw vertProperties — same numbers
+  // renderSingleView computes after constructing the BufferGeometry.
+  let minX = Infinity, minY = Infinity, minZ = Infinity;
+  let maxX = -Infinity, maxY = -Infinity, maxZ = -Infinity;
+  const { vertProperties, numVert, numProp } = meshData;
+  for (let i = 0; i < numVert; i++) {
+    const x = vertProperties[i * numProp];
+    const y = vertProperties[i * numProp + 1];
+    const z = vertProperties[i * numProp + 2];
+    if (x < minX) minX = x; if (x > maxX) maxX = x;
+    if (y < minY) minY = y; if (y > maxY) maxY = y;
+    if (z < minZ) minZ = z; if (z > maxZ) maxZ = z;
+  }
+  const center = new THREE.Vector3((minX + maxX) / 2, (minY + maxY) / 2, (minZ + maxZ) / 2);
+  const bsize = new THREE.Vector3(maxX - minX, maxY - minY, maxZ - minZ);
   const maxDim = Math.max(bsize.x, bsize.y, bsize.z);
   const dist = maxDim * 2;
 
@@ -535,7 +364,20 @@ export function renderSingleView(meshData: MeshData, options: {
     perspCamera.updateProjectionMatrix();
     camera = perspCamera;
   }
+  return camera;
+}
 
+export function renderSingleView(meshData: MeshData, options: {
+  elevation?: number;
+  azimuth?: number;
+  ortho?: boolean;
+  size?: number;
+} = {}): string {
+  const viewSize = options.size ?? 500;
+
+  const geometry = meshDataToGeometry(meshData);
+  const scene = createElevationScene(geometry, 0xffffff);
+  const camera = buildViewCamera(meshData, options);
   const renderer = getOffscreenRenderer(viewSize);
 
   const annotations = buildStrokesGroup(new THREE.Vector2(viewSize, viewSize));

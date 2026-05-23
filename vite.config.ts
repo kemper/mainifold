@@ -54,6 +54,11 @@ function absoluteUrls(): Plugin {
 export default defineConfig({
   base: '/',
   plugins: [tailwindcss(), absoluteUrls(), markdownCharset()],
+  worker: {
+    // ES module Workers support code-splitting and are required when
+    // Worker files import other modules (agentWorker, engineWorker).
+    format: 'es',
+  },
   optimizeDeps: {
     exclude: ['manifold-3d']
   },
@@ -61,7 +66,7 @@ export default defineConfig({
     headers: {
       'Cross-Origin-Opener-Policy': 'same-origin',
       'Cross-Origin-Embedder-Policy': 'require-corp',
-      'Content-Security-Policy': "default-src 'self'; script-src 'self' 'unsafe-eval' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' blob: data:; connect-src 'self'; worker-src 'self' blob:; font-src 'self'",
+      'Content-Security-Policy': "default-src 'self'; script-src 'self' 'unsafe-eval' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' blob: data:; connect-src 'self' https:; worker-src 'self' blob:; font-src 'self'",
     },
     fs: {
       // Relax strict fs access for WASM files in node_modules
