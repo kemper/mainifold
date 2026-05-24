@@ -539,7 +539,7 @@ function buildDrawer(): void {
 
   // Toggle strip
   toggleStripEl = document.createElement('div');
-  toggleStripEl.className = 'px-3 py-1.5 border-t border-zinc-800 flex flex-wrap items-center gap-1.5 shrink-0';
+  toggleStripEl.className = 'px-3 py-1.5 border-t border-zinc-800 flex flex-col gap-1 shrink-0';
   bottomSection.appendChild(toggleStripEl);
 
   // Cost meter
@@ -911,13 +911,24 @@ function renderPromptChip(): void {
 
 // === Toggle strip rendering ===
 
+// Whether the collapsible "Options" group (verification knobs, caps, thinking
+// level) is expanded. In-memory; collapsed by default so the panel reads clean.
+let advancedOpen = false;
+
 function renderToggleStrip(): void {
   if (!toggleStripEl) return;
   toggleStripEl.replaceChildren();
   const settings = loadSettings();
   const { toggles } = settings;
 
-  toggleStripEl.appendChild(togglePill(
+  // Primary actions — always visible (the pills the user flips most often).
+  const primary = document.createElement('div');
+  primary.className = 'flex flex-wrap items-center gap-1';
+  // Advanced knobs — set once and rarely touched; tucked behind ⚙ Options.
+  const adv = document.createElement('div');
+  adv.className = 'flex flex-wrap items-center gap-1 mt-1.5 pt-1.5 border-t border-zinc-800';
+
+  primary.appendChild(togglePill(
     '📸 Auto-render',
     toggles.vision.views,
     'Auto-render: lets the model call renderView() to take its own screenshots after paint / geometry changes. Each render ≈ 1500 tokens of input on the next turn — verification is valuable but it adds up. The 📷 Show AI button still works manually when this is OFF.',
@@ -946,7 +957,7 @@ function renderToggleStrip(): void {
     saveSettings(setToggles(loadSettings(), { vision: { resolution: resSel.value as ChatToggles['vision']['resolution'] } }));
     renderCostMeter();
   });
-  toggleStripEl.appendChild(resSel);
+  adv.appendChild(resSel);
 
   // Verification angles — how many camera angles renderViews captures per check.
   const anglesSel = document.createElement('select');
@@ -963,9 +974,9 @@ function renderToggleStrip(): void {
   anglesSel.addEventListener('change', () => {
     saveSettings(setToggles(loadSettings(), { vision: { angles: anglesSel.value as ChatToggles['vision']['angles'] } }));
   });
-  toggleStripEl.appendChild(anglesSel);
+  adv.appendChild(anglesSel);
 
-  toggleStripEl.appendChild(togglePill(
+  primary.appendChild(togglePill(
     '▶ Run',
     toggles.scope.runCode,
     'Run code: allow the AI to execute geometry code (runCode, runAndSave). OFF makes it suggest code in chat without running.',
@@ -974,7 +985,7 @@ function renderToggleStrip(): void {
       renderToggleStrip();
     },
   ));
-  toggleStripEl.appendChild(togglePill(
+  primary.appendChild(togglePill(
     '💾 Save',
     toggles.scope.saveVersions,
     'Save versions: allow the AI to commit results to the gallery (runAndSave, loadVersion). OFF keeps the model in run-only / dry-run mode.',
@@ -983,7 +994,7 @@ function renderToggleStrip(): void {
       renderToggleStrip();
     },
   ));
-  toggleStripEl.appendChild(togglePill(
+  primary.appendChild(togglePill(
     '🎨 Paint',
     toggles.scope.paintFaces,
     'Paint: allow the AI to set color regions (paintInBox, paintSlab, paintNear, etc.). OFF by default — painting locks the editor and is the easiest place for the AI to over-select.',
@@ -992,7 +1003,7 @@ function renderToggleStrip(): void {
       renderToggleStrip();
     },
   ));
-  toggleStripEl.appendChild(togglePill(
+  primary.appendChild(togglePill(
     '📝 Notes',
     toggles.scope.sessionNotes,
     'Session notes: allow the AI to call addSessionNote to log design decisions. OFF saves a tool round-trip per note — the chat transcript already records the reasoning.',
@@ -1015,7 +1026,7 @@ function renderToggleStrip(): void {
   retry.addEventListener('change', () => {
     saveSettings(setToggles(loadSettings(), { autoRetry: Number(retry.value) as 0 | 1 | 3 }));
   });
-  toggleStripEl.appendChild(retry);
+  adv.appendChild(retry);
 
   // Iteration cap — how many tool round-trips per user turn before the
   // loop forces a stop. Lower = safer (model can't run away on cost or
@@ -1034,7 +1045,7 @@ function renderToggleStrip(): void {
   iterCap.addEventListener('change', () => {
     saveSettings(setToggles(loadSettings(), { maxIterations: iterCap.value as ChatToggles['maxIterations'] }));
   });
-  toggleStripEl.appendChild(iterCap);
+  adv.appendChild(iterCap);
 
   // Spend cap — alternative / parallel control to iteration cap. Both
   // apply; whichever trips first stops the loop. Useful when iteration
@@ -1054,7 +1065,7 @@ function renderToggleStrip(): void {
   spendCap.addEventListener('change', () => {
     saveSettings(setToggles(loadSettings(), { maxSpend: spendCap.value as ChatToggles['maxSpend'] }));
   });
-  toggleStripEl.appendChild(spendCap);
+  adv.appendChild(spendCap);
 
   // Thinking level — how much the model reasons before answering. Maps
   // per-provider to Anthropic extended-thinking budget_tokens, Gemini
@@ -1076,7 +1087,21 @@ function renderToggleStrip(): void {
     saveSettings(setToggles(loadSettings(), { thinking: thinkSel.value as ChatToggles['thinking'] }));
     renderCostMeter();
   });
-  toggleStripEl.appendChild(thinkSel);
+  adv.appendChild(thinkSel);
+
+  // Disclosure toggle for the advanced group.
+  const optBtn = document.createElement('button');
+  optBtn.className = advancedOpen
+    ? 'px-2 py-0.5 rounded text-[10px] bg-zinc-700/60 border border-zinc-600 text-zinc-200'
+    : 'px-2 py-0.5 rounded text-[10px] bg-zinc-800 border border-zinc-700 text-zinc-400 [@media(hover:hover)]:hover:text-zinc-200';
+  optBtn.textContent = advancedOpen ? '⚙ Options ▴' : '⚙ Options ▾';
+  optBtn.title = 'Advanced AI controls: verification image resolution & angles, auto-retry, iteration & spend caps, and thinking level. Hidden by default to keep the panel uncluttered.';
+  optBtn.setAttribute('aria-expanded', String(advancedOpen));
+  optBtn.addEventListener('click', () => { advancedOpen = !advancedOpen; renderToggleStrip(); });
+  primary.appendChild(optBtn);
+
+  toggleStripEl.appendChild(primary);
+  if (advancedOpen) toggleStripEl.appendChild(adv);
 }
 
 function togglePill(label: string, on: boolean, tooltip: string, onClick: () => void): HTMLButtonElement {
