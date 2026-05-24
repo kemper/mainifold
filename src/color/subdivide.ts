@@ -189,55 +189,84 @@ function nearestSampleDist2(px: number, py: number, pz: number, samples: [number
   return best;
 }
 
-/** Classify a triangle against the airbrush's feathered EDGE band — the annulus
- *  between `innerR` (solid-core edge) and `outerR` (the radius). Only that band
- *  needs subdivision: the solid core paints as whole coarse triangles and the
- *  exterior never paints, so the triangle cost tracks the thin edge, not the
- *  whole disc. With `innerR === 0` (a translucent spray with no fully-solid
- *  core) it degrades to the full footprint. */
-function airbrushFeatherClassifier(
+/** Classify a triangle for the airbrush refine. Two phases keep subdivision
+ *  blob-local: a triangle bigger than a droplet that overlaps the footprint is
+ *  split down toward droplet scale; once at droplet scale, only triangles that
+ *  cross a droplet EDGE are refined further (to round it), while gaps between
+ *  droplets and the fully-covered interior are left coarse. The solid core
+ *  (inside `innerR`) and everything outside the footprint are never touched. */
+function airbrushDropletClassifier(
   samples: [number, number, number][],
   innerR: number,
   outerR: number,
+  dabR: number,
+  strength: number,
+  softness: number,
+  seed: number,
 ): TriClassifier {
   const inner2 = innerR * innerR;
   const outer2 = outerR * outerR;
+  const dab2 = dabR * dabR;
+  const g = dabR;
+  // Is the point inside any kept droplet? Same lattice + falloff test the
+  // resolver uses, so refine and paint agree on where droplets are.
+  const inDroplet = (x: number, y: number, z: number): boolean => {
+    const gi = Math.round(x / g), gj = Math.round(y / g), gk = Math.round(z / g);
+    for (let di = -1; di <= 1; di++) for (let dj = -1; dj <= 1; dj++) for (let dk = -1; dk <= 1; dk++) {
+      const ix = gi + di, iy = gj + dj, iz = gk + dk;
+      const px = ix * g, py = iy * g, pz = iz * g;
+      const ddx = x - px, ddy = y - py, ddz = z - pz;
+      if (ddx * ddx + ddy * ddy + ddz * ddz > dab2) continue;
+      const dn2 = nearestSampleDist2(px, py, pz, samples);
+      if (dn2 > outer2) continue;
+      const cov = airbrushProbability(Math.sqrt(dn2) / outerR, strength, softness);
+      if (cov >= 1 || (cov > 0 && cellHash(ix, iy, iz, seed) < cov)) return true;
+    }
+    return false;
+  };
   return (a, b, c) => {
     const da = nearestSampleDist2(a[0], a[1], a[2], samples);
     const db = nearestSampleDist2(b[0], b[1], b[2], samples);
     const dc = nearestSampleDist2(c[0], c[1], c[2], samples);
-    const inBand = (d: number): boolean => d >= inner2 && d <= outer2;
-    if (inBand(da) && inBand(db) && inBand(dc)) return 'inside';
-    // Entirely within the solid core → never subdivide (it paints solid).
-    if (da < inner2 && db < inner2 && dc < inner2) return 'outside';
-    // Entirely beyond the outer radius → outside, unless the band still grazes
-    // the triangle (a small spray sitting inside one big face).
+    // Solid core (all inside innerR) → leave coarse; the resolver paints it solid.
+    if (inner2 > 0 && da < inner2 && db < inner2 && dc < inner2) return 'outside';
+    // Entirely beyond the footprint → leave coarse, unless the spray still grazes
+    // a triangle bigger than itself (a small spray inside one big face).
     if (da > outer2 && db > outer2 && dc > outer2) {
+      let grazes = false;
       for (let s = 0; s < samples.length; s++) {
         const sp = samples[s];
         const cp = closestPointOnTriangle(sp[0], sp[1], sp[2], a[0], a[1], a[2], b[0], b[1], b[2], c[0], c[1], c[2]);
         const dx = cp[0] - sp[0], dy = cp[1] - sp[1], dz = cp[2] - sp[2];
-        if (dx * dx + dy * dy + dz * dz <= outer2) return 'straddle';
+        if (dx * dx + dy * dy + dz * dz <= outer2) { grazes = true; break; }
       }
-      return 'outside';
+      if (!grazes) return 'outside';
     }
-    return 'straddle';
+    // Coarse phase: still bigger than a droplet → split toward droplet scale.
+    if (maxEdgeLen2(a, b, c) > dab2) return 'straddle';
+    // Fine phase: refine only droplet edges; leave gaps + covered interior coarse.
+    const va = inDroplet(a[0], a[1], a[2]);
+    const vb = inDroplet(b[0], b[1], b[2]);
+    const vc = inDroplet(c[0], c[1], c[2]);
+    if (va && vb && vc) return 'inside';
+    if (va || vb || vc) return 'straddle';
+    return 'outside';
   };
 }
 
-/** Build a refine region for an airbrush footprint. The dense core paints as
- *  whole coarse triangles (one solid colour); beyond it the spray is a scatter
- *  of round droplets. Only the feathered EDGE band is refined — to about a third
- *  of a droplet, so each droplet is a smooth little circle rather than one chunky
- *  triangle — keeping the cost on the thin edge, not the whole disc. A `strength`
- *  below 1 has no fully-solid core, so its `innerR` is 0 and the whole footprint
- *  is treated as feather; the triangle budget is the backstop there. */
+/** Build a refine region for an airbrush footprint. Subdivision is blob-local:
+ *  the dense core paints as whole coarse triangles, and around the scattered
+ *  droplets only the droplet EDGES are refined (to a third of a droplet, so each
+ *  circle is smooth) — gaps between droplets stay medium and the area outside the
+ *  footprint stays coarse. `strength` below 1 has no fully-solid core (innerR 0).
+ *  The triangle budget is the backstop. */
 export function airbrushRefineRegion(
   samples: [number, number, number][],
   radius: number,
   dabRadius: number,
   strength: number,
   softness: number,
+  seed: number,
 ): RefineRegion {
   const dab = dabRadius > 0 ? dabRadius : radius / 12;
   const roundEdge = dab / 3;
@@ -248,8 +277,7 @@ export function airbrushRefineRegion(
   return {
     aabb: strokeAabb(stroke),
     maxEdge: roundEdge,
-    classify: airbrushFeatherClassifier(samples, innerR, radius),
-    fill: true,
+    classify: airbrushDropletClassifier(samples, innerR, radius, dab, strength, softness, seed | 0),
     maxTriangles: AIRBRUSH_MAX_FILL_TRIANGLES,
   };
 }

@@ -151,15 +151,21 @@ test.describe('airbrush', () => {
 
   test('strength and softness change coverage monotonically (fixed seed)', async ({ page }) => {
     await openEditor(page);
-    const out = await page.evaluate(() => {
+    const out = await page.evaluate(async () => {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const pw = (window as any).partwright;
+      // Big droplets (maxEdge 10/3) on a finely tessellated base whose triangles
+      // are already smaller than the refine target — so NO subdivision happens and
+      // the painted triangle count tracks covered AREA (a clean coverage proxy;
+      // with adaptive subdivision, count no longer does — dense sprays merge into
+      // fewer coarse triangles).
+      await pw.run(`const { Manifold } = api; return Manifold.sphere(25, 240);`);
       const spray = (strength: number, softness: number) => {
         pw.clearColors();
-        return pw.paintAirbrush({ points: [[0, 0, 5]], radius: 5, strength, softness, seed: 42, color: [0.2, 0.6, 1] }).triangles;
+        return pw.paintAirbrush({ points: [[0, 0, 25]], radius: 10, strength, softness, seed: 42, maxEdge: 10 / 3, color: [0.2, 0.6, 1] }).triangles;
       };
-      // Same seed ⇒ the dither is a strict superset as the threshold rises, so
-      // these comparisons are deterministic, not statistical.
+      // Same seed ⇒ kept droplets are a strict superset as the threshold rises,
+      // so these comparisons are deterministic, not statistical.
       const strongCount = spray(0.95, 0.5);
       const weakCount = spray(0.3, 0.5);
       const hardCount = spray(0.9, 0.0); // hard disc — solid out to the rim
