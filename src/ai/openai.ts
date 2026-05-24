@@ -1,17 +1,28 @@
 // OpenAI provider: hand-rolled fetch, SSE streaming. No SDK dependency —
 // keeps the bundle small and the wire format inspectable.
 //
-// The agent loop (streamTurn) talks to the **Responses API**
-// (/v1/responses), not Chat Completions. Newer reasoning models — gpt-5.5
-// and beyond — reject `reasoning_effort` alongside function tools on
-// /v1/chat/completions ("Function tools with reasoning_effort are not
-// supported … Please use /v1/responses instead"), and the agent always
-// sends tools. Responses is OpenAI's forward path for reasoning models and
-// supports every chat model too, so the whole loop runs through it.
+// The agent loop (streamTurn) routes per model so we support the widest
+// range of models, old and new:
+//
+//   - Reasoning models (gpt-5 family incl. gpt-5.5, o1/o3/o4) → the
+//     **Responses API** (/v1/responses). gpt-5.5+ *reject* reasoning_effort
+//     alongside function tools on /v1/chat/completions ("… Please use
+//     /v1/responses instead") and the agent always sends tools, so reasoning
+//     models go to Responses — their forward-looking home, which every
+//     current reasoning model supports.
+//   - Every other / older model (gpt-4o, gpt-4.1, and legacy gpt-4 /
+//     gpt-4-turbo / gpt-3.5-turbo, dated snapshots) → **Chat Completions**
+//     (/v1/chat/completions). Some of these exist *only* on Chat Completions
+//     (they're not on the Responses API), so keeping them here is what makes
+//     "slightly older models" keep working.
+//
+// The split is gated by isReasoningModel — the same sniff that decides
+// whether a reasoning request is even valid — so there's no brittle
+// version-number guessing.
 //
 // validateKey / listModels / summarize stay on Chat Completions: they send
-// neither tools nor a reasoning request, so they're unaffected by that
-// restriction and the simpler endpoint is fine.
+// neither tools nor a reasoning request, so the Responses-only restriction
+// never applies and the simpler endpoint works for every model.
 //
 // Mirrors src/ai/anthropic.ts's exported shape (validateKey, streamTurn,
 // summarize, resetClient) so chatLoop.ts can dispatch via a sibling
@@ -33,8 +44,9 @@ const CHAT_URL = 'https://api.openai.com/v1/chat/completions';
 const RESPONSES_URL = 'https://api.openai.com/v1/responses';
 
 /** OpenAI reasoning models (gpt-5 family + the o-series) accept a reasoning
- *  request; the 4o/4.1 chat models reject it. Sniff the id so we only ask
- *  for reasoning where it's valid. */
+ *  request; the 4o/4.1 and legacy chat models reject it. This same sniff
+ *  also routes the request: reasoning models go to the Responses API,
+ *  everything else to Chat Completions. */
 function isReasoningModel(model: string): boolean {
   return /^(gpt-5|o1|o3|o4)/i.test(model);
 }
@@ -138,14 +150,31 @@ export interface OpenaiRequestSpec {
   model: string;
   systemPrompt: string;
   systemSuffix: string;
-  /** Canonical history; converted to the Responses `input` shape internally. */
+  /** Canonical history; converted to the per-endpoint shape internally. */
   history: ChatMessage[];
   tools: ToolDefinition[];
   maxTokens?: number;
   /** Extended-thinking level → reasoning `effort` (reasoning models only).
-   *  'off' (default) omits the `reasoning` field. */
+   *  'off' (default) omits the reasoning request. */
   thinking?: ChatToggles['thinking'];
 }
+
+/** Route per model: reasoning models go to the Responses API (gpt-5.5+
+ *  require it for tools + reasoning), everything else to Chat Completions
+ *  (where the older / legacy models live). */
+export async function streamTurn(
+  spec: OpenaiRequestSpec,
+  callbacks: StreamCallbacks = {},
+  signal?: AbortSignal,
+): Promise<StreamResult> {
+  return isReasoningModel(spec.model)
+    ? streamTurnResponses(spec, callbacks, signal)
+    : streamTurnChat(spec, callbacks, signal);
+}
+
+// ---------------------------------------------------------------------------
+// Responses API path (reasoning models: gpt-5 family, o-series)
+// ---------------------------------------------------------------------------
 
 /** Responses API tool definition — flatter than Chat Completions (no nested
  *  `function` wrapper). */
@@ -166,9 +195,9 @@ type ResponsesInputItem =
   | { type: 'function_call'; call_id: string; name: string; arguments: string }
   | { type: 'function_call_output'; call_id: string; output: string };
 
-export async function streamTurn(
+async function streamTurnResponses(
   spec: OpenaiRequestSpec,
-  callbacks: StreamCallbacks = {},
+  callbacks: StreamCallbacks,
   signal?: AbortSignal,
 ): Promise<StreamResult> {
   const maxOutputTokens = spec.maxTokens ?? 8192;
@@ -199,8 +228,8 @@ export async function streamTurn(
     store: false,
   };
   if (tools.length > 0) body.tools = tools;
-  // `reasoning.effort` only for reasoning models + non-'off' levels; 4o/4.1
-  // and 'off' omit it so the request matches the provider default.
+  // `reasoning.effort` only for non-'off' levels (every model routed here is
+  // a reasoning model).
   const effort = reasoningEffort(spec.model, spec.thinking ?? 'off');
   if (effort) body.reasoning = { effort };
 
@@ -228,7 +257,7 @@ export async function streamTurn(
   return await consumeResponsesStream(res, callbacks, signal);
 }
 
-interface AccumulatedToolCall {
+interface ResponsesToolBuffer {
   callId: string;
   name: string;
   argsText: string;
@@ -243,7 +272,7 @@ async function consumeResponsesStream(
   let collectedText = '';
   // Keyed by the streamed output-item id so argument deltas land in the
   // right buffer; toolOrder preserves emission order for the final array.
-  const toolBuffers: Record<string, AccumulatedToolCall> = {};
+  const toolBuffers: Record<string, ResponsesToolBuffer> = {};
   const toolOrder: string[] = [];
   let stopReason = 'end_turn';
   let usage: TurnUsage = { inputTokens: 0, outputTokens: 0, cacheCreationInputTokens: 0, cacheReadInputTokens: 0 };
@@ -337,25 +366,6 @@ async function consumeResponsesStream(
   return { text: collectedText, toolCalls, stopReason, usage };
 }
 
-function abortedResult(): StreamResult {
-  return {
-    text: '',
-    toolCalls: [],
-    stopReason: 'aborted',
-    usage: { inputTokens: 0, outputTokens: 0, cacheCreationInputTokens: 0, cacheReadInputTokens: 0 },
-  };
-}
-
-function parseToolArgs(argsText: string): Record<string, unknown> {
-  if (!argsText) return {};
-  try {
-    const parsed = JSON.parse(argsText);
-    return typeof parsed === 'object' && parsed !== null ? parsed : {};
-  } catch {
-    return {};
-  }
-}
-
 /** Convert the canonical chat history into the Responses `input` array. The
  *  Responses API takes a flat list of items: `message` items (user/assistant
  *  text + images), `function_call` items (the model's tool calls), and
@@ -430,14 +440,6 @@ function sanitizeResponsesToolCalls(items: ResponsesInputItem[]): ResponsesInput
   return items;
 }
 
-function collectAssistantText(blocks: ChatBlock[]): string {
-  let text = '';
-  for (const b of blocks) {
-    if (b.type === 'text') text += b.text;
-  }
-  return text;
-}
-
 function buildResponsesUserContent(blocks: ChatBlock[]): ResponsesContentPart[] | null {
   const items: ResponsesContentPart[] = [];
   for (const b of blocks) {
@@ -454,13 +456,310 @@ function buildResponsesUserContent(blocks: ChatBlock[]): ResponsesContentPart[] 
   return items.length > 0 ? items : null;
 }
 
+// ---------------------------------------------------------------------------
+// Chat Completions path (gpt-4o / gpt-4.1 + legacy gpt-4 / gpt-3.5-turbo)
+// ---------------------------------------------------------------------------
+
+interface OpenAIToolDef {
+  type: 'function';
+  function: {
+    name: string;
+    description: string;
+    parameters: Record<string, unknown>;
+  };
+}
+
+interface OpenAIMessage {
+  role: 'system' | 'user' | 'assistant' | 'tool';
+  content?: string | Array<{ type: 'text'; text: string } | { type: 'image_url'; image_url: { url: string } }>;
+  tool_calls?: Array<{ id: string; type: 'function'; function: { name: string; arguments: string } }>;
+  tool_call_id?: string;
+  name?: string;
+}
+
+async function streamTurnChat(
+  spec: OpenaiRequestSpec,
+  callbacks: StreamCallbacks,
+  signal?: AbortSignal,
+): Promise<StreamResult> {
+  const maxCompletionTokens = spec.maxTokens ?? 8192;
+
+  const tools: OpenAIToolDef[] = spec.tools.map(t => ({
+    type: 'function',
+    function: {
+      name: t.name,
+      description: t.description,
+      parameters: t.input_schema,
+    },
+  }));
+
+  // OpenAI takes the system as the first message in the messages array.
+  // We merge our long prompt + suffix because OpenAI doesn't have a
+  // separate cache breakpoint we can pin the suffix outside of.
+  const systemText = spec.systemSuffix.trim().length > 0
+    ? `${spec.systemPrompt}\n\n${spec.systemSuffix}`
+    : spec.systemPrompt;
+
+  const messages: OpenAIMessage[] = [{ role: 'system', content: systemText }];
+  messages.push(...buildChatMessages(spec.history));
+
+  const body: Record<string, unknown> = {
+    model: spec.model,
+    // `max_completion_tokens`, not `max_tokens` — the gpt-5 family and the
+    // o-series reject `max_tokens` outright (400 unsupported_parameter),
+    // and it's the forward-compatible spelling for the older 4o/4.1 models
+    // too. Don't switch this back.
+    max_completion_tokens: maxCompletionTokens,
+    messages,
+    stream: true,
+    stream_options: { include_usage: true },
+  };
+  if (tools.length > 0) body.tools = tools;
+  // Non-reasoning models route here, so reasoningEffort() returns null and no
+  // reasoning_effort is sent — exactly the pre-feature request shape. (A
+  // reasoning model would have been dispatched to the Responses path.)
+  const effort = reasoningEffort(spec.model, spec.thinking ?? 'off');
+  if (effort) body.reasoning_effort = effort;
+
+  let res: Response;
+  try {
+    res = await fetch(CHAT_URL, {
+      method: 'POST',
+      headers: authHeaders(spec.apiKey),
+      body: JSON.stringify(body),
+      signal,
+    });
+  } catch (err) {
+    // Abort (stall watchdog / user Stop) rejects the fetch — return a
+    // clean aborted result rather than throwing the raw DOMException.
+    if (signal?.aborted) return abortedResult();
+    throw err;
+  }
+
+  if (!res.ok) {
+    if (signal?.aborted) return abortedResult();
+    const errText = await res.text().catch(() => '');
+    throw new Error(`OpenAI ${res.status}: ${errText.slice(0, 400) || res.statusText}`);
+  }
+
+  return await consumeChatStream(res, callbacks, signal);
+}
+
+interface ChatToolBuffer {
+  id: string;
+  name: string;
+  argsText: string;
+  startedNotified: boolean;
+}
+
+async function consumeChatStream(
+  res: Response,
+  callbacks: StreamCallbacks,
+  signal?: AbortSignal,
+): Promise<StreamResult> {
+  let collectedText = '';
+  const toolBuffers: Record<number, ChatToolBuffer> = {};
+  let stopReason = 'unknown';
+  let usage: TurnUsage = { inputTokens: 0, outputTokens: 0, cacheCreationInputTokens: 0, cacheReadInputTokens: 0 };
+
+  try {
+    for await (const event of readSseStream(res, signal)) {
+      if (event === '[DONE]') break;
+      let payload: any;
+      try { payload = JSON.parse(event); } catch { continue; }
+      // Usage frame comes at the end when stream_options.include_usage=true.
+      if (payload.usage) {
+        usage = {
+          inputTokens: payload.usage.prompt_tokens ?? 0,
+          outputTokens: payload.usage.completion_tokens ?? 0,
+          cacheCreationInputTokens: 0,
+          // OpenAI exposes cached tokens via prompt_tokens_details.cached_tokens
+          // — treat as cache reads so cost.ts can discount them.
+          cacheReadInputTokens: payload.usage.prompt_tokens_details?.cached_tokens ?? 0,
+        };
+      }
+      const choice = payload.choices?.[0];
+      if (!choice) continue;
+      const delta = choice.delta ?? {};
+      if (typeof delta.content === 'string' && delta.content.length > 0) {
+        collectedText += delta.content;
+        callbacks.onText?.(delta.content);
+      }
+      if (Array.isArray(delta.tool_calls)) {
+        for (const tc of delta.tool_calls) {
+          const idx: number = tc.index ?? 0;
+          let buf = toolBuffers[idx];
+          if (!buf) {
+            buf = { id: tc.id ?? `call_${idx}`, name: '', argsText: '', startedNotified: false };
+            toolBuffers[idx] = buf;
+          }
+          if (typeof tc.id === 'string' && tc.id.length > 0) buf.id = tc.id;
+          if (tc.function?.name && !buf.name) buf.name = tc.function.name;
+          if (typeof tc.function?.arguments === 'string') buf.argsText += tc.function.arguments;
+          if (!buf.startedNotified && buf.name) {
+            buf.startedNotified = true;
+            callbacks.onToolStart?.(buf.id, buf.name);
+          }
+        }
+      }
+      if (choice.finish_reason) stopReason = mapChatStopReason(choice.finish_reason);
+    }
+  } catch (err) {
+    if (signal?.aborted) return { text: collectedText, toolCalls: [], stopReason: 'aborted', usage };
+    throw err;
+  }
+
+  const toolCalls: PersistedToolCall[] = Object.values(toolBuffers).map(buf => ({
+    id: buf.id,
+    name: buf.name,
+    input: parseToolArgs(buf.argsText),
+  }));
+
+  return { text: collectedText, toolCalls, stopReason, usage };
+}
+
+function mapChatStopReason(reason: string): string {
+  if (reason === 'tool_calls') return 'tool_use';
+  if (reason === 'stop') return 'end_turn';
+  if (reason === 'length') return 'max_tokens';
+  if (reason === 'content_filter') return 'refusal';
+  return reason;
+}
+
+function buildChatMessages(history: ChatMessage[]): OpenAIMessage[] {
+  const out: OpenAIMessage[] = [];
+  for (const msg of history) {
+    if (msg.role === 'assistant') {
+      const text = collectAssistantText(msg.blocks);
+      const calls = msg.toolCalls ?? [];
+      const am: OpenAIMessage = { role: 'assistant' };
+      if (text.length > 0) am.content = text;
+      if (calls.length > 0) {
+        am.tool_calls = calls.map(tc => ({
+          id: tc.id,
+          type: 'function',
+          function: { name: tc.name, arguments: JSON.stringify(tc.input ?? {}) },
+        }));
+      }
+      if (am.content || am.tool_calls) out.push(am);
+    } else {
+      // Tool results come BEFORE any new user text per OpenAI's rules.
+      for (const r of msg.toolResults ?? []) {
+        out.push({ role: 'tool', tool_call_id: r.toolUseId, content: r.content });
+        if (r.image) {
+          // OpenAI's tool role doesn't accept image blocks directly, so we
+          // surface the image on a user message right after.
+          out.push({
+            role: 'user',
+            content: [
+              { type: 'text', text: `(tool result image for ${r.toolUseId})` },
+              { type: 'image_url', image_url: { url: imageToDataUrl(r.image) } },
+            ],
+          });
+        }
+      }
+      const content = buildChatUserContent(msg.blocks);
+      if (content !== null) out.push({ role: 'user', content });
+    }
+  }
+  return sanitizeChatToolMessages(out);
+}
+
+/** OpenAI 400s if an assistant message carrying `tool_calls` isn't followed
+ *  by a `tool` message for every tool_call_id before the next turn ("The
+ *  following tool_call_ids did not have response messages"). A turn that
+ *  ends right after the model emits tool calls — user Stop, stall watchdog,
+ *  or the spend cap tripping before results are posted — leaves a dangling
+ *  assistant message in history, so the next send fails.
+ *
+ *  Mirror anthropic.ts's `sanitizeToolUse`: inject a synthetic error result
+ *  for any unanswered id. Keyed off the GLOBAL set of answered ids (not a
+ *  positional scan) so an image tool-result — which surfaces the image on a
+ *  `user` message wedged between `tool` messages — doesn't read as a gap. */
+function sanitizeChatToolMessages(messages: OpenAIMessage[]): OpenAIMessage[] {
+  const answered = new Set<string>();
+  for (const m of messages) {
+    if (m.role === 'tool' && m.tool_call_id) answered.add(m.tool_call_id);
+  }
+  for (let i = 0; i < messages.length; i++) {
+    const m = messages[i];
+    if (m.role !== 'assistant' || !m.tool_calls || m.tool_calls.length === 0) continue;
+    const missing = m.tool_calls.filter(tc => !answered.has(tc.id));
+    if (missing.length === 0) continue;
+    const synthetic: OpenAIMessage[] = missing.map(tc => ({
+      role: 'tool',
+      tool_call_id: tc.id,
+      content: 'Tool call was interrupted and did not complete.',
+    }));
+    messages.splice(i + 1, 0, ...synthetic);
+    for (const s of synthetic) if (s.tool_call_id) answered.add(s.tool_call_id);
+    i += synthetic.length;
+  }
+  return messages;
+}
+
+function buildChatUserContent(blocks: ChatBlock[]): OpenAIMessage['content'] | null {
+  // String content is preferred when there are no images — keeps the
+  // payload small and matches the most common case.
+  const hasImage = blocks.some(b => b.type === 'image');
+  const items: Array<{ type: 'text'; text: string } | { type: 'image_url'; image_url: { url: string } }> = [];
+  let plainText = '';
+  for (const b of blocks) {
+    if (b.type === 'text' && b.text.trim().length > 0) {
+      if (hasImage) items.push({ type: 'text', text: b.text });
+      else plainText += b.text;
+    } else if (b.type === 'image') {
+      items.push({ type: 'image_url', image_url: { url: imageToDataUrl(b.source) } });
+    } else if (b.type === 'review') {
+      // Reviews from other providers serialize to text so any model can
+      // see them. Tag stays so the receiving model can tell it apart.
+      const reviewText = `[Review from ${b.provider}/${b.model}]\n${b.text}`;
+      if (hasImage) items.push({ type: 'text', text: reviewText });
+      else plainText += reviewText;
+    }
+  }
+  if (!hasImage) return plainText.length > 0 ? plainText : null;
+  return items.length > 0 ? items : null;
+}
+
+// ---------------------------------------------------------------------------
+// Shared helpers
+// ---------------------------------------------------------------------------
+
+function abortedResult(): StreamResult {
+  return {
+    text: '',
+    toolCalls: [],
+    stopReason: 'aborted',
+    usage: { inputTokens: 0, outputTokens: 0, cacheCreationInputTokens: 0, cacheReadInputTokens: 0 },
+  };
+}
+
+function parseToolArgs(argsText: string): Record<string, unknown> {
+  if (!argsText) return {};
+  try {
+    const parsed = JSON.parse(argsText);
+    return typeof parsed === 'object' && parsed !== null ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+function collectAssistantText(blocks: ChatBlock[]): string {
+  let text = '';
+  for (const b of blocks) {
+    if (b.type === 'text') text += b.text;
+  }
+  return text;
+}
+
 function imageToDataUrl(source: ImageSource): string {
   return `data:${source.mediaType};base64,${source.data}`;
 }
 
 /** Single-shot non-streaming call used by compaction + review. Stays on Chat
  *  Completions: no tools and no reasoning request, so the gpt-5.5 tools +
- *  reasoning_effort restriction doesn't apply. */
+ *  reasoning_effort restriction doesn't apply and every model works here. */
 export async function summarize(
   apiKey: string,
   model: string,
