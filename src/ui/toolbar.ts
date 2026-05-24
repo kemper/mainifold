@@ -1,6 +1,7 @@
 import { resetTour, startTour } from './tour';
 import { partwrightMarkSvg } from './brand';
 import { showQualitySettingsModal } from './qualitySettingsModal';
+import { showAboutModal } from './aboutModal';
 import { getTheme, onThemeChange, toggleTheme } from './theme';
 import { downloadBlob } from '../export/download';
 import {
@@ -569,6 +570,17 @@ export function createToolbar(
 
   diagBtn.addEventListener('click', callbacks.onToggleDiagnostics);
   toolbar.appendChild(diagBtn);
+
+  // About button — build/version info (commit, branch, links) for verifying
+  // which Cloudflare branch/PR deploy you're testing.
+  const aboutBtn = document.createElement('button');
+  aboutBtn.id = 'btn-about';
+  aboutBtn.className = 'flex items-center justify-center w-10 h-10 md:w-6 md:h-6 rounded-full text-zinc-500 [@media(hover:hover)]:hover:text-zinc-200 [@media(hover:hover)]:hover:bg-zinc-700 transition-colors text-sm md:text-xs ml-1';
+  aboutBtn.title = 'About — build & version info';
+  aboutBtn.setAttribute('aria-label', 'About this build');
+  aboutBtn.innerHTML = '<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/></svg>';
+  aboutBtn.addEventListener('click', () => { showAboutModal(); });
+  toolbar.appendChild(aboutBtn);
 
   // Help button
   const helpBtn = document.createElement('button');
