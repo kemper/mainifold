@@ -378,9 +378,9 @@ function captureThumbnail(mesh: MeshData | null = currentMeshData): Promise<Blob
   let canvas: HTMLCanvasElement;
   try {
     canvas = renderSingleViewCanvas(applyTriColorsIfVisible(mesh), {
-      elevation: STANDARD_VIEWS.front.elevation,
-      azimuth: STANDARD_VIEWS.front.azimuth,
-      ortho: STANDARD_VIEWS.front.ortho,
+      elevation: STANDARD_VIEWS.iso.elevation,
+      azimuth: STANDARD_VIEWS.iso.azimuth,
+      ortho: STANDARD_VIEWS.iso.ortho,
     });
   } catch {
     return Promise.resolve(null);
