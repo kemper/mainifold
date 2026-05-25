@@ -3,11 +3,15 @@
 // doesn't intercept the click into the editor.
 
 import { test, expect } from 'playwright/test';
+import { keepAiPanelClosed } from './helpers/aiPanel';
 
 async function openEditor(page: import('playwright/test').Page) {
   await page.addInitScript(() => {
     try { localStorage.setItem('partwright-tour-completed', new Date().toISOString()); } catch { /* ignore */ }
   });
+  // Keep the AI drawer closed so the code editor stays visible (the drawer
+  // auto-hides it). This suite drives the CodeMirror DOM directly.
+  await keepAiPanelClosed(page);
   await page.goto('/editor');
   await page.waitForSelector('text=Ready', { timeout: 15000 });
 }

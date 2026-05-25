@@ -1,5 +1,6 @@
 import { getMobilePane, onMobilePaneChange, setMobilePane } from './mobilePane';
 import { showQualitySettingsModal } from './qualitySettingsModal';
+import { isTourCompleted } from './tour';
 
 export type TabName = 'interactive' | 'gallery' | 'versions' | 'images' | 'diff' | 'notes' | 'data';
 
@@ -341,6 +342,10 @@ export function createLayout(appContainer: HTMLElement, opts: CreateLayoutOption
   // changes can recompose visibility without re-running tab DOM toggling.
   let _currentTab: TabName = 'interactive';
   let editorCollapsed = false;
+  // True only while the editor is collapsed *because the AI panel auto-hid it*
+  // (not because the user clicked Hide code). Lets us restore the editor when
+  // the AI panel closes without clobbering a deliberate manual choice.
+  let editorHiddenByAi = false;
   const mqDesktop = window.matchMedia('(min-width: 768px)');
 
   // Composes desktop/mobile pane visibility from the active tab and (on mobile)
@@ -375,9 +380,38 @@ export function createLayout(appContainer: HTMLElement, opts: CreateLayoutOption
   }
 
   collapseEditorBtn.addEventListener('click', () => {
+    // A manual show/hide takes ownership: stop tracking this as AI-driven so
+    // closing the AI panel later won't override the user's explicit choice.
+    editorHiddenByAi = false;
     if (editorCollapsed) expandEditor(); else collapseEditor();
   });
-  expandEditorBtn.addEventListener('click', expandEditor);
+  expandEditorBtn.addEventListener('click', () => {
+    editorHiddenByAi = false;
+    expandEditor();
+  });
+
+  // Couple the code editor to the AI drawer: opening the drawer auto-hides the
+  // editor to free up room for the viewport + chat (the AI is doing the coding;
+  // the user can bring the editor back with Show code). Closing the drawer
+  // restores it — but only if *we* hid it and the user hasn't taken manual
+  // control since. Desktop only: on mobile the drawer is a full-screen overlay
+  // and editor visibility is driven by the mobile pane toggle.
+  window.addEventListener('ai-panel-toggled', (e) => {
+    if (!mqDesktop.matches) return;
+    const open = !!(e as CustomEvent).detail?.open;
+    if (open) {
+      // Leave the editor up until the first-run tour is done — its opening step
+      // spotlights the editor pane, so the first visit keeps the pre-feature
+      // layout. Returning visitors (tour complete) get the auto-hide.
+      if (isTourCompleted() && !editorCollapsed) {
+        collapseEditor();
+        editorHiddenByAi = true;
+      }
+    } else if (editorHiddenByAi) {
+      expandEditor();
+      editorHiddenByAi = false;
+    }
+  });
 
   // === Parts rail collapse ===
   // Mirrors the editor collapse: hide the rail to reclaim width, leaving a small

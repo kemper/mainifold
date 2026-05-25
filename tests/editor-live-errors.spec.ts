@@ -4,11 +4,15 @@
 // kept out of the diagnostic log.
 
 import { test, expect } from 'playwright/test';
+import { keepAiPanelClosed } from './helpers/aiPanel';
 
 async function openEditor(page: import('playwright/test').Page) {
   await page.addInitScript(() => {
     try { localStorage.setItem('partwright-tour-completed', new Date().toISOString()); } catch { /* ignore */ }
   });
+  // Keep the AI drawer closed so the code editor + error overlay stay visible
+  // (the drawer auto-hides the editor pane).
+  await keepAiPanelClosed(page);
   await page.goto('/editor');
   await page.waitForSelector('text=Ready', { timeout: 15000 });
 }

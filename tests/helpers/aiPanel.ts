@@ -18,3 +18,16 @@ export async function openAiPanel(page: Page): Promise<void> {
     await expect(panel).toBeVisible({ timeout: 500 });
   }).toPass({ timeout: 10_000 });
 }
+
+/** Seed settings so the AI drawer starts CLOSED on load. The drawer auto-hides
+ *  the code editor when open (it frees room for the viewport + chat), so
+ *  editor-focused tests — ones that type into the CodeMirror DOM or assert on
+ *  the editor pane — seed this to keep the editor visible. Race-free: the drawer
+ *  never opens, so it never collapses the editor. Call before page.goto(). */
+export async function keepAiPanelClosed(page: Page): Promise<void> {
+  await page.addInitScript(() => {
+    try {
+      localStorage.setItem('partwright-ai-settings-v1', JSON.stringify({ drawerOpen: false }));
+    } catch { /* ignore */ }
+  });
+}

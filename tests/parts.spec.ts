@@ -4,6 +4,7 @@
 // the lazy parts migration). Network-free — all geometry is produced locally.
 
 import { test, expect, type Page } from 'playwright/test';
+import { keepAiPanelClosed } from './helpers/aiPanel';
 
 interface PartsAPI {
   createSession: (name?: string) => Promise<{ id: string }>;
@@ -32,8 +33,11 @@ const cube = (s: number, marker: string) =>
 
 test.describe('Multi-part sessions', () => {
   // Suppress the first-visit guided tour so its backdrop doesn't intercept clicks.
+  // Keep the AI drawer closed so the editor pane stays visible (it asserts on
+  // #editor-title and the lock overlay, which live in the editor pane).
   test.beforeEach(async ({ page }) => {
     await page.addInitScript(() => localStorage.setItem('partwright-tour-completed', '1'));
+    await keepAiPanelClosed(page);
   });
 
   test('parts carry independent code and version history', async ({ page }) => {
