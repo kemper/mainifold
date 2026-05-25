@@ -34,6 +34,7 @@ import { createLayout, type TabName } from './ui/layout';
 import { createToolbar, isAutoRun, setAutoRun, setToolbarLanguage, setAiToolbarState } from './ui/toolbar';
 import { installKeyboardShortcuts } from './ui/keyboardShortcuts';
 import { registerCommands } from './ui/commandPalette';
+import { showQualitySettingsModal } from './ui/qualitySettingsModal';
 import { combo, MOD_LABEL, SHIFT_LABEL, ALT_LABEL } from './ui/shortcutDefs';
 import { showToast } from './ui/toast';
 import { initAiPanel, setActiveSession as setAiActiveSession, toggleAiPanel } from './ui/aiPanel';
@@ -149,6 +150,7 @@ import {
   changePart,
   renamePart,
   deletePart,
+  deleteParts,
   reorderParts,
   getState,
   getSessionUrl,
@@ -1555,7 +1557,6 @@ async function main() {
       updateAppHistory('/', 'push');
       void syncRouteFromURL();
     },
-    onOpenCatalog: () => { void showCatalogPage(); },
     onRun: () => runCode(),
     onExportGLB: actionExportGLB,
     onExportSTL: actionExportSTL,
@@ -1582,8 +1583,6 @@ async function main() {
     },
     onImportFile: async (file) => { await handleImportFile(file); },
     onImportInboxEntry: handleReimportInboxEntry,
-    onToggleAi: () => { toggleAiPanel(); },
-    onToggleDiagnostics: () => { toggleDiagnosticsPanel(); },
     onLanguageSwitch: async (lang: 'manifold-js' | 'scad') => {
       if (lang === getActiveLanguage()) return;
       // If current session has work, ask before switching
@@ -1662,12 +1661,16 @@ async function main() {
       }
       applyVersionAnnotations(loadedVersion);
     },
-    onOpenSessionList: () => showSessionList(),
     onNewSession: startNewSessionInEditor,
   });
 
   // Create layout
-  const { editorContainer, editorErrorPanel, viewportPane, galleryContainer, versionsContainer, imagesContainer, diffContainer, notesContainer, dataContainer, statusBar, clipControls, formatBtn, autoFormatToggle, switchTab, partsRail, togglePartsRail } = createLayout(editorUI);
+  const { editorContainer, editorErrorPanel, viewportPane, galleryContainer, versionsContainer, imagesContainer, diffContainer, notesContainer, dataContainer, statusBar, clipControls, formatBtn, autoFormatToggle, switchTab, partsRail, togglePartsRail } = createLayout(editorUI, {
+    onToggleAi: () => { toggleAiPanel(); },
+    onOpenCatalog: () => { void showCatalogPage(); },
+    onToggleDiagnostics: () => { toggleDiagnosticsPanel(); },
+    onOpenSessionList: () => showSessionList(),
+  });
 
   // Parts rail — IDE-style list of the session's parts.
   createPartList(partsRail, {
@@ -1696,6 +1699,15 @@ async function main() {
       const wasCurrent = getState().currentPart?.id === partId;
       const result = await deletePart(partId);
       if (result && wasCurrent) {
+        await loadPartIntoEditor(getState().currentVersion);
+      }
+    },
+    onDeleteParts: async (partIds: string[]) => {
+      if (isReadOnlyViewer()) return;
+      const result = await deleteParts(partIds);
+      // Only reload the editor when the active part was among those removed
+      // (deleteParts reports this via newCurrent).
+      if (result && result.newCurrent) {
         await loadPartIntoEditor(getState().currentVersion);
       }
     },
@@ -1765,7 +1777,7 @@ async function main() {
     { id: 'new-session', title: 'New session', hint: 'Session', keywords: 'create blank', run: () => startNewSessionInEditor() },
     { id: 'open-sessions', title: 'Open session…', hint: 'Session', keywords: 'switch list recent', run: () => showSessionList() },
     { id: 'tab-interactive', title: 'Go to 3D view', hint: 'Tab', keywords: 'interactive viewport model', run: () => switchTab('interactive') },
-    { id: 'tab-gallery', title: 'Go to Gallery', hint: 'Tab', keywords: 'thumbnails versions', run: () => switchTab('gallery') },
+    { id: 'tab-gallery', title: 'Go to Gallery (read-only)', hint: 'Tab', keywords: 'thumbnails versions visual grid', run: () => switchTab('gallery') },
     { id: 'tab-versions', title: 'Go to Versions', hint: 'Tab', keywords: 'history rename delete', run: () => switchTab('versions') },
     { id: 'tab-images', title: 'Go to Reference images', hint: 'Tab', keywords: 'photos reference', run: () => switchTab('images') },
     { id: 'tab-diff', title: 'Go to Diff', hint: 'Tab', keywords: 'compare changes', run: () => switchTab('diff') },
@@ -1779,6 +1791,8 @@ async function main() {
     { id: 'toggle-diagnostics', title: 'Toggle diagnostic log', hint: 'View', keywords: 'errors warnings console', run: () => toggleDiagnosticsPanel() },
     { id: 'open-catalog', title: 'Open catalog', hint: 'Navigate', keywords: 'examples premade browse', run: () => { void showCatalogPage(); } },
     { id: 'open-help', title: 'Open help', hint: 'Navigate', keywords: 'docs documentation guide', run: () => showHelp() },
+    { id: 'open-quality', title: 'Modeling quality settings', hint: 'Settings', keywords: 'resolution curve segments smoothness', run: () => showQualitySettingsModal() },
+    { id: 'retake-tour', title: 'Take the guided tour', hint: 'Help', keywords: 'onboarding walkthrough intro tutorial', run: () => { resetTour(); startTour(); } },
   ]);
 
   // Init gallery
@@ -1856,9 +1870,21 @@ async function main() {
     startNewSessionInEditor,
   );
 
-  // Assemble DOM early so landing/help pages can render before WASM loads
-  app.appendChild(editorUI);
-  app.appendChild(overlayContainer);
+  // Assemble DOM early so landing/help pages can render before WASM loads.
+  // The page subtrees (editor + landing/help/catalog overlays) share a flex row
+  // with the AI panel so the panel docks as a persistent right-hand column: it
+  // sits OUTSIDE the per-page subtrees, so it survives route changes (the
+  // landing-page chat flow relies on the panel staying mounted across nav).
+  const appRow = document.createElement('div');
+  appRow.id = 'app-row';
+  appRow.className = 'flex flex-row flex-1 min-h-0 w-full';
+  const pageArea = document.createElement('div');
+  pageArea.id = 'page-area';
+  pageArea.className = 'flex flex-col flex-1 min-w-0 min-h-0';
+  pageArea.appendChild(editorUI);
+  pageArea.appendChild(overlayContainer);
+  appRow.appendChild(pageArea);
+  app.appendChild(appRow);
 
   let editorReady = false;
   let editorReadyResolve: (() => void) = () => {};
@@ -2512,6 +2538,7 @@ async function main() {
           updateAppHistory('/editor', 'push');
           await syncRouteFromURL();
         },
+        mountInto: appRow,
       });
       const cur = getState();
       await setAiActiveSession(cur.session?.id ?? null);
@@ -3055,15 +3082,18 @@ async function main() {
     /** Render a single view from any camera angle. Returns a data URL (PNG).
      *  elevation: degrees, 0 = horizon, 90 = top-down. Default 30.
      *  azimuth: degrees, 0 = front (-Y), 90 = right (+X). Default 315.
-     *  ortho: true for orthographic projection. Default false. */
-    renderView(options?: { elevation?: number; azimuth?: number; ortho?: boolean; size?: number }): string | null {
+     *  ortho: true for orthographic projection. Default false.
+     *  wireframe: force the black topology overlay on (true) or off (false).
+     *  Default leaves it on for uncolored meshes and off for painted ones. */
+    renderView(options?: { elevation?: number; azimuth?: number; ortho?: boolean; size?: number; wireframe?: boolean }): string | null {
       if (options !== undefined) {
         const o = assertObject(options, 'renderView(options)')!;
-        assertNoUnknownKeys(o, ['elevation', 'azimuth', 'ortho', 'size'], 'renderView(options)');
+        assertNoUnknownKeys(o, ['elevation', 'azimuth', 'ortho', 'size', 'wireframe'], 'renderView(options)');
         assertNumber(o.elevation, 'renderView(options).elevation', { optional: true, min: -90, max: 90 });
         assertNumber(o.azimuth, 'renderView(options).azimuth', { optional: true });
         assertBoolean(o.ortho, 'renderView(options).ortho', { optional: true });
         assertNumber(o.size, 'renderView(options).size', { optional: true, min: 1, integer: true });
+        assertBoolean(o.wireframe, 'renderView(options).wireframe', { optional: true });
       }
       if (!currentMeshData) return null;
       // Default image size follows the spending-mode resolution budget when the
@@ -5285,7 +5315,11 @@ async function main() {
       const shp: BrushShape = (shape === 'square' || shape === 'diamond') ? shape : 'circle';
       // maxEdge (absolute) overrides; otherwise radius / resolution, default 256.
       const res = Math.max(SMOOTH_DIVISOR_MIN, Math.min(SMOOTH_DIVISOR_MAX, resolution ?? 256));
-      const target = maxEdge !== undefined ? maxEdge : radius / res;
+      // Floor an explicit maxEdge at the same finest edge the resolution path
+      // can request (radius / SMOOTH_DIVISOR_MAX). A tinier value just drives
+      // runaway subdivision for no visible benefit (the safety ceiling in
+      // buildRefinedMesh would cut it off anyway).
+      const target = maxEdge !== undefined ? Math.max(maxEdge, radius / SMOOTH_DIVISOR_MAX) : radius / res;
       const region = addRegion(
         typeof name === 'string' && name ? name : `Region ${getRegions().length + 1}`,
         [color[0], color[1], color[2]],
@@ -6805,16 +6839,17 @@ async function main() {
       // saved version re-runs the code first, which rebuilds the map.
       currentLabelMap = result.labelMap ?? null;
 
-      // Apply any existing color regions to the mesh. Smooth-brush regions
-      // (`brushStroke`) subdivide the mesh: their triangle indices point into
-      // the REFINED tessellation, not this freshly-run coarse base. Re-running
-      // the code (e.g. the debounced auto-run that fires ~300ms after a saved
-      // version loads) resets currentMeshData to the coarse base, so naively
-      // coloring `result.mesh` would stamp those refined-mesh indices onto
-      // coarse triangles — the "shattered shards" load bug. Rebuild the refined
-      // geometry and re-resolve every region against it, exactly as the
+      // Apply any existing color regions to the mesh. Refining regions —
+      // smooth brush strokes AND smooth slab/box regions — subdivide the mesh:
+      // their triangle indices point into the REFINED tessellation, not this
+      // freshly-run coarse base. Re-running the code (e.g. the debounced
+      // auto-run that fires ~300ms after a saved version loads) resets
+      // currentMeshData to the coarse base, so naively coloring `result.mesh`
+      // would stamp those refined-mesh indices onto coarse triangles — the
+      // "shattered shards" bug. Gate on hasRefineDescriptors() (not just brush
+      // strokes) so slab/box smooth regions rebuild too, exactly as the
       // visibility-toggle path does via reconcilePaintedGeometry.
-      if (hasColorRegions() && strokeDescriptors().length > 0) {
+      if (hasColorRegions() && hasRefineDescriptors()) {
         rebuildPaintedGeometry();
         lastStrokeList = strokeDescriptors();
       } else {
@@ -7008,7 +7043,7 @@ async function main() {
 
     function reflect(locked: boolean) {
       lockBtn.className = locked ? activeClass : inactiveClass;
-      lockBtn.textContent = locked ? '\uD83D\uDD12' : '\uD83D\uDD13';
+      lockBtn.textContent = locked ? '\uD83D\uDD12 Lock' : '\uD83D\uDD13 Lock';
       lockBtn.title = locked ? 'Unlock camera rotation' : 'Lock camera rotation';
     }
 
