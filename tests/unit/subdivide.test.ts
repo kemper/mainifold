@@ -2,7 +2,7 @@
 // in/out test and the boundary-conforming clip). Pure geometry — no browser.
 
 import { describe, test, expect } from 'vitest';
-import { strokeSignedDist, airbrushCoverage, airbrushDither, type BrushStroke, type AirbrushStroke } from '../../src/color/subdivide';
+import { strokeSignedDist, sprayCoverage, airbrushDither, type BrushStroke } from '../../src/color/subdivide';
 
 const at = (s: BrushStroke, p: [number, number, number]) => strokeSignedDist(p[0], p[1], p[2], s);
 
@@ -44,24 +44,26 @@ describe('strokeSignedDist', () => {
   });
 });
 
-describe('airbrush', () => {
-  const stroke = (over: Partial<AirbrushStroke> = {}): AirbrushStroke =>
-    ({ samples: [[0, 0, 0]], radius: 10, strength: 1, softness: 0.5, seed: 1, maxEdge: 0.5, ...over });
+describe('airbrush spray coverage', () => {
+  // sd = signed distance to the footprint edge (≤0 inside). For a radius-10
+  // circle, sd = d - 10 where d is the distance from the centre.
+  const stroke = (spray: Partial<{ strength: number; softness: number }> = {}): BrushStroke =>
+    ({ samples: [[0, 0, 0]], radius: 10, shape: 'circle', maxEdge: 0.5, spray: { strength: 1, softness: 0.5, seed: 1, ...spray } });
 
-  test('coverage: full in the core, fades across the feather, zero past the radius', () => {
-    const s = stroke(); // core = 5 (softness 0.5), radius 10
-    expect(airbrushCoverage(0, s)).toBeCloseTo(1);    // centre
-    expect(airbrushCoverage(5, s)).toBeCloseTo(1);    // edge of solid core
-    expect(airbrushCoverage(7.5, s)).toBeCloseTo(0.5); // mid-feather
-    expect(airbrushCoverage(10, s)).toBe(0);          // radius
-    expect(airbrushCoverage(12, s)).toBe(0);          // beyond
+  test('coverage: full in the core, fades across the feather, zero at/past the edge', () => {
+    const s = stroke(); // featherWidth = 5 (softness 0.5)
+    expect(sprayCoverage(-10, s)).toBeCloseTo(1);  // centre (depth 10)
+    expect(sprayCoverage(-5, s)).toBeCloseTo(1);   // core boundary (depth = featherWidth)
+    expect(sprayCoverage(-2.5, s)).toBeCloseTo(0.5); // mid-feather
+    expect(sprayCoverage(0, s)).toBe(0);           // edge
+    expect(sprayCoverage(1, s)).toBe(0);           // outside
   });
 
   test('strength scales coverage; lower softness widens the solid core', () => {
-    expect(airbrushCoverage(0, stroke({ strength: 0.4 }))).toBeCloseTo(0.4);
-    // softness 0.1 → core = 9, so d=8 is still solid; softness 0.9 → core = 1, d=8 is deep feather
-    expect(airbrushCoverage(8, stroke({ softness: 0.1 }))).toBeCloseTo(1);
-    expect(airbrushCoverage(8, stroke({ softness: 0.9 }))).toBeLessThan(0.5);
+    expect(sprayCoverage(-10, stroke({ strength: 0.4 }))).toBeCloseTo(0.4);
+    // depth 2 inside: softness 0.1 → featherWidth 1 (solid); softness 0.9 → featherWidth 9 (deep feather)
+    expect(sprayCoverage(-2, stroke({ softness: 0.1 }))).toBeCloseTo(1);
+    expect(sprayCoverage(-2, stroke({ softness: 0.9 }))).toBeLessThan(0.5);
   });
 
   test('dither is deterministic and ~uniform in [0,1)', () => {
@@ -75,6 +77,6 @@ describe('airbrush', () => {
 
   test('coverage is monotonic in strength (the dither superset → non-flaky tests)', () => {
     const lo = stroke({ strength: 0.5 }), hi = stroke({ strength: 0.9 });
-    for (const d of [0, 3, 6, 9]) expect(airbrushCoverage(d, hi)).toBeGreaterThanOrEqual(airbrushCoverage(d, lo));
+    for (const sd of [-10, -6, -3, -1]) expect(sprayCoverage(sd, hi)).toBeGreaterThanOrEqual(sprayCoverage(sd, lo));
   });
 });

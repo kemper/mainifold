@@ -51,6 +51,12 @@ export interface BrushStroke {
   /** Geodesic reachability for `geodesic` mode (built from the base mesh via
    *  `buildGeodesicField`). Runtime-only — never persisted; rebuilt on demand. */
   geoField?: GeodesicField;
+  /** Airbrush: when set, the stroke paints a soft *spray* instead of a solid
+   *  fill — coverage fades from the core out via a stochastic per-triangle dither
+   *  (every triangle stays one printable colour). Implies geodesic + no boundary
+   *  clip (the edge is the dither). Works with any shape (circle/square/diamond
+   *  spackle) since it reuses the footprint's signed distance. */
+  spray?: { strength: number; softness: number; seed: number };
 }
 
 export interface Aabb {
@@ -241,6 +247,24 @@ function maxEdgeLen2(a: number[], b: number[], c: number[]): number {
   return Math.max(e(a, b), e(b, c), e(c, a));
 }
 
+/** Refine classifier for an airbrush spray: densify the dithered band so the
+ *  speckle is fine. The feather (signed distance within `softness·radius` of the
+ *  edge) always refines; a solid `strength ≥ 1` core stays coarse, but a
+ *  `strength < 1` core dithers too and so refines. Off-footprint / unreachable
+ *  (signed distance > 0, incl. +∞) is left alone. No clip — the edge is dither. */
+function sprayClassifier(stroke: BrushStroke): TriClassifier {
+  const featherWidth = stroke.radius * stroke.spray!.softness;
+  const solidCore = stroke.spray!.strength >= 1;
+  return (a, b, c) => {
+    const fa = strokeSignedDist(a[0], a[1], a[2], stroke);
+    const fb = strokeSignedDist(b[0], b[1], b[2], stroke);
+    const fc = strokeSignedDist(c[0], c[1], c[2], stroke);
+    if (fa > 0 && fb > 0 && fc > 0) return 'outside';
+    if (solidCore && fa < -featherWidth && fb < -featherWidth && fc < -featherWidth) return 'inside';
+    return 'straddle';
+  };
+}
+
 /** Classify a triangle against a brush footprint: inside when all three
  *  vertices are covered, straddle when some (but not all) are — or, for a brush
  *  smaller than the face, when the footprint's closest point on the triangle
@@ -249,6 +273,7 @@ function maxEdgeLen2(a: number[], b: number[], c: number[]): number {
  *  a sphere of radius r misses a square's corners (at r·√2), leaving them coarse
  *  and unpainted. */
 function brushClassifier(stroke: BrushStroke): TriClassifier {
+  if (stroke.spray) return sprayClassifier(stroke);
   const { radius: r, shape } = stroke;
   const slab = slabActive(stroke);
   const geodesic = stroke.surface === 'geodesic' && !!stroke.geoField;
@@ -447,52 +472,22 @@ export function brushRefineRegion(stroke: BrushStroke): RefineRegion {
     classify: brushClassifier(stroke),
     // The rim is refined to maxEdge for curve segment density, then clipped
     // exactly along this field so the painted edge is the analytic outline.
-    field: (px, py, pz) => strokeSignedDist(px, py, pz, stroke),
+    // A spray has no hard edge (it dithers), so it skips the clip.
+    field: stroke.spray ? undefined : (px, py, pz) => strokeSignedDist(px, py, pz, stroke),
   };
 }
 
-/** A geodesic airbrush stroke: a soft spray whose edge fades out via a
- *  stochastic per-triangle dither (NOT colour blending — every triangle stays a
- *  single printable colour). Always geodesic: the footprint is gated by surface
- *  connectivity (`geoField`) so the spray never jumps through a thin/hollow wall.
- *  Falloff is by distance to the stroke; coverage = `strength · feather(d)`. */
-export interface AirbrushStroke {
-  samples: [number, number, number][];
-  /** Spray cone radius (mesh units). */
-  radius: number;
-  /** Core coverage / density in 0..1. 1 = solid core; lower dithers everywhere. */
-  strength: number;
-  /** Feather fraction in 0..1: the outer `softness·radius` band fades 1→0; the
-   *  inner `(1-softness)·radius` core is at full `strength`. */
-  softness: number;
-  /** Dither seed — the speckle is deterministic so it reproduces on reload. */
-  seed: number;
-  /** Target edge length for the feather subdivision (finer = finer speckle). */
-  maxEdge: number;
-  /** Geodesic surface gate (built from the base mesh; runtime-only). */
-  geoField?: GeodesicField;
-}
-
-/** Coverage probability at distance `d` from the stroke: `strength` inside the
- *  solid core, fading linearly to 0 across the feather, 0 beyond the radius. */
-export function airbrushCoverage(d: number, stroke: AirbrushStroke): number {
-  const r = stroke.radius;
-  const core = r * (1 - stroke.softness);
-  if (d >= r) return 0;
-  if (d <= core) return stroke.strength;
-  const f = 1 - (d - core) / (r - core || 1); // 1 at core → 0 at radius
-  return stroke.strength * f;
-}
-
-/** Euclidean distance from `p` to the nearest stroke sample. */
-function nearestSampleDist(px: number, py: number, pz: number, samples: [number, number, number][]): number {
-  let best = Infinity;
-  for (const s of samples) {
-    const dx = px - s[0], dy = py - s[1], dz = pz - s[2];
-    const d2 = dx * dx + dy * dy + dz * dz;
-    if (d2 < best) best = d2;
-  }
-  return Math.sqrt(best);
+/** Airbrush coverage probability for a point at signed footprint distance `sd`
+ *  (≤0 inside, as returned by `strokeSignedDist`): `strength` deep in the core,
+ *  fading linearly to 0 at the footprint edge across the outer `softness·radius`
+ *  band. Shape-agnostic — a square footprint gives a square spackle, etc. */
+export function sprayCoverage(sd: number, stroke: BrushStroke): number {
+  const spray = stroke.spray;
+  if (!spray || sd >= 0) return 0;
+  const featherWidth = stroke.radius * spray.softness;
+  const depthInside = -sd;
+  const f = featherWidth > 0 ? Math.min(depthInside / featherWidth, 1) : 1;
+  return spray.strength * f;
 }
 
 /** Deterministic dither in [0,1) from a world position + seed. Quantizes coords
@@ -506,67 +501,6 @@ export function airbrushDither(px: number, py: number, pz: number, seed: number)
   h = Math.imul(h ^ q(pz), 2654435761);
   h ^= h >>> 15; h = Math.imul(h, 2246822519); h ^= h >>> 13;
   return (h >>> 0) / 4294967296;
-}
-
-/** AABB of an airbrush footprint (samples padded by the radius). */
-function airbrushAabb(stroke: AirbrushStroke): Aabb {
-  const r = stroke.radius;
-  const min: [number, number, number] = [Infinity, Infinity, Infinity];
-  const max: [number, number, number] = [-Infinity, -Infinity, -Infinity];
-  for (const s of stroke.samples) {
-    for (let k = 0; k < 3; k++) {
-      if (s[k] - r < min[k]) min[k] = s[k] - r;
-      if (s[k] + r > max[k]) max[k] = s[k] + r;
-    }
-  }
-  return { min, max };
-}
-
-/** Refine region for an airbrush: subdivide the dithered band (the feather, and
- *  the whole footprint when `strength < 1` so the core dithers too) down to
- *  `maxEdge` for fine speckle, leaving a solid `strength = 1` core coarse. No
- *  boundary clip — the spray's edge is the dither, not a hard outline. */
-export function airbrushRefineRegion(stroke: AirbrushStroke): RefineRegion {
-  const r = stroke.radius;
-  const core = r * (1 - stroke.softness);
-  const solidCore = stroke.strength >= 1;
-  const geo = stroke.geoField;
-  const samples = stroke.samples;
-  const classify: TriClassifier = (a, b, c) => {
-    const cx = (a[0] + b[0] + c[0]) / 3, cy = (a[1] + b[1] + c[1]) / 3, cz = (a[2] + b[2] + c[2]) / 3;
-    if (geo && !geo.reachableAt(cx, cy, cz)) return 'outside';
-    const da = nearestSampleDist(a[0], a[1], a[2], samples);
-    const db = nearestSampleDist(b[0], b[1], b[2], samples);
-    const dc = nearestSampleDist(c[0], c[1], c[2], samples);
-    if (da >= r && db >= r && dc >= r) return 'outside';
-    if (solidCore && da < core && db < core && dc < core) return 'inside';
-    return 'straddle';
-  };
-  return { aabb: airbrushAabb(stroke), maxEdge: stroke.maxEdge, classify };
-}
-
-/** Triangles the airbrush paints: within the spray, on the connected surface,
- *  and passing the dither at their distance-dependent coverage. Run against the
- *  refined mesh so the speckle is fine. */
-export function airbrushFootprintTriangles(mesh: MeshData, stroke: AirbrushStroke): Set<number> {
-  const { triVerts, numTri, vertProperties, numProp } = mesh;
-  const out = new Set<number>();
-  const box = airbrushAabb(stroke);
-  const geo = stroke.geoField;
-  const r = stroke.radius;
-  for (let t = 0; t < numTri; t++) {
-    const v0 = triVerts[t * 3], v1 = triVerts[t * 3 + 1], v2 = triVerts[t * 3 + 2];
-    const ax = vertProperties[v0 * numProp], ay = vertProperties[v0 * numProp + 1], az = vertProperties[v0 * numProp + 2];
-    const bx = vertProperties[v1 * numProp], by = vertProperties[v1 * numProp + 1], bz = vertProperties[v1 * numProp + 2];
-    const c2x = vertProperties[v2 * numProp], c2y = vertProperties[v2 * numProp + 1], c2z = vertProperties[v2 * numProp + 2];
-    if (triOutsideAabb([ax, ay, az], [bx, by, bz], [c2x, c2y, c2z], box)) continue;
-    const cx = (ax + bx + c2x) / 3, cy = (ay + by + c2y) / 3, cz = (az + bz + c2z) / 3;
-    if (geo && !geo.reachableAt(cx, cy, cz)) continue;
-    const d = nearestSampleDist(cx, cy, cz, stroke.samples);
-    if (d >= r) continue;
-    if (airbrushDither(cx, cy, cz, stroke.seed) < airbrushCoverage(d, stroke)) out.add(t);
-  }
-  return out;
 }
 
 /** Triangles a region's boundary crosses (partially, not fully covered) AND are
@@ -630,7 +564,13 @@ export function strokeFootprintTriangles(mesh: MeshData, stroke: BrushStroke): S
     const cx2 = vertProperties[v2 * numProp], cy2 = vertProperties[v2 * numProp + 1], cz2 = vertProperties[v2 * numProp + 2];
     if (triOutsideAabb([ax, ay, az], [bx, by, bz], [cx2, cy2, cz2], box)) continue;
     const cx = (ax + bx + cx2) / 3, cy = (ay + by + cy2) / 3, cz = (az + bz + cz2) / 3;
-    if (withinFootprint(cx, cy, cz, stroke)) out.add(t);
+    if (stroke.spray) {
+      // Spray: dither coverage at the centroid's footprint depth.
+      const sd = strokeSignedDist(cx, cy, cz, stroke);
+      if (sd < 0 && airbrushDither(cx, cy, cz, stroke.spray.seed) < sprayCoverage(sd, stroke)) out.add(t);
+    } else if (withinFootprint(cx, cy, cz, stroke)) {
+      out.add(t);
+    }
   }
   return out;
 }
