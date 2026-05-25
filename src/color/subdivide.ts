@@ -44,6 +44,10 @@ export interface BrushStroke {
    *  `slab` normal-offset test; derived from the base mesh (`deriveSampleNormals`)
    *  when a descriptor doesn't carry them. */
   sampleNormals?: [number, number, number][];
+  /** Per-sample tangent-plane basis `[u, v]` (both unit, ⟂ to the normal),
+   *  parallel to `samples`. Used by `slab` mode to measure a square/diamond
+   *  cross-section in the surface plane; derived from the normals when absent. */
+  sampleTangents?: [[number, number, number], [number, number, number]][];
   /** Geodesic reachability for `geodesic` mode (built from the base mesh via
    *  `buildGeodesicField`). Runtime-only — never persisted; rebuilt on demand. */
   geoField?: GeodesicField;
@@ -97,44 +101,79 @@ function slabActive(stroke: BrushStroke): boolean {
     && Number.isFinite(stroke.depth);
 }
 
-/** True when `p` is within the brush footprint of any of the stroke's samples,
- *  using the shape's distance metric (circle = Euclidean, square = Chebyshev,
- *  diamond = L1). In `slab` mode a point is rejected unless it also lies within
- *  `depth` of the surface along that sample's normal — so the footprint is a
- *  thin shell on the picked surface, not a 3D ball that punches through walls. */
+/** An orthonormal tangent-plane basis `[u, v]` for a unit normal `n`, derived
+ *  deterministically (project the world axis least aligned with `n`). On an
+ *  axis-aligned face this lands on the world axes, so a slab square/diamond reads
+ *  the same as the geodesic one. */
+export function tangentBasis(n: number[]): [[number, number, number], [number, number, number]] {
+  const ax = Math.abs(n[0]), ay = Math.abs(n[1]), az = Math.abs(n[2]);
+  // Reference = world axis least parallel to n (smallest |component|).
+  const ref: [number, number, number] = (ax <= ay && ax <= az) ? [1, 0, 0] : (ay <= az ? [0, 1, 0] : [0, 0, 1]);
+  const d = ref[0] * n[0] + ref[1] * n[1] + ref[2] * n[2];
+  let ux = ref[0] - d * n[0], uy = ref[1] - d * n[1], uz = ref[2] - d * n[2];
+  const ul = Math.hypot(ux, uy, uz) || 1;
+  ux /= ul; uy /= ul; uz /= ul;
+  const vx = n[1] * uz - n[2] * uy, vy = n[2] * ux - n[0] * uz, vz = n[0] * uy - n[1] * ux;
+  return [[ux, uy, uz], [vx, vy, vz]];
+}
+
+/** 3D footprint test (circle = sphere, square = cube, diamond = octahedron) —
+ *  the metric for geodesic / legacy strokes, where the surface gate handles
+ *  through-wall rejection. */
+function inShape3D(dx: number, dy: number, dz: number, shape: BrushShape, r: number): boolean {
+  if (shape === 'square') return Math.abs(dx) <= r && Math.abs(dy) <= r && Math.abs(dz) <= r;
+  if (shape === 'diamond') return Math.abs(dx) + Math.abs(dy) + Math.abs(dz) <= r;
+  return dx * dx + dy * dy + dz * dz <= r * r;
+}
+
+/** Slab footprint test: the 2D brush cross-section measured in the tangent plane
+ *  (circle → cylinder, square → cuboid, diamond → diamond-prism) extruded along
+ *  the normal by ±`depth`. This is the "paint a shape *through* the wall"
+ *  semantics — constant cross-section, no taper — and keeps corners crisp because
+ *  the extent is exact in-plane rather than a sphere. */
+function inSlabPrism(
+  dx: number, dy: number, dz: number,
+  n: number[], u: number[], v: number[],
+  shape: BrushShape, r: number, depth: number,
+): boolean {
+  const off = dx * n[0] + dy * n[1] + dz * n[2];
+  if (off > depth || off < -depth) return false;
+  const tx = dx - off * n[0], ty = dy - off * n[1], tz = dz - off * n[2];
+  if (shape === 'circle') return tx * tx + ty * ty + tz * tz <= r * r;
+  const a = tx * u[0] + ty * u[1] + tz * u[2];
+  const b = tx * v[0] + ty * v[1] + tz * v[2];
+  if (shape === 'square') return Math.abs(a) <= r && Math.abs(b) <= r;
+  return Math.abs(a) + Math.abs(b) <= r; // diamond
+}
+
+/** True when `p` is within the brush footprint of any of the stroke's samples.
+ *  `slab` mode uses an extruded-prism cross-section in the surface plane;
+ *  geodesic / legacy use the 3D shape metric (with geodesic also gating on
+ *  surface connectivity so paint can't jump through a wall). */
 function withinFootprint(
   px: number, py: number, pz: number,
   stroke: BrushStroke,
 ): boolean {
   const { samples, radius, shape } = stroke;
   const r = radius;
-  // Geodesic mode: the in-plane footprint still defines the extent, but a point
-  // off the seed-connected surface region is rejected outright (no bleed-through).
   if (stroke.surface === 'geodesic' && stroke.geoField && !stroke.geoField.reachableAt(px, py, pz)) {
     return false;
   }
   const slab = slabActive(stroke);
   const depth = stroke.depth ?? Infinity;
   const normals = stroke.sampleNormals;
+  const tangents = stroke.sampleTangents;
   for (let i = 0; i < samples.length; i++) {
     const dx = px - samples[i][0];
     const dy = py - samples[i][1];
     const dz = pz - samples[i][2];
-    let inShape: boolean;
-    if (shape === 'square') {
-      inShape = Math.abs(dx) <= r && Math.abs(dy) <= r && Math.abs(dz) <= r;
-    } else if (shape === 'diamond') {
-      inShape = Math.abs(dx) + Math.abs(dy) + Math.abs(dz) <= r;
-    } else {
-      inShape = dx * dx + dy * dy + dz * dz <= r * r;
-    }
-    if (!inShape) continue;
     if (slab && normals) {
       const n = normals[i];
-      const off = dx * n[0] + dy * n[1] + dz * n[2];
-      if (off > depth || off < -depth) continue; // beyond the slab → through-wall, skip
+      const t = tangents ? tangents[i] : tangentBasis(n);
+      if (inSlabPrism(dx, dy, dz, n, t[0], t[1], shape, r, depth)) return true;
+    } else if (inShape3D(dx, dy, dz, shape, r)) {
+      return true;
     }
-    return true;
   }
   return false;
 }
@@ -149,13 +188,16 @@ function triVertex(mesh: MeshData, vi: number): [number, number, number] {
  *  the stroke before the per-triangle footprint math — the difference between
  *  O(whole mesh) and O(triangles under the brush) on an accumulated mesh. */
 function strokeAabb(stroke: BrushStroke): { min: [number, number, number]; max: [number, number, number] } {
-  const r = stroke.radius;
+  // Pad generously: a square cross-section reaches r·√2 at its corners, and a
+  // slab prism extends ±depth along the (possibly tilted) normal. Over-inclusion
+  // only costs a little extra classify work; under-inclusion would clip paint.
+  const pad = stroke.radius * Math.SQRT2 + (slabActive(stroke) ? (stroke.depth ?? 0) : 0);
   const min: [number, number, number] = [Infinity, Infinity, Infinity];
   const max: [number, number, number] = [-Infinity, -Infinity, -Infinity];
   for (const s of stroke.samples) {
     for (let k = 0; k < 3; k++) {
-      if (s[k] - r < min[k]) min[k] = s[k] - r;
-      if (s[k] + r > max[k]) max[k] = s[k] + r;
+      if (s[k] - pad < min[k]) min[k] = s[k] - pad;
+      if (s[k] + pad > max[k]) max[k] = s[k] + pad;
     }
   }
   return { min, max };
@@ -181,15 +223,18 @@ function maxEdgeLen2(a: number[], b: number[], c: number[]): number {
 
 /** Classify a triangle against a brush footprint: inside when all three
  *  vertices are covered, straddle when some (but not all) are — or, for a brush
- *  smaller than the face, when the footprint's closest point on the triangle is
- *  within the radius (so a small brush in the middle of a big face still
- *  tessellates). */
+ *  smaller than the face, when the footprint's closest point on the triangle
+ *  still falls inside the footprint (so a small brush in the middle of a big face
+ *  tessellates). The fallback tests the *actual* shape, not a bounding sphere —
+ *  a sphere of radius r misses a square's corners (at r·√2), leaving them coarse
+ *  and unpainted. */
 function brushClassifier(stroke: BrushStroke): TriClassifier {
-  const r2 = stroke.radius * stroke.radius;
+  const { radius: r, shape } = stroke;
   const slab = slabActive(stroke);
   const geodesic = stroke.surface === 'geodesic' && !!stroke.geoField;
   const depth = stroke.depth ?? Infinity;
   const normals = stroke.sampleNormals;
+  const tangents = stroke.sampleTangents;
   return (a, b, c) => {
     let inside = 0;
     if (withinFootprint(a[0], a[1], a[2], stroke)) inside++;
@@ -203,16 +248,17 @@ function brushClassifier(stroke: BrushStroke): TriClassifier {
         sp[0], sp[1], sp[2],
         a[0], a[1], a[2], b[0], b[1], b[2], c[0], c[1], c[2],
       );
+      if (geodesic && stroke.geoField && !stroke.geoField.reachableAt(cp[0], cp[1], cp[2])) continue;
       const dx = cp[0] - sp[0], dy = cp[1] - sp[1], dz = cp[2] - sp[2];
-      if (dx * dx + dy * dy + dz * dz <= r2) {
-        if (slab && normals) {
-          const n = normals[s];
-          const off = dx * n[0] + dy * n[1] + dz * n[2];
-          if (off > depth || off < -depth) continue; // closest point is through a wall
-        }
-        if (geodesic && !stroke.geoField!.reachableAt(cp[0], cp[1], cp[2])) continue; // closest point is off the connected surface
-        return 'straddle';
+      let hit: boolean;
+      if (slab && normals) {
+        const n = normals[s];
+        const t = tangents ? tangents[s] : tangentBasis(n);
+        hit = inSlabPrism(dx, dy, dz, n, t[0], t[1], shape, r, depth);
+      } else {
+        hit = inShape3D(dx, dy, dz, shape, r);
       }
+      if (hit) return 'straddle';
     }
     return 'outside';
   };

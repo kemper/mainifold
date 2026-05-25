@@ -185,6 +185,50 @@ test.describe('smooth paintbrush', () => {
     expect(out.slabDeep).toBeGreaterThan(out.geo); // geodesic stayed on the top; the deep slab reached the back
   });
 
+  test('slab is an extruded prism: shapes reach through the wall by depth', async ({ page }) => {
+    await openEditor(page);
+    const out = await page.evaluate(async () => {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const pw = (window as any).partwright;
+      // Thin plate (2 thick): a shallow prism hugs the top, a deep one extrudes
+      // the same cross-section through to the back face.
+      await pw.run(`const { Manifold } = api; return Manifold.cube([20, 20, 2], true);`);
+      const sq = (depth: number) => {
+        pw.clearColors();
+        return pw.paintStroke({ points: [[0, 0, 1]], radius: 6, maxEdge: 0.5, surface: 'slab', depth, shape: 'square', color: [1, 0, 0] }).triangles;
+      };
+      const shallow = sq(0.5);
+      const deep = sq(5);
+      return { shallow, deep };
+    });
+    expect(out.shallow).toBeGreaterThan(0);       // square cross-section painted on the top
+    expect(out.deep).toBeGreaterThan(out.shallow); // extruded through to the back face
+  });
+
+  test('slab matches geodesic shape-for-shape on a flat face (corners handled)', async ({ page }) => {
+    await openEditor(page);
+    const out = await page.evaluate(async () => {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const pw = (window as any).partwright;
+      await pw.run(`const { Manifold } = api; return Manifold.cube([60, 60, 4], true);`);
+      const paint = (shape: string, surface: string) => {
+        pw.clearColors();
+        return pw.paintStroke({ points: [[0, 0, 2]], radius: 8, maxEdge: 0.5, surface, depth: 1, shape, color: [1, 0, 0] }).triangles;
+      };
+      return {
+        slabSquare: paint('square', 'slab'),
+        geoSquare: paint('square', 'geodesic'),
+        slabCircle: paint('circle', 'slab'),
+        geoCircle: paint('circle', 'geodesic'),
+      };
+    });
+    // On a flat face the slab prism resolves to the same footprint as the
+    // (known-correct) geodesic — including the square's corners.
+    expect(out.slabSquare).toBeGreaterThan(0);
+    expect(out.slabSquare).toBe(out.geoSquare);
+    expect(out.slabCircle).toBe(out.geoCircle);
+  });
+
   test('many strokes stay fast and bounded (no O(strokes^2) replay)', async ({ page }) => {
     await openEditor(page);
     const out = await page.evaluate(async () => {
