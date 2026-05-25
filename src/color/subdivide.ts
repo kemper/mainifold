@@ -451,6 +451,124 @@ export function brushRefineRegion(stroke: BrushStroke): RefineRegion {
   };
 }
 
+/** A geodesic airbrush stroke: a soft spray whose edge fades out via a
+ *  stochastic per-triangle dither (NOT colour blending — every triangle stays a
+ *  single printable colour). Always geodesic: the footprint is gated by surface
+ *  connectivity (`geoField`) so the spray never jumps through a thin/hollow wall.
+ *  Falloff is by distance to the stroke; coverage = `strength · feather(d)`. */
+export interface AirbrushStroke {
+  samples: [number, number, number][];
+  /** Spray cone radius (mesh units). */
+  radius: number;
+  /** Core coverage / density in 0..1. 1 = solid core; lower dithers everywhere. */
+  strength: number;
+  /** Feather fraction in 0..1: the outer `softness·radius` band fades 1→0; the
+   *  inner `(1-softness)·radius` core is at full `strength`. */
+  softness: number;
+  /** Dither seed — the speckle is deterministic so it reproduces on reload. */
+  seed: number;
+  /** Target edge length for the feather subdivision (finer = finer speckle). */
+  maxEdge: number;
+  /** Geodesic surface gate (built from the base mesh; runtime-only). */
+  geoField?: GeodesicField;
+}
+
+/** Coverage probability at distance `d` from the stroke: `strength` inside the
+ *  solid core, fading linearly to 0 across the feather, 0 beyond the radius. */
+export function airbrushCoverage(d: number, stroke: AirbrushStroke): number {
+  const r = stroke.radius;
+  const core = r * (1 - stroke.softness);
+  if (d >= r) return 0;
+  if (d <= core) return stroke.strength;
+  const f = 1 - (d - core) / (r - core || 1); // 1 at core → 0 at radius
+  return stroke.strength * f;
+}
+
+/** Euclidean distance from `p` to the nearest stroke sample. */
+function nearestSampleDist(px: number, py: number, pz: number, samples: [number, number, number][]): number {
+  let best = Infinity;
+  for (const s of samples) {
+    const dx = px - s[0], dy = py - s[1], dz = pz - s[2];
+    const d2 = dx * dx + dy * dy + dz * dz;
+    if (d2 < best) best = d2;
+  }
+  return Math.sqrt(best);
+}
+
+/** Deterministic dither in [0,1) from a world position + seed. Quantizes coords
+ *  to a fine grid (the refined centroids are deterministic, so this reproduces
+ *  exactly on reload) and mixes them with an integer hash. */
+export function airbrushDither(px: number, py: number, pz: number, seed: number): number {
+  const q = (v: number): number => Math.round(v * 1024) | 0;
+  let h = (seed | 0) ^ 0x9e3779b9;
+  h = Math.imul(h ^ q(px), 2654435761);
+  h = Math.imul(h ^ q(py), 2654435761);
+  h = Math.imul(h ^ q(pz), 2654435761);
+  h ^= h >>> 15; h = Math.imul(h, 2246822519); h ^= h >>> 13;
+  return (h >>> 0) / 4294967296;
+}
+
+/** AABB of an airbrush footprint (samples padded by the radius). */
+function airbrushAabb(stroke: AirbrushStroke): Aabb {
+  const r = stroke.radius;
+  const min: [number, number, number] = [Infinity, Infinity, Infinity];
+  const max: [number, number, number] = [-Infinity, -Infinity, -Infinity];
+  for (const s of stroke.samples) {
+    for (let k = 0; k < 3; k++) {
+      if (s[k] - r < min[k]) min[k] = s[k] - r;
+      if (s[k] + r > max[k]) max[k] = s[k] + r;
+    }
+  }
+  return { min, max };
+}
+
+/** Refine region for an airbrush: subdivide the dithered band (the feather, and
+ *  the whole footprint when `strength < 1` so the core dithers too) down to
+ *  `maxEdge` for fine speckle, leaving a solid `strength = 1` core coarse. No
+ *  boundary clip — the spray's edge is the dither, not a hard outline. */
+export function airbrushRefineRegion(stroke: AirbrushStroke): RefineRegion {
+  const r = stroke.radius;
+  const core = r * (1 - stroke.softness);
+  const solidCore = stroke.strength >= 1;
+  const geo = stroke.geoField;
+  const samples = stroke.samples;
+  const classify: TriClassifier = (a, b, c) => {
+    const cx = (a[0] + b[0] + c[0]) / 3, cy = (a[1] + b[1] + c[1]) / 3, cz = (a[2] + b[2] + c[2]) / 3;
+    if (geo && !geo.reachableAt(cx, cy, cz)) return 'outside';
+    const da = nearestSampleDist(a[0], a[1], a[2], samples);
+    const db = nearestSampleDist(b[0], b[1], b[2], samples);
+    const dc = nearestSampleDist(c[0], c[1], c[2], samples);
+    if (da >= r && db >= r && dc >= r) return 'outside';
+    if (solidCore && da < core && db < core && dc < core) return 'inside';
+    return 'straddle';
+  };
+  return { aabb: airbrushAabb(stroke), maxEdge: stroke.maxEdge, classify };
+}
+
+/** Triangles the airbrush paints: within the spray, on the connected surface,
+ *  and passing the dither at their distance-dependent coverage. Run against the
+ *  refined mesh so the speckle is fine. */
+export function airbrushFootprintTriangles(mesh: MeshData, stroke: AirbrushStroke): Set<number> {
+  const { triVerts, numTri, vertProperties, numProp } = mesh;
+  const out = new Set<number>();
+  const box = airbrushAabb(stroke);
+  const geo = stroke.geoField;
+  const r = stroke.radius;
+  for (let t = 0; t < numTri; t++) {
+    const v0 = triVerts[t * 3], v1 = triVerts[t * 3 + 1], v2 = triVerts[t * 3 + 2];
+    const ax = vertProperties[v0 * numProp], ay = vertProperties[v0 * numProp + 1], az = vertProperties[v0 * numProp + 2];
+    const bx = vertProperties[v1 * numProp], by = vertProperties[v1 * numProp + 1], bz = vertProperties[v1 * numProp + 2];
+    const c2x = vertProperties[v2 * numProp], c2y = vertProperties[v2 * numProp + 1], c2z = vertProperties[v2 * numProp + 2];
+    if (triOutsideAabb([ax, ay, az], [bx, by, bz], [c2x, c2y, c2z], box)) continue;
+    const cx = (ax + bx + c2x) / 3, cy = (ay + by + c2y) / 3, cz = (az + bz + c2z) / 3;
+    if (geo && !geo.reachableAt(cx, cy, cz)) continue;
+    const d = nearestSampleDist(cx, cy, cz, stroke.samples);
+    if (d >= r) continue;
+    if (airbrushDither(cx, cy, cz, stroke.seed) < airbrushCoverage(d, stroke)) out.add(t);
+  }
+  return out;
+}
+
 /** Triangles a region's boundary crosses (partially, not fully covered) AND are
  *  still coarser than `region.maxEdge`. These are the ones worth subdividing:
  *  fully-inside triangles already paint solid, fully-outside ones never paint,
