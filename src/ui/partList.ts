@@ -3,7 +3,8 @@
 // Renders into the rail container created by layout.ts and re-renders on every
 // session-state change.
 
-import { getState, onStateChange, type SessionState, type Part } from '../storage/sessionManager';
+import { getState, onStateChange, type SessionState, type Part, type Version } from '../storage/sessionManager';
+import { getLatestVersion } from '../storage/db';
 
 export interface PartListCallbacks {
   /** Switch the active part (loads its latest version into the editor). */
@@ -26,6 +27,11 @@ let dragging = false;
 // Set when a state change arrives mid-drag (suppressed); flushed on drag end so
 // the rail never shows stale parts after an async update lands during a drag.
 let pendingRender = false;
+// partId -> the object URL of its latest thumbnail and the version it came from.
+// Lets re-renders reuse an already-built preview (no flicker, no extra DB read)
+// and rebuild the URL only when the underlying version actually changes. The URL
+// is owned here: revoked when replaced (applyThumb) or pruned (pruneThumbCache).
+const thumbCache = new Map<string, { versionId: string; url: string }>();
 
 export function createPartList(container: HTMLElement, callbacks: PartListCallbacks): void {
   railEl = container;
@@ -70,6 +76,7 @@ function render(state: SessionState): void {
   railEl.appendChild(list);
 
   if (!state.session) {
+    pruneThumbCache(new Set());
     const empty = document.createElement('div');
     empty.className = 'px-3 py-2 text-[11px] text-zinc-600 italic';
     empty.textContent = 'No session';
@@ -77,12 +84,21 @@ function render(state: SessionState): void {
     return;
   }
 
+  pruneThumbCache(new Set(state.parts.map((p) => p.id)));
   for (const part of state.parts) {
-    list.appendChild(buildRow(part, part.id === state.currentPart?.id, state.parts.length, list));
+    list.appendChild(
+      buildRow(
+        part,
+        part.id === state.currentPart?.id,
+        state.parts.length,
+        list,
+        state.currentVersion,
+      ),
+    );
   }
 }
 
-function buildRow(part: Part, isCurrent: boolean, partCount: number, list: HTMLElement): HTMLElement {
+function buildRow(part: Part, isCurrent: boolean, partCount: number, list: HTMLElement, currentVersion: Version | null): HTMLElement {
   const row = document.createElement('div');
   row.dataset.partId = part.id;
   row.setAttribute('role', 'button');
@@ -103,6 +119,9 @@ function buildRow(part: Part, isCurrent: boolean, partCount: number, list: HTMLE
   grip.setAttribute('aria-label', 'Drag to reorder');
   attachDragHandlers(grip, row, list);
   row.appendChild(grip);
+
+  // Small geometry preview of the part, next to its name.
+  row.appendChild(buildThumb(part, isCurrent, currentVersion));
 
   const name = document.createElement('span');
   name.className = 'flex-1 min-w-0 truncate text-xs';
@@ -137,6 +156,75 @@ function buildRow(part: Part, isCurrent: boolean, partCount: number, list: HTMLE
   }
 
   return row;
+}
+
+/** A small fixed-size preview slot for a part's latest geometry. */
+function buildThumb(part: Part, isCurrent: boolean, currentVersion: Version | null): HTMLElement {
+  const box = document.createElement('span');
+  box.dataset.thumb = '';
+  box.className = 'shrink-0 w-6 h-6 rounded bg-zinc-900 overflow-hidden flex items-center justify-center';
+
+  // Show whatever we already have cached straight away so an unrelated re-render
+  // (part switch, rename, reorder) doesn't flash the preview off and back on.
+  const cached = thumbCache.get(part.id);
+  if (cached) box.appendChild(makeThumbImg(cached.url));
+
+  if (isCurrent) {
+    // The current part's latest version is already in memory and stays fresh as
+    // the user saves — no DB read needed.
+    applyThumb(part.id, currentVersion, box);
+  } else if (!cached) {
+    // A non-current part's thumbnail can't change until it becomes current, so
+    // fetch it once and rely on the cache from then on.
+    void getLatestVersion(part.id).then((v) => applyThumb(part.id, v, box));
+  }
+  return box;
+}
+
+/** Point the preview box at `version`'s thumbnail, (re)building the object URL
+ *  only when the version changed since we last cached one for this part. */
+function applyThumb(partId: string, version: Version | null, box: HTMLElement): void {
+  if (!version || !version.thumbnail) return; // no saved geometry yet
+  const cached = thumbCache.get(partId);
+  if (cached && cached.versionId === version.id) {
+    paintThumb(partId, cached.url, box); // already cached — just ensure it's shown
+    return;
+  }
+  if (cached) URL.revokeObjectURL(cached.url);
+  const url = URL.createObjectURL(version.thumbnail);
+  thumbCache.set(partId, { versionId: version.id, url });
+  paintThumb(partId, url, box);
+}
+
+/** Draw `url` into the part's preview slot. Prefers the row that's currently in
+ *  the DOM (looked up by part id) so an async paint can't land on a stale box
+ *  left behind by an intervening re-render; falls back to `box` when the row
+ *  isn't mounted yet (the synchronous current-part path). */
+function paintThumb(partId: string, url: string, box: HTMLElement): void {
+  const live = railEl?.querySelector<HTMLElement>(`[data-part-id="${CSS.escape(partId)}"] [data-thumb]`);
+  const target = live ?? box;
+  const existing = target.querySelector('img');
+  if (existing && existing.src === url) return; // already showing this image
+  target.textContent = '';
+  target.appendChild(makeThumbImg(url));
+}
+
+function makeThumbImg(url: string): HTMLImageElement {
+  const img = document.createElement('img');
+  img.src = url;
+  img.alt = '';
+  img.className = 'w-full h-full object-contain';
+  return img;
+}
+
+/** Drop (and revoke) cached preview URLs for parts that no longer exist. */
+function pruneThumbCache(validIds: Set<string>): void {
+  for (const [partId, entry] of thumbCache) {
+    if (!validIds.has(partId)) {
+      URL.revokeObjectURL(entry.url);
+      thumbCache.delete(partId);
+    }
+  }
 }
 
 function beginRename(name: HTMLElement, part: Part): void {
