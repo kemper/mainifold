@@ -117,65 +117,78 @@ export function tangentBasis(n: number[]): [[number, number, number], [number, n
   return [[ux, uy, uz], [vx, vy, vz]];
 }
 
-/** 3D footprint test (circle = sphere, square = cube, diamond = octahedron) —
- *  the metric for geodesic / legacy strokes, where the surface gate handles
- *  through-wall rejection. */
-function inShape3D(dx: number, dy: number, dz: number, shape: BrushShape, r: number): boolean {
-  if (shape === 'square') return Math.abs(dx) <= r && Math.abs(dy) <= r && Math.abs(dz) <= r;
-  if (shape === 'diamond') return Math.abs(dx) + Math.abs(dy) + Math.abs(dz) <= r;
-  return dx * dx + dy * dy + dz * dz <= r * r;
+/** Signed distance to a 3D footprint (circle = sphere, square = cube, diamond =
+ *  octahedron): ≤0 inside, >0 outside, 0 on the boundary. The metric for
+ *  geodesic / legacy strokes, where the surface gate handles through-wall
+ *  rejection. (For square/diamond this is the constraint-max, not a true
+ *  Euclidean distance — but it has the right sign and zero set, which is what the
+ *  in/out test and the boundary clip need.) */
+function shapeDist3D(dx: number, dy: number, dz: number, shape: BrushShape, r: number): number {
+  if (shape === 'square') return Math.max(Math.abs(dx), Math.abs(dy), Math.abs(dz)) - r;
+  if (shape === 'diamond') return Math.abs(dx) + Math.abs(dy) + Math.abs(dz) - r;
+  return Math.hypot(dx, dy, dz) - r;
 }
 
-/** Slab footprint test: the 2D brush cross-section measured in the tangent plane
- *  (circle → cylinder, square → cuboid, diamond → diamond-prism) extruded along
- *  the normal by ±`depth`. This is the "paint a shape *through* the wall"
- *  semantics — constant cross-section, no taper — and keeps corners crisp because
- *  the extent is exact in-plane rather than a sphere. */
-function inSlabPrism(
+/** Signed distance to a slab footprint: the 2D brush cross-section measured in
+ *  the tangent plane (circle → cylinder, square → cuboid, diamond →
+ *  diamond-prism) extruded along the normal by ±`depth`. ≤0 inside. Constant
+ *  cross-section (no taper), so the shape punches cleanly through a wall. */
+function slabPrismDist(
   dx: number, dy: number, dz: number,
   n: number[], u: number[], v: number[],
   shape: BrushShape, r: number, depth: number,
-): boolean {
+): number {
   const off = dx * n[0] + dy * n[1] + dz * n[2];
-  if (off > depth || off < -depth) return false;
   const tx = dx - off * n[0], ty = dy - off * n[1], tz = dz - off * n[2];
-  if (shape === 'circle') return tx * tx + ty * ty + tz * tz <= r * r;
-  const a = tx * u[0] + ty * u[1] + tz * u[2];
-  const b = tx * v[0] + ty * v[1] + tz * v[2];
-  if (shape === 'square') return Math.abs(a) <= r && Math.abs(b) <= r;
-  return Math.abs(a) + Math.abs(b) <= r; // diamond
+  let lateral: number;
+  if (shape === 'circle') {
+    lateral = Math.hypot(tx, ty, tz) - r;
+  } else {
+    const a = tx * u[0] + ty * u[1] + tz * u[2];
+    const b = tx * v[0] + ty * v[1] + tz * v[2];
+    lateral = (shape === 'square') ? Math.max(Math.abs(a), Math.abs(b)) - r : Math.abs(a) + Math.abs(b) - r;
+  }
+  // Intersection of the lateral cross-section and the |off| ≤ depth slab.
+  return Math.max(lateral, Math.abs(off) - depth);
 }
 
-/** True when `p` is within the brush footprint of any of the stroke's samples.
- *  `slab` mode uses an extruded-prism cross-section in the surface plane;
- *  geodesic / legacy use the 3D shape metric (with geodesic also gating on
- *  surface connectivity so paint can't jump through a wall). */
-function withinFootprint(
+/** Signed distance from `p` to the stroke's footprint (the union over samples):
+ *  ≤0 inside, >0 outside, 0 on the boundary. This is the field the boundary clip
+ *  follows; `withinFootprint` is just its sign. Geodesic returns +∞ off the
+ *  seed-connected surface region so paint can't jump a wall. */
+export function strokeSignedDist(
   px: number, py: number, pz: number,
   stroke: BrushStroke,
-): boolean {
-  const { samples, radius, shape } = stroke;
-  const r = radius;
+): number {
   if (stroke.surface === 'geodesic' && stroke.geoField && !stroke.geoField.reachableAt(px, py, pz)) {
-    return false;
+    return Infinity;
   }
+  const { samples, radius: r, shape } = stroke;
   const slab = slabActive(stroke);
   const depth = stroke.depth ?? Infinity;
   const normals = stroke.sampleNormals;
   const tangents = stroke.sampleTangents;
+  let best = Infinity;
   for (let i = 0; i < samples.length; i++) {
     const dx = px - samples[i][0];
     const dy = py - samples[i][1];
     const dz = pz - samples[i][2];
+    let d: number;
     if (slab && normals) {
       const n = normals[i];
       const t = tangents ? tangents[i] : tangentBasis(n);
-      if (inSlabPrism(dx, dy, dz, n, t[0], t[1], shape, r, depth)) return true;
-    } else if (inShape3D(dx, dy, dz, shape, r)) {
-      return true;
+      d = slabPrismDist(dx, dy, dz, n, t[0], t[1], shape, r, depth);
+    } else {
+      d = shapeDist3D(dx, dy, dz, shape, r);
     }
+    if (d < best) best = d;
   }
-  return false;
+  return best;
+}
+
+/** True when `p` is within the brush footprint of any of the stroke's samples. */
+function withinFootprint(px: number, py: number, pz: number, stroke: BrushStroke): boolean {
+  return strokeSignedDist(px, py, pz, stroke) <= 0;
 }
 
 function triVertex(mesh: MeshData, vi: number): [number, number, number] {
@@ -250,15 +263,15 @@ function brushClassifier(stroke: BrushStroke): TriClassifier {
       );
       if (geodesic && stroke.geoField && !stroke.geoField.reachableAt(cp[0], cp[1], cp[2])) continue;
       const dx = cp[0] - sp[0], dy = cp[1] - sp[1], dz = cp[2] - sp[2];
-      let hit: boolean;
+      let d: number;
       if (slab && normals) {
         const n = normals[s];
         const t = tangents ? tangents[s] : tangentBasis(n);
-        hit = inSlabPrism(dx, dy, dz, n, t[0], t[1], shape, r, depth);
+        d = slabPrismDist(dx, dy, dz, n, t[0], t[1], shape, r, depth);
       } else {
-        hit = inShape3D(dx, dy, dz, shape, r);
+        d = shapeDist3D(dx, dy, dz, shape, r);
       }
-      if (hit) return 'straddle';
+      if (d <= 0) return 'straddle';
     }
     return 'outside';
   };
