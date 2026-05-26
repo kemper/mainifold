@@ -14,16 +14,25 @@ import {
   uniqueName,
   sanitizeName,
   fmt,
+  ringPoints,
+  starPoints,
   type PrimitiveSpec,
 } from '../src/insert/codegen';
 import {
   addJsDeclaration,
   ensureManifoldDestructure,
+  ensureCrossSectionDestructure,
   isSimpleReturnExpr,
   appendScadStatement,
   replaceScadRanges,
   setPartTranslateDeltaJs,
   setPartTranslateDeltaScad,
+  mirrorPartJs,
+  mirrorPartScad,
+  duplicatePartJs,
+  duplicatePartScad,
+  removeJsDeclaration,
+  removeScadStatement,
 } from '../src/insert/controller';
 import { primitiveEntry, unionBoxes, pickPart, translateEntry, type RegistryEntry } from '../src/insert/spatial';
 
@@ -374,5 +383,327 @@ test.describe('controller — SCAD splicing', () => {
     expect(out).toContain('difference() { // part: cut1');
     expect(out).not.toContain('// part: box1');
     expect(out.indexOf('difference()')).toBe(0);
+  });
+});
+
+// ===========================================================================
+// Extended shape catalog (Stage A: torus / tube / wedge / pyramid / polygon /
+// hemisphere / tetrahedron / star)
+// ===========================================================================
+
+test.describe('emitPrimitive — extended shapes (manifold-js)', () => {
+  test('torus revolves a circle offset along X', () => {
+    const spec: PrimitiveSpec = { kind: 'torus', name: 't1', majorRadius: 10, tubeRadius: 2, segments: 48 };
+    expect(emitPrimitiveJs(spec)).toBe('const t1 = CrossSection.circle(2).translate([10, 0]).revolve(48);');
+  });
+
+  test('tube subtracts an inner cylinder from an outer; respects center', () => {
+    const spec: PrimitiveSpec = { kind: 'tube', name: 'pipe1', height: 20, outerRadius: 5, innerRadius: 3, center: true };
+    expect(emitPrimitiveJs(spec)).toBe(
+      'const pipe1 = Manifold.cylinder(20, 5).subtract(Manifold.cylinder(20, 3)).translate([0, 0, -10]);',
+    );
+  });
+
+  test('wedge extrudes a right-triangle CrossSection', () => {
+    const spec: PrimitiveSpec = { kind: 'wedge', name: 'w1', size: [10, 6, 4], center: false };
+    expect(emitPrimitiveJs(spec)).toBe('const w1 = CrossSection.ofPolygons([[[0, 0], [10, 0], [0, 6]]]).extrude(4);');
+  });
+
+  test('wedge with center shifts the bbox to origin', () => {
+    const spec: PrimitiveSpec = { kind: 'wedge', name: 'w1', size: [10, 6, 4], center: true };
+    expect(emitPrimitiveJs(spec)).toBe(
+      'const w1 = CrossSection.ofPolygons([[[0, 0], [10, 0], [0, 6]]]).extrude(4).translate([-5, -3, -2]);',
+    );
+  });
+
+  test('pyramid extrudes a centered square with scaleTop=[0,0]', () => {
+    const spec: PrimitiveSpec = { kind: 'pyramid', name: 'p1', baseSize: 10, height: 12, center: true };
+    expect(emitPrimitiveJs(spec))
+      .toBe('const p1 = CrossSection.square([10, 10], true).extrude(12, 1, 0, [0, 0], true);');
+  });
+
+  test('polygon prism emits a literal ring of vertices', () => {
+    const spec: PrimitiveSpec = { kind: 'polygon', name: 'hex1', sides: 6, radius: 5, height: 4, center: false };
+    const out = emitPrimitiveJs(spec);
+    expect(out).toContain('CrossSection.ofPolygons([[');
+    expect(out).toContain('.extrude(4)');
+    // First vertex sits at (radius, 0).
+    expect(out).toContain('[5, 0]');
+  });
+
+  test('hemisphere is sphere ∩ upper-cube halfspace', () => {
+    const spec: PrimitiveSpec = { kind: 'hemisphere', name: 'd1', radius: 6, center: false };
+    expect(emitPrimitiveJs(spec)).toBe(
+      'const d1 = Manifold.sphere(6).intersect(Manifold.cube([12, 12, 12], true).translate([0, 0, 6]));',
+    );
+  });
+
+  test('tetrahedron scales the unit Manifold.tetrahedron()', () => {
+    const spec: PrimitiveSpec = { kind: 'tetrahedron', name: 'tet1', size: 10 };
+    expect(emitPrimitiveJs(spec)).toBe('const tet1 = Manifold.tetrahedron().scale(5);');
+  });
+
+  test('tetrahedron at the unit reference omits the scale call', () => {
+    const spec: PrimitiveSpec = { kind: 'tetrahedron', name: 'tet1', size: 2 };
+    expect(emitPrimitiveJs(spec)).toBe('const tet1 = Manifold.tetrahedron();');
+  });
+
+  test('star extrudes 2n alternating outer/inner vertices', () => {
+    const spec: PrimitiveSpec = { kind: 'star', name: 's1', points: 5, outerRadius: 5, innerRadius: 2, height: 3, center: false };
+    const out = emitPrimitiveJs(spec);
+    expect(out).toContain('CrossSection.ofPolygons([[');
+    expect(out).toContain('.extrude(3)');
+    // First vertex is at +X, outer radius.
+    expect(out).toContain('[5, 0]');
+  });
+});
+
+test.describe('emitPrimitive — extended shapes (OpenSCAD)', () => {
+  test('torus → rotate_extrude with $fn', () => {
+    const spec: PrimitiveSpec = { kind: 'torus', name: 't1', majorRadius: 10, tubeRadius: 2, segments: 48 };
+    expect(emitPrimitiveScad(spec))
+      .toBe('rotate_extrude($fn=48) translate([10, 0, 0]) circle(r=2); // part: t1');
+  });
+
+  test('tube → difference of two cylinders, cutter overshoots ends when uncentered', () => {
+    const spec: PrimitiveSpec = { kind: 'tube', name: 'pipe1', height: 20, outerRadius: 5, innerRadius: 3, center: false };
+    expect(emitPrimitiveScad(spec)).toBe(
+      'difference() { cylinder(h=20, r=5, center=false); translate([0, 0, -0.1]) cylinder(h=20.2, r=3, center=false); }; // part: pipe1',
+    );
+  });
+
+  test('wedge → linear_extrude polygon; center wraps the lot in translate', () => {
+    const spec: PrimitiveSpec = { kind: 'wedge', name: 'w1', size: [10, 6, 4], center: true };
+    expect(emitPrimitiveScad(spec))
+      .toBe('translate([-5, -3, -2]) linear_extrude(4) polygon([[0, 0], [10, 0], [0, 6]]); // part: w1');
+  });
+
+  test('pyramid → linear_extrude with scale=0', () => {
+    const spec: PrimitiveSpec = { kind: 'pyramid', name: 'p1', baseSize: 8, height: 10, center: false };
+    expect(emitPrimitiveScad(spec))
+      .toBe('linear_extrude(10, scale=0, center=false) square([8, 8], center=true); // part: p1');
+  });
+
+  test('polygon prism → cylinder with $fn=sides', () => {
+    const spec: PrimitiveSpec = { kind: 'polygon', name: 'hex1', sides: 6, radius: 5, height: 4, center: true };
+    expect(emitPrimitiveScad(spec))
+      .toBe('cylinder(h=4, r=5, center=true, $fn=6); // part: hex1');
+  });
+
+  test('hemisphere → intersection of sphere and lower cube halfspace', () => {
+    const spec: PrimitiveSpec = { kind: 'hemisphere', name: 'd1', radius: 6, center: false };
+    expect(emitPrimitiveScad(spec)).toBe(
+      'intersection() { sphere(r=6); translate([-6, -6, 0]) cube([12, 12, 6]); }; // part: d1',
+    );
+  });
+
+  test('tetrahedron → polyhedron with 4 cube-corner points', () => {
+    const spec: PrimitiveSpec = { kind: 'tetrahedron', name: 'tet1', size: 4 };
+    const out = emitPrimitiveScad(spec);
+    expect(out).toContain('polyhedron(points=');
+    expect(out).toContain('[2, 2, 2]');
+    expect(out).toContain('// part: tet1');
+  });
+
+  test('star → linear_extrude polygon of star vertices', () => {
+    const spec: PrimitiveSpec = { kind: 'star', name: 's1', points: 5, outerRadius: 5, innerRadius: 2, height: 3, center: false };
+    const out = emitPrimitiveScad(spec);
+    expect(out).toContain('linear_extrude(3, center=false) polygon([');
+    expect(out).toContain('// part: s1');
+  });
+});
+
+test.describe('ringPoints / starPoints', () => {
+  test('ringPoints produces n vertices starting at (r, 0)', () => {
+    const pts = ringPoints(4, 5);
+    expect(pts).toHaveLength(4);
+    expect(pts[0][0]).toBeCloseTo(5);
+    expect(pts[0][1]).toBeCloseTo(0);
+    // Second vertex at 90° → (0, 5).
+    expect(pts[1][0]).toBeCloseTo(0);
+    expect(pts[1][1]).toBeCloseTo(5);
+  });
+
+  test('starPoints alternates outer/inner radii', () => {
+    const pts = starPoints(5, 5, 2);
+    expect(pts).toHaveLength(10);
+    // Even indices are outer (radius 5), odd are inner (radius 2).
+    expect(Math.hypot(pts[0][0], pts[0][1])).toBeCloseTo(5);
+    expect(Math.hypot(pts[1][0], pts[1][1])).toBeCloseTo(2);
+    expect(Math.hypot(pts[2][0], pts[2][1])).toBeCloseTo(5);
+  });
+});
+
+test.describe('spatial — bbox for extended shapes', () => {
+  test('torus bbox spans 2(R+r) in XY and 2r in Z', () => {
+    const e = primitiveEntry({ kind: 'torus', name: 't', majorRadius: 10, tubeRadius: 2, segments: 32 });
+    expect(e.box.min).toEqual([-12, -12, -2]);
+    expect(e.box.max).toEqual([12, 12, 2]);
+    expect(e.center).toEqual([0, 0, 0]);
+  });
+
+  test('uncentered hemisphere sits Z=0..R', () => {
+    const e = primitiveEntry({ kind: 'hemisphere', name: 'd', radius: 6, center: false });
+    expect(e.box.min).toEqual([-6, -6, 0]);
+    expect(e.box.max).toEqual([6, 6, 6]);
+  });
+
+  test('tetrahedron bbox matches the bounding-cube edge', () => {
+    const e = primitiveEntry({ kind: 'tetrahedron', name: 'tet', size: 10 });
+    expect(e.box.min).toEqual([-5, -5, -5]);
+    expect(e.box.max).toEqual([5, 5, 5]);
+  });
+
+  test('polygon prism bbox uses the circumscribed radius and centered Z', () => {
+    const e = primitiveEntry({ kind: 'polygon', name: 'hex', sides: 6, radius: 4, height: 10, center: true });
+    expect(e.box.min).toEqual([-4, -4, -5]);
+    expect(e.box.max).toEqual([4, 4, 5]);
+  });
+});
+
+// ===========================================================================
+// Stage B controller helpers (mirror / duplicate / delete + CrossSection
+// destructure)
+// ===========================================================================
+
+test.describe('ensureCrossSectionDestructure', () => {
+  test('adds a fresh destructure line when none exists', () => {
+    expect(ensureCrossSectionDestructure('return 1;'))
+      .toBe('const { CrossSection } = api;\nreturn 1;');
+  });
+
+  test('extends an existing api destructure rather than duplicating it', () => {
+    const code = 'const { Manifold } = api;\nreturn Manifold.cube([1,1,1], true);';
+    expect(ensureCrossSectionDestructure(code))
+      .toBe('const { Manifold, CrossSection } = api;\nreturn Manifold.cube([1,1,1], true);');
+  });
+
+  test('no-op when CrossSection is already in scope', () => {
+    const code = 'const { Manifold, CrossSection } = api;\nreturn 1;';
+    expect(ensureCrossSectionDestructure(code)).toBe(code);
+  });
+});
+
+test.describe('mirrorPartJs', () => {
+  test('inserts .mirror before a trailing .translate so position is preserved', () => {
+    const code = 'const { Manifold } = api;\nconst box1 = Manifold.cube([2,2,2], true).translate([5, 0, 0]);\nreturn box1;';
+    const out = mirrorPartJs(code, 'box1', [1, 0, 0]);
+    expect(out).toContain('Manifold.cube([2,2,2], true).mirror([1, 0, 0]).translate([5, 0, 0]);');
+  });
+
+  test('appends .mirror at the RHS end when no translate exists', () => {
+    const code = 'const a = Manifold.sphere(1);\nreturn a;';
+    const out = mirrorPartJs(code, 'a', [0, 1, 0]);
+    expect(out).toContain('const a = Manifold.sphere(1).mirror([0, 1, 0]);');
+  });
+
+  test('leaves the code untouched when the name is missing', () => {
+    const code = 'const a = Manifold.sphere(1);\nreturn a;';
+    expect(mirrorPartJs(code, 'nope', [1, 0, 0])).toBe(code);
+  });
+});
+
+test.describe('duplicatePartJs', () => {
+  test('inserts a translated clone right after the original declaration', () => {
+    const code = 'const { Manifold } = api;\nconst a = Manifold.sphere(1);\nreturn a;';
+    const out = duplicatePartJs(code, 'a', 'a_copy', [3, 0, 0]);
+    expect(out).toContain('const a_copy = a.translate([3, 0, 0]);');
+    // Order preserved: declaration before clone before return.
+    const idxA = out.indexOf('const a =');
+    const idxCopy = out.indexOf('const a_copy');
+    const idxRet = out.indexOf('return a;');
+    expect(idxA).toBeLessThan(idxCopy);
+    expect(idxCopy).toBeLessThan(idxRet);
+  });
+
+  test('omits the translate when the offset is zero', () => {
+    const code = 'const a = Manifold.sphere(1);\nreturn a;';
+    const out = duplicatePartJs(code, 'a', 'a_copy', [0, 0, 0]);
+    expect(out).toContain('const a_copy = a;');
+  });
+});
+
+test.describe('duplicatePartScad', () => {
+  test('clones a SCAD statement under a new part tag and offset', () => {
+    const code = 'cube([2,2,2], center=true); // part: box1\n';
+    const range = { from: 0, to: code.indexOf('\n') };
+    const out = duplicatePartScad(code, range, 'box2', [5, 0, 0]);
+    expect(out).toContain('cube([2,2,2], center=true); // part: box1');
+    expect(out).toContain('translate([5, 0, 0]) cube([2,2,2], center=true); // part: box2');
+  });
+});
+
+test.describe('removeJsDeclaration', () => {
+  test('removes the matching const and repoints a dangling return at the previous part', () => {
+    const code = [
+      'const { Manifold } = api;',
+      'const a = Manifold.cube([1,1,1], true);',
+      'const b = Manifold.sphere(1);',
+      'return b;',
+    ].join('\n');
+    const out = removeJsDeclaration(code, 'b');
+    expect(out).not.toContain('const b =');
+    expect(out).toContain('return a;');
+  });
+
+  test('leaves other parts intact when the deleted one was not the return target', () => {
+    const code = [
+      'const a = Manifold.cube([1,1,1], true);',
+      'const b = Manifold.sphere(1);',
+      'return a;',
+    ].join('\n');
+    const out = removeJsDeclaration(code, 'b');
+    expect(out).toContain('const a =');
+    expect(out).toContain('return a;');
+    expect(out).not.toContain('const b =');
+  });
+
+  test('no-op when the name is not declared', () => {
+    const code = 'const a = Manifold.sphere(1);\nreturn a;';
+    expect(removeJsDeclaration(code, 'b')).toBe(code);
+  });
+});
+
+test.describe('removeScadStatement', () => {
+  test('removes the statement at its character range', () => {
+    const code = 'cube([2,2,2]); // part: a\nsphere(r=1); // part: b\n';
+    const aRange = { from: 0, to: code.indexOf('\n') + 1 };
+    const out = removeScadStatement(code, aRange);
+    expect(out).not.toContain('// part: a');
+    expect(out).toContain('// part: b');
+  });
+});
+
+test.describe('mirrorPartScad', () => {
+  test('inserts mirror() between the leading translate and the construction', () => {
+    const code = 'translate([5, 0, 0]) cube([1,1,1]); // part: a';
+    const range = { from: 0, to: code.length };
+    const out = mirrorPartScad(code, range, [1, 0, 0]);
+    expect(out).toBe('translate([5, 0, 0]) mirror([1, 0, 0]) cube([1,1,1]); // part: a');
+  });
+
+  test('prepends mirror() when the statement has no translate', () => {
+    const code = 'cube([1,1,1]); // part: a';
+    const range = { from: 0, to: code.length };
+    const out = mirrorPartScad(code, range, [0, 1, 0]);
+    expect(out).toBe('mirror([0, 1, 0]) cube([1,1,1]); // part: a');
+  });
+});
+
+test.describe('addJsDeclaration + CrossSection auto-destructure', () => {
+  test('snippet that mentions CrossSection gets the destructure extended', () => {
+    const code = 'const { Manifold } = api;\nreturn Manifold.cube([1,1,1], true);';
+    const decl = 'const t1 = CrossSection.circle(2).translate([10, 0]).revolve(48);';
+    const out = addJsDeclaration(code, decl, 't1', 'force');
+    expect(out.code).toContain('const { Manifold, CrossSection } = api;');
+    expect(out.code).toContain(decl);
+    expect(out.returnSet).toBe(true);
+  });
+
+  test('snippet with only Manifold does not add CrossSection', () => {
+    const code = 'const { Manifold } = api;\nreturn Manifold.cube([1,1,1], true);';
+    const decl = 'const ball = Manifold.sphere(3);';
+    const out = addJsDeclaration(code, decl, 'ball', 'force');
+    expect(out.code).not.toContain('CrossSection');
   });
 });

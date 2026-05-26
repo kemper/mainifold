@@ -13,8 +13,21 @@
 //     operand scanner can list it (SCAD has no geometry variables).
 
 export type InsertLanguage = 'manifold-js' | 'scad';
-export type PrimitiveKind = 'cube' | 'sphere' | 'cylinder' | 'cone';
+export type PrimitiveKind =
+  | 'cube'
+  | 'sphere'
+  | 'cylinder'
+  | 'cone'
+  | 'torus'
+  | 'tube'
+  | 'wedge'
+  | 'pyramid'
+  | 'polygon'
+  | 'hemisphere'
+  | 'tetrahedron'
+  | 'star';
 export type BooleanOpKind = 'union' | 'subtract' | 'intersect';
+export type MirrorAxis = 'x' | 'y' | 'z';
 
 export type Vec3 = [number, number, number];
 
@@ -34,6 +47,43 @@ export type PrimitiveSpec =
       height: number;
       radiusBottom: number;
       radiusTop: number;
+      center: boolean;
+    })
+  | (Common & {
+      kind: 'torus';
+      majorRadius: number;
+      tubeRadius: number;
+      segments: number;
+    })
+  | (Common & {
+      kind: 'tube';
+      height: number;
+      outerRadius: number;
+      innerRadius: number;
+      center: boolean;
+    })
+  | (Common & { kind: 'wedge'; size: Vec3; center: boolean })
+  | (Common & {
+      kind: 'pyramid';
+      baseSize: number;
+      height: number;
+      center: boolean;
+    })
+  | (Common & {
+      kind: 'polygon';
+      sides: number;
+      radius: number;
+      height: number;
+      center: boolean;
+    })
+  | (Common & { kind: 'hemisphere'; radius: number; center: boolean })
+  | (Common & { kind: 'tetrahedron'; size: number })
+  | (Common & {
+      kind: 'star';
+      points: number;
+      outerRadius: number;
+      innerRadius: number;
+      height: number;
       center: boolean;
     });
 
@@ -85,7 +135,43 @@ const BASE_NAME: Record<PrimitiveKind, string> = {
   sphere: 'ball',
   cylinder: 'cyl',
   cone: 'cone',
+  torus: 'torus',
+  tube: 'tube',
+  wedge: 'wedge',
+  pyramid: 'pyramid',
+  polygon: 'prism',
+  hemisphere: 'dome',
+  tetrahedron: 'tet',
+  star: 'star',
 };
+
+/** Vertices of a regular n-gon inscribed in a circle of given radius,
+ *  starting at angle 0 and going counter-clockwise. */
+export function ringPoints(sides: number, radius: number): [number, number][] {
+  const n = Math.max(3, Math.floor(sides));
+  const out: [number, number][] = [];
+  for (let i = 0; i < n; i++) {
+    const a = (i / n) * Math.PI * 2;
+    out.push([radius * Math.cos(a), radius * Math.sin(a)]);
+  }
+  return out;
+}
+
+/** 2n vertices alternating outer/inner radius for an n-pointed star. */
+export function starPoints(points: number, outer: number, inner: number): [number, number][] {
+  const n = Math.max(3, Math.floor(points));
+  const out: [number, number][] = [];
+  for (let i = 0; i < n * 2; i++) {
+    const a = (i / (n * 2)) * Math.PI * 2;
+    const r = i % 2 === 0 ? outer : inner;
+    out.push([r * Math.cos(a), r * Math.sin(a)]);
+  }
+  return out;
+}
+
+function vec2List(pts: readonly [number, number][]): string {
+  return pts.map(p => `[${fmt(p[0])}, ${fmt(p[1])}]`).join(', ');
+}
 
 export function baseNameFor(kind: PrimitiveKind): string {
   return BASE_NAME[kind];
@@ -135,6 +221,59 @@ function jsPrimitiveExpr(spec: PrimitiveSpec): string {
       expr = `Manifold.cylinder(${fmt(spec.height)}, ${fmt(spec.radiusBottom)}, ${fmt(spec.radiusTop)})`;
       if (spec.center) centerShift = [0, 0, -spec.height / 2];
       break;
+    case 'torus':
+      // A circle at (X=R, Y=0) revolved around the profile's Y axis (which
+      // becomes Z after revolve) produces a torus of major radius R, tube r.
+      // Revolved geometry is naturally centered on Z=0.
+      expr = `CrossSection.circle(${fmt(spec.tubeRadius)}).translate([${fmt(spec.majorRadius)}, 0]).revolve(${Math.max(3, Math.floor(spec.segments))})`;
+      break;
+    case 'tube':
+      // Outer cylinder minus inner — both share base-on-origin like cylinder.
+      expr = `Manifold.cylinder(${fmt(spec.height)}, ${fmt(spec.outerRadius)}).subtract(Manifold.cylinder(${fmt(spec.height)}, ${fmt(spec.innerRadius)}))`;
+      if (spec.center) centerShift = [0, 0, -spec.height / 2];
+      break;
+    case 'wedge': {
+      // Right-triangle prism with the right angle at (0, 0) in XY.
+      const tri = `[[${fmt(0)}, ${fmt(0)}], [${fmt(spec.size[0])}, ${fmt(0)}], [${fmt(0)}, ${fmt(spec.size[1])}]]`;
+      expr = `CrossSection.ofPolygons([${tri}]).extrude(${fmt(spec.size[2])})`;
+      if (spec.center) centerShift = [-spec.size[0] / 2, -spec.size[1] / 2, -spec.size[2] / 2];
+      break;
+    }
+    case 'pyramid': {
+      // Square base extruded to a point via scaleTop=[0,0]. extrude `center`
+      // (last arg) centers along Z; the square is already centered in XY.
+      const c = spec.center;
+      expr = `CrossSection.square([${fmt(spec.baseSize)}, ${fmt(spec.baseSize)}], true).extrude(${fmt(spec.height)}, 1, 0, [0, 0], ${c})`;
+      break;
+    }
+    case 'polygon': {
+      const pts = ringPoints(spec.sides, spec.radius);
+      expr = `CrossSection.ofPolygons([[${vec2List(pts)}]]).extrude(${fmt(spec.height)})`;
+      if (spec.center) centerShift = [0, 0, -spec.height / 2];
+      break;
+    }
+    case 'hemisphere': {
+      // Sphere ∩ cube halfspace; cube spans Z=0..2R so the dome covers Z=0..R.
+      const R = spec.radius;
+      expr = `Manifold.sphere(${fmt(R)}).intersect(Manifold.cube([${fmt(2 * R)}, ${fmt(2 * R)}, ${fmt(2 * R)}], true).translate([0, 0, ${fmt(R)}]))`;
+      if (spec.center) centerShift = [0, 0, -R / 2];
+      break;
+    }
+    case 'tetrahedron': {
+      // Manifold.tetrahedron() produces a tetrahedron whose vertices are 4
+      // alternating corners of the cube [-1,1]^3 (bounding box 2 units edge).
+      // Scale by size/2 so `size` matches the bounding-box edge length.
+      const s = spec.size / 2;
+      expr = `Manifold.tetrahedron()`;
+      if (s !== 1) expr += `.scale(${fmt(s)})`;
+      break;
+    }
+    case 'star': {
+      const pts = starPoints(spec.points, spec.outerRadius, spec.innerRadius);
+      expr = `CrossSection.ofPolygons([[${vec2List(pts)}]]).extrude(${fmt(spec.height)})`;
+      if (spec.center) centerShift = [0, 0, -spec.height / 2];
+      break;
+    }
   }
 
   const shift: Vec3 = [
@@ -151,7 +290,13 @@ export function emitPrimitiveJs(spec: PrimitiveSpec): string {
   return `const ${spec.name} = ${jsPrimitiveExpr(spec)};`;
 }
 
-/** OpenSCAD construction call (no translate, no trailing `;`). */
+function scadVec2List(pts: readonly [number, number][]): string {
+  return pts.map(p => `[${fmt(p[0])}, ${fmt(p[1])}]`).join(', ');
+}
+
+/** OpenSCAD construction call (no translate, no trailing `;`). Most kinds emit
+ *  a single call; compound shapes (tube, hemisphere, tetrahedron) emit a
+ *  brace-delimited block — the SCAD scanner already understands those. */
 function scadPrimitiveCall(spec: PrimitiveSpec): string {
   switch (spec.kind) {
     case 'cube':
@@ -162,6 +307,45 @@ function scadPrimitiveCall(spec: PrimitiveSpec): string {
       return `cylinder(h=${fmt(spec.height)}, r=${fmt(spec.radius)}, center=${spec.center})`;
     case 'cone':
       return `cylinder(h=${fmt(spec.height)}, r1=${fmt(spec.radiusBottom)}, r2=${fmt(spec.radiusTop)}, center=${spec.center})`;
+    case 'torus': {
+      const seg = Math.max(3, Math.floor(spec.segments));
+      return `rotate_extrude($fn=${seg}) translate([${fmt(spec.majorRadius)}, 0, 0]) circle(r=${fmt(spec.tubeRadius)})`;
+    }
+    case 'tube': {
+      const inner = `cylinder(h=${fmt(spec.height + 0.2)}, r=${fmt(spec.innerRadius)}, center=${spec.center})`;
+      const innerShift = spec.center ? inner : `translate([0, 0, -0.1]) ${inner}`;
+      return `difference() { cylinder(h=${fmt(spec.height)}, r=${fmt(spec.outerRadius)}, center=${spec.center}); ${innerShift}; }`;
+    }
+    case 'wedge': {
+      const tri = `[[0, 0], [${fmt(spec.size[0])}, 0], [0, ${fmt(spec.size[1])}]]`;
+      const body = `linear_extrude(${fmt(spec.size[2])}) polygon(${tri})`;
+      return spec.center
+        ? `translate([${fmt(-spec.size[0] / 2)}, ${fmt(-spec.size[1] / 2)}, ${fmt(-spec.size[2] / 2)}]) ${body}`
+        : body;
+    }
+    case 'pyramid':
+      return `linear_extrude(${fmt(spec.height)}, scale=0, center=${spec.center}) square([${fmt(spec.baseSize)}, ${fmt(spec.baseSize)}], center=true)`;
+    case 'polygon':
+      // SCAD cylinder with $fn is a regular polygon prism (the cheapest path).
+      return `cylinder(h=${fmt(spec.height)}, r=${fmt(spec.radius)}, center=${spec.center}, $fn=${Math.max(3, Math.floor(spec.sides))})`;
+    case 'hemisphere': {
+      const R = spec.radius;
+      const cutter = `translate([${fmt(-R)}, ${fmt(-R)}, 0]) cube([${fmt(2 * R)}, ${fmt(2 * R)}, ${fmt(R)}])`;
+      const inside = `intersection() { sphere(r=${fmt(R)}); ${cutter}; }`;
+      return spec.center ? `translate([0, 0, ${fmt(-R / 2)}]) ${inside}` : inside;
+    }
+    case 'tetrahedron': {
+      // 4 corners of the cube [-s,s]^3 (alternating) form a regular tetrahedron
+      // with bounding-box edge 2s, edge length 2s·√2.
+      const s = spec.size / 2;
+      const pts = `[[${fmt(s)}, ${fmt(s)}, ${fmt(s)}], [${fmt(-s)}, ${fmt(-s)}, ${fmt(s)}], [${fmt(-s)}, ${fmt(s)}, ${fmt(-s)}], [${fmt(s)}, ${fmt(-s)}, ${fmt(-s)}]]`;
+      const faces = `[[0, 2, 1], [0, 1, 3], [0, 3, 2], [1, 2, 3]]`;
+      return `polyhedron(points=${pts}, faces=${faces})`;
+    }
+    case 'star': {
+      const pts = starPoints(spec.points, spec.outerRadius, spec.innerRadius);
+      return `linear_extrude(${fmt(spec.height)}, center=${spec.center}) polygon([${scadVec2List(pts)}])`;
+    }
   }
 }
 

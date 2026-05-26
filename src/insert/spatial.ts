@@ -55,6 +55,56 @@ export function primitiveEntry(spec: PrimitiveSpec): RegistryEntry {
       localMax = [r, r, spec.center ? spec.height / 2 : spec.height];
       break;
     }
+    case 'torus': {
+      const outer = spec.majorRadius + spec.tubeRadius;
+      localMin = [-outer, -outer, -spec.tubeRadius];
+      localMax = [outer, outer, spec.tubeRadius];
+      break;
+    }
+    case 'tube': {
+      const r = spec.outerRadius;
+      localMin = [-r, -r, spec.center ? -spec.height / 2 : 0];
+      localMax = [r, r, spec.center ? spec.height / 2 : spec.height];
+      break;
+    }
+    case 'wedge': {
+      const [x, y, z] = spec.size;
+      localMin = spec.center ? [-x / 2, -y / 2, -z / 2] : [0, 0, 0];
+      localMax = spec.center ? [x / 2, y / 2, z / 2] : [x, y, z];
+      break;
+    }
+    case 'pyramid': {
+      const a = spec.baseSize / 2;
+      localMin = [-a, -a, spec.center ? -spec.height / 2 : 0];
+      localMax = [a, a, spec.center ? spec.height / 2 : spec.height];
+      break;
+    }
+    case 'polygon': {
+      const r = spec.radius;
+      localMin = [-r, -r, spec.center ? -spec.height / 2 : 0];
+      localMax = [r, r, spec.center ? spec.height / 2 : spec.height];
+      break;
+    }
+    case 'hemisphere': {
+      const R = spec.radius;
+      // Dome occupies Z=0..R uncentered, Z=-R/2..R/2 when "center" shifts it
+      // around the bbox midpoint.
+      localMin = [-R, -R, spec.center ? -R / 2 : 0];
+      localMax = [R, R, spec.center ? R / 2 : R];
+      break;
+    }
+    case 'tetrahedron': {
+      const s = spec.size / 2;
+      localMin = [-s, -s, -s];
+      localMax = [s, s, s];
+      break;
+    }
+    case 'star': {
+      const r = spec.outerRadius;
+      localMin = [-r, -r, spec.center ? -spec.height / 2 : 0];
+      localMax = [r, r, spec.center ? spec.height / 2 : spec.height];
+      break;
+    }
   }
 
   const min = add(localMin, pos);

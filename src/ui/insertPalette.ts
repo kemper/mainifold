@@ -26,11 +26,24 @@ import {
   baseNameFor,
   type PrimitiveKind,
   type BooleanOpKind,
+  type MirrorAxis,
   type PrimitiveSpec,
   type InsertLanguage,
   type Vec3,
 } from '../insert/codegen';
-import { addJsDeclaration, appendScadStatement, replaceScadRanges, setPartTranslateDeltaJs, setPartTranslateDeltaScad } from '../insert/controller';
+import {
+  addJsDeclaration,
+  appendScadStatement,
+  replaceScadRanges,
+  setPartTranslateDeltaJs,
+  setPartTranslateDeltaScad,
+  mirrorPartJs,
+  mirrorPartScad,
+  duplicatePartJs,
+  duplicatePartScad,
+  removeJsDeclaration,
+  removeScadStatement,
+} from '../insert/controller';
 import { primitiveEntry, unionBoxes, pickPart, translateEntry, type RegistryEntry } from '../insert/spatial';
 import type { MeshData } from '../geometry/types';
 
@@ -66,6 +79,15 @@ const specByName = new Map<string, PrimitiveSpec>();
 
 let cb: InsertPaletteCallbacks | null = null;
 let panel: HTMLElement | null = null;
+
+// Multi-select state: parts the user has marked (via 3D-pick select mode or
+// the "+" buttons next to operands) so the quick-action buttons can operate on
+// them without going through the operand-picker modal. Persists across panel
+// open/close so the user can iterate.
+const selection = new Set<string>();
+// DOM refs for live UI updates when the selection changes.
+let selectionStripEl: HTMLElement | null = null;
+let quickActionsEl: HTMLElement | null = null;
 
 const RESULT_BASE: Record<BooleanOpKind, string> = {
   union: 'merged',
@@ -159,24 +181,66 @@ function buildPanel(): HTMLElement {
 
   p.appendChild(sectionLabel('Shapes'));
   const shapeRow = document.createElement('div');
-  shapeRow.className = 'flex flex-wrap gap-1.5 mb-1';
-  shapeRow.appendChild(paletteButton('◼ Cube', 'Insert a cube / box', () => openPrimitiveModal('cube')));
-  shapeRow.appendChild(paletteButton('● Sphere', 'Insert a sphere', () => openPrimitiveModal('sphere')));
-  shapeRow.appendChild(paletteButton('▮ Cylinder', 'Insert a cylinder', () => openPrimitiveModal('cylinder')));
-  shapeRow.appendChild(paletteButton('▲ Cone', 'Insert a cone', () => openPrimitiveModal('cone')));
+  shapeRow.className = 'grid grid-cols-4 gap-1 mb-1';
+  const shapeBtns: [PrimitiveKind, string, string][] = [
+    ['cube', '◼ Cube', 'Insert a cube / box'],
+    ['sphere', '● Sphere', 'Insert a sphere'],
+    ['cylinder', '▮ Cylinder', 'Insert a cylinder'],
+    ['cone', '▲ Cone', 'Insert a cone'],
+    ['torus', '◯ Torus', 'Insert a torus (ring)'],
+    ['tube', '⌬ Tube', 'Insert a hollow cylinder / pipe'],
+    ['hemisphere', '◐ Dome', 'Insert a hemisphere'],
+    ['tetrahedron', '◭ Tet', 'Insert a regular tetrahedron'],
+    ['pyramid', '⛰ Pyramid', 'Insert a square-base pyramid'],
+    ['wedge', '◣ Wedge', 'Insert a right-triangle prism'],
+    ['polygon', '⬡ N-gon', 'Insert a regular polygon prism'],
+    ['star', '✦ Star', 'Insert a star prism'],
+  ];
+  for (const [kind, label, title] of shapeBtns) {
+    shapeRow.appendChild(paletteButton(label, title, () => openPrimitiveModal(kind)));
+  }
   p.appendChild(shapeRow);
 
+  // --- Selection strip (chips + Select / Clear buttons) ---
+  p.appendChild(sectionLabel('Selection'));
+  selectionStripEl = document.createElement('div');
+  selectionStripEl.className = 'flex flex-wrap items-center gap-1 min-h-[26px] p-1 bg-zinc-900/60 border border-zinc-700 rounded mb-1';
+  p.appendChild(selectionStripEl);
+  const selBtnRow = document.createElement('div');
+  selBtnRow.className = 'flex gap-1.5 mb-1';
+  selBtnRow.appendChild(paletteButton('🎯 Select', 'Click shapes in the 3D view to select them', startSelectMode));
+  const clearBtn = paletteButton('⟲ Clear', 'Empty the selection', () => {
+    selection.clear();
+    rerenderSelectionUI();
+  });
+  selBtnRow.appendChild(clearBtn);
+  p.appendChild(selBtnRow);
+
+  // --- Boolean operations ---
   p.appendChild(sectionLabel('Operations'));
   const opRow = document.createElement('div');
   opRow.className = 'flex flex-wrap gap-1.5';
   (['union', 'subtract', 'intersect'] as BooleanOpKind[]).forEach(op => {
     opRow.appendChild(
-      paletteButton(OP_LABEL[op], `Combine shapes with ${OP_TITLE[op].toLowerCase()}`, () => beginOperation(op)),
+      paletteButton(
+        OP_LABEL[op],
+        `${OP_TITLE[op]} — uses the current selection when it has 2+ parts, otherwise opens the operand picker.`,
+        () => beginOperation(op),
+      ),
     );
   });
   p.appendChild(opRow);
 
-  p.appendChild(sectionLabel('Edit'));
+  // --- Quick-edit row (selection-driven) ---
+  p.appendChild(sectionLabel('Edit selection'));
+  quickActionsEl = document.createElement('div');
+  quickActionsEl.className = 'flex flex-wrap gap-1.5';
+  quickActionsEl.appendChild(paletteButton('⎘ Duplicate', 'Clone the selected parts (offset along +X)', applyQuickDuplicate));
+  quickActionsEl.appendChild(paletteButton('▥ Mirror', 'Flip the selected parts in place', openMirrorPicker));
+  quickActionsEl.appendChild(paletteButton('✕ Delete', 'Remove the selected parts from the code', applyQuickDelete));
+  p.appendChild(quickActionsEl);
+
+  p.appendChild(sectionLabel('Scene'));
   const editRow = document.createElement('div');
   editRow.className = 'flex flex-wrap gap-1.5';
   editRow.appendChild(
@@ -189,7 +253,58 @@ function buildPanel(): HTMLElement {
   hint.textContent = 'Inserted code targets the active language (JS / SCAD) and renders immediately.';
   p.appendChild(hint);
 
+  // Paint the selection strip and the disabled-state of the quick actions.
+  setTimeout(rerenderSelectionUI, 0);
+
   return p;
+}
+
+// ---------------------------------------------------------------------------
+// Selection state (drives quick-action ops)
+// ---------------------------------------------------------------------------
+
+/** Prune any names that no longer exist in the live code, then refresh the UI. */
+function pruneSelection(): void {
+  if (!cb) return;
+  const valid = new Set(scanParts(cb.getCode(), cb.getLanguage()).map(p => p.name));
+  for (const name of selection) if (!valid.has(name)) selection.delete(name);
+}
+
+function rerenderSelectionUI(): void {
+  if (!selectionStripEl) return;
+  pruneSelection();
+  selectionStripEl.replaceChildren();
+  if (selection.size === 0) {
+    const hint = document.createElement('span');
+    hint.className = 'text-[11px] text-zinc-500 px-1';
+    hint.textContent = 'Empty — use 🎯 Select to pick parts in 3D.';
+    selectionStripEl.appendChild(hint);
+  } else {
+    for (const name of selection) {
+      const chip = document.createElement('span');
+      chip.className =
+        'inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[11px] bg-emerald-900/40 border border-emerald-700/50 text-emerald-100';
+      chip.textContent = name;
+      const x = document.createElement('button');
+      x.className = 'text-emerald-200 hover:text-white';
+      x.textContent = '×';
+      x.title = `Remove ${name} from selection`;
+      x.addEventListener('click', () => {
+        selection.delete(name);
+        rerenderSelectionUI();
+      });
+      chip.appendChild(x);
+      selectionStripEl.appendChild(chip);
+    }
+  }
+  if (quickActionsEl) {
+    const enabled = selection.size > 0;
+    for (const btn of Array.from(quickActionsEl.querySelectorAll('button'))) {
+      btn.disabled = !enabled;
+      btn.classList.toggle('opacity-50', !enabled);
+      btn.classList.toggle('cursor-not-allowed', !enabled);
+    }
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -268,6 +383,119 @@ function existingNames(): string[] {
   return scanParts(cb.getCode(), cb.getLanguage()).map(p => p.name);
 }
 
+function intField(parent: HTMLElement, label: string, value: number, min = 3): () => number {
+  const { row, controls } = fieldRow(label);
+  const input = document.createElement('input');
+  input.type = 'number';
+  input.step = '1';
+  input.min = String(min);
+  input.value = String(value);
+  input.className = 'w-16 bg-zinc-900 border border-zinc-600 rounded px-2 py-1 text-xs text-zinc-100 text-right';
+  controls.appendChild(input);
+  parent.appendChild(row);
+  return () => Math.max(min, Math.floor(parseFloat(input.value) || min));
+}
+
+/** Build the per-kind parameter fields and return a function that constructs
+ *  the matching PrimitiveSpec when the user clicks Insert. */
+function buildPrimitiveForm(
+  body: HTMLElement,
+  kind: PrimitiveKind,
+): (name: string, position: Vec3) => PrimitiveSpec {
+  switch (kind) {
+    case 'cube': {
+      const getSize = vec3Field(body, 'Size (x, y, z)', [10, 10, 10]);
+      const getCenter = checkField(body, 'Center at origin', true);
+      return (name, position) => ({ kind: 'cube', name, size: getSize(), center: getCenter(), position });
+    }
+    case 'sphere': {
+      const getRadius = numField(body, 'Radius', 6);
+      return (name, position) => ({ kind: 'sphere', name, radius: getRadius(), position });
+    }
+    case 'cylinder': {
+      const getHeight = numField(body, 'Height', 20);
+      const getRadius = numField(body, 'Radius', 5);
+      const getCenter = checkField(body, 'Center at origin', true);
+      return (name, position) => ({
+        kind: 'cylinder', name, height: getHeight(), radius: getRadius(), center: getCenter(), position,
+      });
+    }
+    case 'cone': {
+      const getHeight = numField(body, 'Height', 20);
+      const getR1 = numField(body, 'Bottom radius', 6);
+      const getR2 = numField(body, 'Top radius', 0);
+      const getCenter = checkField(body, 'Center at origin', true);
+      return (name, position) => ({
+        kind: 'cone', name, height: getHeight(), radiusBottom: getR1(), radiusTop: getR2(),
+        center: getCenter(), position,
+      });
+    }
+    case 'torus': {
+      const getMajor = numField(body, 'Major radius (ring)', 12);
+      const getTube = numField(body, 'Tube radius', 3);
+      const getSeg = intField(body, 'Segments', 48, 4);
+      return (name, position) => ({
+        kind: 'torus', name, majorRadius: getMajor(), tubeRadius: getTube(), segments: getSeg(), position,
+      });
+    }
+    case 'tube': {
+      const getHeight = numField(body, 'Height', 20);
+      const getOuter = numField(body, 'Outer radius', 8);
+      const getInner = numField(body, 'Inner radius', 5);
+      const getCenter = checkField(body, 'Center at origin', true);
+      return (name, position) => ({
+        kind: 'tube', name, height: getHeight(), outerRadius: getOuter(), innerRadius: getInner(),
+        center: getCenter(), position,
+      });
+    }
+    case 'wedge': {
+      const getSize = vec3Field(body, 'Size (x, y, z)', [10, 10, 10]);
+      const getCenter = checkField(body, 'Center bbox at origin', false);
+      return (name, position) => ({ kind: 'wedge', name, size: getSize(), center: getCenter(), position });
+    }
+    case 'pyramid': {
+      const getBase = numField(body, 'Base side', 10);
+      const getHeight = numField(body, 'Height', 12);
+      const getCenter = checkField(body, 'Center at origin', true);
+      return (name, position) => ({
+        kind: 'pyramid', name, baseSize: getBase(), height: getHeight(), center: getCenter(), position,
+      });
+    }
+    case 'polygon': {
+      const getSides = intField(body, 'Sides', 6, 3);
+      const getRadius = numField(body, 'Radius', 6);
+      const getHeight = numField(body, 'Height', 10);
+      const getCenter = checkField(body, 'Center at origin', true);
+      return (name, position) => ({
+        kind: 'polygon', name, sides: getSides(), radius: getRadius(), height: getHeight(),
+        center: getCenter(), position,
+      });
+    }
+    case 'hemisphere': {
+      const getRadius = numField(body, 'Radius', 6);
+      const getCenter = checkField(body, 'Center bbox at origin', false);
+      return (name, position) => ({
+        kind: 'hemisphere', name, radius: getRadius(), center: getCenter(), position,
+      });
+    }
+    case 'tetrahedron': {
+      const getSize = numField(body, 'Bounding-cube edge', 10);
+      return (name, position) => ({ kind: 'tetrahedron', name, size: getSize(), position });
+    }
+    case 'star': {
+      const getPoints = intField(body, 'Points', 5, 3);
+      const getOuter = numField(body, 'Outer radius', 8);
+      const getInner = numField(body, 'Inner radius', 3);
+      const getHeight = numField(body, 'Height', 6);
+      const getCenter = checkField(body, 'Center at origin', true);
+      return (name, position) => ({
+        kind: 'star', name, points: getPoints(), outerRadius: getOuter(), innerRadius: getInner(),
+        height: getHeight(), center: getCenter(), position,
+      });
+    }
+  }
+}
+
 function openPrimitiveModal(kind: PrimitiveKind): void {
   if (!cb) return;
   if (cb.isLocked()) {
@@ -277,30 +505,7 @@ function openPrimitiveModal(kind: PrimitiveKind): void {
 
   const shell = createModalShell({ title: `Insert ${kind}`, maxWidth: 'sm' });
   const lang = cb.getLanguage();
-
-  // Per-kind dimension fields
-  let getSize: (() => Vec3) | null = null;
-  let getRadius: (() => number) | null = null;
-  let getHeight: (() => number) | null = null;
-  let getR1: (() => number) | null = null;
-  let getR2: (() => number) | null = null;
-  let getCenter: (() => boolean) | null = null;
-
-  if (kind === 'cube') {
-    getSize = vec3Field(shell.body, 'Size (x, y, z)', [10, 10, 10]);
-    getCenter = checkField(shell.body, 'Center at origin', true);
-  } else if (kind === 'sphere') {
-    getRadius = numField(shell.body, 'Radius', 6);
-  } else if (kind === 'cylinder') {
-    getHeight = numField(shell.body, 'Height', 20);
-    getRadius = numField(shell.body, 'Radius', 5);
-    getCenter = checkField(shell.body, 'Center at origin', true);
-  } else if (kind === 'cone') {
-    getHeight = numField(shell.body, 'Height', 20);
-    getR1 = numField(shell.body, 'Bottom radius', 6);
-    getR2 = numField(shell.body, 'Top radius', 0);
-    getCenter = checkField(shell.body, 'Center at origin', true);
-  }
+  const buildSpec = buildPrimitiveForm(shell.body, kind);
 
   const getPosition = vec3Field(shell.body, 'Position (x, y, z)', [0, 0, 0]);
   const defaultName = uniqueName(baseNameFor(kind), existingNames());
@@ -317,24 +522,7 @@ function openPrimitiveModal(kind: PrimitiveKind): void {
   create.addEventListener('click', () => {
     const name = uniqueName(sanitizeName(getName()), existingNames());
     const position = getPosition();
-    let spec: PrimitiveSpec;
-    if (kind === 'cube') {
-      spec = { kind, name, size: getSize!(), center: getCenter!(), position };
-    } else if (kind === 'sphere') {
-      spec = { kind, name, radius: getRadius!(), position };
-    } else if (kind === 'cylinder') {
-      spec = { kind, name, height: getHeight!(), radius: getRadius!(), center: getCenter!(), position };
-    } else {
-      spec = {
-        kind,
-        name,
-        height: getHeight!(),
-        radiusBottom: getR1!(),
-        radiusTop: getR2!(),
-        center: getCenter!(),
-        position,
-      };
-    }
+    const spec = buildSpec(name, position);
     shell.close();
     applyPrimitive(spec, lang);
   });
@@ -400,6 +588,24 @@ function beginOperation(op: BooleanOpKind): void {
   if (cb.isLocked()) {
     cb.showToast('Editor is locked by color regions — unlock to edit code.', { variant: 'warn' });
     return;
+  }
+  // If the selection already has enough parts, skip the operand-picker modal
+  // and apply the op immediately. Order matches the selection (insertion order).
+  if (selection.size >= 2) {
+    const liveParts = scanParts(cb.getCode(), cb.getLanguage());
+    const partByName = new Map(liveParts.map(p => [p.name, p]));
+    const operands: Operand[] = [];
+    for (const name of selection) {
+      const part = partByName.get(name);
+      if (!part) continue;
+      operands.push({ name: part.name, statement: part.statement, range: part.range });
+    }
+    if (operands.length >= 2) {
+      applyOperation(op, operands, cb.getLanguage());
+      selection.clear();
+      rerenderSelectionUI();
+      return;
+    }
   }
   openOperationModal(op, []);
 }
@@ -709,6 +915,70 @@ function buildProxyGeometry(spec: PrimitiveSpec): THREE.BufferGeometry {
       g.rotateX(Math.PI / 2);
       return g;
     }
+    case 'torus': {
+      // Three TorusGeometry lies in XY by default but with Z as the axis of
+      // rotational symmetry — that's already our convention.
+      const seg = Math.max(4, Math.floor(spec.segments));
+      return new THREE.TorusGeometry(spec.majorRadius, spec.tubeRadius, 16, seg);
+    }
+    case 'tube': {
+      // Solid-outer approximation is fine for the proxy (the hole isn't
+      // visually critical when dragging).
+      const g = new THREE.CylinderGeometry(spec.outerRadius, spec.outerRadius, spec.height, 40);
+      g.rotateX(Math.PI / 2);
+      return g;
+    }
+    case 'wedge': {
+      const [x, y, z] = spec.size;
+      const shape = new THREE.Shape();
+      shape.moveTo(0, 0);
+      shape.lineTo(x, 0);
+      shape.lineTo(0, y);
+      shape.lineTo(0, 0);
+      const g = new THREE.ExtrudeGeometry(shape, { depth: z, bevelEnabled: false });
+      if (spec.center) g.translate(-x / 2, -y / 2, -z / 2);
+      return g;
+    }
+    case 'pyramid': {
+      // 4-sided cone = square pyramid (Three rotates the base by π/4 by default,
+      // which is fine — proxy just needs to be visually plausible).
+      const g = new THREE.ConeGeometry(spec.baseSize / Math.SQRT2, spec.height, 4);
+      g.rotateX(Math.PI / 2);
+      return g;
+    }
+    case 'polygon': {
+      const g = new THREE.CylinderGeometry(spec.radius, spec.radius, spec.height, Math.max(3, spec.sides));
+      g.rotateX(Math.PI / 2);
+      return g;
+    }
+    case 'hemisphere': {
+      // Three's SphereGeometry takes (r, ws, hs, phiStart, phiLength, thetaStart, thetaLength).
+      // Default sphere has its polar axis along Y. We want the dome along +Z, so rotate it.
+      const g = new THREE.SphereGeometry(spec.radius, 32, 20, 0, Math.PI * 2, 0, Math.PI / 2);
+      g.rotateX(Math.PI / 2); // Y-up dome → Z-up dome
+      return g;
+    }
+    case 'tetrahedron': {
+      // TetrahedronGeometry's `r` is the circumradius. Our tetrahedron has
+      // vertices at the 4 alternating corners of [-s, s]^3, so circumradius = s√3.
+      return new THREE.TetrahedronGeometry((spec.size / 2) * Math.sqrt(3));
+    }
+    case 'star': {
+      const n = Math.max(3, Math.floor(spec.points));
+      const shape = new THREE.Shape();
+      for (let i = 0; i < n * 2; i++) {
+        const a = (i / (n * 2)) * Math.PI * 2;
+        const r = i % 2 === 0 ? spec.outerRadius : spec.innerRadius;
+        const x = r * Math.cos(a);
+        const y = r * Math.sin(a);
+        if (i === 0) shape.moveTo(x, y);
+        else shape.lineTo(x, y);
+      }
+      shape.closePath();
+      const g = new THREE.ExtrudeGeometry(shape, { depth: spec.height, bevelEnabled: false });
+      if (spec.center) g.translate(0, 0, -spec.height / 2);
+      return g;
+    }
   }
 }
 
@@ -911,6 +1181,281 @@ function startBuildSession(): void {
 
   doneBtn.addEventListener('click', endSession);
   buildCleanup = endSession;
+}
+
+// ---------------------------------------------------------------------------
+// Multi-select 3D-pick session (Stage B: Tinkercad-style click-to-select)
+// ---------------------------------------------------------------------------
+
+let selectSessionCleanup: (() => void) | null = null;
+
+function startSelectMode(): void {
+  if (!cb) return;
+  if (cb.isLocked()) {
+    cb.showToast('Editor is locked by color regions — unlock to edit code.', { variant: 'warn' });
+    return;
+  }
+  if (selectSessionCleanup) return; // already running
+  const canvas = cb.getCanvas();
+  const camera = cb.getCamera();
+  const mesh = cb.getMeshData();
+  if (!canvas || !camera || !mesh) {
+    cb.showToast('No model to pick from. Run your code first.', { variant: 'warn' });
+    return;
+  }
+  if (registry.size === 0) {
+    cb.showToast('Nothing is registered for picking yet. Insert shapes via the palette first.', { variant: 'warn' });
+    return;
+  }
+
+  const validNames = new Set(scanParts(cb.getCode(), cb.getLanguage()).map(p => p.name));
+  // Drop any stale entries (parts that were renamed / deleted in the code).
+  for (const name of selection) if (!validNames.has(name)) selection.delete(name);
+
+  // Tuck the palette out of the way so its panel doesn't intercept canvas
+  // clicks while the user is picking parts. The strip re-renders on Done.
+  closeInsertPalette();
+
+  const scene = getScene();
+  const highlightGroup = new THREE.Group();
+  scene.add(highlightGroup);
+
+  const refreshHighlights = (): void => {
+    while (highlightGroup.children.length > 0) {
+      const c = highlightGroup.children[0];
+      highlightGroup.remove(c);
+    }
+    for (const name of selection) {
+      const entry = registry.get(name);
+      if (!entry) continue;
+      const sx = entry.box.max[0] - entry.box.min[0];
+      const sy = entry.box.max[1] - entry.box.min[1];
+      const sz = entry.box.max[2] - entry.box.min[2];
+      const geo = new THREE.BoxGeometry(Math.max(0.01, sx), Math.max(0.01, sy), Math.max(0.01, sz));
+      const edges = new THREE.EdgesGeometry(geo);
+      const wire = new THREE.LineSegments(edges, new THREE.LineBasicMaterial({ color: 0x34d399, linewidth: 2 }));
+      wire.position.set(entry.center[0], entry.center[1], entry.center[2]);
+      wire.renderOrder = 999;
+      highlightGroup.add(wire);
+      geo.dispose();
+    }
+  };
+  refreshHighlights();
+
+  // Floating instruction bar.
+  const bar = document.createElement('div');
+  bar.className =
+    'fixed left-1/2 -translate-x-1/2 bottom-6 z-50 flex items-center gap-2 px-3 py-2 rounded-lg bg-zinc-800/95 border border-zinc-600 shadow-xl text-xs text-zinc-100';
+  const msg = document.createElement('span');
+  const updateMsg = (): void => { msg.textContent = `Click shapes to toggle selection — ${selection.size} selected`; };
+  updateMsg();
+  bar.appendChild(msg);
+  const doneBtn = document.createElement('button');
+  doneBtn.className = BUTTON_PRIMARY + ' !py-1';
+  doneBtn.textContent = 'Done';
+  bar.appendChild(doneBtn);
+  document.body.appendChild(bar);
+
+  const raycaster = new THREE.Raycaster();
+  const geometry = meshDataToGeometry(mesh);
+  const tempMesh = new THREE.Mesh(geometry, new THREE.MeshBasicMaterial({ side: THREE.DoubleSide }));
+
+  let downX = 0;
+  let downY = 0;
+  const onDown = (e: PointerEvent): void => { downX = e.clientX; downY = e.clientY; };
+  const onUp = (e: PointerEvent): void => {
+    if (Math.abs(e.clientX - downX) > 4 || Math.abs(e.clientY - downY) > 4) return;
+    const rect = canvas.getBoundingClientRect();
+    const ndcX = ((e.clientX - rect.left) / rect.width) * 2 - 1;
+    const ndcY = -((e.clientY - rect.top) / rect.height) * 2 + 1;
+    raycaster.setFromCamera(new THREE.Vector2(ndcX, ndcY), camera);
+    const hits = raycaster.intersectObject(tempMesh);
+    if (hits.length === 0) return;
+    const pt: Vec3 = [hits[0].point.x, hits[0].point.y, hits[0].point.z];
+    const name = pickPart(pt, registry, validNames);
+    if (!name) {
+      cb!.showToast('Could not match that spot to an inserted part.', { variant: 'warn' });
+      return;
+    }
+    if (selection.has(name)) selection.delete(name);
+    else selection.add(name);
+    updateMsg();
+    refreshHighlights();
+    rerenderSelectionUI();
+  };
+
+  canvas.addEventListener('pointerdown', onDown);
+  canvas.addEventListener('pointerup', onUp);
+
+  const endSession = (): void => {
+    canvas.removeEventListener('pointerdown', onDown);
+    canvas.removeEventListener('pointerup', onUp);
+    geometry.dispose();
+    (tempMesh.material as THREE.Material).dispose();
+    for (const c of [...highlightGroup.children]) {
+      if (c instanceof THREE.LineSegments) {
+        c.geometry.dispose();
+        (c.material as THREE.Material).dispose();
+      }
+    }
+    highlightGroup.parent?.remove(highlightGroup);
+    bar.remove();
+    selectSessionCleanup = null;
+    // Reopen the palette so the user sees the resulting chip strip + can act on it.
+    openInsertPalette();
+    rerenderSelectionUI();
+  };
+
+  doneBtn.addEventListener('click', endSession);
+  selectSessionCleanup = endSession;
+}
+
+// ---------------------------------------------------------------------------
+// Quick-action ops (Duplicate / Mirror / Delete on selected parts)
+// ---------------------------------------------------------------------------
+
+function applyQuickDuplicate(): void {
+  if (!cb) return;
+  if (cb.isLocked()) {
+    cb.showToast('Editor is locked by color regions — unlock to edit code.', { variant: 'warn' });
+    return;
+  }
+  if (selection.size === 0) {
+    cb.showToast('Nothing selected — pick parts with 🎯 Select first.', { variant: 'warn' });
+    return;
+  }
+  const lang = cb.getLanguage();
+  // Offset each duplicate along +X by 1.1× the part's X extent so the copy
+  // sits next to the original instead of overlapping.
+  const newNames: string[] = [];
+  for (const name of [...selection]) {
+    const entry = registry.get(name);
+    const dx = entry ? (entry.box.max[0] - entry.box.min[0]) * 1.1 : 10;
+    const offset: Vec3 = [dx, 0, 0];
+    let code = cb.getCode();
+    const newName = uniqueName(`${name}_copy`, existingNames());
+    if (lang === 'scad') {
+      const part = scanParts(code, 'scad').find(p => p.name === name);
+      if (!part?.range) continue;
+      code = duplicatePartScad(code, part.range, newName, offset);
+    } else {
+      code = duplicatePartJs(code, name, newName, offset);
+    }
+    cb.setCode(code);
+    const origSpec = specByName.get(name);
+    if (origSpec) {
+      const pos = origSpec.position ?? [0, 0, 0];
+      const dupSpec = { ...origSpec, name: newName, position: [pos[0] + offset[0], pos[1] + offset[1], pos[2] + offset[2]] as Vec3 };
+      specByName.set(newName, dupSpec);
+      registry.set(newName, primitiveEntry(dupSpec));
+    } else {
+      const orig = registry.get(name);
+      if (orig) registry.set(newName, translateEntry(orig, offset));
+    }
+    newNames.push(newName);
+  }
+  selection.clear();
+  for (const n of newNames) selection.add(n);
+  rerenderSelectionUI();
+  cb.run(cb.getCode());
+  if (newNames.length > 0) {
+    cb.showToast(`Duplicated ${newNames.length} part${newNames.length === 1 ? '' : 's'}.`, { variant: 'success' });
+  }
+}
+
+function openMirrorPicker(): void {
+  if (!cb) return;
+  if (cb.isLocked()) {
+    cb.showToast('Editor is locked by color regions — unlock to edit code.', { variant: 'warn' });
+    return;
+  }
+  if (selection.size === 0) {
+    cb.showToast('Nothing selected — pick parts with 🎯 Select first.', { variant: 'warn' });
+    return;
+  }
+  const shell = createModalShell({ title: 'Mirror selection', maxWidth: 'sm' });
+  const info = document.createElement('div');
+  info.className = 'text-xs text-zinc-300';
+  info.textContent = `Flip ${selection.size} part${selection.size === 1 ? '' : 's'} in place across the chosen axis.`;
+  shell.body.appendChild(info);
+  const row = document.createElement('div');
+  row.className = 'flex gap-1.5 mt-2';
+  (['x', 'y', 'z'] as MirrorAxis[]).forEach(axis => {
+    const btn = document.createElement('button');
+    btn.className = BUTTON_PRIMARY;
+    btn.textContent = `Mirror ${axis.toUpperCase()}`;
+    btn.addEventListener('click', () => {
+      shell.close();
+      applyQuickMirror(axis);
+    });
+    row.appendChild(btn);
+  });
+  shell.body.appendChild(row);
+
+  const cancel = document.createElement('button');
+  cancel.className = BUTTON_CANCEL;
+  cancel.textContent = 'Cancel';
+  cancel.addEventListener('click', shell.close);
+  shell.footer.appendChild(cancel);
+}
+
+function applyQuickMirror(axisKey: MirrorAxis): void {
+  if (!cb) return;
+  const axis: Vec3 = axisKey === 'x' ? [1, 0, 0] : axisKey === 'y' ? [0, 1, 0] : [0, 0, 1];
+  const lang = cb.getLanguage();
+  let count = 0;
+  for (const name of [...selection]) {
+    let code = cb.getCode();
+    if (lang === 'scad') {
+      const part = scanParts(code, 'scad').find(p => p.name === name);
+      if (!part?.range) continue;
+      code = mirrorPartScad(code, part.range, axis);
+    } else {
+      code = mirrorPartJs(code, name, axis);
+    }
+    cb.setCode(code);
+    count++;
+  }
+  rerenderSelectionUI();
+  cb.run(cb.getCode());
+  if (count > 0) {
+    cb.showToast(`Mirrored ${count} part${count === 1 ? '' : 's'} across ${axisKey.toUpperCase()}.`, { variant: 'success' });
+  }
+}
+
+function applyQuickDelete(): void {
+  if (!cb) return;
+  if (cb.isLocked()) {
+    cb.showToast('Editor is locked by color regions — unlock to edit code.', { variant: 'warn' });
+    return;
+  }
+  if (selection.size === 0) {
+    cb.showToast('Nothing selected — pick parts with 🎯 Select first.', { variant: 'warn' });
+    return;
+  }
+  const lang = cb.getLanguage();
+  let count = 0;
+  for (const name of [...selection]) {
+    let code = cb.getCode();
+    if (lang === 'scad') {
+      // Re-scan each iteration since prior deletions shift offsets.
+      const part = scanParts(code, 'scad').find(p => p.name === name);
+      if (!part?.range) continue;
+      code = removeScadStatement(code, part.range);
+    } else {
+      code = removeJsDeclaration(code, name);
+    }
+    cb.setCode(code);
+    registry.delete(name);
+    specByName.delete(name);
+    count++;
+  }
+  selection.clear();
+  rerenderSelectionUI();
+  cb.run(cb.getCode());
+  if (count > 0) {
+    cb.showToast(`Deleted ${count} part${count === 1 ? '' : 's'}.`, { variant: 'success' });
+  }
 }
 
 function meshDataToGeometry(mesh: MeshData): THREE.BufferGeometry {

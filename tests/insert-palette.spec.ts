@@ -146,6 +146,54 @@ test.describe('Insert palette', () => {
     await expect(page.getByText('Intersect shapes')).toBeVisible();
   });
 
+  test('extended shape catalog inserts and renders each shape', async ({ page }) => {
+    await gotoEditor(page);
+    await page.locator('#btn-insert').click();
+
+    const tryShape = async (label: string, modalTitle: string, expectedSnippet: RegExp): Promise<void> => {
+      await page.locator(palette).getByRole('button', { name: label }).click();
+      await expect(page.getByText(modalTitle, { exact: true })).toBeVisible();
+      await page.getByRole('button', { name: 'Insert', exact: true }).click();
+      await expect.poll(() => getCode(page)).toMatch(expectedSnippet);
+      // No engine errors after insertion.
+      const geo = await getGeo(page);
+      expect(geo.status).not.toBe('error');
+    };
+
+    await tryShape('Torus', 'Insert torus', /CrossSection\.circle\([^)]+\)\.translate\(\[[^\]]+\]\)\.revolve/);
+    await tryShape('N-gon', 'Insert polygon', /CrossSection\.ofPolygons/);
+    await tryShape('Tet', 'Insert tetrahedron', /Manifold\.tetrahedron\(\)/);
+    await tryShape('Dome', 'Insert hemisphere', /Manifold\.sphere\([^)]+\)\.intersect/);
+
+    // CrossSection-using shapes should have added CrossSection to the destructure.
+    const code = await getCode(page);
+    expect(code).toMatch(/const\s*\{[^}]*\bCrossSection\b[^}]*\}\s*=\s*api\b/);
+  });
+
+  test('selection strip renders when picking parts via Select mode', async ({ page }) => {
+    await gotoEditor(page);
+    await page.locator('#btn-insert').click();
+
+    // One centered cube so 3D-pick lands on it reliably.
+    await page.locator(palette).getByRole('button', { name: 'Cube' }).click();
+    await page.getByRole('button', { name: 'Insert', exact: true }).click();
+    await expect.poll(() => getCode(page)).toContain('const box');
+
+    // Delete quick-action starts disabled — selection is empty.
+    const deleteBtn = page.locator(palette).getByRole('button', { name: 'Delete' });
+    await expect(deleteBtn).toBeDisabled();
+
+    // Enter Select mode. The instruction bar appears and a chip strip is empty.
+    await page.locator(palette).getByRole('button', { name: 'Select' }).click();
+    await expect(page.getByText(/Click shapes to toggle selection/i)).toBeVisible();
+    await page.locator('canvas').first().click();
+    await page.getByRole('button', { name: 'Done', exact: true }).click();
+
+    // After a successful pick the chip strip should hold "box" and Delete is enabled.
+    await expect(page.locator(palette).getByText('box', { exact: false })).toBeVisible({ timeout: 5000 });
+    await expect(deleteBtn).toBeEnabled();
+  });
+
   test('build mode: shapes render separately, select + gizmo session runs', async ({ page }) => {
     await gotoEditor(page);
     await page.locator('#btn-insert').click();
