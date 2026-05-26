@@ -1,6 +1,7 @@
 import type { Engine, MeshResult, ValidateResult } from './types';
 import { javaScriptSyntaxDiagnostics, runtimeDiagnostic } from '../sourceDiagnostics';
 import { createCurvesNamespace } from '../curves';
+import { createMeshOpsNamespace } from '../meshOps';
 import { getDefaultCircularSegments } from '../qualitySettings';
 import { getActiveImports } from '../../import/importedMesh';
 import { getBrepNamespace } from '../brepRuntime';
@@ -36,6 +37,8 @@ function renderMesh(meshData: any) {
 let manifoldModule: any = null;
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 let curvesNamespace: any = null;
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+let meshOpsNamespace: any = null;
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 export function getManifoldModule(): any {
@@ -99,6 +102,7 @@ export const manifoldJsEngine: Engine = {
     manifoldModule = await Module.default();
     manifoldModule.setup();
     curvesNamespace = createCurvesNamespace(manifoldModule);
+    meshOpsNamespace = createMeshOpsNamespace(manifoldModule);
   },
 
   isReady() {
@@ -196,6 +200,31 @@ export const manifoldJsEngine: Engine = {
       CrossSection,
       Curves: curvesNamespace,
       BREP,
+      meshOps: meshOpsNamespace,
+      // Flat aliases for the most-used meshOps verbs — agents reach for shorter
+      // names like `api.intersects(a,b)` and `api.placeOn(part, table)` much more
+      // often than they reach for the namespace, so we promote those to api.* too.
+      // Predicates:
+      intersects: meshOpsNamespace.intersects,
+      contains: meshOpsNamespace.contains,
+      pointInside: meshOpsNamespace.pointInside,
+      bbox: meshOpsNamespace.bbox,
+      componentBounds: meshOpsNamespace.componentBounds,
+      volumeDelta: meshOpsNamespace.volumeDelta,
+      // Alignment + patterns:
+      alignTo: meshOpsNamespace.alignTo,
+      placeOn: meshOpsNamespace.placeOn,
+      mirrorAcross: meshOpsNamespace.mirrorAcross,
+      mirrorCopy: meshOpsNamespace.mirrorCopy,
+      linearPattern: meshOpsNamespace.linearPattern,
+      circularPattern: meshOpsNamespace.circularPattern,
+      spiralPattern: meshOpsNamespace.spiralPattern,
+      // Robust booleans + heal:
+      expectUnion: meshOpsNamespace.expectUnion,
+      expectDifference: meshOpsNamespace.expectDifference,
+      expectComponents: meshOpsNamespace.expectComponents,
+      heal: meshOpsNamespace.heal,
+      // ----
       setMinCircularAngle,
       setMinCircularEdgeLength,
       setCircularSegments,
