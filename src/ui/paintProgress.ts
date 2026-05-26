@@ -7,10 +7,13 @@
 const DEFAULT_SHOW_DELAY_MS = 250;
 /** Tests override this to 0 so the badge appears synchronously and the
  *  Cancel-flow assertions don't depend on timing the worker against the
- *  250ms threshold. Production code path always uses the default. */
+ *  250ms threshold. Production code path always uses the default. Returns
+ *  the previous delay so a test can restore it on teardown. */
 let showDelayMs = DEFAULT_SHOW_DELAY_MS;
-export function __setPaintProgressDelayForTests(ms: number): void {
+export function __setPaintProgressDelayForTests(ms: number): number {
+  const prev = showDelayMs;
   showDelayMs = Math.max(0, ms | 0);
+  return prev;
 }
 
 let host: HTMLDivElement | null = null;

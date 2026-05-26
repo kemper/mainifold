@@ -123,7 +123,7 @@ import { restoreView as restoreAnnotationViewById } from './annotations/selectMo
 import { applyTriColors, applyTriColorsIfVisible, hasRegions as hasColorRegions, onChange as onColorRegionsChange, onVisibilityChange as onPaintVisibilityChange, clearRegions, serialize as serializeRegions, addRegion, getRegions, removeRegion, removeLastRegion, redoLastRegion, setRegionVisibility, setRegionTriangles, buildTriColors, createEmptyTriColors, overlayPainted, type SerializedColorRegion, type RegionDescriptor } from './color/regions';
 import { setBucketTolerance as setPaintBucketTolerance, getBucketTolerance as getPaintBucketTolerance, setBrushRadius as setPaintBrushRadius, getBrushRadius as getPaintBrushRadius, setBrushSmooth as setPaintBrushSmooth, isBrushSmooth as isPaintBrushSmooth, setBrushSmoothDivisor as setPaintBrushSmoothDivisor, getBrushSmoothDivisor as getPaintBrushSmoothDivisor, setBrushSurface as setPaintBrushSurface, getBrushSurface as getPaintBrushSurface, setBrushPaintDepth as setPaintBrushDepth, getBrushPaintDepth as getPaintBrushDepth, SMOOTH_DIVISOR_MIN, SMOOTH_DIVISOR_MAX } from './color/paintMode';
 import { buildStrokeMesh, buildRefinedMesh, brushRefineRegion, strokeFootprintTriangles, deriveSampleNormals, buildGeodesicField, tangentBasis, childrenByParent, type BrushStroke, type BrushShape, type RefineRegion } from './color/subdivide';
-import { refineInWorker, SubdivisionAbortError } from './color/subdivisionClient';
+import { refineInWorker, SubdivisionAbortError, terminateSubdivisionWorker } from './color/subdivisionClient';
 import { startPaintProgress, endPaintProgress, __setPaintProgressDelayForTests } from './ui/paintProgress';
 import { initEditorLock, syncLockState, setUnlockHandlers } from './color/editorLock';
 import { buildAdjacency, findCoplanarRegion, findConnectedFromSeed, resolveSeed, findNearestTriangle, type AdjacencyGraph } from './color/adjacency';
@@ -233,13 +233,24 @@ let suspendReconcile = false;
  *    - `asyncReconcileInFlight`: a job is running or being post-processed.
  *    - `asyncReconcileDirty`: a region change arrived during a running job;
  *      the post-job loop re-runs once it lands.
- *    - `paintAbort`: cancels the running worker job (Cancel button).
- *    - `pendingCancelDescriptor`: the brushStroke descriptor we just dispatched
- *      a job for; if the user cancels, this region is removed as an orphan. */
+ *    - `paintAbort`: cancels the running worker job (Cancel button or an
+ *      agent-API sync action that's taking over). */
 let asyncReconcileInFlight = false;
 let asyncReconcileDirty = false;
 let paintAbort: AbortController | null = null;
-let pendingCancelDescriptor: Extract<RegionDescriptor, { kind: 'brushStroke' }> | null = null;
+/** Monotonic generation tag for paint state. Incremented every time the sync
+ *  agent-API path (`withSyncReconcile`) mutates the region store while an
+ *  async worker job is in flight, so the worker's continuation can detect
+ *  that it was superseded and discard its result instead of clobbering the
+ *  mesh / region triangles the sync work just produced. Each async tick
+ *  captures the generation at start and checks it on completion. */
+let paintGeneration = 0;
+/** Set when `withSyncReconcile` aborts an in-flight worker job because a
+ *  sync agent action is taking over. Tells `handlePaintCancel` not to
+ *  surface a "Painting cancelled." toast or remove the in-flight stroke as
+ *  an orphan — neither applies to an internal abort. Cleared after the
+ *  cancel handler runs. */
+let pendingInternalAbort = false;
 /** Deferred that resolves once `asyncReconcileInFlight` flips false (so any
  *  coalesced follow-ups have also drained). `partwright.waitForPaint()` and
  *  the e2e tests that drive the brush via mouse events await this to know
@@ -663,9 +674,33 @@ function descriptorToStroke(d: Extract<RegionDescriptor, { kind: 'brushStroke' }
   return stroke;
 }
 
+/** Cancel any in-flight subdivision worker job and reset the async paint state.
+ *  Called before paths that wholesale replace the region store (session
+ *  rehydrate, unlock-to-edit), so a worker continuation can't land on the new
+ *  state and stamp stale triangle ids onto fresh regions. The worker process
+ *  itself is terminated; a fresh one spins up on the next refine. */
+function resetPaintWorkerState(): void {
+  paintGeneration++;
+  pendingInternalAbort = false;
+  asyncReconcileInFlight = false;
+  asyncReconcileDirty = false;
+  paintAbort = null;
+  terminateSubdivisionWorker();
+  endPaintProgress();
+  if (paintIdleDeferred) {
+    const d = paintIdleDeferred;
+    paintIdleDeferred = null;
+    d.resolve();
+  }
+}
+
 /** True when any in-memory region is a smooth brush stroke (which drives mesh
  *  subdivision). */
 function rehydrateColorRegions(geometryData: Record<string, unknown> | null): { carried: string[]; dropped: string[] } {
+  // Drop any in-flight worker job before we wipe + replace the region store;
+  // otherwise its continuation could overwrite the freshly-rehydrated mesh
+  // and stamp triangles onto regions that no longer exist.
+  resetPaintWorkerState();
   clearRegions();
 
   const report: { carried: string[]; dropped: string[] } = { carried: [], dropped: [] };
@@ -812,8 +847,20 @@ function reconcilePaintedGeometrySync(): void {
 /** Run a region-mutation action with the async listener suspended, then drive
  *  the sync reconciler so any refining descriptors fully resolve before the
  *  caller returns. Used by the agent APIs to preserve their pre-existing
- *  "result is populated on return" contract. */
+ *  "result is populated on return" contract.
+ *
+ *  If a worker job is currently in flight (e.g. the user is mid-stroke and
+ *  then the agent fires `paintStroke` / `clearColors`), we abort it and bump
+ *  `paintGeneration` so the worker's continuation discards its result instead
+ *  of overwriting the mesh + region triangles the sync rebuild just
+ *  produced. `pendingInternalAbort` tells the abort handler not to surface a
+ *  user-facing toast — the agent action took over by design. */
 function withSyncReconcile<T>(action: () => T): T {
+  paintGeneration++;
+  if (asyncReconcileInFlight) {
+    pendingInternalAbort = true;
+    paintAbort?.abort();
+  }
   const prev = suspendReconcile;
   suspendReconcile = true;
   try {
@@ -888,7 +935,9 @@ async function reconcilePaintedGeometryAsyncTick(): Promise<void> {
     const newDesc = strokesNow[strokesNow.length - 1] as Extract<RegionDescriptor, { kind: 'brushStroke' }>;
     try {
       await appendStrokeRefineAsync(newDesc);
-      lastStrokeList = strokesNow;
+      // Region set may have shifted while the await was in flight (coalesced
+      // changes, or an agent-API sync action via withSyncReconcile). Re-read.
+      lastStrokeList = strokeDescriptors();
     } catch (err) {
       if (isAbortError(err)) {
         handlePaintCancel();
@@ -934,8 +983,8 @@ async function appendStrokeRefineAsync(
   const inputMesh = currentMeshData;
 
   paintAbort = new AbortController();
-  pendingCancelDescriptor = descriptor;
   const abort = paintAbort;
+  const myGen = paintGeneration;
   startPaintProgress({ onCancel: () => abort.abort() });
 
   try {
@@ -945,6 +994,11 @@ async function appendStrokeRefineAsync(
       descriptors: [descriptor],
       signal: abort.signal,
     });
+    // If a sync agent action (withSyncReconcile) mutated paint state while
+    // this worker job was running, the mesh / regions we'd apply are stale.
+    // Drop the result silently — the sync path already produced the right
+    // state, and our `finally` still cleans up the progress badge.
+    if (myGen !== paintGeneration) return;
     currentMeshData = mesh;
     updatePaintMesh(mesh);
     const parentToChildren = childrenByParent(childToParent);
@@ -978,7 +1032,6 @@ async function appendStrokeRefineAsync(
   } finally {
     endPaintProgress();
     paintAbort = null;
-    pendingCancelDescriptor = null;
   }
 }
 
@@ -998,8 +1051,8 @@ async function rebuildPaintedGeometryAsync(): Promise<void> {
   }
 
   paintAbort = new AbortController();
-  pendingCancelDescriptor = null;
   const abort = paintAbort;
+  const myGen = paintGeneration;
   startPaintProgress({ onCancel: () => abort.abort() });
 
   try {
@@ -1009,6 +1062,8 @@ async function rebuildPaintedGeometryAsync(): Promise<void> {
       descriptors,
       signal: abort.signal,
     });
+    // See appendStrokeRefineAsync: drop stale results when a sync action ran.
+    if (myGen !== paintGeneration) return;
     currentMeshData = mesh;
     updatePaintMesh(mesh);
     const parentToChildren = childrenByParent(childToParent);
@@ -1033,28 +1088,37 @@ async function rebuildPaintedGeometryAsync(): Promise<void> {
   }
 }
 
-/** User cancelled the in-flight worker job. The mesh state is whatever it was
- *  before the cancelled refine (the worker hadn't applied results yet), so we
- *  just drop the orphaned brushStroke region (if any) and resume normal
- *  reconcile from the remaining state. */
+/** Worker job ended via abort. Two cases:
+ *    - User clicked Cancel: drop the orphaned brushStroke region (added on
+ *      mouseup but never resolved), surface a toast, and let
+ *      `lastStrokeList` reflect the post-removal state.
+ *    - `withSyncReconcile` aborted us so an agent action could take over
+ *      (`pendingInternalAbort`): the sync rebuild has already produced
+ *      correct state — don't remove anything, don't toast, just let the
+ *      pending-promise unwind clean up.
+ *
+ *  `appendStrokeRefineAsync` / `rebuildPaintedGeometryAsync`'s finally has
+ *  already cleared `paintAbort` and called `endPaintProgress` by the time
+ *  we get here. */
 function handlePaintCancel(): void {
-  endPaintProgress();
-  const orphan = pendingCancelDescriptor;
-  pendingCancelDescriptor = null;
-  paintAbort = null;
+  if (pendingInternalAbort) {
+    pendingInternalAbort = false;
+    // Sync work owns the post-state; just refresh lastStrokeList against
+    // whatever it produced and return.
+    lastStrokeList = strokeDescriptors();
+    return;
+  }
 
-  // Remove the orphaned stroke region (added but never resolved). Suspend
-  // reconcile so removing it doesn't kick off another worker job; we manually
-  // sync the lock + color overlay afterwards.
-  if (orphan) {
-    const orphanRegion = getRegions().find(r => r.descriptor === orphan);
-    if (orphanRegion) {
-      suspendReconcile = true;
-      try {
-        removeRegion(orphanRegion.id);
-      } finally {
-        suspendReconcile = false;
-      }
+  // Real user-initiated cancel. The mesh is still pre-stroke (the worker
+  // never applied a result, since the rejection happened before the apply).
+  // Drop any orphaned brushStroke regions (empty triangles → unresolved).
+  const orphans = getRegions().filter(r => r.descriptor.kind === 'brushStroke' && r.triangles.size === 0);
+  if (orphans.length > 0) {
+    suspendReconcile = true;
+    try {
+      for (const r of orphans) removeRegion(r.id);
+    } finally {
+      suspendReconcile = false;
     }
   }
   lastStrokeList = strokeDescriptors();
@@ -5755,11 +5819,13 @@ async function main() {
     /** Test-only knob: how long the paint progress badge waits before
      *  appearing (default 250ms). Tests that exercise the Cancel button set
      *  this to 0 so the badge shows synchronously and the test doesn't
-     *  depend on the worker taking >250ms. Returns the previous value. */
+     *  depend on the worker taking >250ms. Returns the previous value. The
+     *  underscore prefix flags it as a non-public extension point — kept
+     *  unconditionally exported because Vite's `import.meta.env.DEV` gate
+     *  would force the test bundle to differ from the production one, and
+     *  the cost of a single ~30-line knob isn't worth the divergence. */
     __setPaintProgressDelay(ms: number): number {
-      const prev = 250;
-      __setPaintProgressDelayForTests(ms);
-      return prev;
+      return __setPaintProgressDelayForTests(ms);
     },
 
     /** Undo the most recent paint operation. The removed region goes onto
