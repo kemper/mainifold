@@ -397,10 +397,10 @@ test.describe('emitPrimitive — extended shapes (manifold-js)', () => {
     expect(emitPrimitiveJs(spec)).toBe('const t1 = CrossSection.circle(2).translate([10, 0]).revolve(48);');
   });
 
-  test('tube subtracts an inner cylinder from an outer; respects center', () => {
+  test('tube subtracts an over-tall inner cylinder to avoid coplanar caps; respects center', () => {
     const spec: PrimitiveSpec = { kind: 'tube', name: 'pipe1', height: 20, outerRadius: 5, innerRadius: 3, center: true };
     expect(emitPrimitiveJs(spec)).toBe(
-      'const pipe1 = Manifold.cylinder(20, 5).subtract(Manifold.cylinder(20, 3)).translate([0, 0, -10]);',
+      'const pipe1 = Manifold.cylinder(20, 5).subtract(Manifold.cylinder(20.2, 3).translate([0, 0, -0.1])).translate([0, 0, -10]);',
     );
   });
 

@@ -228,8 +228,13 @@ function jsPrimitiveExpr(spec: PrimitiveSpec): string {
       expr = `CrossSection.circle(${fmt(spec.tubeRadius)}).translate([${fmt(spec.majorRadius)}, 0]).revolve(${Math.max(3, Math.floor(spec.segments))})`;
       break;
     case 'tube':
-      // Outer cylinder minus inner — both share base-on-origin like cylinder.
-      expr = `Manifold.cylinder(${fmt(spec.height)}, ${fmt(spec.outerRadius)}).subtract(Manifold.cylinder(${fmt(spec.height)}, ${fmt(spec.innerRadius)}))`;
+      // Outer cylinder minus an over-tall inner — overshooting both ends by 0.1
+      // keeps the boolean's caps non-coplanar so the result stays a clean
+      // manifold (the SCAD path uses the same 0.1 overshoot).
+      expr =
+        `Manifold.cylinder(${fmt(spec.height)}, ${fmt(spec.outerRadius)})` +
+        `.subtract(Manifold.cylinder(${fmt(spec.height + 0.2)}, ${fmt(spec.innerRadius)})` +
+        `.translate([0, 0, -0.1]))`;
       if (spec.center) centerShift = [0, 0, -spec.height / 2];
       break;
     case 'wedge': {

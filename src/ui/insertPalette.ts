@@ -193,7 +193,7 @@ function buildPanel(): HTMLElement {
     ['tetrahedron', '◭ Tet', 'Insert a regular tetrahedron'],
     ['pyramid', '⛰ Pyramid', 'Insert a square-base pyramid'],
     ['wedge', '◣ Wedge', 'Insert a right-triangle prism'],
-    ['polygon', '⬡ N-gon', 'Insert a regular polygon prism'],
+    ['polygon', '⬢ N-gon', 'Insert a regular polygon prism'],
     ['star', '✦ Star', 'Insert a star prism'],
   ];
   for (const [kind, label, title] of shapeBtns) {
@@ -263,11 +263,16 @@ function buildPanel(): HTMLElement {
 // Selection state (drives quick-action ops)
 // ---------------------------------------------------------------------------
 
-/** Prune any names that no longer exist in the live code, then refresh the UI. */
+/** Prune any names that no longer exist in the live code. Also drops stale
+ *  registry / spec entries so the in-memory state can't outgrow what's actually
+ *  in the editor — covers session switches, version rollbacks, and direct code
+ *  edits that delete a part. */
 function pruneSelection(): void {
   if (!cb) return;
   const valid = new Set(scanParts(cb.getCode(), cb.getLanguage()).map(p => p.name));
   for (const name of selection) if (!valid.has(name)) selection.delete(name);
+  for (const name of [...registry.keys()]) if (!valid.has(name)) registry.delete(name);
+  for (const name of [...specByName.keys()]) if (!valid.has(name)) specByName.delete(name);
 }
 
 function rerenderSelectionUI(): void {
@@ -1221,8 +1226,14 @@ function startSelectMode(): void {
   scene.add(highlightGroup);
 
   const refreshHighlights = (): void => {
+    // Dispose the wireframes we built last time before swapping them out —
+    // otherwise every toggle click leaks one BoxGeometry + LineBasicMaterial.
     while (highlightGroup.children.length > 0) {
       const c = highlightGroup.children[0];
+      if (c instanceof THREE.LineSegments) {
+        c.geometry.dispose();
+        (c.material as THREE.Material).dispose();
+      }
       highlightGroup.remove(c);
     }
     for (const name of selection) {
