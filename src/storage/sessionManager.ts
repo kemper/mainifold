@@ -22,6 +22,7 @@ import {
   updatePart as dbUpdatePart,
   updatePartOrders as dbUpdatePartOrders,
   deletePart as dbDeletePart,
+  deleteParts as dbDeleteParts,
   addNote as dbAddNote,
   listNotes as dbListNotes,
   deleteNote as dbDeleteNote,
@@ -677,6 +678,55 @@ export async function deletePart(partId: string): Promise<DeletePartResult | nul
   return { deleted: target, newCurrent: null };
 }
 
+export interface DeletePartsResult {
+  /** Ids actually removed (input ids that matched a current part). */
+  deletedIds: string[];
+  /** The part that became active after deletion (only set when the active part
+   *  was among those deleted). */
+  newCurrent: Part | null;
+}
+
+/**
+ * Delete several parts and all their versions in one atomic transaction. Mirrors
+ * the single-part rule: a session must keep at least one part, so the call is
+ * refused (returns null) if the selection covers every remaining part. When the
+ * active part is among those deleted, the nearest survivor above it in display
+ * order — else the first remaining — becomes active. Returns null if nothing
+ * matched or the delete was refused.
+ */
+export async function deleteParts(partIds: string[]): Promise<DeletePartsResult | null> {
+  if (!currentState.session) return null;
+  const parts = currentState.parts;
+  const idSet = new Set(partIds);
+  const targets = parts.filter(p => idSet.has(p.id));
+  if (targets.length === 0) return null;
+  if (targets.length >= parts.length) return null; // keep at least one part
+
+  const deletedSet = new Set(targets.map(p => p.id));
+  await dbDeleteParts(targets.map(p => p.id));
+
+  const remaining = parts.filter(p => !deletedSet.has(p.id));
+  const currentId = currentState.currentPart?.id;
+  const currentDeleted = currentId != null && deletedSet.has(currentId);
+
+  if (currentDeleted) {
+    const pos = parts.findIndex(p => p.id === currentId);
+    let next = remaining[0];
+    for (let i = pos - 1; i >= 0; i--) {
+      if (!deletedSet.has(parts[i].id)) { next = parts[i]; break; }
+    }
+    currentState = { ...currentState, parts: remaining };
+    await changePart(next.id);
+    return { deletedIds: [...deletedSet], newCurrent: next };
+  }
+
+  currentState = { ...currentState, parts: remaining };
+  broadcastPartChange();
+  updateURL();
+  notify();
+  return { deletedIds: [...deletedSet], newCurrent: null };
+}
+
 /**
  * Persist a new display order for the active session's parts. `orderedIds` is
  * the full list of part ids, first = top. Ids not present are appended in their
@@ -1109,14 +1159,18 @@ export async function getSessionContext(): Promise<SessionContext | null> {
 
 // === Cleanup ===
 
-/** Delete a session if it has no versions and no notes (used for auto-created empty sessions) */
+/** Delete a session if it has no versions, no notes, and no AI chat
+ *  messages (used for auto-created empty sessions). Chat-only sessions
+ *  ARE content — `dbDeleteSession` cascade-deletes chats via the
+ *  sessionId index, so omitting the chat check here would silently wipe
+ *  a user's transcript on the next "new session" / navigation away. */
 export async function deleteIfEmpty(sessionId: string): Promise<boolean> {
-  // Empty = no saved versions in any part and no notes. The auto-created part
-  // that every session carries doesn't count as content.
   const count = await getSessionVersionCount(sessionId);
   if (count > 0) return false;
   const notes = await dbListNotes(sessionId);
   if (notes.length > 0) return false;
+  const chat = await dbListMessages(sessionId);
+  if (chat.length > 0) return false;
   await dbDeleteSession(sessionId);
   if (currentState.session?.id === sessionId) {
     currentState = { session: null, parts: [], currentPart: null, currentVersion: null, versionCount: 0 };
