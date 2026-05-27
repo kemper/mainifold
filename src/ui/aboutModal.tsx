@@ -3,6 +3,7 @@
 // Ported to Preact; mounts into the shared modalShell.
 
 import { useSignal } from '@preact/signals';
+import type { ComponentChildren } from 'preact';
 import { mountPreactModal } from './preact/mount';
 import { partwrightMarkSvg } from './brand';
 import {
@@ -60,7 +61,7 @@ function PlainValue(props: { text: string; title?: string; mono?: boolean }) {
   );
 }
 
-function Row(props: { label: string; children: preact.ComponentChildren }) {
+function Row(props: { label: string; children: ComponentChildren }) {
   return (
     <div class="flex items-baseline justify-between gap-4 py-1.5">
       <span class="text-xs text-zinc-500 shrink-0">{props.label}</span>

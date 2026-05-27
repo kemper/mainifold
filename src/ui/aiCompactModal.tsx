@@ -6,7 +6,6 @@ import { signal, type Signal } from '@preact/signals';
 import { formatUsd } from '../ai/cost';
 import type { CompactionProposal } from '../ai/compaction';
 import { mountPreactModal } from './preact/mount';
-import { SecondaryButton } from './preact/primitives';
 
 export interface CompactConfirm {
   summary: string;
@@ -102,8 +101,9 @@ export function showCompactConfirmModal(
             class="px-3 py-1.5 rounded text-xs text-zinc-300 hover:bg-zinc-700"
             onClick={close}
           >Cancel</button>
-          <SecondaryButton
-            label="Compact"
+          <button
+            type="button"
+            class="px-3 py-1.5 rounded text-xs font-medium bg-blue-600 hover:bg-blue-500 text-white"
             onClick={() => {
               const kept = notes.value
                 .filter(n => n.include)
@@ -112,7 +112,7 @@ export function showCompactConfirmModal(
               close();
               onConfirm({ summary: summary.value.trim(), notes: kept });
             }}
-          />
+          >Compact</button>
         </>
       ),
     }),

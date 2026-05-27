@@ -89,7 +89,7 @@ function DiagnosticsBody() {
                 ? 'No AI calls have been made this session.'
                 : 'No events match the current filter.'}
             </p>
-          : visible.map(evt => <EventRow key={evt.timestamp + ':' + evt.kind} evt={evt} />)}
+          : visible.map((evt, i) => <EventRow key={i} evt={evt} />)}
       </div>
     </>
   );
