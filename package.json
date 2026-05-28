@@ -38,6 +38,8 @@
     "manifold-3d": "^3.3.2",
     "openscad-wasm-prebuilt": "^1.2.0",
     "preact": "^10.29.2",
+    "replicad": "^0.23.1",
+    "replicad-opencascadejs": "^0.23.0",
     "tailwindcss": "^4.2.1",
     "three": "^0.183.2"
   }
