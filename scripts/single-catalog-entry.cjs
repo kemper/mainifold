@@ -120,6 +120,12 @@ async function main() {
       } catch (e) {
         return { error: 'paint phase threw: ' + (e && e.message ? e.message : String(e)) };
       }
+      // Per the lighthouse fix-up agent's finding: saveVersion('colored')
+      // immediately after a paint pass can capture a NULL thumbnail because
+      // the live viewport hasn't re-rendered yet. Wait for one paint frame
+      // before snapshotting so the saved version carries a usable
+      // catalog tile image.
+      await new Promise(res => setTimeout(res, 400));
       const r2 = await window.partwright.saveVersion('colored');
       if (r2 && r2.error) return { error: 'saveVersion(colored): ' + r2.error };
       paintReport.savedVersion = r2;
