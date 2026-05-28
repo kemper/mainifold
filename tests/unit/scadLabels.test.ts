@@ -1,0 +1,120 @@
+import { describe, it, expect } from 'vitest';
+import { scanScadLabels } from '../../src/geometry/engines/scadLabels';
+
+describe('scanScadLabels — hasAnyLabelCalls', () => {
+  it('reports no labels for source with none', () => {
+    const r = scanScadLabels('cube([10,10,10]); sphere(r=5);');
+    expect(r.hasAnyLabelCalls).toBe(false);
+    expect(r.hasNestedLabels).toBe(false);
+  });
+
+  it('detects a top-level label() call', () => {
+    const r = scanScadLabels('label("body") cube([10,10,10]);');
+    expect(r.hasAnyLabelCalls).toBe(true);
+    expect(r.hasNestedLabels).toBe(false);
+  });
+
+  it('ignores tokens that just happen to contain "label" (relabel, slabel, label_)', () => {
+    const r = scanScadLabels('relabel(); slabel("x"); label_("x");');
+    expect(r.hasAnyLabelCalls).toBe(false);
+  });
+
+  it('ignores label() inside line comments', () => {
+    const r = scanScadLabels('// label("commented")\ncube(10);');
+    expect(r.hasAnyLabelCalls).toBe(false);
+  });
+
+  it('ignores label( inside string literals', () => {
+    const r = scanScadLabels('echo("label(x)"); cube(10);');
+    expect(r.hasAnyLabelCalls).toBe(false);
+  });
+
+  it('ignores label( inside block comments', () => {
+    const r = scanScadLabels('/* label("x") cube(10); */ sphere(5);');
+    expect(r.hasAnyLabelCalls).toBe(false);
+  });
+});
+
+describe('scanScadLabels — top-level statement extraction', () => {
+  it('records one statement per top-level cube()', () => {
+    const r = scanScadLabels('cube([1,1,1]); cube([2,2,2]); cube([3,3,3]);');
+    expect(r.topLevelStatements).toHaveLength(3);
+    expect(r.topLevelStatements.every(s => s.labelName === null)).toBe(true);
+  });
+
+  it('captures literal label names in source order', () => {
+    const r = scanScadLabels(`
+      label("body") cube([10,10,10]);
+      translate([20,0,0]) cube([5,5,5]);
+      label("post") cylinder(r=2, h=8);
+    `);
+    expect(r.topLevelStatements).toHaveLength(3);
+    expect(r.topLevelStatements[0].labelName).toBe('body');
+    expect(r.topLevelStatements[1].labelName).toBe(null);
+    expect(r.topLevelStatements[2].labelName).toBe('post');
+  });
+
+  it('finds the label inside a transformation chain', () => {
+    const r = scanScadLabels('translate([5,0,0]) label("x") cube(2);');
+    expect(r.topLevelStatements).toHaveLength(1);
+    expect(r.topLevelStatements[0].labelName).toBe('x');
+  });
+
+  it('skips module/function/use/include and bare assignments', () => {
+    const r = scanScadLabels(`
+      use <bosl2/std.scad>
+      include <other.scad>
+      module shape() { cube(10); }
+      function double(x) = x * 2;
+      x = 5;
+      vec = [1, 2, 3];
+      cube([10,10,10]);
+    `);
+    expect(r.topLevelStatements).toHaveLength(1);
+    expect(r.topLevelStatements[0].labelName).toBe(null);
+  });
+
+  it('treats label() inside a {} block as nested, not top-level', () => {
+    const r = scanScadLabels(`
+      label("outside") cube(10);
+      difference() {
+        label("body") cube(20);
+        label("hole") cylinder(r=2, h=30);
+      }
+    `);
+    expect(r.hasAnyLabelCalls).toBe(true);
+    expect(r.hasNestedLabels).toBe(true);
+    // The difference() is one top-level block statement that carries no
+    // label at its own root; the labels INSIDE are nested.
+    expect(r.topLevelStatements).toHaveLength(2);
+    expect(r.topLevelStatements[0].labelName).toBe('outside');
+    expect(r.topLevelStatements[1].labelName).toBe(null);
+  });
+
+  it('does not capture a non-literal label argument', () => {
+    const r = scanScadLabels('label(str("c", i)) cube(1);');
+    expect(r.hasAnyLabelCalls).toBe(true);
+    expect(r.topLevelStatements).toHaveLength(1);
+    // Runtime-computed name — we deliberately don't try to evaluate it.
+    expect(r.topLevelStatements[0].labelName).toBe(null);
+  });
+
+  it('captures a label name even when label() is followed by another call chain', () => {
+    const r = scanScadLabels('color([1,0,0]) label("x") translate([0,1,0]) cube(2);');
+    expect(r.topLevelStatements[0].labelName).toBe('x');
+  });
+
+  it('treats a label call appearing only inside a nested block as nested', () => {
+    const r = scanScadLabels(`
+      union() {
+        label("a") cube(5);
+        cube(10);
+      }
+    `);
+    expect(r.hasAnyLabelCalls).toBe(true);
+    expect(r.hasNestedLabels).toBe(true);
+    // The union() is one top-level block, no label at its root.
+    expect(r.topLevelStatements).toHaveLength(1);
+    expect(r.topLevelStatements[0].labelName).toBe(null);
+  });
+});

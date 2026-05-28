@@ -135,10 +135,32 @@ so listLabels() after loadVersion returns THAT version's labels — not
 the current version's. If v1 didn't use api.label but v3 did, loading
 v1 gives empty labels. This is correct behavior.
 
-For models you didn't author with labels (or for SCAD), fall back to
-paintComponent(index, color) — it decomposes the union and paints the
-Nth piece in one call. Use listComponents() FIRST only when you need
-to inspect bboxes before deciding what to paint.
+SCAD supports the same labelling pattern via a passthrough \`label(name)\`
+module that Partwright pre-injects into every compile. Wrap each
+top-level statement you intend to paint:
+
+  label("body") cube([10,10,10]);
+  translate([20,0,0]) label("wheel") sphere(r=4);
+  label("post") translate([0,20,0]) cylinder(r=2, h=8);
+
+Then paintByLabel / paintByLabels work the same way they do for
+manifold-js. Constraints:
+ - Use a literal string name (label("body"), not label(str("c", i))).
+ - Apply label() at the TOP LEVEL of the source — labels inside a
+   boolean ({ ... } block of difference/intersection/union/hull/etc.)
+   are lost, because OpenSCAD's CGAL backend strips provenance through
+   booleans. Refactor those into top-level statements you union after
+   the fact, or apply the label OUTSIDE the boolean to tag the whole
+   result.
+ - Only add label() when you actually plan to paint. The unlabelled
+   path uses the fast STL pipeline; the labelled path costs a single
+   AMF compile (similar wall-clock, slightly more parsing). When no
+   labels are present in the source, there is zero overhead.
+
+For models you didn't author with labels (in either language), fall
+back to paintComponent(index, color) — it decomposes the union and
+paints the Nth piece in one call. Use listComponents() FIRST only when
+you need to inspect bboxes before deciding what to paint.
 
 For multi-feature labelled models, batch with paintByLabels([...]) —
 one tool call paints all features and coalesces the viewport refresh
