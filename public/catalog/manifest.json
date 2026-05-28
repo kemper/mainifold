@@ -237,6 +237,34 @@
       "file": "modular_drawer_bin.partwright.json",
       "language": "scad",
       "description": "A stackable storage bin with two compartments, rounded corners, and stacking lugs. Built with BOSL2's cuboid(rounding=) for filleted edges, plus translate-and-anchor cyl() placement for the lugs."
+    },
+    {
+      "id": "sdf-organic-creature",
+      "name": "SDF Organic Creature",
+      "file": "sdf_organic_creature.partwright.json",
+      "language": "manifold-js",
+      "description": "A smooth-blended creature built entirely from SDF primitives — showcases smoothUnion for organic body welds and paint-by-label colourisation of an SDF model."
+    },
+    {
+      "id": "sdf-gyroid-chamber",
+      "name": "SDF Gyroid Chamber",
+      "file": "sdf_gyroid_chamber.partwright.json",
+      "language": "manifold-js",
+      "description": "A triply-periodic gyroid lattice clipped inside a solid frame — the SDF way to do 3D-printable infill in one expression."
+    },
+    {
+      "id": "sdf-twisted-vessel",
+      "name": "SDF Twisted Vessel",
+      "file": "sdf_twisted_vessel.partwright.json",
+      "language": "manifold-js",
+      "description": "A spiralled body produced by the SDF `.twist()` domain warp on a non-radially-symmetric profile, joined to a base with smoothUnion."
+    },
+    {
+      "id": "sdf-mixed-mechanical",
+      "name": "SDF + Manifold Mechanical Part",
+      "file": "sdf_mixed_mechanical.partwright.json",
+      "language": "manifold-js",
+      "description": "A mechanical part that mixes smooth-blended SDF features (grip, fillets) with crisp Manifold CSG (mounting plate, drilled holes) — shows how the two engines compose."
     }
   ]
 }

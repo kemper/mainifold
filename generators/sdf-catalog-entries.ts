@@ -74,6 +74,12 @@ async function waitForEngine(page: Page): Promise<void> {
 }
 
 test.describe.serial('generate sdf catalog entries', () => {
+  // SDF lowering is heavier than the existing examples — marching
+  // tetrahedra on a 0.4 edgeLength gyroid easily takes 30–60s on a CI
+  // box. Give each entry a generous timeout so the runner doesn't
+  // false-flag a slow render as a hung test.
+  test.setTimeout(180_000);
+
   test.beforeEach(async ({ page }) => {
     await page.addInitScript(() => localStorage.setItem('partwright-tour-completed', '1'));
   });
