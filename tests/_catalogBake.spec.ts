@@ -38,6 +38,7 @@ test.describe('catalog baker', () => {
   test.skip(!process.env.BAKE_CATALOG, 'set BAKE_CATALOG=1 to run the baker');
 
   test('bake colorized parametric catalog entries', async ({ page }) => {
+    test.setTimeout(600_000); // 6 serial browser sessions (some heavy) >> the 30s default
     const metaFiles = readdirSync(FIX_DIR).filter(f => f.endsWith('.meta.json'));
     expect(metaFiles.length).toBeGreaterThan(0);
     const baked: string[] = [];

@@ -31,6 +31,9 @@ interface Stats {
   componentCount?: number;
   genus?: number;
   boundingBox?: { min: number[]; max: number[]; size: number[] };
+  /** api.label(shape, name) regions that survived to the result mesh, with their
+   *  triangle counts — lets a catalog author confirm paint-plan labels resolve. */
+  labels?: { name: string; triangles: number }[];
 }
 
 function parseArgs(argv: string[]): { file?: string; params: Record<string, unknown>; json: boolean } {
@@ -87,6 +90,7 @@ function computeStats(result: ReturnType<typeof manifoldJsEngine.run>): Stats {
       componentCount,
       genus: manifold.genus(),
       boundingBox: { min, max, size },
+      labels: result.labelMap ? Array.from(result.labelMap, ([name, tris]) => ({ name, triangles: tris.size })) : [],
     };
   } finally {
     try { manifold.delete(); } catch { /* already freed */ }
@@ -137,6 +141,10 @@ async function main(): Promise<void> {
       console.log(`  components    ${stats.componentCount}`);
       console.log(`  genus         ${stats.genus}`);
       console.log(`  bbox size     [${stats.boundingBox?.size.map(n => n.toFixed(2)).join(', ')}]`);
+      if (stats.labels && stats.labels.length > 0) {
+        console.log(`\nlabels (${stats.labels.length}, for paintByLabel):`);
+        for (const l of stats.labels) console.log(`  - ${l.name}: ${l.triangles} triangles`);
+      }
     }
     console.log('');
   }
