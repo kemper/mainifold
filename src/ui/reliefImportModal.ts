@@ -4,12 +4,13 @@
 // generation itself is the host's job — this modal only resolves options and
 // hands back the source ImageData via onCreate.
 
-import type { ReliefOptions, ReliefImportMode, TileOutputKind, TileShapeKind, HeightGrid } from '../relief/types';
+import type { ReliefOptions, ReliefImportMode, TileOutputKind, TileShapeKind, HeightGrid, ReliefMesh, SeedRegion } from '../relief/types';
 import { DEFAULT_RELIEF_OPTIONS } from '../relief/types';
-import { sampleImageToGrid, detectBackgroundMask, bgMaskFromColor } from '../relief/imageToRelief';
+import { sampleImageToGrid, detectBackgroundMask, bgMaskFromColor, generateRelief, generateReliefFromSvg } from '../relief/imageToRelief';
 import { registerImport } from '../import/importInbox';
 import { createModalShell } from './modalShell';
 import { BUTTON_PRIMARY, BUTTON_CANCEL } from './styleConstants';
+import * as THREE from 'three';
 
 export interface ReliefImportModalOptions {
   aiAvailable: boolean;
@@ -31,6 +32,11 @@ export interface ReliefImportModalOptions {
 const PREVIEW_PX = 220;
 const DEBOUNCE_MS = 120;
 const MAX_RESOLUTION = 512;
+// 3D preview rebuilds use a downscaled grid — mesh generation is fast at this
+// size and the wizard's static thumbnail doesn't benefit from print-quality
+// fidelity. Quality previews happen in the studio after Create.
+const PREVIEW_3D_RESOLUTION = 64;
+const PREVIEW_3D_DEBOUNCE_MS = 250;
 
 interface ModeDef {
   id: ReliefImportMode;
@@ -83,6 +89,8 @@ export function openReliefImportModal(options: ReliefImportModalOptions): void {
     scrollable: true,
     onClose: () => {
       if (previewTimer !== undefined) window.clearTimeout(previewTimer);
+      if (preview3DTimer !== undefined) window.clearTimeout(preview3DTimer);
+      three.dispose();
       isOpen = false;
     },
   });
@@ -310,18 +318,65 @@ export function openReliefImportModal(options: ReliefImportModalOptions): void {
 
   // --- Live preview --------------------------------------------------------
   const previewWrap = document.createElement('div');
-  previewWrap.className = 'flex flex-col items-center gap-1.5 border-t border-zinc-700 pt-3';
+  previewWrap.className = 'flex flex-col items-center gap-2 border-t border-zinc-700 pt-3';
+
+  const previewRow = document.createElement('div');
+  previewRow.className = 'flex items-start gap-3 flex-wrap justify-center';
 
   const canvas = document.createElement('canvas');
   canvas.className = 'rounded border border-zinc-700 bg-zinc-900 max-w-full';
   canvas.style.imageRendering = 'pixelated';
 
+  // Small Three.js viewport — a low-res render of the actual tile mesh as a
+  // sanity check on how the chamfer, holes, and silhouette will look in 3D.
+  const preview3DWrap = document.createElement('div');
+  preview3DWrap.className = 'flex flex-col items-center gap-1';
+  const preview3D = document.createElement('canvas');
+  preview3D.width = 220;
+  preview3D.height = 220;
+  preview3D.className = 'rounded border border-zinc-700 bg-zinc-900';
+  preview3D.style.width = '220px';
+  preview3D.style.height = '220px';
+  const preview3DCaption = document.createElement('div');
+  preview3DCaption.className = 'text-[10px] text-zinc-500 font-mono';
+  preview3DCaption.textContent = '3D preview';
+  preview3DWrap.append(preview3D, preview3DCaption);
+
+  previewRow.append(canvas, preview3DWrap);
+
   const stat = document.createElement('div');
   stat.className = 'text-[11px] text-zinc-400 font-mono';
   stat.textContent = 'Load an image to preview.';
 
-  previewWrap.append(canvas, stat);
+  previewWrap.append(previewRow, stat);
   shell.body.appendChild(previewWrap);
+
+  // --- 3D preview state ---------------------------------------------------
+  const three = init3DPreview(preview3D);
+  let preview3DTimer: number | undefined;
+  function schedule3DPreview(): void {
+    if (preview3DTimer !== undefined) window.clearTimeout(preview3DTimer);
+    preview3DTimer = window.setTimeout(render3DPreview, PREVIEW_3D_DEBOUNCE_MS);
+  }
+  async function render3DPreview(): Promise<void> {
+    if (!image && !svgText) {
+      three.setMesh(null);
+      return;
+    }
+    try {
+      // Build at a low resolution so options-tweak feels snappy. Quality
+      // previews are the studio's job.
+      const previewOpts: ReliefOptions = structuredClone(opts);
+      previewOpts.common.resolution = Math.min(opts.common.resolution, PREVIEW_3D_RESOLUTION);
+      const result = svgText
+        ? await generateReliefFromSvg(svgText, previewOpts)
+        : generateRelief(image!, previewOpts);
+      three.setMesh(result.mesh, result.seedRegions, previewOpts.common.widthMm);
+    } catch {
+      // Generation can fail mid-tweak (e.g. while parsing SVG); leave the
+      // previous render in place rather than flashing an error.
+    }
+  }
 
   // Click the preview to drop a hole at that point. The canvas drew the tile
   // centred at (halfW, halfH), so reverse that to get model-space (cxMm, cyMm).
@@ -572,9 +627,14 @@ export function openReliefImportModal(options: ReliefImportModalOptions): void {
   function schedulePreview(): void {
     if (previewTimer !== undefined) window.clearTimeout(previewTimer);
     previewTimer = window.setTimeout(renderPreview, DEBOUNCE_MS);
+    schedule3DPreview();
   }
 
   function renderPreview(): void {
+    // Keep the 3D preview in sync whenever the 2D one updates — the two
+    // surface different facets (cluster map vs. realised mesh) of the same
+    // option set.
+    schedule3DPreview();
     if (svgText) {
       // SVG mode: the source is shown in the thumbnail and each <path fill>
       // becomes its own crisp region — there's no luminance/cluster grid to
@@ -961,6 +1021,127 @@ export function openReliefImportModal(options: ReliefImportModalOptions): void {
     wrap.appendChild(select);
     parent.appendChild(wrap);
   }
+}
+
+interface Preview3D {
+  setMesh(mesh: ReliefMesh | null, seeds?: SeedRegion[], widthMm?: number): void;
+  dispose(): void;
+}
+
+// Wire a small Three.js scene to a canvas. The returned handle accepts new
+// meshes from the wizard and frames them. Auto-rotates so the user sees all
+// sides without orbit controls; cleans up renderer + GPU resources on dispose.
+function init3DPreview(canvas: HTMLCanvasElement): Preview3D {
+  let renderer: THREE.WebGLRenderer | null = null;
+  try {
+    renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: true });
+  } catch {
+    // WebGL unavailable (rare on sandbox / headless). Skip 3D preview entirely;
+    // the rest of the wizard still works without it.
+    return { setMesh() { /* noop */ }, dispose() { /* noop */ } };
+  }
+  renderer.setPixelRatio(window.devicePixelRatio || 1);
+  renderer.setSize(canvas.width, canvas.height, false);
+  renderer.setClearColor(0x18181b, 1);
+
+  const scene = new THREE.Scene();
+  const camera = new THREE.PerspectiveCamera(40, canvas.width / canvas.height, 0.1, 5000);
+  camera.position.set(0, -120, 80);
+  camera.up.set(0, 0, 1);
+  camera.lookAt(0, 0, 0);
+
+  const ambient = new THREE.AmbientLight(0xffffff, 0.55);
+  scene.add(ambient);
+  const key = new THREE.DirectionalLight(0xffffff, 0.85);
+  key.position.set(80, -120, 140);
+  scene.add(key);
+  const fill = new THREE.DirectionalLight(0xffffff, 0.4);
+  fill.position.set(-100, 60, 60);
+  scene.add(fill);
+
+  const group = new THREE.Group();
+  scene.add(group);
+  let currentMesh: THREE.Mesh | null = null;
+  let disposed = false;
+
+  function clearMesh(): void {
+    if (!currentMesh) return;
+    group.remove(currentMesh);
+    currentMesh.geometry.dispose();
+    const mat = currentMesh.material;
+    if (Array.isArray(mat)) mat.forEach(m => m.dispose());
+    else mat.dispose();
+    currentMesh = null;
+  }
+
+  // Apply seed-region colours as per-vertex colours by tagging each triangle's
+  // three vertices with the region colour. Cheap and accurate enough for the
+  // preview — for the studio's full-fidelity preview we still use the real
+  // paint regions on the actual mesh.
+  function paintVertexColors(geom: THREE.BufferGeometry, mesh: ReliefMesh, seeds: SeedRegion[] | undefined): void {
+    const colors = new Float32Array(mesh.numVert * 3);
+    // Default ash colour so unpainted bottom/walls aren't black.
+    for (let i = 0; i < mesh.numVert; i++) {
+      colors[i * 3] = 0.72; colors[i * 3 + 1] = 0.72; colors[i * 3 + 2] = 0.72;
+    }
+    if (seeds) {
+      for (const seed of seeds) {
+        const [r, g, b] = seed.color;
+        for (const triId of seed.triangleIds) {
+          for (let k = 0; k < 3; k++) {
+            const vid = mesh.triVerts[triId * 3 + k];
+            colors[vid * 3] = r; colors[vid * 3 + 1] = g; colors[vid * 3 + 2] = b;
+          }
+        }
+      }
+    }
+    geom.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+  }
+
+  function setMesh(mesh: ReliefMesh | null, seeds?: SeedRegion[], widthMm?: number): void {
+    clearMesh();
+    if (!mesh || mesh.numTri === 0) return;
+    const geom = new THREE.BufferGeometry();
+    geom.setAttribute('position', new THREE.BufferAttribute(mesh.vertProperties, 3));
+    geom.setIndex(new THREE.BufferAttribute(mesh.triVerts, 1));
+    paintVertexColors(geom, mesh, seeds);
+    geom.computeVertexNormals();
+    const material = new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.6, metalness: 0.05 });
+    currentMesh = new THREE.Mesh(geom, material);
+    group.add(currentMesh);
+    // Frame the camera to the mesh extents so any aspect / chamfer sits inside
+    // the viewport.
+    geom.computeBoundingBox();
+    const bb = geom.boundingBox!;
+    const span = Math.max(bb.max.x - bb.min.x, bb.max.y - bb.min.y, (bb.max.z - bb.min.z) * 2);
+    const fitDistance = (span * 0.75) / Math.tan((camera.fov * Math.PI) / 360);
+    camera.position.set(0, -fitDistance, fitDistance * 0.55);
+    camera.lookAt(0, 0, (bb.max.z + bb.min.z) / 2);
+    void widthMm;
+  }
+
+  let rafId = 0;
+  const t0 = performance.now();
+  function tick(): void {
+    if (disposed) return;
+    const t = (performance.now() - t0) / 1000;
+    group.rotation.z = t * 0.25;
+    renderer!.render(scene, camera);
+    rafId = requestAnimationFrame(tick);
+  }
+  rafId = requestAnimationFrame(tick);
+
+  function dispose(): void {
+    disposed = true;
+    if (rafId) cancelAnimationFrame(rafId);
+    clearMesh();
+    renderer!.dispose();
+    // Force-release the WebGL context so a re-opened wizard doesn't pile up
+    // contexts (browsers cap them around 8–16 per page).
+    renderer!.forceContextLoss();
+  }
+
+  return { setMesh, dispose };
 }
 
 // Deep-merge an AI-returned partial into the working options. Only the four
