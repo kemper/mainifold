@@ -370,4 +370,32 @@ test.describe('api.sdf', () => {
     const vDiff = Math.abs(out.ring.volume - out.array.volume) / out.array.volume;
     expect(vDiff).toBeLessThan(0.05);
   });
+
+  test('repeatN stagger produces a brick-bonded grid (different from straight grid)', async ({ page }) => {
+    const out = await page.evaluate(async () => {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const pw = (window as any).partwright;
+      const straight = await pw.runIsolated(`
+        const { sdf } = api;
+        return sdf.box([3, 1.5, 1.5]).repeatN([5, 4, 0], [3.4, 1.8, 0]).build({ edgeLength: 0.3 });
+      `);
+      const brick = await pw.runIsolated(`
+        const { sdf } = api;
+        return sdf.box([3, 1.5, 1.5]).repeatN([5, 4, 0], [3.4, 1.8, 0], {
+          stagger: { along: 'x', by: 'y' }
+        }).build({ edgeLength: 0.3 });
+      `);
+      return { straight: straight.geometryData, brick: brick.geometryData };
+    });
+    expect(out.straight.status).toBe('ok');
+    expect(out.brick.status).toBe('ok');
+    // Both have 20 bricks; volumes should match within marching-tetra noise.
+    const vRatio = out.brick.volume / out.straight.volume;
+    expect(vRatio).toBeGreaterThan(0.95);
+    expect(vRatio).toBeLessThan(1.05);
+    // The stagger expands the X bbox by amount*period (0.5 * 3.4 = 1.7).
+    const xDiff = out.brick.boundingBox.dimensions[0] - out.straight.boundingBox.dimensions[0];
+    expect(xDiff).toBeGreaterThan(1.4);
+    expect(xDiff).toBeLessThan(2.0);
+  });
 });

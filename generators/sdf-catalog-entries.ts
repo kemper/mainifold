@@ -115,6 +115,14 @@ const newEntries: SdfEntry[] = [
     name: 'SDF Graded TPMS Study',
     description: 'A femur-inspired model exercising all three new graded TPMS variants: gradedSchwarzP for the cortical shaft (radial density), gradedDiamond for the marrow canal (axial trabecular grading), and gradedLidinoid for the femoral head (spherical-radial). Five painted regions.',
   },
+  {
+    exampleFile: 'sdf_brick_wall.js',
+    paintFile: 'sdf_brick_wall.paint.json',
+    catalogFile: 'sdf_brick_wall.partwright.json',
+    id: 'sdf-brick-wall',
+    name: 'SDF Running-Bond Brick Wall',
+    description: 'A classic running-bond brick wall — bricks tiled via repeatN({stagger: {along: x, by: y}}), the new option for brick/honeycomb patterns. Every other course shifts by half a brick. Two painted regions on a recessed mortar slab.',
+  },
 ];
 
 interface PaintManifest {

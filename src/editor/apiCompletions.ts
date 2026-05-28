@@ -128,7 +128,7 @@ const SDF_INSTANCE: Completion[] = [
   fn('polarArray', '(count, {axis?, angle?, radius?})', 'Union of count copies rotated evenly around axis. radius pushes each copy outward first.'),
   fn('polarRepeat', '(count, {axis?, radius?})', 'Domain-warp ring: tile this node count times around axis. Cheaper than polarArray for large counts (child evaluated ONCE per sample).'),
   fn('repeat', '([px,py,pz])', 'Tile infinitely on a grid (0 = no repeat on that axis). INFINITE — intersect or pass bounds.'),
-  fn('repeatN', '([nx,ny,nz], [px,py,pz])', 'Finite-count grid: nx×ny×nz copies centred on the origin (0 disables an axis). Bounds stay finite — no intersect needed.'),
+  fn('repeatN', '([nx,ny,nz], [px,py,pz], {stagger?})', 'Finite-count grid: nx×ny×nz copies centred on the origin (0 disables an axis). Bounds finite. Optional stagger: {along, by, amount?} for brick/honeycomb patterns.'),
   fn('label', '(name)', 'Mark this subtree as a paintable region for partwright.paintByLabel.'),
   fn('build', '({edgeLength?, bounds?, level?, tolerance?})', 'Lower to a Manifold via marching tetrahedra.'),
 ];

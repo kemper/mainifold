@@ -279,8 +279,13 @@ export class SdfNode {
    *  the number of copies on each axis (integer >= 0; 0 disables). The
    *  array centres on the origin and uses limit-modulo: points outside
    *  the array snap to the nearest cell rather than carrying the tiling
-   *  infinitely. Bounds are finite even before any intersect. */
-  repeatN(counts: Vec3, periods: Vec3): SdfNode {
+   *  infinitely. Bounds are finite even before any intersect.
+   *
+   *  Optional `opts.stagger` brick-shifts alternating rows: cells in
+   *  every other row along `by` get nudged by `amount * period` along
+   *  `along`. The classic brick wall is `{ along: 'x', by: 'y' }`
+   *  with the default amount of 0.5. */
+  repeatN(counts: Vec3, periods: Vec3, opts: RepeatNOptions = {}): SdfNode {
     const n = assertNumberTuple(counts, 3, 'repeatN(counts)') as Vec3;
     const p = assertNumberTuple(periods, 3, 'repeatN(periods)') as Vec3;
     for (let i = 0; i < 3; i++) {
@@ -291,7 +296,22 @@ export class SdfNode {
         throw new ValidationError(`repeatN(periods)[${i}]: must be >= 0.`);
       }
     }
-    return opRepeatN(this, n, p);
+    const o = assertObject(opts, 'repeatN(opts)') ?? {};
+    assertNoUnknownKeys(o as Record<string, unknown>, REPEAT_N_FIELDS, 'repeatN(opts)');
+    let stagger: ResolvedStagger | undefined;
+    if (o.stagger !== undefined) {
+      const s = assertObject(o.stagger, 'repeatN(opts.stagger)')!;
+      assertNoUnknownKeys(s, STAGGER_FIELDS, 'repeatN(opts.stagger)');
+      const along = assertEnum(s.along, ['x', 'y', 'z'] as const, 'repeatN(opts.stagger.along)');
+      const by = assertEnum(s.by, ['x', 'y', 'z'] as const, 'repeatN(opts.stagger.by)');
+      if (along === by) {
+        throw new ValidationError('repeatN(opts.stagger): along and by must be different axes.');
+      }
+      const amount = s.amount === undefined ? 0.5
+        : assertNumber(s.amount, 'repeatN(opts.stagger.amount)', { min: 0, max: 1 }) as number;
+      stagger = { along, by, amount };
+    }
+    return opRepeatN(this, n, p, stagger);
   }
 
   /** Tile this node `count` times around an `axis` (full revolution).
@@ -1213,8 +1233,27 @@ export interface PolarRepeatOptions {
   radius?: number;
 }
 
+export interface RepeatNStaggerOptions {
+  /** Axis the cells SHIFT ALONG (X for a brick wall). */
+  along: 'x' | 'y' | 'z';
+  /** Axis whose row parity DECIDES the shift (Y for a brick wall — every
+   *  other Y row is shifted). Must differ from `along`. */
+  by: 'x' | 'y' | 'z';
+  /** Shift size as a fraction of `along`'s period. Defaults to 0.5
+   *  (classic brick half-bond). 0 disables; 1 means a full period (which
+   *  reads as no stagger because each shifted row aligns with the next
+   *  unshifted column). Range [0, 1]. */
+  amount?: number;
+}
+
+export interface RepeatNOptions {
+  stagger?: RepeatNStaggerOptions;
+}
+
 const POLAR_FIELDS = ['axis', 'angle', 'radius'] as const;
 const POLAR_REPEAT_FIELDS = ['axis', 'radius'] as const;
+const REPEAT_N_FIELDS = ['stagger'] as const;
+const STAGGER_FIELDS = ['along', 'by', 'amount'] as const;
 
 function opPolarArray(child: SdfNode, count: number, opts: PolarArrayOptions): SdfNode {
   assertNumber(count, 'polarArray(count)', { min: 1, integer: true });
@@ -1271,13 +1310,26 @@ function opRepeat(child: SdfNode, periods: Vec3): SdfNode {
   });
 }
 
-function opRepeatN(child: SdfNode, counts: Vec3, periods: Vec3): SdfNode {
+interface ResolvedStagger {
+  along: 'x' | 'y' | 'z';
+  by: 'x' | 'y' | 'z';
+  amount: number;
+}
+
+function opRepeatN(child: SdfNode, counts: Vec3, periods: Vec3, stagger?: ResolvedStagger): SdfNode {
   // Finite-count cousin of opRepeat. Centred on the origin: N copies on
   // each axis with N>0 span (N-1)*period. Points outside that span snap
   // to the nearest cell (Inigo Quilez's `clampedRepeat` trick) — gives
   // the boundary cells a "filled-in" distance field without leaking the
   // tiling beyond the array. count=0 on an axis means "don't repeat
   // there" (pass-through, same as opRepeat).
+  //
+  // Optional `stagger` brick-shifts alternating rows: cells in every
+  // other row along the `by` axis get nudged by `amount * period`
+  // along the `along` axis. Coupling the two axes via the by-row
+  // parity means the modulo has to be computed in a specific order:
+  // resolve the by-axis cell FIRST (so we know which row we're in),
+  // THEN apply the offset, THEN resolve along's cell.
   const [nx, ny, nz] = counts;
   const [px, py, pz] = periods;
   // Per-axis cell-index limits, centred on the origin:
@@ -1287,23 +1339,56 @@ function opRepeatN(child: SdfNode, counts: Vec3, periods: Vec3): SdfNode {
   // This matches the visual "ring of N copies symmetric about the origin".
   const cellMin = (n: number): number => n > 0 ? -Math.floor(n / 2) : 0;
   const cellMax = (n: number): number => n > 0 ? Math.ceil(n / 2) - 1 : 0;
-  const lmod = (v: number, p: number, n: number): number => {
-    if (n <= 0 || p <= 0) return v;
-    if (n === 1) return v; // single cell at the origin — pass-through
-    const c = Math.max(cellMin(n), Math.min(cellMax(n), Math.round(v / p)));
-    return v - c * p;
+  const cellIdx = (v: number, p: number, n: number): number => {
+    if (n <= 0 || p <= 0 || n === 1) return 0;
+    return Math.max(cellMin(n), Math.min(cellMax(n), Math.round(v / p)));
   };
+  const lmod = (v: number, p: number, n: number): number => {
+    if (n <= 0 || p <= 0 || n === 1) return v;
+    return v - cellIdx(v, p, n) * p;
+  };
+  let evalFn: EvalFn;
+  if (!stagger) {
+    evalFn = (x, y, z) => child._eval(lmod(x, px, nx), lmod(y, py, ny), lmod(z, pz, nz));
+  } else {
+    const alongIdx = stagger.along === 'x' ? 0 : stagger.along === 'y' ? 1 : 2;
+    const byIdx = stagger.by === 'x' ? 0 : stagger.by === 'y' ? 1 : 2;
+    const byP = periods[byIdx], byN = counts[byIdx];
+    const shift = stagger.amount * periods[alongIdx];
+    evalFn = (x, y, z) => {
+      const v: Vec3 = [x, y, z];
+      // Resolve the by-axis row FIRST.
+      const cBy = cellIdx(v[byIdx], byP, byN);
+      // Apply the along-axis offset based on row parity.
+      const offset = (Math.abs(cBy) % 2 === 1) ? shift : 0;
+      v[alongIdx] -= offset;
+      // Now reduce all three axes.
+      return child._eval(
+        lmod(v[0], px, nx),
+        lmod(v[1], py, ny),
+        lmod(v[2], pz, nz),
+      );
+    };
+  }
   const b = child._bounds;
   const axisBounds = (n: number, p: number, lo: number, hi: number): [number, number] => {
     if (n <= 0 || p <= 0 || n === 1) return [lo, hi];
     return [cellMin(n) * p + lo, cellMax(n) * p + hi];
   };
-  const [xLo, xHi] = axisBounds(nx, px, b.min[0], b.max[0]);
-  const [yLo, yHi] = axisBounds(ny, py, b.min[1], b.max[1]);
-  const [zLo, zHi] = axisBounds(nz, pz, b.min[2], b.max[2]);
+  let [xLo, xHi] = axisBounds(nx, px, b.min[0], b.max[0]);
+  let [yLo, yHi] = axisBounds(ny, py, b.min[1], b.max[1]);
+  let [zLo, zHi] = axisBounds(nz, pz, b.min[2], b.max[2]);
+  // Stagger pushes the along-axis bounds outward by `amount * period`
+  // because alternating rows shift by that much beyond the unshifted span.
+  if (stagger) {
+    const expand = stagger.amount * (stagger.along === 'x' ? px : stagger.along === 'y' ? py : pz);
+    if (stagger.along === 'x') { xLo -= 0; xHi += expand; }
+    else if (stagger.along === 'y') { yLo -= 0; yHi += expand; }
+    else { zLo -= 0; zHi += expand; }
+  }
   return new SdfNode({
     kind: 'repeatN',
-    eval: (x, y, z) => child._eval(lmod(x, px, nx), lmod(y, py, ny), lmod(z, pz, nz)),
+    eval: evalFn,
     bounds: { min: [xLo, yLo, zLo], max: [xHi, yHi, zHi] },
     children: [child],
     partitionable: false,

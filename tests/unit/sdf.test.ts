@@ -807,6 +807,61 @@ describe('sdf repeatN (finite-count tiling)', () => {
   });
 });
 
+describe('sdf repeatN stagger (brick-shift)', () => {
+  it('default amount (0.5) shifts every other by-row by half a period along the along-axis', () => {
+    // 3 rows along Y at y = -4, 0, +4. With stagger {along:'x', by:'y'},
+    // the y=0 row (cBy=0, even) sits unshifted; y=±4 rows (cBy=±1, odd)
+    // shift along X by 0.5 * 4 = 2. A sphere unit cell at origin therefore
+    // has its OUTER ROW centres at (x=2, y=4) and (x=2, y=-4).
+    const tile = primSphere(1).repeatN([3, 3, 0], [4, 4, 0], {
+      stagger: { along: 'x', by: 'y' },
+    });
+    expect(tile.evaluate(0, 0, 0)).toBeCloseTo(-1, 6);   // centre of the y=0 row, unshifted cell at x=0
+    expect(tile.evaluate(2, 4, 0)).toBeCloseTo(-1, 6);   // shifted x=2 in the y=+4 row
+    expect(tile.evaluate(0, 4, 0)).toBeGreaterThan(-1);  // x=0 in the y=+4 row is NO LONGER a cell centre
+  });
+  it('amount 0 disables the stagger (same as no stagger)', () => {
+    const plain = primSphere(1).repeatN([3, 3, 0], [4, 4, 0]);
+    const zeroStagger = primSphere(1).repeatN([3, 3, 0], [4, 4, 0], {
+      stagger: { along: 'x', by: 'y', amount: 0 },
+    });
+    expect(zeroStagger.evaluate(4, 4, 0)).toBeCloseTo(plain.evaluate(4, 4, 0), 6);
+  });
+  it('amount > 0 expands the along-axis bounds by amount*period', () => {
+    const plain = primSphere(1).repeatN([3, 3, 0], [4, 4, 0]);
+    const staggered = primSphere(1).repeatN([3, 3, 0], [4, 4, 0], {
+      stagger: { along: 'x', by: 'y', amount: 0.5 },
+    });
+    // Plain X extent: cells at -4,0,4 + sphere radius 1 → [-5, 5].
+    // Staggered: shifted rows extend +0.5*4 = +2 further on the +X side.
+    expect(staggered.bounds().max[0]).toBeCloseTo(plain.bounds().max[0] + 2, 6);
+    // Y bounds unaffected.
+    expect(staggered.bounds().min[1]).toBe(plain.bounds().min[1]);
+    expect(staggered.bounds().max[1]).toBe(plain.bounds().max[1]);
+  });
+  it('rejects along === by (same axis) and amount outside [0, 1]', () => {
+    expect(() => primSphere(1).repeatN([3, 3, 0], [4, 4, 0], {
+      stagger: { along: 'x', by: 'x' },
+    })).toThrow(/different axes/);
+    expect(() => primSphere(1).repeatN([3, 3, 0], [4, 4, 0], {
+      stagger: { along: 'x', by: 'y', amount: 1.5 },
+    })).toThrow();
+    expect(() => primSphere(1).repeatN([3, 3, 0], [4, 4, 0], {
+      stagger: { along: 'x', by: 'y', amount: -0.1 },
+    })).toThrow();
+  });
+  it('rejects missing along/by, unknown stagger fields, and unknown opts keys', () => {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    expect(() => primSphere(1).repeatN([3, 3, 0], [4, 4, 0], { stagger: { along: 'x' } as any })).toThrow();
+    expect(() => primSphere(1).repeatN([3, 3, 0], [4, 4, 0], {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      stagger: { along: 'x', by: 'y', wobble: 0.3 } as any,
+    })).toThrow();
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    expect(() => primSphere(1).repeatN([3, 3, 0], [4, 4, 0], { wiggle: true } as any)).toThrow();
+  });
+});
+
 describe('sdf polarRepeat (domain-warp ring)', () => {
   const { opPolarRepeat } = __testables__;
   it('full revolution: a copy lands at every sector boundary', () => {

@@ -405,6 +405,13 @@
       "file": "sdf_graded_tpms_study.partwright.json",
       "language": "manifold-js",
       "description": "A femur-inspired model exercising all three new graded TPMS variants: gradedSchwarzP for the cortical shaft (radial density), gradedDiamond for the marrow canal (axial trabecular grading), and gradedLidinoid for the femoral head (spherical-radial). Five painted regions."
+    },
+    {
+      "id": "sdf-brick-wall",
+      "name": "SDF Running-Bond Brick Wall",
+      "file": "sdf_brick_wall.partwright.json",
+      "language": "manifold-js",
+      "description": "A classic running-bond brick wall — bricks tiled via repeatN({stagger: {along: x, by: y}}), the new option for brick/honeycomb patterns. Every other course shifts by half a brick. Two painted regions on a recessed mortar slab."
     }
   ]
 }
