@@ -172,16 +172,27 @@ function isLabelTokenAt(masked: string, at: number): boolean {
 
 const DECL_RE = /^\s*(module|function|use|include)\b/;
 
+/** Leading keywords that mean this chunk is a *continuation* of the previous
+ *  top-level statement, not a new one. `else` is the canonical case:
+ *  `if (cond) cube(); else sphere();` splits at the first `;`, leaving
+ *  `else sphere();` as a free-floating chunk that would otherwise be counted
+ *  as its own geometry statement. lazy-union still emits only one object
+ *  (the taken branch), so counting both halves makes the count mismatch
+ *  and silently kills labels via the auto-name fallback. */
+const CONTINUATION_RE = /^\s*else\b/;
+
 /** A "statement" we want to count is one that produces geometry. Skip:
  *   - `module name(...) { ... }` and `function name(...) = ...;` declarations
  *   - `use <...>;` / `include <...>;` directives
  *   - Top-level assignments `name = expr;` (no `(` before the `=`)
+ *   - `else <expr>;` continuations of a preceding `if (...) <expr>;`
  *   - Pure whitespace/comment-only chunks
  */
 function isGeometryStatement(chunk: string): boolean {
   const m = maskCommentsAndStrings(chunk).trim();
   if (m.length === 0) return false;
   if (DECL_RE.test(m)) return false;
+  if (CONTINUATION_RE.test(m)) return false;
   // Top-level assignment classifier: a single `=` appears before any `(`.
   // Geometry statements always have `(` before any `=` (e.g. `cube(size=10);`).
   // Variable assignments have `=` before any `(` (e.g. `x = 10;` or

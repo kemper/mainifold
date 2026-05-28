@@ -306,6 +306,14 @@ async function runLabelAwareAsync(
       m = module.Manifold.ofMesh(objects[i]);
     } catch {
       // Skip non-manifold components rather than failing the whole render.
+      // Tell the user if the dropped component was labelled — silently losing
+      // a name they're trying to paint by would be confusing.
+      if (names[i]) {
+        stderr.push(
+          `WARNING: label "${names[i]}" attached to a non-manifold component ` +
+          `(object ${i}); paintByLabel("${names[i]}") will return no triangles.`,
+        );
+      }
       continue;
     }
     const original = m.asOriginal();

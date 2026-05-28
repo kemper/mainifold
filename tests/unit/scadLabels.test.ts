@@ -117,4 +117,20 @@ describe('scanScadLabels — top-level statement extraction', () => {
     expect(r.topLevelStatements).toHaveLength(1);
     expect(r.topLevelStatements[0].labelName).toBe(null);
   });
+
+  it('does not count `else <expr>;` as a second top-level statement', () => {
+    // `if (cond) cube(); else sphere();` splits at the first `;`, but
+    // lazy-union still emits exactly ONE object (the taken branch). If we
+    // counted the orphan `else …` chunk, the count would mismatch and
+    // labels would silently fall back to auto-naming.
+    const r = scanScadLabels(`
+      label("primary") cube(10);
+      if (true) cube(5); else sphere(3);
+      label("trailing") cylinder(r=2, h=4);
+    `);
+    expect(r.topLevelStatements).toHaveLength(3);
+    expect(r.topLevelStatements[0].labelName).toBe('primary');
+    expect(r.topLevelStatements[1].labelName).toBe(null);
+    expect(r.topLevelStatements[2].labelName).toBe('trailing');
+  });
 });
