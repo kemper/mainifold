@@ -380,17 +380,18 @@ test.describe('Relief Studio', () => {
       x.fillStyle = '#2020c0'; x.fillRect(54, 0, 26, 80);
       const src = c.toDataURL('image/png');
       const pw = (window as unknown as { partwright: Record<string, (...a: unknown[]) => unknown> }).partwright;
-      await pw.importImageAsRelief({
+      const created = await pw.importImageAsRelief({
         src, mode: 'quantized',
         options: { widthMm: 30, resolution: 60, maxHeight: 1.5, baseThickness: 0.4, layerHeight: 0.1 },
         quantized: { output: 'relief', paintingMode: 'single-nozzle' },
-      }) as { sessionId?: string };
+      }) as { sessionId?: string; error?: string };
       const regions = pw.listRegions() as Array<{ color: [number, number, number] }>;
-      return { regionCount: regions.length, regions };
+      return { created, regionCount: regions.length, regions };
     });
     // Three-stripe input → at least one region per Z-band the clusters land
     // in. The exact count depends on the layer height + clamping but should be
     // > 1 (proves bands actually separated) and <= clusterCount + 1 buffer.
+    expect(res.created.error).toBeFalsy();
     expect(res.regionCount).toBeGreaterThan(1);
   });
 

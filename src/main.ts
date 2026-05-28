@@ -8084,6 +8084,10 @@ async function main() {
       // keep working without changes on the main thread.
       if (result.manifold) {
         currentManifold = result.manifold;
+      } else if (result.renderOnly) {
+        // Render-only output (api.renderMesh) is intentionally not a real
+        // Manifold; trying to ofMesh() it would throw "Not manifold".
+        currentManifold = null;
       } else {
         const mod = getModule();
         currentManifold = (mod && result.mesh) ? mod.Manifold.ofMesh(result.mesh) : null;

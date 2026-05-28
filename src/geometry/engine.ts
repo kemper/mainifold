@@ -167,12 +167,13 @@ function handleEngineWorkerMessage(event: MessageEvent): void {
     const labelMapEntries = msg.labelMapEntries as [string, number[]][] | null;
     const result: MeshResult = {
       mesh,
-      manifold: null, // live WASM object can't cross threads; caller reconstructs via ofMesh()
+      manifold: null, // live WASM object can't cross threads; caller reconstructs via ofMesh() when not render-only
       error: msg.error as string | null,
       diagnostics: msg.diagnostics as MeshResult['diagnostics'],
       labelMap: labelMapEntries
         ? new Map(labelMapEntries.map(([k, v]) => [k, new Set(v)]))
         : undefined,
+      renderOnly: !!msg.renderOnly,
     };
     pending.resolve(result);
     return;

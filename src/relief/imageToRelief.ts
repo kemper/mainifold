@@ -645,20 +645,252 @@ export function generateRelief(image: ImageData, opts: ReliefOptions = DEFAULT_R
 
   // Tile outputs (flat / silhouette) skip the heightmap relief mesh and build
   // a flat tile of constant thickness instead, painting colour clusters onto
-  // its top face — the Bambu-keychain workflow. Only applies to quantized
-  // mode (luminance is always a heightmap).
+  // its top face — the keychain workflow. Only applies to quantized mode
+  // (luminance is always a heightmap).
   if (opts.mode === 'quantized' && grid.colors && opts.quantized.output !== 'relief') {
     return buildQuantizedTile(grid, opts);
   }
 
+  // Stepped relief, single-nozzle painting: every cell is its own flat-top
+  // box with vertical walls subdivided by Z-band, so every print layer is
+  // ONE colour and no slanted triangles spread cluster colours across
+  // multiple Z bands. This is the slicer-faithful path the user expects when
+  // they set "single-nozzle" mode + a specific layer height.
+  if (opts.mode === 'quantized' && grid.colors && opts.quantized.paintingMode === 'single-nozzle') {
+    const stepped = buildSteppedReliefMesh(grid, opts);
+    return { mesh: stepped.mesh, grid, seedRegions: stepped.seedRegions };
+  }
+
+  // Multi-colour painting keeps the smooth heightfield (slanted triangles
+  // between cells of different cluster heights) — AMS printers can swap
+  // colours mid-XY so the slant artefacts don't bite the print.
   const mesh = buildReliefMesh(grid, opts);
   if (opts.mode !== 'quantized' || !grid.colors) {
     return { mesh, grid };
   }
-  const seedRegions = opts.quantized.paintingMode === 'multi-color'
-    ? seedRegionsFromReliefGrid(grid)
-    : seedRegionsByZBand(mesh, grid, opts);
+  const seedRegions = seedRegionsFromReliefGrid(grid);
   return { mesh, grid, seedRegions };
+}
+
+/** Stepped-relief mesh: each cell is a flat-top box, walls between adjacent
+ *  cells of different Z subdivided by Z-band so vertex colours per strip
+ *  match the filament that would be deposited at that Z. Vertex sharing is
+ *  kept minimal so colour boundaries are crisp — duplicating verts at band
+ *  boundaries is what produces hard colour steps instead of vertex-interp
+ *  gradients. */
+function buildSteppedReliefMesh(grid: HeightGrid, opts: ReliefOptions): { mesh: ReliefMesh; seedRegions: SeedRegion[] } {
+  const W = grid.width, H = grid.height;
+  const base = opts.common.baseThickness;
+  const widthMm = opts.common.widthMm;
+  const heightMm = widthMm * (H / W);
+  const halfW = widthMm / 2;
+  const halfH = heightMm / 2;
+  const dx = W > 1 ? widthMm / (W - 1) : 0;
+  const dy = H > 1 ? heightMm / (H - 1) : 0;
+  const lh = opts.common.layerHeight > 0 ? opts.common.layerHeight : 0.1;
+  const totalZ = base + opts.common.maxHeight;
+  const bandCount = Math.max(1, Math.ceil(totalZ / lh));
+
+  // Per-cluster summary, identical to seedRegionsByZBand. Each cluster's
+  // unique colour appears once at a unique topZ.
+  type Cluster = { color: [number, number, number]; topZ: number };
+  const clusters = new Map<number, Cluster>();
+  const colors = grid.colors!;
+  for (let y = 0; y < H; y++) {
+    for (let x = 0; x < W; x++) {
+      const i = y * W + x;
+      const r = colors[i * 3], g = colors[i * 3 + 1], b = colors[i * 3 + 2];
+      const key = (r << 16) | (g << 8) | b;
+      const cellZ = base + grid.heights[i];
+      let c = clusters.get(key);
+      if (!c) clusters.set(key, { color: [r / 255, g / 255, b / 255], topZ: cellZ });
+      else if (cellZ > c.topZ) c.topZ = cellZ;
+    }
+  }
+  const sortedClusters = Array.from(clusters.values()).sort((a, b) => a.topZ - b.topZ);
+  // Per-band winning filament colour (the one being deposited as the printer
+  // climbs through that band).
+  const bandColor: [number, number, number][] = [];
+  for (let b = 0; b < bandCount; b++) {
+    const bandTopZ = (b + 1) * lh;
+    let winner: Cluster | null = null;
+    for (const c of sortedClusters) {
+      if (c.topZ + 1e-6 >= bandTopZ) { winner = c; break; }
+    }
+    if (!winner) winner = sortedClusters[sortedClusters.length - 1] ?? { color: [0.7, 0.7, 0.7], topZ: totalZ };
+    bandColor.push(winner.color);
+  }
+  const bandOf = (z: number): number => {
+    // Snap z to a band; a value exactly at a layer boundary belongs to the
+    // band BELOW (since that's the band that just deposited material there).
+    let b = Math.floor((z - 1e-6) / lh);
+    if (b < 0) b = 0;
+    if (b >= bandCount) b = bandCount - 1;
+    return b;
+  };
+
+  // Pre-count vertices and triangles so we can allocate typed arrays once.
+  // For each cell: 4 top + 4 bottom = 8. For each "external" wall: 4 vertices
+  // per Z-band strip + 2 triangles per strip. A wall is external iff the
+  // neighbour cell is missing or shorter.
+  const cellZ = (x: number, y: number): number => base + grid.heights[y * W + x];
+  const neighborZ = (x: number, y: number): number => {
+    if (x < 0 || y < 0 || x >= W || y >= H) return 0;
+    return cellZ(x, y);
+  };
+  const stripsInRange = (zBot: number, zTop: number): number => {
+    if (zTop <= zBot) return 0;
+    const bBot = bandOf(zBot + 1e-6);
+    const bTop = bandOf(zTop - 1e-6);
+    return bTop - bBot + 1;
+  };
+
+  let vertCount = 0;
+  let triCount = 0;
+  for (let y = 0; y < H - 1; y++) {
+    for (let x = 0; x < W - 1; x++) {
+      const z = cellZ(x, y);
+      // Top + bottom: 8 verts + 4 tris.
+      vertCount += 8;
+      triCount += 4;
+      // Walls: per side, look at the adjacent quad-cell. Side is external if
+      // the neighbour is missing or shorter than this cell.
+      const neighbours: [number, number][] = [[x, y - 1], [x + 1, y], [x, y + 1], [x - 1, y]];
+      for (const [nx, ny] of neighbours) {
+        const nz = (nx < 0 || ny < 0 || nx >= W - 1 || ny >= H - 1) ? 0 : cellZ(nx, ny);
+        if (nz >= z) continue;
+        const strips = stripsInRange(nz, z);
+        vertCount += 4 * strips;
+        triCount += 2 * strips;
+      }
+    }
+  }
+
+  const vertProperties = new Float32Array(vertCount * 3);
+  const triVerts = new Uint32Array(triCount * 3);
+  // Track which Z-band each emitted triangle belongs to, so we can group
+  // them into seed regions afterward.
+  const triBand = new Int32Array(triCount);
+
+  let vi = 0; // running vertex write cursor (count, not floats)
+  let ti = 0;
+  const addVert = (px: number, py: number, pz: number): number => {
+    const idx = vi;
+    vertProperties[vi * 3] = px;
+    vertProperties[vi * 3 + 1] = py;
+    vertProperties[vi * 3 + 2] = pz;
+    vi++;
+    return idx;
+  };
+  const addTri = (a: number, b: number, c: number, band: number): void => {
+    triVerts[ti * 3] = a;
+    triVerts[ti * 3 + 1] = b;
+    triVerts[ti * 3 + 2] = c;
+    triBand[ti] = band;
+    ti++;
+  };
+
+  // Build the mesh in cell-major order. Each cell owns its 4 top tris first
+  // (so the multi-color path that uses gridTriangleIndexForCell can still
+  // address them by id), then 4 bottom tris, then walls.
+  for (let y = 0; y < H - 1; y++) {
+    for (let x = 0; x < W - 1; x++) {
+      const z = cellZ(x, y);
+      const px0 = -halfW + x * dx;
+      const px1 = -halfW + (x + 1) * dx;
+      const py0 = -halfH + y * dy;
+      const py1 = -halfH + (y + 1) * dy;
+
+      // Top quad: 4 verts at z = cellZ. Top band is the one whose upper edge
+      // equals cellZ (snap-below).
+      const topBand = bandOf(z);
+      const t00 = addVert(px0, py0, z);
+      const t10 = addVert(px1, py0, z);
+      const t11 = addVert(px1, py1, z);
+      const t01 = addVert(px0, py1, z);
+      addTri(t00, t10, t11, topBand);
+      addTri(t00, t11, t01, topBand);
+
+      // Bottom quad: 4 verts at z = 0, reversed winding so normals point -Z.
+      // Bottom band is band 0 (whatever's deposited at the print's first layer).
+      const b00 = addVert(px0, py0, 0);
+      const b10 = addVert(px1, py0, 0);
+      const b11 = addVert(px1, py1, 0);
+      const b01 = addVert(px0, py1, 0);
+      addTri(b00, b11, b10, 0);
+      addTri(b00, b01, b11, 0);
+
+      // Walls — one per external side, each subdivided into Z-band strips.
+      // Per side we know two world-space XY endpoints and an outward
+      // normal direction; the winding choice flips per side so all walls
+      // face outward.
+      const sides: { x1: number; y1: number; x2: number; y2: number; outward: 'n' | 's' | 'e' | 'w'; nz: number }[] = [
+        // -Y side (south): edge from (px0, py0) to (px1, py0)
+        { x1: px0, y1: py0, x2: px1, y2: py0, outward: 's', nz: (y - 1 < 0) ? 0 : cellZ(x, y - 1) },
+        // +X side (east): edge from (px1, py0) to (px1, py1)
+        { x1: px1, y1: py0, x2: px1, y2: py1, outward: 'e', nz: (x + 1 > W - 2) ? 0 : cellZ(x + 1, y) },
+        // +Y side (north): edge from (px1, py1) to (px0, py1)
+        { x1: px1, y1: py1, x2: px0, y2: py1, outward: 'n', nz: (y + 1 > H - 2) ? 0 : cellZ(x, y + 1) },
+        // -X side (west): edge from (px0, py1) to (px0, py0)
+        { x1: px0, y1: py1, x2: px0, y2: py0, outward: 'w', nz: (x - 1 < 0) ? 0 : cellZ(x - 1, y) },
+      ];
+      void neighborZ; // helper kept for readability
+      for (const side of sides) {
+        if (side.nz >= z) continue;
+        // Subdivide [side.nz, z] into Z-band strips. The strip range is half-
+        // open at the top, but clamped to the wall's range at both ends. We
+        // emit exactly `bTop - bBot + 1` strips — matching the pre-count so
+        // the typed arrays end up fully populated (any trailing zero entries
+        // become a degenerate triangle that Manifold.ofMesh's manifold check
+        // would reject, even though we route the mesh through renderMesh).
+        const bBot = bandOf(side.nz + 1e-6);
+        const bTop = bandOf(z - 1e-6);
+        for (let b = bBot; b <= bTop; b++) {
+          const stripBot = Math.max(side.nz, b * lh);
+          const stripTop = Math.min(z, (b + 1) * lh);
+          // 4 verts in counter-clockwise order seen from outside. The order
+          // depends on the side's outward normal so all walls face out.
+          const v00 = addVert(side.x1, side.y1, stripBot);
+          const v10 = addVert(side.x2, side.y2, stripBot);
+          const v11 = addVert(side.x2, side.y2, stripTop);
+          const v01 = addVert(side.x1, side.y1, stripTop);
+          addTri(v00, v10, v11, b);
+          addTri(v00, v11, v01, b);
+        }
+      }
+    }
+  }
+
+  // Group triangles by Z-band into seed regions; merge identical neighbours.
+  const buckets: { color: [number, number, number]; triangleIds: number[] }[] = [];
+  for (let b = 0; b < bandCount; b++) buckets.push({ color: bandColor[b], triangleIds: [] });
+  for (let t = 0; t < ti; t++) buckets[triBand[t]].triangleIds.push(t);
+
+  const merged: { color: [number, number, number]; triangleIds: number[] }[] = [];
+  for (const bucket of buckets) {
+    if (bucket.triangleIds.length === 0) continue;
+    const prev = merged[merged.length - 1];
+    if (prev && prev.color[0] === bucket.color[0] && prev.color[1] === bucket.color[1] && prev.color[2] === bucket.color[2]) {
+      // Loop-push (not spread) — same overflow guard as seedRegionsByZBand.
+      for (let i = 0; i < bucket.triangleIds.length; i++) prev.triangleIds.push(bucket.triangleIds[i]);
+    } else {
+      merged.push({ color: bucket.color, triangleIds: bucket.triangleIds });
+    }
+  }
+  const seedRegions: SeedRegion[] = merged.map((m, i) => ({ color: m.color, triangleIds: m.triangleIds, name: `Layer ${i + 1}` }));
+
+  const mesh: ReliefMesh = {
+    vertProperties,
+    triVerts,
+    numVert: vi,
+    numTri: ti,
+    numProp: 3,
+    // Stepped mesh has duplicated verts at band boundaries (intentional, for
+    // hard colour steps) so it isn't edge-manifold by construction. Mark
+    // render-only; the caller routes it through api.renderMesh.
+    watertight: false,
+  };
+  return { mesh, seedRegions };
 }
 
 /** Build the flat colour-tile result for quantized mode with output !== 'relief'. */
@@ -707,82 +939,9 @@ function seedRegionsFromReliefGrid(grid: HeightGrid): SeedRegion[] {
   return mapBucketsToRegions(byColor);
 }
 
-/** Single-nozzle variant: every triangle's centroid Z decides which Z-band it
- *  belongs to, and each band's dominant cluster colour wins the whole band.
- *  This matches what a real swap print produces — at any printed layer the
- *  whole XY plane is one filament — so previews and slicer output agree. */
-function seedRegionsByZBand(mesh: ReliefMesh, grid: HeightGrid, opts: ReliefOptions): SeedRegion[] {
-  const colors = grid.colors!;
-  const base = opts.common.baseThickness;
-  const maxH = opts.common.maxHeight;
-  const totalZ = base + maxH;
-  const lh = opts.common.layerHeight > 0 ? opts.common.layerHeight : 0.1;
-  const bandCount = Math.max(1, Math.ceil(totalZ / lh));
-
-  // Build cluster summaries from the grid: a unique colour appears at each
-  // cluster's height. Walk the grid once, tallying area-per-colour and the
-  // top Z each colour reaches.
-  type Cluster = { color: [number, number, number]; topZ: number; area: number };
-  const clusters = new Map<number, Cluster>();
-  for (let y = 0; y < grid.height; y++) {
-    for (let x = 0; x < grid.width; x++) {
-      const i = y * grid.width + x;
-      const r = colors[i * 3], g = colors[i * 3 + 1], b = colors[i * 3 + 2];
-      const key = (r << 16) | (g << 8) | b;
-      const cellZ = base + grid.heights[i];
-      let c = clusters.get(key);
-      if (!c) { c = { color: [r / 255, g / 255, b / 255], topZ: cellZ, area: 0 }; clusters.set(key, c); }
-      if (cellZ > c.topZ) c.topZ = cellZ;
-      c.area++;
-    }
-  }
-  // For each Z-band, the print's filament is the LOWEST-topZ cluster still
-  // capping at or above the band — i.e. the cluster the printer just finished
-  // depositing. That's the colour deposited on every print layer in the band.
-  const bandColor: [number, number, number][] = [];
-  const sortedClusters = Array.from(clusters.values()).sort((a, b) => a.topZ - b.topZ);
-  for (let b = 0; b < bandCount; b++) {
-    const bandTopZ = (b + 1) * lh;
-    let winner: Cluster | null = null;
-    for (const c of sortedClusters) {
-      if (c.topZ + 1e-6 >= bandTopZ) { winner = c; break; }
-    }
-    if (!winner) winner = sortedClusters[sortedClusters.length - 1] ?? { color: [0.7, 0.7, 0.7], topZ: totalZ, area: 0 };
-    bandColor.push(winner.color);
-  }
-
-  // Triangle → band by centroid Z over the actual mesh.
-  const tris = mesh.numTri;
-  const verts = mesh.vertProperties;
-  const idx = mesh.triVerts;
-  const buckets: { color: [number, number, number]; triangleIds: number[] }[] =
-    bandColor.map(c => ({ color: c, triangleIds: [] }));
-  for (let t = 0; t < tris; t++) {
-    const a = idx[t * 3], b = idx[t * 3 + 1], c = idx[t * 3 + 2];
-    const z = (verts[a * 3 + 2] + verts[b * 3 + 2] + verts[c * 3 + 2]) / 3;
-    let band = Math.floor(z / lh);
-    if (band < 0) band = 0;
-    if (band >= bandCount) band = bandCount - 1;
-    buckets[band].triangleIds.push(t);
-  }
-
-  // Collapse identical-colour neighbouring bands into single regions so the
-  // paint UI lists "Layer 0.6–1.2 mm" once, not once per layer. Push items
-  // one-by-one (not via spread) because triangleIds can hold millions of
-  // entries at 512-cell resolution and ...spread would overflow the JS call
-  // stack.
-  const merged: { color: [number, number, number]; triangleIds: number[] }[] = [];
-  for (const bucket of buckets) {
-    if (bucket.triangleIds.length === 0) continue;
-    const prev = merged[merged.length - 1];
-    if (prev && prev.color[0] === bucket.color[0] && prev.color[1] === bucket.color[1] && prev.color[2] === bucket.color[2]) {
-      for (let i = 0; i < bucket.triangleIds.length; i++) prev.triangleIds.push(bucket.triangleIds[i]);
-    } else {
-      merged.push({ color: bucket.color, triangleIds: bucket.triangleIds });
-    }
-  }
-  return merged.map((m, i) => ({ color: m.color, triangleIds: m.triangleIds, name: `Layer ${i + 1}` }));
-}
+// (seedRegionsByZBand removed — buildSteppedReliefMesh now produces stepped
+//  geometry whose triangles are Z-banded by construction, so we don't have to
+//  retro-fit colours onto a slanted continuous mesh.)
 
 /** Tile variant: cellTriIds carries -1 for excluded cells (shape/hole/edge),
  *  so only included cells contribute. */

@@ -299,6 +299,7 @@ export const manifoldJsEngine: Engine = {
         manifold: renderOnly ? null : result,
         error: null,
         labelMap,
+        renderOnly,
       };
     } catch (e: unknown) {
       let msg = e instanceof Error ? e.message : String(e);

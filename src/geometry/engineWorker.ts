@@ -122,7 +122,7 @@ self.onmessage = async (event: MessageEvent) => {
 
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         (self as any).postMessage(
-          { type: 'execute_result', callId, mesh, error: null, diagnostics: [], labelMapEntries },
+          { type: 'execute_result', callId, mesh, error: null, diagnostics: [], labelMapEntries, renderOnly: !!result.renderOnly },
           transfer,
         );
       } else {
