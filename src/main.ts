@@ -299,12 +299,18 @@ let geometryDataEl: HTMLElement;
 // When the editor is showing a decoded share link (`/editor#share=…`), it is a
 // strictly READ-ONLY preview of UNTRUSTED code: nothing the sharer wrote may
 // execute until the viewer explicitly Forks. This module-scoped flag is the
-// chokepoint guard — `runCode`/`runCodeSync` (and therefore the console
-// `partwright.run()`/`runAndSave()`, which route through them) and
-// `saveCurrentVersion` all refuse while it's set. It's separate from the
-// CodeMirror read-only flag (which only blocks typing) and from the multi-tab
-// viewer flag.
+// chokepoint guard — every code-execution entry point bails while it's set:
+// `runCode`/`runCodeSync` (and the console `partwright.run()`/`runAndSave()`
+// that route through them), `executeIsolated` (which backs the AI-exposed
+// `runIsolated`/`runAndAssert`/`runDecompose`, modify/test, and forkVersion),
+// and `setReferenceGeometry`, plus `saveCurrentVersion` and the export actions.
+// It's separate from the CodeMirror read-only flag (which only blocks typing)
+// and from the multi-tab viewer flag.
 let _sharedPreview = false;
+
+/** Error string returned by the execution chokepoints while a read-only shared
+ *  preview is on screen — the sharer's untrusted code must not run until Fork. */
+const SHARED_PREVIEW_REFUSAL = 'Read-only shared preview — fork this design first to run code.';
 
 /** True while the editor is showing a decoded share link (read-only preview).
  *  Execution + save chokepoints bail when this returns true. */
@@ -2032,6 +2038,7 @@ async function main() {
   // Mesh export actions, shared by the toolbar and the command palette so the
   // guards + success/error toasts stay in one place.
   const actionExportGLB = async () => {
+    if (isSharedPreview()) { showToast('Fork this shared design before exporting.', { variant: 'warn' }); return; }
     try {
       if (currentMeshData) assertFiniteMesh(currentMeshData);
       const filename = await exportGLB();
@@ -2041,16 +2048,19 @@ async function main() {
     }
   };
   const actionExportSTL = () => {
+    if (isSharedPreview()) { showToast('Fork this shared design before exporting.', { variant: 'warn' }); return; }
     if (!currentMeshData) return;
     try { showToast(`Exported ${exportSTL(currentMeshData)}`, { variant: 'success' }); }
     catch (e) { showToast(e instanceof Error ? e.message : 'STL export failed', { variant: 'warn' }); }
   };
   const actionExportOBJ = () => {
+    if (isSharedPreview()) { showToast('Fork this shared design before exporting.', { variant: 'warn' }); return; }
     if (!currentMeshData) return;
     try { showToast(`Exported ${exportOBJ(hasColorRegions() ? applyTriColors(currentMeshData) : currentMeshData)}`, { variant: 'success' }); }
     catch (e) { showToast(e instanceof Error ? e.message : 'OBJ export failed', { variant: 'warn' }); }
   };
   const actionExport3MF = () => {
+    if (isSharedPreview()) { showToast('Fork this shared design before exporting.', { variant: 'warn' }); return; }
     if (!currentMeshData) return;
     try { showToast(`Exported ${export3MF(hasColorRegions() ? applyTriColors(currentMeshData) : currentMeshData)}`, { variant: 'success' }); }
     catch (e) { showToast(e instanceof Error ? e.message : '3MF export failed', { variant: 'warn' }); }
@@ -2102,8 +2112,13 @@ async function main() {
       showToast('Could not prepare this design for sharing.', { variant: 'warn' });
       return;
     }
-    if (state.parts.length > 1 && state.currentPart?.name) {
-      exported.session = { ...exported.session, name: state.currentPart.name };
+    if (state.parts.length > 1) {
+      // A share link carries one version of one part. Tell the user so a
+      // multi-part assembly isn't silently reduced, and name the shared session
+      // after the current part.
+      const partName = state.currentPart?.name;
+      if (partName) exported.session = { ...exported.session, name: partName };
+      showToast(`Sharing only "${partName ?? 'the current part'}" — multi-part designs share one part per link.`, { variant: 'neutral' });
     }
 
     try {
@@ -2135,7 +2150,7 @@ async function main() {
   };
 
   /** True when the share action can run: an active session on a ready engine. */
-  const canShare = (): boolean => !!getState().session && engineOk && !isSharedPreview();
+  const canShare = (): boolean => !!getState().session && engineOk && !isSharedPreview() && typeof CompressionStream !== 'undefined';
 
   // Create toolbar
   createToolbar(editorUI, {
@@ -2752,15 +2767,16 @@ async function main() {
     setControlNeutralized('btn-save-version', true);
     setControlNeutralized('lang-toggle', true);
 
-    if (!sharedBannerEl) {
-      sharedBannerEl = renderSharedBanner(() => { void onFork(); });
-      const editorPane = editorContainer.parentElement;
-      if (editorPane) editorPane.insertBefore(sharedBannerEl, editorContainer);
-    }
-    if (!sharedOverlayEl) {
-      sharedOverlayEl = renderSharedOverlay({ thumbnail, onFork: () => { void onFork(); } });
-      viewportPane.appendChild(sharedOverlayEl);
-    }
+    // Rebuild the banner + overlay fresh on every entry so re-previewing a
+    // DIFFERENT share link (pasted over an active preview) shows the new
+    // thumbnail rather than a stale one carried over from the previous link.
+    if (sharedBannerEl) { sharedBannerEl.remove(); sharedBannerEl = null; }
+    if (sharedOverlayEl) { sharedOverlayEl.remove(); sharedOverlayEl = null; }
+    sharedBannerEl = renderSharedBanner(() => { void onFork(); });
+    const editorPane = editorContainer.parentElement;
+    if (editorPane) editorPane.insertBefore(sharedBannerEl, editorContainer);
+    sharedOverlayEl = renderSharedOverlay({ thumbnail, onFork: () => { void onFork(); } });
+    viewportPane.appendChild(sharedOverlayEl);
   }
 
   /** Leave shared-preview mode: re-enable every control and remove the banner +
@@ -2775,6 +2791,9 @@ async function main() {
     setControlNeutralized('lang-toggle', false);
     if (sharedBannerEl) { sharedBannerEl.remove(); sharedBannerEl = null; }
     if (sharedOverlayEl) { sharedOverlayEl.remove(); sharedOverlayEl = null; }
+    // Re-derive the Run button state from the (reason-counted) editor lock, so we
+    // never leave Run enabled if a color lock happens to be active.
+    syncLockState();
   }
 
   /** Strip the `#share=` hash from the URL without touching the back stack or
@@ -2808,7 +2827,10 @@ async function main() {
       if (!branded) throw new Error('not a Partwright payload');
       payload = validateSharePayloadShape(branded);
     } catch (e) {
-      errorLog.capture({ level: 'warn', source: 'app', message: `invalid share link: ${e instanceof Error ? e.message : String(e)}` });
+      // A malformed/hostile share link is an expected degrade path, not an app
+      // error — log to the console only (keep it out of the user-facing
+      // diagnostic log) and fall back to a normal editable editor.
+      console.debug('Partwright: ignoring invalid share link —', e instanceof Error ? e.message : String(e));
       stripShareHash();
       exitSharedMode();
       // Fall through to a normal, editable empty editor.
@@ -3497,6 +3519,25 @@ async function main() {
   // during initial load don't hit a Temporal Dead Zone error.)
 
   async function executeIsolated(code: string, lang?: Language) {
+    // Hard refusal in a read-only shared preview. executeIsolated is the single
+    // funnel for every isolated run — runIsolated / runAndAssert / runDecompose
+    // (all AI-exposed tools), modify/test, and forkVersion — so guarding it here
+    // stops the sharer's untrusted code from reaching the `new Function` sandbox
+    // (and thus fetch / indexedDB) via any of them. Fork clears the flag before
+    // importing, so the consented run is unaffected.
+    if (isSharedPreview()) {
+      return {
+        geometryData: {
+          status: 'error' as const,
+          error: SHARED_PREVIEW_REFUSAL,
+          diagnostics: [] as SourceDiagnostic[],
+          executionTimeMs: 0,
+          codeHash: simpleHash(code),
+        },
+        meshData: null as MeshData | null,
+        manifold: null as unknown,
+      };
+    }
     const t0 = performance.now();
     const result = await executeCodeAsync(code, lang);
     const elapsed = Math.round(performance.now() - t0);
@@ -5619,6 +5660,9 @@ async function main() {
       });
       if (typeof check === 'object' && check !== null && 'error' in check) {
         return { success: false, error: check.error };
+      }
+      if (isSharedPreview()) {
+        return { success: false, error: SHARED_PREVIEW_REFUSAL };
       }
       const result = executeCode(code, 'manifold-js');
       if (result.error) {

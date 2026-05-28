@@ -100,7 +100,10 @@ export function isSafeImageDataUrl(s: unknown): s is string {
   if (s.length > MAX_IMAGE_DATA_URL_CHARS) return false;
   // Anchored: scheme + raster mime + base64 marker + a pure base64 body to end.
   // No whitespace or `<`/`>`/`"` can appear because the body class excludes them.
-  return /^data:image\/(?:png|jpe?g|webp|gif);base64,[A-Za-z0-9+/]+={0,2}$/i.test(s);
+  // `(?![\s\S])` (true end-of-string) rather than `$`, which without the `m`
+  // flag would also match just before a trailing newline — so "…AAAA\n" is
+  // rejected, keeping the validator exactly as strict as its doc comment.
+  return /^data:image\/(?:png|jpe?g|webp|gif);base64,[A-Za-z0-9+/]+={0,2}(?![\s\S])/i.test(s);
 }
 
 // === trim ===

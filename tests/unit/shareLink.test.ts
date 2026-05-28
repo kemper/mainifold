@@ -109,6 +109,9 @@ describe('isSafeImageDataUrl', () => {
     expect(isSafeImageDataUrl('data:image/png;base64,iVBOR\nw0KGgo=')).toBe(false);
     expect(isSafeImageDataUrl('data:image/png;base64,iVBOR,<script>alert(1)</script>')).toBe(false);
     expect(isSafeImageDataUrl('data:image/png;base64,abc"def')).toBe(false);
+    // Trailing newline must be rejected — a bare `$` (no `m` flag) would match
+    // the position just before it and let "…=\n" through.
+    expect(isSafeImageDataUrl('data:image/png;base64,iVBORw0KGgo=\n')).toBe(false);
   });
 
   test('rejects an oversized data URL', () => {

@@ -80,6 +80,30 @@ async function sessionCount(page: Page): Promise<number> {
   });
 }
 
+/** Wipe the IndexedDB `sessions` store to establish a clean baseline. The bare
+ *  /editor load auto-creates a disposable empty session; clearing it lets a
+ *  preview's non-mutation be asserted as an exact 0 (independent of the
+ *  pre-existing empty-session GC). */
+async function clearSessions(page: Page): Promise<void> {
+  await page.evaluate(async () => {
+    const db: IDBDatabase = await new Promise((res, rej) => {
+      const r = indexedDB.open('partwright');
+      r.onsuccess = () => res(r.result);
+      r.onerror = () => rej(r.error);
+    });
+    try {
+      await new Promise<void>((res, rej) => {
+        const txn = db.transaction('sessions', 'readwrite');
+        txn.objectStore('sessions').clear();
+        txn.oncomplete = () => res();
+        txn.onerror = () => rej(txn.error);
+      });
+    } finally {
+      db.close();
+    }
+  });
+}
+
 /** Read the parsed #geometry-data JSON. */
 async function geometryData(page: Page): Promise<Record<string, unknown>> {
   return page.evaluate(() => {
@@ -121,7 +145,9 @@ test.describe('share links', () => {
     const sharedCode = 'const { Manifold } = api;\nreturn Manifold.cube([5,5,5], true);';
     const url = await buildShareUrl(page, { code: sharedCode, volume: SENTINEL_VOL, thumbnail: TINY_PNG });
 
-    const before = await sessionCount(page);
+    // Clear the disposable default session created by the initial /editor load so
+    // the preview's non-mutation is unambiguous: it must add NO session of its own.
+    await clearSessions(page);
 
     await page.goto(url);
     await page.waitForSelector('#shared-preview-banner', { timeout: 20000 });
@@ -151,12 +177,52 @@ test.describe('share links', () => {
     // Hash stripped to exactly /editor (no #, no ?session=).
     expect(page.url()).toBe(`${new URL(url).origin}/editor`);
 
-    // No IndexedDB writes.
-    expect(await sessionCount(page)).toBe(before);
+    // Non-mutating: no active session in the URL and no session row created.
+    expect(new URL(page.url()).searchParams.has('session')).toBe(false);
+    expect(await sessionCount(page)).toBe(0);
 
     // Back must not resurrect a #share= URL.
     await page.goBack().catch(() => {});
     expect(page.url()).not.toContain('#share=');
+  });
+
+  test('T2b Console execution APIs (runIsolated / runAndAssert) refuse in a preview', async ({ page }) => {
+    // runIsolated / runAndAssert back the AI-exposed tools and bypass the Run
+    // button, so they must honor the no-execution invariant too — otherwise a
+    // prompt-injected agent could run the sharer's code (reaching fetch /
+    // indexedDB, where API keys live) without an explicit Fork.
+    await openEditor(page);
+    const SENTINEL_VOL = 4242;
+    const url = await buildShareUrl(page, {
+      code: 'const { Manifold } = api;\nreturn Manifold.cube([5,5,5], true);',
+      volume: SENTINEL_VOL,
+      thumbnail: TINY_PNG,
+    });
+
+    await page.goto(url);
+    await page.waitForSelector('#shared-preview-banner', { timeout: 20000 });
+
+    const out = await page.evaluate(async () => {
+      const pw = (window as unknown as { partwright: {
+        runIsolated(code: string): Promise<{ geometryData: { status?: string; error?: string } }>;
+        runAndAssert(code: string, a: unknown): Promise<{ passed: boolean; failures?: string[] }>;
+      } }).partwright;
+      const evil = 'const { Manifold } = api; return Manifold.cube([9,9,9], true);';
+      // Use a VALID assertion shape (minVolume), so the call passes argument
+      // validation and actually reaches the execution guard rather than failing
+      // shape-validation first.
+      return { isolated: await pw.runIsolated(evil), asserted: await pw.runAndAssert(evil, { minVolume: 0 }) };
+    });
+
+    // runIsolated is refused with an error result …
+    expect(out.isolated.geometryData.status).toBe('error');
+    expect(String(out.isolated.geometryData.error)).toMatch(/shared preview/i);
+    // … and runAndAssert fails with the same refusal.
+    expect(out.asserted.passed).toBe(false);
+    expect(String(out.asserted.failures?.[0])).toMatch(/shared preview/i);
+
+    // The geometry pipeline stayed cold: the embedded sentinel is unchanged.
+    expect((await geometryData(page)).volume).toBe(SENTINEL_VOL);
   });
 
   test('T3 Fork makes the design hot, editable, and persisted', async ({ page }) => {
