@@ -395,6 +395,45 @@ test.describe('Relief Studio', () => {
     expect(res.regionCount).toBeGreaterThan(1);
   });
 
+  // Regression for the user-reported bug: a blue subject on a lighter
+  // background rendered TAN in the stepped mesh (3D + generated model),
+  // disagreeing with the 2D cluster preview. Two compounding causes:
+  //   1. cell tops were painted with the Z-band WINNER, not the cell's own
+  //      cluster colour;
+  //   2. a baseThickness that isn't a multiple of layerHeight (e.g. 0.64 mm
+  //      at 0.2 mm layers — exactly the user's 3.64 mm tile) pushed every
+  //      cell top OFF the band grid, so the winner search returned the next
+  //      cluster up.
+  // The fix paints tops with the cell's own colour and snaps the base to a
+  // whole layer count. These settings reproduce the original failure (blue →
+  // tan); the assertion is that a blue region survives.
+  test('stepped relief keeps the subject colour with an unaligned base (no colour swap)', async ({ page }) => {
+    await page.goto('/editor');
+    await waitForEngine(page);
+    const res = await page.evaluate(async () => {
+      const c = document.createElement('canvas');
+      c.width = 80; c.height = 80;
+      const x = c.getContext('2d')!;
+      // Light tan background (brightest → tallest), saturated blue subject.
+      x.fillStyle = '#e8e0b0'; x.fillRect(0, 0, 80, 80);
+      x.fillStyle = '#2255c0'; x.fillRect(24, 24, 32, 32);
+      const src = c.toDataURL('image/png');
+      const pw = (window as unknown as { partwright: Record<string, (...a: unknown[]) => unknown> }).partwright;
+      await pw.importImageAsRelief({
+        src, mode: 'quantized',
+        // baseThickness 0.64 is NOT a multiple of layerHeight 0.2 — the trigger.
+        options: { widthMm: 40, resolution: 70, maxHeight: 3.0, baseThickness: 0.64, layerHeight: 0.2 },
+        quantized: { output: 'relief', clusters: 2, paintingMode: 'single-nozzle' },
+      }) as { sessionId?: string; error?: string };
+      const regions = pw.listRegions() as Array<{ color: [number, number, number] }>;
+      // A blue region must survive — blue dominant, low red/green. Under the
+      // old code this came back tan (no blue region at all).
+      const hasBlue = regions.some(r => r.color[2] > 0.5 && r.color[0] < 0.4 && r.color[1] < 0.5);
+      return { hasBlue, regions };
+    });
+    expect(res.hasBlue).toBe(true);
+  });
+
   // Wave 5: crop trims the source image before clustering. A cropped half of
   // a two-colour image should produce a tile whose regions match only the
   // surviving colour (the other colour was cropped away).

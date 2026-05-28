@@ -686,7 +686,6 @@ export function generateRelief(image: ImageData, opts: ReliefOptions = DEFAULT_R
  *  gradients. */
 function buildSteppedReliefMesh(grid: HeightGrid, opts: ReliefOptions): { mesh: ReliefMesh; seedRegions: SeedRegion[] } {
   const W = grid.width, H = grid.height;
-  const base = opts.common.baseThickness;
   const widthMm = opts.common.widthMm;
   const heightMm = widthMm * (H / W);
   const halfW = widthMm / 2;
@@ -694,6 +693,12 @@ function buildSteppedReliefMesh(grid: HeightGrid, opts: ReliefOptions): { mesh: 
   const dx = W > 1 ? widthMm / (W - 1) : 0;
   const dy = H > 1 ? heightMm / (H - 1) : 0;
   const lh = opts.common.layerHeight > 0 ? opts.common.layerHeight : 0.1;
+  // Snap the base to a whole number of layers. Cluster heights are already
+  // layer multiples, so a layer-aligned base makes EVERY cell top land exactly
+  // on a layer boundary — which is what keeps each printed Z-layer a single
+  // colour (an unaligned base, e.g. 0.64 mm at 0.2 mm layers, pushes tops off
+  // the band grid and the walls end up mixing two filaments within one layer).
+  const base = Math.max(1, Math.round(opts.common.baseThickness / lh)) * lh;
   const totalZ = base + opts.common.maxHeight;
   const bandCount = Math.max(1, Math.ceil(totalZ / lh));
 
@@ -783,9 +788,29 @@ function buildSteppedReliefMesh(grid: HeightGrid, opts: ReliefOptions): { mesh: 
 
   const vertProperties = new Float32Array(vertCount * 3);
   const triVerts = new Uint32Array(triCount * 3);
-  // Track which Z-band each emitted triangle belongs to, so we can group
-  // them into seed regions afterward.
-  const triBand = new Int32Array(triCount);
+  // Track each emitted triangle's colour as a packed-RGB key (0xRRGGBB) so we
+  // can group triangles into seed regions afterward. TOP triangles take the
+  // cell's OWN cluster colour (so the rendered top matches the 2D cluster
+  // preview exactly); WALL strips take the Z-band winner (the swap-history
+  // filament for that layer). Keying by colour — not band index — means a
+  // band-winner search quirk or a height collision can never repaint a cell's
+  // top with a neighbouring cluster's colour.
+  const triKey = new Int32Array(triCount);
+  const keyToColor = new Map<number, [number, number, number]>();
+  const packColor = (rgb: [number, number, number]): number => {
+    const r = Math.max(0, Math.min(255, Math.round(rgb[0] * 255)));
+    const g = Math.max(0, Math.min(255, Math.round(rgb[1] * 255)));
+    const b = Math.max(0, Math.min(255, Math.round(rgb[2] * 255)));
+    const key = (r << 16) | (g << 8) | b;
+    if (!keyToColor.has(key)) keyToColor.set(key, [r / 255, g / 255, b / 255]);
+    return key;
+  };
+  // Per-cell cluster colour straight from the grid (the 2D-preview colour).
+  const cellColorKey = (x: number, y: number): number => {
+    const i = y * W + x;
+    return packColor([colors[i * 3] / 255, colors[i * 3 + 1] / 255, colors[i * 3 + 2] / 255]);
+  };
+  const bandKey = bandColor.map(packColor);
 
   let vi = 0; // running vertex write cursor (count, not floats)
   let ti = 0;
@@ -797,11 +822,11 @@ function buildSteppedReliefMesh(grid: HeightGrid, opts: ReliefOptions): { mesh: 
     vi++;
     return idx;
   };
-  const addTri = (a: number, b: number, c: number, band: number): void => {
+  const addTri = (a: number, b: number, c: number, key: number): void => {
     triVerts[ti * 3] = a;
     triVerts[ti * 3 + 1] = b;
     triVerts[ti * 3 + 2] = c;
-    triBand[ti] = band;
+    triKey[ti] = key;
     ti++;
   };
 
@@ -816,25 +841,25 @@ function buildSteppedReliefMesh(grid: HeightGrid, opts: ReliefOptions): { mesh: 
       const py0 = -halfH + y * dy;
       const py1 = -halfH + (y + 1) * dy;
 
-      // Top quad: 4 verts at z = cellZ - Z_SHIFT, so a slicer at z=k*lh sees
-      // this cell's top in the band BELOW the boundary (matching the
-      // filament that capped it in a single-nozzle swap print).
-      const topBand = bandOf(z);
+      // Top quad: coloured with the CELL'S OWN cluster colour so the rendered
+      // top exactly matches the 2D cluster preview. (z is shifted a hair below
+      // the layer boundary only so the slicer assigns it to the band below.)
+      const cellKey = cellColorKey(x, y);
       const t00 = addVert(px0, py0, z);
       const t10 = addVert(px1, py0, z);
       const t11 = addVert(px1, py1, z);
       const t01 = addVert(px0, py1, z);
-      addTri(t00, t10, t11, topBand);
-      addTri(t00, t11, t01, topBand);
+      addTri(t00, t10, t11, cellKey);
+      addTri(t00, t11, t01, cellKey);
 
-      // Bottom quad: 4 verts at z = 0, reversed winding so normals point -Z.
-      // Bottom band is band 0 (whatever's deposited at the print's first layer).
+      // Bottom quad: z = 0, reversed winding so normals point -Z. Coloured
+      // with band 0's filament (whatever's laid on the print's first layer).
       const b00 = addVert(px0, py0, 0);
       const b10 = addVert(px1, py0, 0);
       const b11 = addVert(px1, py1, 0);
       const b01 = addVert(px0, py1, 0);
-      addTri(b00, b11, b10, 0);
-      addTri(b00, b01, b11, 0);
+      addTri(b00, b11, b10, bandKey[0]);
+      addTri(b00, b01, b11, bandKey[0]);
 
       // Walls — one per external side, each subdivided into Z-band strips.
       // Per side we know two world-space XY endpoints and an outward
@@ -870,30 +895,30 @@ function buildSteppedReliefMesh(grid: HeightGrid, opts: ReliefOptions): { mesh: 
           const v10 = addVert(side.x2, side.y2, stripBot);
           const v11 = addVert(side.x2, side.y2, stripTop);
           const v01 = addVert(side.x1, side.y1, stripTop);
-          addTri(v00, v10, v11, b);
-          addTri(v00, v11, v01, b);
+          addTri(v00, v10, v11, bandKey[b]);
+          addTri(v00, v11, v01, bandKey[b]);
         }
       }
     }
   }
 
-  // Group triangles by Z-band into seed regions; merge identical neighbours.
-  const buckets: { color: [number, number, number]; triangleIds: number[] }[] = [];
-  for (let b = 0; b < bandCount; b++) buckets.push({ color: bandColor[b], triangleIds: [] });
-  for (let t = 0; t < ti; t++) buckets[triBand[t]].triangleIds.push(t);
-
-  const merged: { color: [number, number, number]; triangleIds: number[] }[] = [];
-  for (const bucket of buckets) {
-    if (bucket.triangleIds.length === 0) continue;
-    const prev = merged[merged.length - 1];
-    if (prev && prev.color[0] === bucket.color[0] && prev.color[1] === bucket.color[1] && prev.color[2] === bucket.color[2]) {
-      // Loop-push (not spread) — same overflow guard as seedRegionsByZBand.
-      for (let i = 0; i < bucket.triangleIds.length; i++) prev.triangleIds.push(bucket.triangleIds[i]);
-    } else {
-      merged.push({ color: bucket.color, triangleIds: bucket.triangleIds });
-    }
+  // Group triangles by colour key into seed regions. One region per distinct
+  // colour (a cluster's top + the wall strips that share its filament), so the
+  // region list reads as "one entry per colour" — matching the colours the
+  // user sees and the filaments they'll load.
+  const byKey = new Map<number, number[]>();
+  for (let t = 0; t < ti; t++) {
+    const key = triKey[t];
+    let ids = byKey.get(key);
+    if (!ids) { ids = []; byKey.set(key, ids); }
+    ids.push(t);
   }
-  const seedRegions: SeedRegion[] = merged.map((m, i) => ({ color: m.color, triangleIds: m.triangleIds, name: `Layer ${i + 1}` }));
+  let regionIndex = 0;
+  const seedRegions: SeedRegion[] = [];
+  for (const [key, triangleIds] of byKey) {
+    const color = keyToColor.get(key) ?? [0.7, 0.7, 0.7];
+    seedRegions.push({ color, triangleIds, name: `Color ${++regionIndex}` });
+  }
 
   const mesh: ReliefMesh = {
     vertProperties,
