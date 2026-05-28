@@ -4,6 +4,7 @@ import { DEFAULT_LANGUAGE, isLanguage } from './engines/types';
 import { manifoldJsEngine, getManifoldModule } from './engines/manifoldJs';
 import { openscadEngine } from './engines/openscad';
 import { replicadEngine } from './engines/replicad';
+import { voxelEngine } from './engines/voxel';
 import { getActiveImports } from '../import/importedMesh';
 import { getDefaultCircularSegments } from './qualitySettings';
 
@@ -14,6 +15,7 @@ const engines: Record<Language, Engine> = {
   'manifold-js': manifoldJsEngine,
   'scad': openscadEngine,
   'replicad': replicadEngine,
+  'voxel': voxelEngine,
 };
 
 let activeLanguage: Language = DEFAULT_LANGUAGE;
@@ -111,6 +113,10 @@ const EXECUTE_TIMEOUT_MS: Record<Language, number> = {
   // assemblies) can rival SCAD's worst cases, so use the same 3-minute
   // ceiling as SCAD rather than the mesh kernel's tighter bound.
   'replicad':    180_000,
+  // Voxel meshing is pure JS (no WASM); large grids are the only slow case,
+  // and the mesher is linear in occupied voxels — the manifold-js ceiling is
+  // ample headroom.
+  'voxel':       60_000,
 };
 
 function rejectAllPending(err: Error): void {
