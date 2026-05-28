@@ -279,6 +279,27 @@
       "file": "enclosure_shell.partwright.json",
       "language": "replicad",
       "description": "A rectangular electronics-project enclosure shell with rounded outer corners, an inset lid lip, PCB mounting bosses, and side ventilation slots — showcasing BREP's exact filleted shells."
+    },
+    {
+      "id": "robot-buddy",
+      "name": "Robot Buddy",
+      "file": "robot_buddy.partwright.json",
+      "language": "replicad",
+      "description": "A friendly retro desktop robot with a domed head, antenna, chest panel, and two stubby arms — colorful BREP showcase with paint."
+    },
+    {
+      "id": "bird-feeder",
+      "name": "Bird Feeder",
+      "file": "bird_feeder.partwright.json",
+      "language": "replicad",
+      "description": "A gazebo-style hanging bird feeder with conical wood roof, revolved seed reservoir, lipped dish, and circular perches — showcasing revolve + circularPattern + paint."
+    },
+    {
+      "id": "pendant-lamp",
+      "name": "Pendant Chandelier",
+      "file": "pendant_lamp.partwright.json",
+      "language": "replicad",
+      "description": "A 5-arm pendant chandelier with brass arms, glass bulbs, central canopy, and a decorative finial — showcasing BREP.circularPattern + paint."
     }
   ]
 }
