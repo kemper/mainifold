@@ -36,6 +36,14 @@ type ManifoldClass = any;
 type ManifoldInstance = any;
 type LabelFn = (shape: ManifoldInstance, name: string) => ManifoldInstance;
 
+/** Closure-bound engine context attached to every SdfNode at construction
+ *  time so the chain method `.build(opts)` can lower through Manifold
+ *  without the caller threading the engine. The namespace factory in
+ *  createSdfNamespace seeds it on every primitive; chain methods + ops
+ *  inherit it from their input node(s). Pure-logic unit tests leave it
+ *  undefined — only `.build()` requires it. */
+interface BuildContext { Manifold: ManifoldClass; label: LabelFn }
+
 export type Vec3 = [number, number, number];
 export interface Box { min: Vec3; max: Vec3 }
 
@@ -114,6 +122,10 @@ interface NodeData {
    *  nested labels below it) is meshed as one chunk; nested labels are
    *  ignored because the outer label wins. */
   labelName?: string;
+  /** Engine binding for `.build()`. Threaded through chain methods and
+   *  ops from the input node(s). Undefined for pure-logic unit-test
+   *  factories — only callers of `.build()` need it. */
+  ctx?: BuildContext;
 }
 
 let nextId = 1;
@@ -129,6 +141,7 @@ export class SdfNode {
   /** @internal */ readonly _bounds: Box;
   /** @internal */ readonly _children: readonly SdfNode[];
   /** @internal */ readonly _partitionable: boolean;
+  /** @internal */ readonly _ctx: BuildContext | undefined;
 
   constructor(data: NodeData) {
     this.id = `sdf_${nextId++}`;
@@ -138,6 +151,9 @@ export class SdfNode {
     this._children = data.children;
     this._partitionable = data.partitionable;
     this.labelName = data.labelName;
+    // Inherit ctx from data, else from the first child that has one.
+    // Lets `union(a, b)` keep the engine binding from either operand.
+    this._ctx = data.ctx ?? (data.children.find(c => c._ctx !== undefined)?._ctx);
   }
 
   evaluate(x: number, y: number, z: number): number {
@@ -231,12 +247,19 @@ export class SdfNode {
 
   // ---- Build ----------------------------------------------------------
 
-  build(
-    Manifold: ManifoldClass,
-    label: LabelFn,
-    opts: SdfBuildOptions = {},
-  ): ManifoldInstance {
-    return buildSdf(this, Manifold, label, opts);
+  /** Lower this SDF tree to a Manifold. Requires the node to have been
+   *  created via `api.sdf` (which binds the engine context) — pure
+   *  unit-test factories produce nodes without context, and calling
+   *  `.build()` on those throws with a clear message. */
+  build(opts: SdfBuildOptions = {}): ManifoldInstance {
+    if (!this._ctx) {
+      throw new ValidationError(
+        '.build() can only be called on SDF nodes created via api.sdf.* — '
+        + 'the engine binding (Manifold + label) is set up by the namespace '
+        + 'and inherited through chain methods.',
+      );
+    }
+    return buildSdf(this, this._ctx.Manifold, this._ctx.label, opts);
   }
 }
 
@@ -886,8 +909,21 @@ export interface SdfNamespace {
 
 /** Construct a fresh SDF namespace for one engine run. Bound to the
  *  current run's Manifold class and `label` closure so labelled
- *  subtrees flow into the existing paint-by-label registry. */
+ *  subtrees flow into the existing paint-by-label registry. Every
+ *  primitive returned by this namespace carries the engine binding;
+ *  chain methods + ops inherit it from their input node(s). */
 export function createSdfNamespace(Manifold: ManifoldClass, label: LabelFn): SdfNamespace {
+  const ctx: BuildContext = { Manifold, label };
+
+  function bound(node: SdfNode): SdfNode {
+    // Attach the engine ctx to the node's internal field. Cast through
+    // unknown because _ctx is declared readonly — that's the contract
+    // for the rest of the codebase, but the namespace is the one place
+    // that legitimately seeds it.
+    (node as unknown as { _ctx: BuildContext })._ctx = ctx;
+    return node;
+  }
+
   function assertSdfNode(val: unknown, paramName: string): SdfNode {
     if (!(val instanceof SdfNode)) {
       throw new ValidationError(
@@ -898,13 +934,13 @@ export function createSdfNamespace(Manifold: ManifoldClass, label: LabelFn): Sdf
   }
 
   return {
-    sphere: (radius) => primSphere(radius),
-    box: (size) => primBox(size),
-    roundedBox: (size, radius) => primRoundedBox(size, radius),
-    cylinder: (radius, height) => primCylinder(radius, height),
-    torus: (R, r) => primTorus(R, r),
-    capsule: (a, b, radius) => primCapsule(a, b, radius),
-    gyroid: (cellSize, thickness) => primGyroid(cellSize, thickness),
+    sphere: (radius) => bound(primSphere(radius)),
+    box: (size) => bound(primBox(size)),
+    roundedBox: (size, radius) => bound(primRoundedBox(size, radius)),
+    cylinder: (radius, height) => bound(primCylinder(radius, height)),
+    torus: (R, r) => bound(primTorus(R, r)),
+    capsule: (a, b, radius) => bound(primCapsule(a, b, radius)),
+    gyroid: (cellSize, thickness) => bound(primGyroid(cellSize, thickness)),
     union: (...nodes) => {
       if (nodes.length === 0) throw new ValidationError('api.sdf.union(): need at least one SDF node.');
       let acc = assertSdfNode(nodes[0], 'union(nodes[0])');
@@ -914,7 +950,7 @@ export function createSdfNamespace(Manifold: ManifoldClass, label: LabelFn): Sdf
     smoothUnion: (a, b, k) => assertSdfNode(a, 'smoothUnion(a)').smoothUnion(assertSdfNode(b, 'smoothUnion(b)'), k),
     subtract: (a, b) => opSubtract(assertSdfNode(a, 'subtract(a)'), assertSdfNode(b, 'subtract(b)')),
     intersect: (a, b) => opIntersect(assertSdfNode(a, 'intersect(a)'), assertSdfNode(b, 'intersect(b)')),
-    build: (node, opts) => assertSdfNode(node, 'build(node)').build(Manifold, label, opts ?? {}),
+    build: (node, opts) => assertSdfNode(node, 'build(node)').build(opts ?? {}),
   };
 }
 

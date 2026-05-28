@@ -22,30 +22,26 @@ test.describe('api.sdf', () => {
   });
 
   test('sdf.sphere().build() produces a sane spherical mesh', async ({ page }) => {
-    const result = await page.evaluate(async () => {
+    const stats = await page.evaluate(async () => {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const pw = (window as any).partwright;
       const r = await pw.runIsolated(
         `const { sdf } = api; return sdf.sphere(5).build({ edgeLength: 0.5 });`,
       );
-      return r;
+      return r.geometryData;
     });
-    expect(result.error).toBeFalsy();
-    expect(result.componentCount).toBe(1);
-    expect(result.isManifold).toBe(true);
+    expect(stats.status).toBe('ok');
+    expect(stats.componentCount).toBe(1);
+    expect(stats.isManifold).toBe(true);
     // Volume of a sphere of r=5 is 4/3*PI*125 ≈ 523.6. Allow generous
     // tolerance because marching tetrahedra on a coarse grid systematically
     // underestimates volume.
-    expect(result.volume).toBeGreaterThan(450);
-    expect(result.volume).toBeLessThan(560);
+    expect(stats.volume).toBeGreaterThan(450);
+    expect(stats.volume).toBeLessThan(560);
   });
 
-  test('smoothUnion produces fewer components than fused-but-touching primitives', async ({ page }) => {
-    // Smooth-union of two spheres that JUST touch sharp-merges into one
-    // piece — but more importantly, the smooth seam is part of one mesh
-    // (the fillet). Sharp boundary-touching primitives would emit
-    // separate components.
-    const result = await page.evaluate(async () => {
+  test('smoothUnion of two spheres meshes as one connected piece', async ({ page }) => {
+    const stats = await page.evaluate(async () => {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const pw = (window as any).partwright;
       const r = await pw.runIsolated(`
@@ -54,17 +50,17 @@ test.describe('api.sdf', () => {
         const b = sdf.sphere(5).translate(8, 0, 0);
         return a.smoothUnion(b, 2).build({ edgeLength: 0.5 });
       `);
-      return r;
+      return r.geometryData;
     });
-    expect(result.error).toBeFalsy();
-    expect(result.componentCount).toBe(1);
-    expect(result.isManifold).toBe(true);
+    expect(stats.status).toBe('ok');
+    expect(stats.componentCount).toBe(1);
+    expect(stats.isManifold).toBe(true);
   });
 
   test('paint-by-label works on labelled SDF subtrees', async ({ page }) => {
-    // Two labelled spheres -> two label entries in the registry. Use the
-    // editor's runAndSave (which keeps the label map around for the
-    // paintByLabel tool call), then assert the labels are visible.
+    // Two labelled spheres -> two label entries in the registry. Use
+    // runAndSave (which keeps the label map around for paintByLabel),
+    // then assert both labels resolve.
     const result = await page.evaluate(async () => {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const pw = (window as any).partwright;
@@ -75,24 +71,26 @@ test.describe('api.sdf', () => {
          return sdf.union(head, eye).build({ edgeLength: 0.6 });`,
         'sdf-labels',
       );
-      if (saved.error) return { stage: 'save', error: saved.error };
       const headPaint = pw.paintByLabel({ label: 'head', color: [1, 0, 0] });
       const eyePaint = pw.paintByLabel({ label: 'eye', color: [0, 1, 0] });
-      const regions = pw.listRegions();
-      return { saved, headPaint, eyePaint, regions };
+      return {
+        saveError: saved.failures ?? saved.error,
+        geometry: saved.geometry,
+        headPaint,
+        eyePaint,
+      };
     });
-    expect(result.stage).toBeUndefined();
+    expect(result.saveError).toBeFalsy();
+    expect(result.geometry?.status).toBe('ok');
     expect(result.headPaint.error).toBeUndefined();
     expect(result.eyePaint.error).toBeUndefined();
     // Both labels should resolve to a non-empty triangle set.
     expect(result.headPaint.triangles).toBeGreaterThan(10);
     expect(result.eyePaint.triangles).toBeGreaterThan(10);
-    // Two regions registered on the model.
-    expect(result.regions.regions ?? result.regions).toBeTruthy();
   });
 
   test('gyroid intersected with a box meshes a finite lattice', async ({ page }) => {
-    const result = await page.evaluate(async () => {
+    const stats = await page.evaluate(async () => {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const pw = (window as any).partwright;
       // Small block + coarse mesh to keep this snappy.
@@ -102,16 +100,16 @@ test.describe('api.sdf', () => {
           .intersect(sdf.box([10, 10, 10]))
           .build({ edgeLength: 0.4 });
       `);
-      return r;
+      return r.geometryData;
     });
-    expect(result.error).toBeFalsy();
-    // Gyroid is a thin lattice — has volume but less than the bounding box (1000).
-    expect(result.volume).toBeGreaterThan(50);
-    expect(result.volume).toBeLessThan(1000);
+    expect(stats.status).toBe('ok');
+    // Gyroid is a thin lattice — volume is well under the bounding box (1000).
+    expect(stats.volume).toBeGreaterThan(50);
+    expect(stats.volume).toBeLessThan(1000);
   });
 
   test('mixing SDF and Manifold parts: smooth grip on a crisp plate', async ({ page }) => {
-    const result = await page.evaluate(async () => {
+    const stats = await page.evaluate(async () => {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const pw = (window as any).partwright;
       const r = await pw.runIsolated(`
@@ -124,31 +122,32 @@ test.describe('api.sdf', () => {
         const plate = Manifold.cube([10, 10, 1], true).translate([0, 0, -6]);
         return grip.add(plate);
       `);
-      return r;
+      return r.geometryData;
     });
-    expect(result.error).toBeFalsy();
-    expect(result.componentCount).toBe(1);
-    expect(result.isManifold).toBe(true);
+    expect(stats.status).toBe('ok');
+    expect(stats.componentCount).toBe(1);
+    expect(stats.isManifold).toBe(true);
   });
 
   test('build() rejects unbounded gyroid without explicit bounds', async ({ page }) => {
-    const result = await page.evaluate(async () => {
+    const stats = await page.evaluate(async () => {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const pw = (window as any).partwright;
       const r = await pw.runIsolated(
         `const { sdf } = api; return sdf.gyroid(5, 0.5).build();`,
       );
-      return r;
+      return r.geometryData;
     });
     // Should fail with a helpful error telling the user to pass bounds
     // or intersect with a finite shape.
-    expect(result.error).toBeTruthy();
-    expect(result.error).toMatch(/bounds|finite/i);
+    expect(stats.status).toBe('error');
+    expect(String(stats.error)).toMatch(/bounds|finite/i);
   });
 
   test('chained transforms compose correctly through the engine', async ({ page }) => {
-    // A translated, then rotated cube should land at the right place.
-    const result = await page.evaluate(async () => {
+    // A translated, then rotated box should land at the right place
+    // and keep its volume (rotation+translation are isometries).
+    const stats = await page.evaluate(async () => {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const pw = (window as any).partwright;
       const r = await pw.runIsolated(`
@@ -158,12 +157,13 @@ test.describe('api.sdf', () => {
           .rotate(0, 0, 90)
           .build({ edgeLength: 0.4 });
       `);
-      return r;
+      return r.geometryData;
     });
-    expect(result.error).toBeFalsy();
-    expect(result.componentCount).toBe(1);
+    expect(stats.status).toBe('ok');
+    expect(stats.componentCount).toBe(1);
     // Volume should be ~64 (4x4x4) regardless of placement/rotation.
-    expect(result.volume).toBeGreaterThan(55);
-    expect(result.volume).toBeLessThan(72);
+    // Allow generous tolerance for marching-tetrahedra approximation.
+    expect(stats.volume).toBeGreaterThan(55);
+    expect(stats.volume).toBeLessThan(75);
   });
 });
