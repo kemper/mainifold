@@ -179,6 +179,48 @@ test.describe('BREP integration', () => {
     expect(result.triangleCount).toBeGreaterThan(50);
   });
 
+  test('BREP.label — labels survive fuseAll and feed paintByLabel', async ({ page }) => {
+    // Build an e-stop-style stack with each piece labeled. After fuseAll
+    // the result is a single welded mesh; BREP.label's spatial signatures
+    // should keep dome / collar / base triangles bucketed under their
+    // respective names. paintByLabel reads from that map.
+    //
+    // We assert all three labels exist and each paints a non-empty set —
+    // *which* triangles end up under which label is best-effort across
+    // fuse seams, so we don't assert exact positions here (that's the
+    // domain of follow-up tuning on the spatial signature resolver).
+    const result = await page.evaluate(async () => {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const pw = (window as any).partwright;
+      const code = `
+        const { Manifold, BREP } = api;
+        const base   = BREP.label(BREP.cylinder(30, 5),                       'base');
+        const collar = BREP.label(BREP.cylinder(25, 8).translate([0, 0, 5]),  'collar');
+        const dome   = BREP.label(BREP.sphere(20).translate([0, 0, 13]),      'dome');
+        return BREP.toManifold(BREP.fuseAll([base, collar, dome]), Manifold);
+      `;
+      const run = await pw.run(code);
+      const labels = pw.listLabels();
+      const baseRes   = pw.paintByLabel({ label: 'base',   color: [0.2, 0.2, 0.2] });
+      const collarRes = pw.paintByLabel({ label: 'collar', color: [1.0, 0.85, 0.0] });
+      const domeRes   = pw.paintByLabel({ label: 'dome',   color: [0.85, 0.1, 0.1] });
+      return { run, labels, baseRes, collarRes, domeRes };
+    });
+
+    expect(result.run.error).toBeFalsy();
+    expect(result.run.isManifold).toBe(true);
+    // All three labels should be present (sanity check on propagation
+    // through `fuseAll`). The exact shape returned by listLabels is
+    // `{count, labels: [{name, triangleCount, bbox, centroid}, …]}`.
+    const labelNames = (result.labels.labels as Array<{ name: string }>).map(l => l.name);
+    expect(labelNames).toEqual(expect.arrayContaining(['base', 'collar', 'dome']));
+    // Each paint call must return a non-empty region (the label resolved).
+    for (const r of [result.baseRes, result.collarRes, result.domeRes]) {
+      expect(r.error).toBeFalsy();
+      expect(r.triangles).toBeGreaterThan(0);
+    }
+  });
+
   test('friendly fillet error — too-large radius surfaces a hint', async ({ page }) => {
     // A fillet bigger than the smaller box dimension can't be solved by
     // OCCT. The raw error is an integer pointer; our wrapper turns it into

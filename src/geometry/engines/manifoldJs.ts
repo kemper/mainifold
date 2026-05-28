@@ -4,7 +4,7 @@ import { createCurvesNamespace } from '../curves';
 import { createMeshOpsNamespace } from '../meshOps';
 import { getDefaultCircularSegments } from '../qualitySettings';
 import { getActiveImports } from '../../import/importedMesh';
-import { getBrepNamespace, consumeBrepAllocations, disposeBrepAllocationsExcept } from '../brepRuntime';
+import { getBrepNamespace, consumeBrepAllocations, disposeBrepAllocationsExcept, consumeBrepToManifoldLabels } from '../brepRuntime';
 
 /** Marker the sandbox attaches to render-only proxies (see `renderMesh` below).
  *  The engine looks for it on the user-returned object to decide whether the
@@ -288,7 +288,15 @@ export const manifoldJsEngine: Engine = {
       }
 
       const mesh = result.getMesh();
-      const labelMap = resolveLabelMap(mesh, labelRegistry);
+      // Merge any BREP-side labels that flowed through `BREP.toManifold(...)`
+      // calls during this run. Each call queued a `Map<label, Set<triangleId>>`
+      // built against the welded BREP tessellation — the same mesh-data we
+      // then handed to `Manifold.ofMesh`. As long as the user didn't run
+      // further booleans on the resulting Manifold (which would remap
+      // triangle ids), the ids are still valid in the final mesh. If the
+      // same label name comes from both BREP and an `api.label` call, the
+      // triangle sets union — friendliest answer.
+      const labelMap = mergeLabelMaps(resolveLabelMap(mesh, labelRegistry), consumeBrepToManifoldLabels());
       // Render-only proxies (from `api.renderMesh`) carry the marker so we can
       // signal downstream "this isn't a real Manifold — skip volume/genus/slice".
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -368,6 +376,30 @@ export const manifoldJsEngine: Engine = {
     }
   },
 };
+
+/** Union-merge any number of `Map<label, Set<triangleId>>` into a single
+ *  map. The primary use case is folding BREP `BREP.toManifold` labels in
+ *  alongside manifold-js `api.label` labels so `paintByLabel` sees both —
+ *  see the run() caller. Returns `undefined` only when every input was
+ *  undefined / empty (keeps the existing "no labels this run" sentinel). */
+function mergeLabelMaps(
+  primary: Map<string, Set<number>> | undefined,
+  extras: ReadonlyArray<Map<string, Set<number>>>,
+): Map<string, Set<number>> | undefined {
+  if (extras.length === 0) return primary;
+  const out: Map<string, Set<number>> = primary ?? new Map();
+  for (const m of extras) {
+    for (const [name, tris] of m) {
+      let set = out.get(name);
+      if (!set) {
+        set = new Set<number>();
+        out.set(name, set);
+      }
+      for (const t of tris) set.add(t);
+    }
+  }
+  return out.size === 0 ? undefined : out;
+}
 
 /** Walk the result mesh's `runOriginalID` + `runIndex` arrays and bucket
  *  triangles by the human-readable name registered for each id at

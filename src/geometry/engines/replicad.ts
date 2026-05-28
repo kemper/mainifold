@@ -1,6 +1,6 @@
 import type { Engine, MeshResult, ValidateResult } from './types';
 import { javaScriptSyntaxDiagnostics, runtimeDiagnostic } from '../sourceDiagnostics';
-import { ensureBrepLoaded, getBrepNamespace, consumeBrepAllocations, disposeBrepAllocationsExcept, type BrepShape } from '../brepRuntime';
+import { ensureBrepLoaded, getBrepNamespace, consumeBrepAllocations, disposeBrepAllocationsExcept, extractLabelMap, type BrepShape } from '../brepRuntime';
 import { getManifoldModule, manifoldJsEngine } from './manifoldJs';
 import { getActiveImports } from '../../import/importedMesh';
 
@@ -202,6 +202,16 @@ export async function runReplicadAsync(jsCode: string): Promise<MeshResult> {
     disposeLast();
     lastShape = liveShape;
 
+    // Pull BREP-side labels off the returned shape so `paintByLabel` works
+    // in replicad-language sessions without the user having to also build
+    // the geometry as labeled Manifolds. Empty map → undefined (engine
+    // convention for "no labels this run"). Triangle ids are the pre-
+    // Manifold-roundtrip ids; manifold-js's canonicalizer can reorder, but
+    // for this engine the BREP→Manifold step happens only via ofMesh
+    // (no boolean ops on the resulting Manifold) so ordering is preserved.
+    const brepLabels = extractLabelMap(liveShape);
+    const labelMap = brepLabels.size > 0 ? brepLabels : undefined;
+
     if (manifold) {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const canonical = (manifold as any).getMesh();
@@ -217,6 +227,7 @@ export async function runReplicadAsync(jsCode: string): Promise<MeshResult> {
         },
         manifold,
         error: null,
+        labelMap,
       };
     }
     // Non-manifold tessellation — render the raw triangles.
@@ -230,6 +241,7 @@ export async function runReplicadAsync(jsCode: string): Promise<MeshResult> {
       },
       manifold: null,
       error: null,
+      labelMap,
     };
   } catch (e: unknown) {
     // Tessellation failure — free the shape so we don't leak it.

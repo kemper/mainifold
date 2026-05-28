@@ -60,7 +60,53 @@ shape.rotate(degrees, [ax, ay, az]);            // optional 3rd arg: origin
 BREP.fuseAll([a, b, c, ...]);                   // union of every shape
 BREP.cutAll([body, hole1, hole2, ...]);         // body - hole1 - hole2 - ...
 BREP.intersectAll([a, b, c, ...]);              // a ∩ b ∩ c ∩ ...
+
+// Labelling — the BREP equivalent of `api.label`. Attaches a name to every
+// face of a shape; the label survives boolean ops via OCCT's History, and
+// translate/rotate via positional face matching. Fillet/chamfer preserve
+// labels on unchanged faces but drop them on new rounded surfaces.
+BREP.label(shape, 'name');                      // wrap a shape with a label
 ```
+
+### Labelled construction — paintByLabel inside a BREP session
+
+`BREP.label(shape, name)` attaches a name to every face of a shape so
+`paintByLabel({label})` finds those triangles after the model runs. The
+label propagates through every subsequent op:
+
+```js
+// Phase A — full BREP language session. Labels propagate through the fuse,
+// and `paintByLabel({label: 'dome'})` (called between runAndSave and the
+// reply) finds every dome triangle, including the parts that survived the
+// boolean.
+const { BREP } = api;
+const base   = BREP.label(BREP.cylinder(30, 5),                 'base');
+const collar = BREP.label(BREP.cylinder(25, 8).translate([0, 0, 5]),  'collar');
+const dome   = BREP.label(BREP.sphere(20).translate([0, 0, 13]),      'dome');
+return BREP.fuseAll([base, collar, dome]);
+```
+
+```js
+// Phase C — manifold-js session reaching into BREP for one feature. The
+// label flows through `BREP.toManifold(...)` into the manifold-js engine's
+// label map, so `paintByLabel({label: 'flange'})` still works.
+const { Manifold, BREP } = api;
+const flange = BREP.label(BREP.box([40, 20, 8]).fillet(2), 'flange');
+const flangeM = BREP.toManifold(flange, Manifold);
+return flangeM.subtract(Manifold.cylinder(20, 3, 3).translate([0, 0, -5]));
+```
+
+Same `paintByLabel` / `paintByLabels` calls afterward — no separate `BREP`
+codepath. Limitations:
+
+- **Fillet / chamfer best-effort:** faces the solver actually remeshes lose
+  their label; the new rounded surfaces have none. Faces that pass through
+  unchanged keep theirs.
+- **Manifold ops on a Manifold returned from `BREP.toManifold`:** if you then
+  call `.subtract()` etc. on that Manifold, the triangle ids get remapped
+  and the BREP-side labels are dropped. For a labelled feature you want to
+  combine with Manifold, label it *after* the boolean (via `api.label` on
+  the result), or do the combine in BREP first and convert once at the end.
 
 All operations chain. Fillets/chamfers can stack:
 

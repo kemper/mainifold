@@ -164,9 +164,45 @@ export interface EdgeFilter {
   inDirection?: [number, number, number];
 }
 
+/** Per-face spatial signature captured at label time. Used by the
+ *  resolver as the propagation mechanism for boolean ops — replicad
+ *  doesn't expose OCCT History cleanly enough to track face provenance
+ *  through `fuse`/`cut`/`intersect` in this opencascade.js build, so we
+ *  fall back on the spatial signature, which is robust across all face
+ *  types.
+ *
+ *  The signature carries *both* an axis-aligned bbox of the labeled face
+ *  and a small sample point cloud. Resolution uses a two-stage match:
+ *  bbox-containment with smallest-volume-wins (rejects faces outside the
+ *  bbox cheaply and picks the more-localised face when several contain),
+ *  then point-cloud nearest as a tie-breaker. Both work because they're
+ *  computed from the same per-face tessellation collected at label time.
+ *
+ *  Translate offsets the bbox and points; rotate transforms them via
+ *  Rodrigues' formula and refits the bbox envelope. Booleans take the
+ *  union of signatures from both inputs. */
+export interface LabelSignature {
+  label: string;
+  /** World-space axis-aligned bounding box of the labeled face. */
+  min: [number, number, number];
+  max: [number, number, number];
+  /** Flat sample of world-space points (x,y,z,x,y,z,…) on the face's
+   *  surface — used as the tie-breaker when bbox-containment alone is
+   *  ambiguous. Capped at 64 points to keep memory bounded. */
+  points: Float32Array;
+}
+
 export interface BrepShape {
   /** Internal — the underlying replicad AnyShape. Kept out of public docs. */
   readonly _shape: AnyShape;
+  /** Internal — face hashcode → label, propagated through every op. Empty
+   *  by default; populated by `BREP.label(shape, name)`. Kept on the wrapper
+   *  rather than on the OCCT shape itself because OCCT doesn't have a place
+   *  to hang user metadata that survives `clone()`. */
+  readonly _faceLabels: ReadonlyMap<number, string>;
+  /** Internal — spatial fallback signatures for label resolution. See the
+   *  comment on `LabelSignature`. Each labeled face contributes one. */
+  readonly _labelSignatures: ReadonlyArray<LabelSignature>;
   /** Round (radius) edges of the shape. Without a filter every edge is
    *  rounded; pass an `EdgeFilter` for selective filleting (the headline BREP
    *  feature mesh kernels can't match — e.g. only the top rim of a cylinder
@@ -201,9 +237,13 @@ export interface BrepShape {
   delete(): void;
 }
 
-function wrap(shape: AnyShape): BrepShape {
+function wrap(
+  shape: AnyShape,
+  faceLabels?: Map<number, string>,
+  labelSignatures?: ReadonlyArray<LabelSignature>,
+): BrepShape {
   if (!replicadModule) throw new Error('BREP runtime not loaded — call ensureBrepLoaded() first.');
-  const w: BrepShape = wrapInner(shape);
+  const w: BrepShape = wrapInner(shape, faceLabels ?? new Map(), labelSignatures ?? []);
   // Track every shape we hand out so the engine can free it at run end —
   // see the resource note at the top of the file. The returned value is
   // spared by the engine if user code returns it.
@@ -211,7 +251,25 @@ function wrap(shape: AnyShape): BrepShape {
   return w;
 }
 
-function wrapInner(shape: AnyShape): BrepShape {
+// ── Label-propagation helpers ───────────────────────────────────────────────
+
+/** Iterate the faces of a replicad shape in TopExp order (the same order
+ *  replicad's `.mesh()` walks for faceGroups), returning their hashcodes
+ *  paired with the live `Face` objects. The Face wrappers are still owned by
+ *  the shape — don't `.delete()` them. */
+function listFaceHashes(shape: AnyShape): Array<{ hash: number; face: AnyShape }> {
+  // `shape.faces` is replicad's enumerator. Each `face.hashCode` is the
+  // OCCT TopoDS_Face hashcode, which matches what `mesh()` puts on faceGroups.
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const faces: any[] = shape.faces;
+  return faces.map((f) => ({ hash: f.hashCode as number, face: f }));
+}
+
+function wrapInner(
+  shape: AnyShape,
+  faceLabels: Map<number, string>,
+  labelSignatures: ReadonlyArray<LabelSignature>,
+): BrepShape {
   // Helpers that capture `shape` in their closure. Each mutating op clones
   // before invoking replicad so the input wrapper stays usable — see the
   // immutability note at the top of the file. The clone count is one per op
@@ -219,6 +277,8 @@ function wrapInner(shape: AnyShape): BrepShape {
   // per-run cleanup absorbs it without ceremony.
   const w: BrepShape = {
     _shape: shape,
+    _faceLabels: faceLabels,
+    _labelSignatures: labelSignatures,
     fillet(radius: number, filter?: EdgeFilter) {
       if (typeof radius !== 'number' || !isFinite(radius) || radius <= 0) {
         throw new Error('BREP.fillet(radius): radius must be a positive number.');
@@ -226,7 +286,12 @@ function wrapInner(shape: AnyShape): BrepShape {
       try {
         const finder = filter ? buildEdgeFinder(filter) : undefined;
         const next = shape.clone().fillet(radius, finder);
-        return wrap(next);
+        // Fillet preserves most input faces (possibly remeshed); the new
+        // rounded surfaces have fresh hashcodes and no label. Survivor
+        // propagation is hashcode-equality. Spatial signatures pass through
+        // unchanged — the surfaces' world-space positions are preserved by
+        // fillet's local-rounding character.
+        return wrap(next, propagateByHashSurvivor(next, faceLabels), labelSignatures);
       } catch (e) {
         throw new Error(formatOcctError(e, 'fillet', { radius, hadFilter: !!filter }));
       }
@@ -238,7 +303,7 @@ function wrapInner(shape: AnyShape): BrepShape {
       try {
         const finder = filter ? buildEdgeFinder(filter) : undefined;
         const next = shape.clone().chamfer(distance, finder);
-        return wrap(next);
+        return wrap(next, propagateByHashSurvivor(next, faceLabels), labelSignatures);
       } catch (e) {
         throw new Error(formatOcctError(e, 'chamfer', { distance, hadFilter: !!filter }));
       }
@@ -246,7 +311,7 @@ function wrapInner(shape: AnyShape): BrepShape {
     fuse(other: BrepShape) {
       assertShape(other, 'BREP.fuse');
       try {
-        return wrap(shape.clone().fuse(other._shape.clone()));
+        return labeledBooleanOp('fuse', w, other);
       } catch (e) {
         throw new Error(formatOcctError(e, 'fuse', {}));
       }
@@ -254,7 +319,7 @@ function wrapInner(shape: AnyShape): BrepShape {
     cut(other: BrepShape) {
       assertShape(other, 'BREP.cut');
       try {
-        return wrap(shape.clone().cut(other._shape.clone()));
+        return labeledBooleanOp('cut', w, other);
       } catch (e) {
         throw new Error(formatOcctError(e, 'cut', {}));
       }
@@ -262,14 +327,23 @@ function wrapInner(shape: AnyShape): BrepShape {
     intersect(other: BrepShape) {
       assertShape(other, 'BREP.intersect');
       try {
-        return wrap(shape.clone().intersect(other._shape.clone()));
+        return labeledBooleanOp('intersect', w, other);
       } catch (e) {
         throw new Error(formatOcctError(e, 'intersect', {}));
       }
     },
     translate(offset: [number, number, number]) {
       assertVec3(offset, 'BREP.translate(offset)');
-      return wrap(shape.clone().translate(offset));
+      const next = shape.clone().translate(offset);
+      // Pure rigid transform — TopExp face order is preserved, so we pair
+      // the input/output face lists positionally and remap hashcodes. The
+      // spatial signatures get translated alongside so the centroid
+      // fallback continues to find them post-translate.
+      return wrap(
+        next,
+        propagateByTopExpOrder(shape, next, faceLabels),
+        translateSignatures(labelSignatures, offset),
+      );
     },
     rotate(degrees: number, axis: [number, number, number], origin: [number, number, number] = [0, 0, 0]) {
       if (typeof degrees !== 'number' || !isFinite(degrees)) {
@@ -277,7 +351,12 @@ function wrapInner(shape: AnyShape): BrepShape {
       }
       assertVec3(axis, 'BREP.rotate(axis)');
       assertVec3(origin, 'BREP.rotate(origin)');
-      return wrap(shape.clone().rotate(degrees, origin, axis));
+      const next = shape.clone().rotate(degrees, origin, axis);
+      return wrap(
+        next,
+        propagateByTopExpOrder(shape, next, faceLabels),
+        rotateSignatures(labelSignatures, degrees, axis, origin),
+      );
     },
     toMesh(opts) {
       return toMeshData(shape, opts);
@@ -287,6 +366,15 @@ function wrapInner(shape: AnyShape): BrepShape {
         throw new Error('BREP.toManifold(Manifold): pass api.Manifold as the first arg.');
       }
       const mesh = toMeshData(shape, opts);
+      // If this BrepShape carries labels, stash the resolved triangle-label
+      // map for the engine to merge into its run labelMap. The Manifold we
+      // return doesn't have a place to carry BREP-side labels itself (its
+      // `runOriginalID` system is for manifold-3d's own provenance), so the
+      // side-channel is how `paintByLabel` ends up seeing them.
+      if (faceLabels.size > 0 || labelSignatures.length > 0) {
+        const labelMap = buildLabelMapFromShape(shape, faceLabels, labelSignatures);
+        if (labelMap.size > 0) pendingToManifoldLabels.push(labelMap);
+      }
       return Manifold.ofMesh({
         numProp: mesh.numProp,
         vertProperties: mesh.vertProperties,
@@ -301,6 +389,145 @@ function wrapInner(shape: AnyShape): BrepShape {
     },
   };
   return w;
+}
+
+/** Translate every signature by `offset` — bbox AND cloud points. */
+function translateSignatures(sigs: ReadonlyArray<LabelSignature>, offset: [number, number, number]): LabelSignature[] {
+  if (sigs.length === 0) return [];
+  return sigs.map(s => {
+    const nextPts = new Float32Array(s.points.length);
+    for (let i = 0; i + 2 < s.points.length; i += 3) {
+      nextPts[i] = s.points[i] + offset[0];
+      nextPts[i + 1] = s.points[i + 1] + offset[1];
+      nextPts[i + 2] = s.points[i + 2] + offset[2];
+    }
+    return {
+      label: s.label,
+      min: [s.min[0] + offset[0], s.min[1] + offset[1], s.min[2] + offset[2]],
+      max: [s.max[0] + offset[0], s.max[1] + offset[1], s.max[2] + offset[2]],
+      points: nextPts,
+    };
+  });
+}
+
+/** Rotate every signature around `origin` by `degrees` about `axis`
+ *  (Rodrigues' formula). The bbox is refit from the rotated cloud points
+ *  so it stays tight regardless of axis. */
+function rotateSignatures(
+  sigs: ReadonlyArray<LabelSignature>,
+  degrees: number,
+  axis: [number, number, number],
+  origin: [number, number, number],
+): LabelSignature[] {
+  if (sigs.length === 0) return [];
+  const rad = (degrees * Math.PI) / 180;
+  const c = Math.cos(rad), s = Math.sin(rad);
+  const [ax, ay, az] = axis;
+  const al = Math.hypot(ax, ay, az);
+  if (al === 0) return sigs.map(x => ({
+    label: x.label,
+    min: [...x.min] as [number, number, number],
+    max: [...x.max] as [number, number, number],
+    points: new Float32Array(x.points),
+  }));
+  const ux = ax / al, uy = ay / al, uz = az / al;
+  const [ox, oy, oz] = origin;
+  return sigs.map(({ label, points }) => {
+    const nextPts = new Float32Array(points.length);
+    let mnx = Infinity, mny = Infinity, mnz = Infinity;
+    let mxx = -Infinity, mxy = -Infinity, mxz = -Infinity;
+    for (let i = 0; i + 2 < points.length; i += 3) {
+      const px = points[i] - ox, py = points[i + 1] - oy, pz = points[i + 2] - oz;
+      const dot = ux * px + uy * py + uz * pz;
+      const crx = uy * pz - uz * py;
+      const cry = uz * px - ux * pz;
+      const crz = ux * py - uy * px;
+      const rx = px * c + crx * s + ux * dot * (1 - c) + ox;
+      const ry = py * c + cry * s + uy * dot * (1 - c) + oy;
+      const rz = pz * c + crz * s + uz * dot * (1 - c) + oz;
+      nextPts[i] = rx; nextPts[i + 1] = ry; nextPts[i + 2] = rz;
+      if (rx < mnx) mnx = rx; if (rx > mxx) mxx = rx;
+      if (ry < mny) mny = ry; if (ry > mxy) mxy = ry;
+      if (rz < mnz) mnz = rz; if (rz > mxz) mxz = rz;
+    }
+    return {
+      label,
+      min: [mnx, mny, mnz],
+      max: [mxx, mxy, mxz],
+      points: nextPts,
+    };
+  });
+}
+
+/** Hash-survivor propagation — used by fillet/chamfer. Walk the output
+ *  shape's faces; whichever ones still appear in the input label map (by
+ *  hashcode) keep their label. Faces that got remeshed by the solver have
+ *  fresh hashes and no label. Cheap and correct for the typical case. */
+function propagateByHashSurvivor(outputShape: AnyShape, inputLabels: Map<number, string>): Map<number, string> {
+  if (inputLabels.size === 0) return new Map();
+  const next = new Map<number, string>();
+  for (const { hash } of listFaceHashes(outputShape)) {
+    const lab = inputLabels.get(hash);
+    if (lab !== undefined) next.set(hash, lab);
+  }
+  return next;
+}
+
+/** Positional propagation — used by translate/rotate. The TopoDS transform
+ *  produces a new shape whose face hashcodes differ from the input, but the
+ *  TopExp iteration order is preserved one-to-one. Walk both lists in
+ *  parallel and copy labels position-by-position. */
+function propagateByTopExpOrder(inputShape: AnyShape, outputShape: AnyShape, inputLabels: Map<number, string>): Map<number, string> {
+  if (inputLabels.size === 0) return new Map();
+  const inFaces = listFaceHashes(inputShape);
+  const outFaces = listFaceHashes(outputShape);
+  const next = new Map<number, string>();
+  // OCCT preserves face count and order under rigid transforms; if for any
+  // reason the counts diverge we fall back to hash-survivor so we never crash
+  // a paint workflow.
+  if (inFaces.length === outFaces.length) {
+    for (let i = 0; i < inFaces.length; i++) {
+      const lab = inputLabels.get(inFaces[i].hash);
+      if (lab !== undefined) next.set(outFaces[i].hash, lab);
+    }
+    return next;
+  }
+  return propagateByHashSurvivor(outputShape, inputLabels);
+}
+
+/** Boolean op for labeled shapes — uses replicad's `.fuse()` / `.cut()` /
+ *  `.intersect()` (which themselves wrap BRepAlgoAPI under the hood) and
+ *  propagates labels via *spatial signature* matching at toMesh time.
+ *
+ *  An earlier version of this function dropped down to BRepAlgoAPI directly
+ *  to use the OCCT History API for label provenance — that read better on
+ *  paper but `Modified()` / `Generated()` returned empty or surprising lists
+ *  for trimmed sphere faces in this opencascade.js build, mislabelling
+ *  features. Spatial-signature matching (per-labeled-face centroids,
+ *  carried on the wrapper) doesn't need History to be correct — it just
+ *  matches output faces to their nearest pre-fuse centroid at resolution
+ *  time. Robust across all op types, including ones we don't try to handle
+ *  via History (fillet, chamfer). */
+function labeledBooleanOp(
+  op: 'fuse' | 'cut' | 'intersect',
+  self: BrepShape,
+  other: BrepShape,
+): BrepShape {
+  if (!replicadModule) {
+    throw new Error('BREP runtime not loaded — call ensureBrepLoaded() first.');
+  }
+  const aClone = self._shape.clone();
+  const bClone = other._shape.clone();
+  let next: AnyShape;
+  if (op === 'fuse') next = aClone.fuse(bClone);
+  else if (op === 'cut') next = aClone.cut(bClone);
+  else next = aClone.intersect(bClone);
+  // Booleans don't transform geometry; both inputs' signatures pass through
+  // (the resolver picks nearest across the union at toMesh time). Face
+  // hashes don't propagate cleanly through replicad's fuse, so we leave
+  // _faceLabels empty for the result and lean entirely on signatures.
+  const mergedSignatures: LabelSignature[] = [...self._labelSignatures, ...other._labelSignatures];
+  return wrap(next, new Map(), mergedSignatures);
 }
 
 /** Translate an integer OCCT exception (or a plain JS error) into a
@@ -414,6 +641,124 @@ function toMeshData(shape: AnyShape, opts?: { tolerance?: number; angularToleran
   return weldDuplicateVertices(mesh.vertices, mesh.triangles);
 }
 
+/** Build a `Map<label, Set<triangleId>>` for a labeled BrepShape, where the
+ *  triangle ids index the WELDED mesh that `toMeshData` returns. Walks the
+ *  replicad tessellation's `faceGroups` (each one tagged with the BREP face
+ *  hashcode) and buckets the triangles by label. Returns an empty map when
+ *  the shape has no labels.
+ *
+ *  Two-stage resolution per faceGroup:
+ *    1. Hash match against `_faceLabels` — fast, exact, set by OCCT History.
+ *    2. Spatial fallback against `_labelSignatures` — robust for faces that
+ *       History missed (most commonly the trimmed-sphere face after a fuse;
+ *       OCCT's Modified() comes back empty in some builds and the hash
+ *       changes from the input). The face's centroid is matched against the
+ *       nearest label signature; close enough → label inherited.
+ *
+ *  The spatial fallback is conservative — it only fires when stage 1 misses,
+ *  and only when there's a "clearly closest" signature (the runner-up is
+ *  meaningfully farther). False positives near boundary triangles would
+ *  paint slightly-wrong regions, so the threshold is generous. */
+function buildLabelMapFromShape(
+  shape: AnyShape,
+  faceLabels: ReadonlyMap<number, string>,
+  labelSignatures: ReadonlyArray<LabelSignature> = [],
+): BrepLabelMap {
+  const out: BrepLabelMap = new Map();
+  if (faceLabels.size === 0 && labelSignatures.length === 0) return out;
+  const tolerance = 0.01;
+  const angularTolerance = 12;
+  const mesh = shape.mesh({ tolerance, angularTolerance });
+  // `faceGroups` is { start, count, faceId } where start/count index into the
+  // *raw* triangles array (pre-weld) and faceId is the face's hashcode. Our
+  // welder doesn't change triangle ids — only vertex indices inside each
+  // triangle get remapped — so a faceGroup's [start..start+count) range still
+  // maps directly to triangle ids in the welded mesh.
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const faceGroups: Array<{ start: number; count: number; faceId: number }> = mesh.faceGroups;
+  const vertices: number[] = mesh.vertices;
+  const triangles: number[] = mesh.triangles;
+
+  const addTriRange = (label: string, startTri: number, endTri: number) => {
+    let set = out.get(label);
+    if (!set) {
+      set = new Set<number>();
+      out.set(label, set);
+    }
+    for (let t = startTri; t < endTri; t++) set.add(t);
+  };
+
+  for (const group of faceGroups) {
+    const startTri = (group.start / 3) | 0;
+    const endTri = startTri + ((group.count / 3) | 0);
+    // Stage 1: hash match.
+    const lab = faceLabels.get(group.faceId);
+    if (lab !== undefined) {
+      addTriRange(lab, startTri, endTri);
+      continue;
+    }
+    // Stage 2: spatial resolution. Two passes:
+    //   1) bbox-containment with smallest-volume tiebreak — eliminates faces
+    //      whose source bbox doesn't even reach the output centroid, and
+    //      picks the more-localised face when several contain it (a sphere's
+    //      bbox engulfs a cylinder, so the cylinder wins on its own seam).
+    //   2) if no bbox contained the centroid (rare; happens when the boolean
+    //      slightly displaces a face past its source bbox), fall back to
+    //      nearest cloud point across all signatures so we still produce a
+    //      label rather than dropping the face.
+    if (labelSignatures.length === 0) continue;
+    let cx = 0, cy = 0, cz = 0, n = 0;
+    for (let t = startTri; t < endTri; t++) {
+      const i0 = triangles[t * 3] * 3, i1 = triangles[t * 3 + 1] * 3, i2 = triangles[t * 3 + 2] * 3;
+      cx += (vertices[i0] + vertices[i1] + vertices[i2]) / 3;
+      cy += (vertices[i0 + 1] + vertices[i1 + 1] + vertices[i2 + 1]) / 3;
+      cz += (vertices[i0 + 2] + vertices[i1 + 2] + vertices[i2 + 2]) / 3;
+      n++;
+    }
+    if (n === 0) continue;
+    cx /= n; cy /= n; cz /= n;
+
+    const eps = 1e-3;
+    // Pass 1: bbox containment + smallest-volume.
+    let bestLabel: string | null = null;
+    let bestVolume = Infinity;
+    for (const sig of labelSignatures) {
+      if (cx < sig.min[0] - eps || cx > sig.max[0] + eps) continue;
+      if (cy < sig.min[1] - eps || cy > sig.max[1] + eps) continue;
+      if (cz < sig.min[2] - eps || cz > sig.max[2] + eps) continue;
+      const dx = Math.max(sig.max[0] - sig.min[0], eps);
+      const dy = Math.max(sig.max[1] - sig.min[1], eps);
+      const dz = Math.max(sig.max[2] - sig.min[2], eps);
+      const vol = dx * dy * dz;
+      if (vol < bestVolume) {
+        bestVolume = vol;
+        bestLabel = sig.label;
+      }
+    }
+    if (bestLabel !== null) {
+      addTriRange(bestLabel, startTri, endTri);
+      continue;
+    }
+    // Pass 2: nearest cloud point across all signatures.
+    let bestD = Infinity;
+    for (const sig of labelSignatures) {
+      const pts = sig.points;
+      for (let i = 0; i + 2 < pts.length; i += 3) {
+        const dx = pts[i] - cx;
+        const dy = pts[i + 1] - cy;
+        const dz = pts[i + 2] - cz;
+        const d = dx * dx + dy * dy + dz * dz;
+        if (d < bestD) {
+          bestD = d;
+          bestLabel = sig.label;
+        }
+      }
+    }
+    if (bestLabel !== null) addTriRange(bestLabel, startTri, endTri);
+  }
+  return out;
+}
+
 /** Merge vertices that share a position (within a tiny tolerance) and rewrite
  *  triangle indices to point at the canonical copy. Returns a `BrepMesh`
  *  whose vertex/triangle counts reflect the welded shape — the input arrays
@@ -477,6 +822,14 @@ export interface BrepNamespace {
   cylinder(r: number, h: number): BrepShape;
   /** Sphere of radius `r` centred at the origin. */
   sphere(r: number): BrepShape;
+  /** Attach a name to every face of a shape. The label survives the BREP
+   *  pipeline: through boolean ops (`fuse`/`cut`/`intersect`), through rigid
+   *  transforms (`translate`/`rotate`), and best-effort through
+   *  `fillet`/`chamfer` (faces remeshed by the solver lose their label;
+   *  unchanged ones keep it). At `.toMesh()` / `.toManifold()` time the
+   *  labels resolve to a triangle-set per label so `paintByLabel({label})`
+   *  works just like the manifold-js `api.label` path. */
+  label(shape: BrepShape, name: string): BrepShape;
   /** Boolean union over an array of shapes — `BREP.fuseAll([a, b, c, …])`
    *  returns `a ∪ b ∪ c ∪ …`. Each input is treated immutably (the wrapper
    *  clones internally), so the originals stay usable. Throws on empty input;
@@ -529,6 +882,55 @@ function reduceShapes(
   return acc;
 }
 
+// ── Label provenance side-channel ───────────────────────────────────────────
+//
+// Each BrepShape carries a `_faceLabels: Map<number, string>` mapping OCCT
+// face hashcodes to user-chosen names. The labels are attached by
+// `BREP.label(shape, name)` (which sets every face of `shape` to `name`)
+// and propagated through every operation:
+//
+//   - translate / rotate: faces preserve TopExp iteration order; we walk the
+//     input + output face lists in parallel and remap hashcodes by position.
+//   - fillet / chamfer: most input faces survive (slightly modified); new
+//     rounded surfaces are unlabeled. We use replicad's wrappers and rely on
+//     hashcode-equality for the survivors — losing labels on faces that the
+//     fillet solver remeshed beyond recognition, which is acceptable.
+//   - fuse / cut / intersect: drop down to OCCT directly (BRepAlgoAPI_Fuse_3
+//     etc.) and use the BooleanOperation's History (.Modified / .Generated)
+//     to find which output faces came from which input face. This is the
+//     "correct" propagation path the AI feedback specifically asked for.
+//
+// At toMesh() / toManifold() time we walk the result's tessellation
+// faceGroups (replicad emits `{start, count, faceId}` per BREP face where
+// `faceId` is the face's hashcode) and bucket triangles by label. The
+// engine surfaces that as a `Map<label, Set<triangleId>>` so `paintByLabel`
+// works identically to the manifold-js `api.label` path.
+
+/** A label map shaped exactly like manifold-js's engine output, so the rest
+ *  of the painting pipeline doesn't need a BREP-specific path. */
+export type BrepLabelMap = Map<string, Set<number>>;
+
+/** Per-run pending labels — populated by `BrepShape.toManifold()` calls
+ *  inside a sandbox so the engine can drain + merge into its labelMap when
+ *  the run ends. Module-level for the same reason as `brepAllocations`. */
+let pendingToManifoldLabels: BrepLabelMap[] = [];
+
+/** Engine helper: take and clear the queued labelMaps from BREP.toManifold
+ *  calls during the just-finished run. The manifold-js engine merges these
+ *  into its own labelRegistry-derived map so `paintByLabel` finds them. */
+export function consumeBrepToManifoldLabels(): BrepLabelMap[] {
+  const out = pendingToManifoldLabels;
+  pendingToManifoldLabels = [];
+  return out;
+}
+
+/** Engine helper for the replicad-language engine: pull the resolved
+ *  `Map<label, Set<triangleId>>` out of a returned BrepShape so the engine
+ *  can attach it to the MeshResult and paintByLabel works. */
+export function extractLabelMap(shape: BrepShape): BrepLabelMap {
+  return buildLabelMapFromShape(shape._shape, shape._faceLabels, shape._labelSignatures);
+}
+
 let cachedNamespace: BrepNamespace | null = null;
 
 /** Returns the BREP namespace if `ensureBrepLoaded()` has completed,
@@ -562,6 +964,71 @@ export function createBrepNamespace(): BrepNamespace {
         throw new Error('BREP.sphere(r): r must be a positive number.');
       }
       return wrap(makeSphere(r));
+    },
+    label(shape, name) {
+      assertShape(shape, 'BREP.label');
+      if (typeof name !== 'string' || name.length === 0) {
+        throw new Error('BREP.label(shape, name): name must be a non-empty string.');
+      }
+      // Stamp every current face with the given name. Two pieces of state
+      // travel forward through subsequent ops:
+      //   - `labels` (face hashcode → name) — fast exact path that works
+      //     when face hashes happen to survive an op.
+      //   - `signatures` (face centroid + label) — spatial fallback used
+      //     by the resolver when hashes don't carry. Centroids come from
+      //     the per-face triangulation that replicad emits while building
+      //     the whole-shape mesh — that's the cleanest robust way to find
+      //     each face's centre regardless of surface type (planar, cylinder,
+      //     sphere, NURBS) and is what `buildLabelMapFromShape` consumes
+      //     too, so the resolver and labeler see the same data.
+      const labels = new Map<number, string>(shape._faceLabels);
+      const signatures: LabelSignature[] = [...shape._labelSignatures];
+      const mesh = shape._shape.mesh({ tolerance: 0.01, angularTolerance: 12 });
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const faceGroups: Array<{ start: number; count: number; faceId: number }> = mesh.faceGroups;
+      const vertices: number[] = mesh.vertices;
+      const triangles: number[] = mesh.triangles;
+      // Per-face signature: bbox + sample point cloud. Both come from the
+      // face's portion of the global tessellation; the cap on MAX_PTS keeps
+      // a pathological fine-tess sphere from pinning megabytes per signature.
+      const MAX_PTS = 64;
+      for (const group of faceGroups) {
+        labels.set(group.faceId, name);
+        const startTri = (group.start / 3) | 0;
+        const endTri = startTri + ((group.count / 3) | 0);
+        const seen = new Set<number>();
+        let mnx = Infinity, mny = Infinity, mnz = Infinity;
+        let mxx = -Infinity, mxy = -Infinity, mxz = -Infinity;
+        for (let t = startTri; t < endTri; t++) {
+          for (let k = 0; k < 3; k++) {
+            const vIdx = triangles[t * 3 + k];
+            seen.add(vIdx);
+            const i = vIdx * 3;
+            const x = vertices[i], y = vertices[i + 1], z = vertices[i + 2];
+            if (x < mnx) mnx = x; if (x > mxx) mxx = x;
+            if (y < mny) mny = y; if (y > mxy) mxy = y;
+            if (z < mnz) mnz = z; if (z > mxz) mxz = z;
+          }
+        }
+        if (seen.size === 0) continue;
+        const all = Array.from(seen);
+        const stride = all.length > MAX_PTS ? Math.max(1, Math.floor(all.length / MAX_PTS)) : 1;
+        const points = new Float32Array(Math.min(all.length, MAX_PTS) * 3);
+        let p = 0;
+        for (let i = 0; i < all.length && p < points.length; i += stride) {
+          const idx = all[i] * 3;
+          points[p++] = vertices[idx];
+          points[p++] = vertices[idx + 1];
+          points[p++] = vertices[idx + 2];
+        }
+        signatures.push({
+          label: name,
+          min: [mnx, mny, mnz],
+          max: [mxx, mxy, mxz],
+          points: points.subarray(0, p),
+        });
+      }
+      return wrap(shape._shape.clone(), labels, signatures);
     },
     fuseAll(shapes) {
       return reduceShapes(shapes, 'fuse', 'BREP.fuseAll');
