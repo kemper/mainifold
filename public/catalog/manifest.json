@@ -237,6 +237,48 @@
       "file": "modular_drawer_bin.partwright.json",
       "language": "scad",
       "description": "A stackable storage bin with two compartments, rounded corners, and stacking lugs. Built with BOSL2's cuboid(rounding=) for filleted edges, plus translate-and-anchor cyl() placement for the lugs."
+    },
+    {
+      "id": "pipe-flange",
+      "name": "Pipe Flange",
+      "file": "pipe_flange.partwright.json",
+      "language": "replicad",
+      "description": "An ANSI-style pipe flange with a 6-bolt circle, central bore, chamfered face, and beveled neck — showcasing BREP's exact selective edge filleting on a mechanically realistic part."
+    },
+    {
+      "id": "machine-knob",
+      "name": "Machine Tool Knob",
+      "file": "machine_knob.partwright.json",
+      "language": "replicad",
+      "description": "A precision machine-tool grip knob with a finger-grip skirt, chamfered top, domed crown, and a shaft bore — showcasing BREP's exact chamfers and fillets on rotational geometry."
+    },
+    {
+      "id": "butt-hinge",
+      "name": "Butt Hinge",
+      "file": "butt_hinge.partwright.json",
+      "language": "replicad",
+      "description": "A classic interlocking butt hinge: two flat leaves, three knuckles, and a continuous pin — showcasing BREP's exact cylindrical surfaces and clean selective fillets."
+    },
+    {
+      "id": "v-pulley",
+      "name": "V-Groove Pulley",
+      "file": "v_pulley.partwright.json",
+      "language": "replicad",
+      "description": "A precision V-belt pulley wheel with a beveled drive groove around its circumference, a central hub bore, and chamfered side rims — showcasing BREP's exact rotational geometry and angled surfaces."
+    },
+    {
+      "id": "test-dir",
+      "name": "Test Dir",
+      "file": "test_dir.partwright.json",
+      "language": "replicad",
+      "description": "test"
+    },
+    {
+      "id": "butt-hinge-test",
+      "name": "Butt Hinge Test",
+      "file": "butt_hinge_test.partwright.json",
+      "language": "replicad",
+      "description": "test"
     }
   ]
 }
