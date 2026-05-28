@@ -303,6 +303,16 @@ export class SdfNode {
   polarRepeat(count: number, opts: PolarRepeatOptions = {}): SdfNode {
     assertNumber(count, 'polarRepeat(count)', { min: 1, integer: true });
     const o = assertObject(opts, 'polarRepeat(opts)') ?? {};
+    // Targeted hint: someone porting from polarArray will reach for
+    // `angle` first. Domain-warp folds need full periodicity so partial
+    // sweeps aren't supported; point them at the right tool instead of
+    // the generic "unknown key" error.
+    if ('angle' in o) {
+      throw new ValidationError(
+        'polarRepeat(opts): `angle` is not supported — polarRepeat is full-revolution only because the domain-warp fold needs angular periodicity. '
+        + 'For a partial sweep, use polarArray(count, {axis, angle, radius}) instead. See /ai/sdf.md#combinators.',
+      );
+    }
     assertNoUnknownKeys(o as Record<string, unknown>, POLAR_REPEAT_FIELDS, 'polarRepeat(opts)');
     const axis = o.axis === undefined ? 'z' : assertEnum(o.axis, ['x', 'y', 'z'] as const, 'polarRepeat(axis)');
     const radius = o.radius === undefined ? 0 : assertNumber(o.radius, 'polarRepeat(radius)', { min: 0 }) as number;

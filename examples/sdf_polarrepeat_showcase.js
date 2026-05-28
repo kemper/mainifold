@@ -56,8 +56,12 @@ const tooth = sdf
   .taper(-0.012, 'x');
 
 // Continuous root cylinder so the teeth share a smooth annular base
-// (otherwise neighbouring teeth would only touch at one line).
-const rootCyl = sdf.cylinder(R_ROOT + 0.4, TEETH_T);
+// (otherwise neighbouring teeth would only touch at one line). Cored
+// out to a true annulus so the central web stays visible — a solid
+// disk here would swallow the web entirely, leaving no paintable
+// surface for that region post-union.
+const rootCyl = sdf.cylinder(R_ROOT + 0.4, TEETH_T)
+  .subtract(sdf.cylinder(R_WEB - 0.6, TEETH_T + 1));
 
 // One sector = root ring chunk + one tooth, smoothly welded at the fillet.
 const sector = rootCyl.smoothUnion(tooth, 0.6);

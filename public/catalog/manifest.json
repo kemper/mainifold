@@ -384,6 +384,27 @@
       "file": "sdf_helix_lamp_standard.partwright.json",
       "language": "manifold-js",
       "description": "An architectural light post whose square-cross-section shaft spirals around an OFFSET vertical axis, paired with a perforated screen wall built by repeat() clipped to a slab and topped by a roundedCylinder lamp cap. Four painted regions; showcases the new offset-twist, repeat, and roundedCylinder primitives."
+    },
+    {
+      "id": "sdf-spur-wheel",
+      "name": "SDF 28-Tooth Spur Wheel",
+      "file": "sdf_polarrepeat_showcase.partwright.json",
+      "language": "manifold-js",
+      "description": "A spur/turbine wheel — single tooth (roundedBox + taper) folded 28-fold via polarRepeat, plus a 6-hole polarArray lightening web and a bored central hub. The canonical \"polarArray for low counts, polarRepeat for high\" showcase, in three painted regions."
+    },
+    {
+      "id": "sdf-perforated-faceplate",
+      "name": "SDF Perforated Faceplate",
+      "file": "sdf_repeatn_showcase.partwright.json",
+      "language": "manifold-js",
+      "description": "A speaker-style faceplate built on the finite-count repeatN combinator — a 7×5 grid of through-holes subtracted from a rounded slab, a recessed bezel, and a 4×1 row of LED-indicator bumps. The textbook \"no intersect needed\" case in three painted regions."
+    },
+    {
+      "id": "sdf-graded-tpms-study",
+      "name": "SDF Graded TPMS Study",
+      "file": "sdf_graded_tpms_study.partwright.json",
+      "language": "manifold-js",
+      "description": "A femur-inspired model exercising all three new graded TPMS variants: gradedSchwarzP for the cortical shaft (radial density), gradedDiamond for the marrow canal (axial trabecular grading), and gradedLidinoid for the femoral head (spherical-radial). Five painted regions."
     }
   ]
 }

@@ -859,4 +859,8 @@ describe('sdf polarRepeat (domain-warp ring)', () => {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     expect(() => primSphere(1).polarRepeat(6, { spread: 10 } as any)).toThrow();
   });
+  it('rejects { angle } with a targeted "use polarArray" hint', () => {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    expect(() => primSphere(1).polarRepeat(6, { angle: 180 } as any)).toThrow(/polarArray/);
+  });
 });

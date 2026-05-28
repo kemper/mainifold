@@ -91,6 +91,30 @@ const newEntries: SdfEntry[] = [
     name: 'SDF Helix Lamp Standard',
     description: 'An architectural light post whose square-cross-section shaft spirals around an OFFSET vertical axis, paired with a perforated screen wall built by repeat() clipped to a slab and topped by a roundedCylinder lamp cap. Four painted regions; showcases the new offset-twist, repeat, and roundedCylinder primitives.',
   },
+  {
+    exampleFile: 'sdf_polarrepeat_showcase.js',
+    paintFile: 'sdf_polarrepeat_showcase.paint.json',
+    catalogFile: 'sdf_polarrepeat_showcase.partwright.json',
+    id: 'sdf-spur-wheel',
+    name: 'SDF 28-Tooth Spur Wheel',
+    description: 'A spur/turbine wheel — single tooth (roundedBox + taper) folded 28-fold via polarRepeat, plus a 6-hole polarArray lightening web and a bored central hub. The canonical "polarArray for low counts, polarRepeat for high" showcase, in three painted regions.',
+  },
+  {
+    exampleFile: 'sdf_repeatn_showcase.js',
+    paintFile: 'sdf_repeatn_showcase.paint.json',
+    catalogFile: 'sdf_repeatn_showcase.partwright.json',
+    id: 'sdf-perforated-faceplate',
+    name: 'SDF Perforated Faceplate',
+    description: 'A speaker-style faceplate built on the finite-count repeatN combinator — a 7×5 grid of through-holes subtracted from a rounded slab, a recessed bezel, and a 4×1 row of LED-indicator bumps. The textbook "no intersect needed" case in three painted regions.',
+  },
+  {
+    exampleFile: 'sdf_graded_tpms_study.js',
+    paintFile: 'sdf_graded_tpms_study.paint.json',
+    catalogFile: 'sdf_graded_tpms_study.partwright.json',
+    id: 'sdf-graded-tpms-study',
+    name: 'SDF Graded TPMS Study',
+    description: 'A femur-inspired model exercising all three new graded TPMS variants: gradedSchwarzP for the cortical shaft (radial density), gradedDiamond for the marrow canal (axial trabecular grading), and gradedLidinoid for the femoral head (spherical-radial). Five painted regions.',
+  },
 ];
 
 interface PaintManifest {
