@@ -271,7 +271,7 @@
       "name": "Precision L-Bracket",
       "file": "l_bracket.partwright.json",
       "language": "replicad",
-      "description": "A right-angle steel bracket with selective fillets on the inside web, rounded outside corners, mounting holes, and a chamfered top — showcasing BREP's exact selective edge rounding."
+      "description": "A right-angle steel bracket with a large concave fillet on the inside web, rounded outer tip edges, and four mounting holes — showcasing BREP's exact selective edge rounding."
     },
     {
       "id": "enclosure-shell",
@@ -279,13 +279,6 @@
       "file": "enclosure_shell.partwright.json",
       "language": "replicad",
       "description": "A rectangular electronics-project enclosure shell with rounded outer corners, an inset lid lip, PCB mounting bosses, and side ventilation slots — showcasing BREP's exact filleted shells."
-    },
-    {
-      "id": "test-baseline",
-      "name": "Test Baseline",
-      "file": "test_baseline.partwright.json",
-      "language": "replicad",
-      "description": "test"
     }
   ]
 }
