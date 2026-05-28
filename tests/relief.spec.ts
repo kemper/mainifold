@@ -426,6 +426,52 @@ test.describe('Relief Studio', () => {
     expect(res.hasBlue).toBe(false);
   });
 
+  // Regression: editing a region's colour from the Edit colors panel (which
+  // happens while Paint mode is closed) used to leave the imported model's
+  // baked tri-colour buffer stale, because reconcilePaintedGeometry's color-
+  // refresh was gated on `isPaintActive()`. The Relief Studio drives the same
+  // updateRegionColor / removeRegion APIs the paint UI does, so the gate has
+  // to go for those edits to be felt on the model.
+  test('updateRegionColor refreshes an imported model with no paint mode open', async ({ page }) => {
+    await page.goto('/editor');
+    await waitForEngine(page);
+    const res = await page.evaluate(async () => {
+      const c = document.createElement('canvas');
+      c.width = 60; c.height = 60;
+      const x = c.getContext('2d')!;
+      x.fillStyle = '#ff0000'; x.fillRect(0, 0, 30, 60);
+      x.fillStyle = '#0000ff'; x.fillRect(30, 0, 30, 60);
+      const src = c.toDataURL('image/png');
+      const pw = (window as unknown as { partwright: Record<string, (...a: unknown[]) => unknown> }).partwright;
+      await pw.importImageAsRelief({
+        src, mode: 'quantized',
+        options: { widthMm: 30, resolution: 50, maxHeight: 1, baseThickness: 0.6 },
+        quantized: { output: 'flat', shape: 'rect' },
+      }) as { sessionId?: string };
+      const regions = pw.listRegions() as Array<{ id: number; color: [number, number, number] }>;
+      const redRegion = regions.find(r => r.color[0] > 0.5 && r.color[1] < 0.4 && r.color[2] < 0.4);
+      if (!redRegion) return { ok: false, reason: 'no red region', regions };
+      // Render the model from the +Z (top-down) view BEFORE the edit so we can
+      // confirm the rendered pixels actually shift after updateRegionColor.
+      const before = pw.renderView({ elevation: 89.9, azimuth: 0, ortho: true, size: 96 }) as string;
+      // Drive the same code path the Edit colors panel uses — change the
+      // region's colour through the regions module while Paint UI is closed.
+      const mod = await import('/src/color/regions.ts');
+      mod.updateRegionColor(redRegion.id, [0, 1, 0]); // red → green
+      // Wait one task so the async reconcile listener fires.
+      await new Promise(resolve => setTimeout(resolve, 100));
+      const after = pw.listRegions() as Array<{ id: number; color: [number, number, number] }>;
+      const updated = after.find(r => r.id === redRegion.id);
+      const afterImg = pw.renderView({ elevation: 89.9, azimuth: 0, ortho: true, size: 96 }) as string;
+      return { ok: true, updatedColor: updated?.color, sameImage: before === afterImg };
+    });
+    expect(res.ok).toBe(true);
+    expect(res.updatedColor?.[1]).toBeGreaterThan(0.9);
+    // The rendered top-down view MUST change once the region recolours, even
+    // though Paint mode is closed — that's the bug the user reported.
+    expect(res.sameImage).toBe(false);
+  });
+
   // Wave 3: chamferMm > 0 keeps the tile valid (same triangle count, since
   // chamfer reuses existing vertices) but raises the perimeter's z to the
   // chamfered level. Geometry stays manifold.

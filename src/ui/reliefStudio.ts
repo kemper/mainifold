@@ -34,7 +34,7 @@ export interface ReliefStudioHandle {
   toggle(): void;
   isOpen(): boolean;
   refresh(): void;
-  /** Show or hide the small "Edit colours" chip that re-opens the studio
+  /** Show or hide the small "Edit colors" chip that re-opens the studio
    *  after the user has closed it. The host decides when to surface it (only
    *  when the active session is image-derived). */
   setChipVisible(visible: boolean): void;
@@ -167,10 +167,10 @@ export function mountReliefStudio(host: HTMLElement, deps: ReliefStudioDeps): Re
 
   // --- Colour palette ---
   const filSection = document.createElement('div');
-  filSection.appendChild(sectionLabel('Model colours'));
+  filSection.appendChild(sectionLabel('Edit colors'));
   const filHint = document.createElement('div');
   filHint.className = 'text-[10px] text-zinc-500 mb-1.5 leading-snug';
-  filHint.textContent = 'Click a swatch to recolour the painted area, click the name to rename, or × to remove. Paint with the Paint tool to add new colours.';
+  filHint.textContent = 'Click a swatch to recolor the painted area, click the name to rename, or × to remove. Paint with the Paint tool to add new colors.';
   filSection.appendChild(filHint);
   const filList = document.createElement('div');
   filList.className = 'flex flex-col gap-1';
@@ -197,7 +197,7 @@ export function mountReliefStudio(host: HTMLElement, deps: ReliefStudioDeps): Re
 
   host.appendChild(panel);
 
-  // "Edit colours" chip — a small viewport overlay button that re-opens the
+  // "Edit colors" chip — a small viewport overlay button that re-opens the
   // studio after the user has closed it. Sits in the same corner as the
   // panel; visible only when the host opts in (relief sessions).
   const chip = document.createElement('button');
@@ -206,11 +206,11 @@ export function mountReliefStudio(host: HTMLElement, deps: ReliefStudioDeps): Re
     'hidden absolute top-2 left-2 z-10 px-2.5 py-1.5 rounded-lg text-xs font-medium ' +
     'bg-zinc-800/90 backdrop-blur text-zinc-100 border border-zinc-600/50 shadow ' +
     'hover:bg-zinc-700/90 transition-colors flex items-center gap-1.5';
-  chip.title = 'Edit colours · open the Relief Studio';
+  chip.title = 'Edit colors · open the Relief Studio';
   const chipSwatch = document.createElement('span');
   chipSwatch.className = 'inline-block w-3 h-3 rounded-sm bg-gradient-to-br from-rose-400 via-amber-400 to-sky-500 border border-black/30';
   const chipLabel = document.createElement('span');
-  chipLabel.textContent = 'Edit colours';
+  chipLabel.textContent = 'Edit colors';
   chip.append(chipSwatch, chipLabel);
   chip.addEventListener('click', () => {
     chip.classList.add('hidden');
@@ -502,7 +502,7 @@ export function mountReliefStudio(host: HTMLElement, deps: ReliefStudioDeps): Re
     },
   };
 
-  // The Model colours list mirrors the region store; any external mutation
+  // The Edit colors list mirrors the region store; any external mutation
   // (painting, undo, updateRegionColor from the paint UI) should re-render
   // the list so the two views stay in sync.
   onRegionsChange(() => { if (handle.isOpen()) renderFilaments(); });

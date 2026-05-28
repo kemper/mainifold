@@ -105,7 +105,7 @@ import { initTheme, getTheme, setTheme } from './ui/theme';
 import type { Theme } from './ui/theme';
 import { initPaintUI, isPaintOpen, forceDeactivate as closePaintMenu } from './color/paintUI';
 import { initSimplifyUI, isSimplifyOpen, refreshSimplifyIfOpen, forceDeactivate as closeSimplifyMenu, type SimplifyHandlers } from './ui/simplifyUI';
-import { updatePaintMesh, setOnRegionPainted, isActive as isPaintActive } from './color/paintMode';
+import { updatePaintMesh, setOnRegionPainted } from './color/paintMode';
 import { initAnnotateUI, isAnnotateOpen, closeMenu as closeAnnotateMenu } from './annotations/annotateUI';
 import { isActive as isSelectActive, getSelectedId as getSelectedAnnotationId } from './annotations/selectMode';
 import {
@@ -861,7 +861,10 @@ function reconcilePaintedGeometrySync(): void {
   const refinedActive = currentMeshData !== paintBaseMesh || hasRefineDescriptors();
   if (!refinedActive) {
     lastStrokeList = [];
-    if (isPaintActive()) paintedColorRefresh();
+    // Mirror the async tick (see reconcilePaintedGeometryAsyncTick) — color
+    // mutations from the Edit colors panel must refresh the mesh even when
+    // the Paint UI is closed.
+    paintedColorRefresh();
     return;
   }
   if (strokesNow.length === lastStrokeList.length + 1 && prefixRefEqual(strokesNow, lastStrokeList)) {
@@ -956,7 +959,13 @@ async function reconcilePaintedGeometryAsyncTick(): Promise<void> {
   const refinedActive = currentMeshData !== paintBaseMesh || hasRefineDescriptors();
   if (!refinedActive) {
     lastStrokeList = [];
-    if (isPaintActive()) paintedColorRefresh();
+    // Re-bake per-triangle colours regardless of whether the Paint UI is
+    // open — the Relief Studio's Edit colors panel also mutates regions
+    // (updateRegionColor / removeRegion) and the user expects the model to
+    // update in realtime from there too. paintedColorRefresh is a no-op
+    // when there are no regions or paint visibility is off, so calling it
+    // unconditionally is cheap.
+    paintedColorRefresh();
     return;
   }
 
@@ -1534,7 +1543,7 @@ async function main() {
   function closeReliefStudio(): void {
     if (!reliefStudio) return;
     reliefStudio.hide();
-    // Surface the "Edit colours" chip so users can find their way back to the
+    // Surface the "Edit colors" chip so users can find their way back to the
     // palette without remembering the toolbar button.
     const sid = getState().session?.id ?? null;
     reliefStudio.setChipVisible(isReliefSession(sid));
@@ -3149,7 +3158,7 @@ async function main() {
   initMeasureToggle(clipControls);
   initOrbitLockToggle(clipControls);
 
-  // Relief / Edit colours toggle in the viewport overlay — paint/simplify are
+  // Relief / Edit colors toggle in the viewport overlay — paint/simplify are
   // alongside this button so the colour palette is discoverable from the
   // same place as the other model-editing tools (was previously in the top
   // toolbar where it kept getting clipped behind Show Code).
@@ -3157,7 +3166,7 @@ async function main() {
   reliefViewportBtn.id = 'relief-viewport-toggle';
   reliefViewportBtn.className = 'px-2 py-1 rounded text-xs bg-zinc-800/80 backdrop-blur text-zinc-400 hover:text-zinc-200 hover:bg-zinc-700/80 transition-colors border border-zinc-600/50';
   reliefViewportBtn.textContent = '✦ Relief';
-  reliefViewportBtn.title = 'Edit colours / make a tile or relief from an image';
+  reliefViewportBtn.title = 'Edit colors / make a tile or relief from an image';
   reliefViewportBtn.addEventListener('click', () => toggleReliefStudio());
   const paintBtnEl = clipControls.querySelector('#paint-toggle');
   if (paintBtnEl) clipControls.insertBefore(reliefViewportBtn, paintBtnEl);
