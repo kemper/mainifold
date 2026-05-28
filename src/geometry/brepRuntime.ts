@@ -1038,13 +1038,13 @@ export interface BrepNamespace {
    *  the XZ plane use `axis: [0,1,0]`; for YZ use `[1,0,0]`. */
   circularPattern(shape: BrepShape, count: number, opts: {
     radius: number;
+    /** Rotation axis. Must be one of `[1,0,0]`, `[0,1,0]`, `[0,0,1]` — the
+     *  perpendicular-seed-axis logic only handles cardinal axes; an
+     *  off-cardinal vector silently produced a tilted-cone layout.
+     *  Defaults to `[0,0,1]` (rotation about Z). */
     axis?: [number, number, number];
-    /** When true, also rotate each copy so its +X faces outward. Defaults
-     *  to true — set false if your shape is already rotationally symmetric
-     *  around its own +Z. */
-    rotateCopies?: boolean;
     /** Sweep angle in degrees. Defaults to 360 (full circle, evenly spaced).
-     *  Pass 90 + count: 5 to fit five copies across a 90° arc. */
+     *  Pass `angle: 90, count: 5` to fit five copies across a 90° arc. */
     angle?: number;
   }): BrepShape;
   /** N copies of `shape` arranged on a straight line, fused into one
@@ -1070,11 +1070,13 @@ export interface BrepNamespace {
    *  rotational shape `cylinder`/`cone`/`sphere` can't express. */
   revolve(profile: Array<[number, number]>): BrepShape;
   /** Hollow the solid by removing the face(s) that match `openFaceFilter`
-   *  and leaving a wall of `thickness` units. Without a filter, hollows
-   *  with no openings (closed shell). The face filter shape mirrors
-   *  EdgeFilter loosely: `{minZ}`, `{maxZ}`, `{topZ: true}`,
-   *  `{bottomZ: true}` etc. */
-  shell(shape: BrepShape, thickness: number, openFaceFilter?: FaceFilter): BrepShape;
+   *  and leaving a wall of `thickness` units. The filter is REQUIRED —
+   *  OCCT's shell needs to know which face to remove for the opening.
+   *  The face filter shape mirrors EdgeFilter loosely: `{topZ: true}`,
+   *  `{bottomZ: true}`, `{minZ}`, `{maxZ}`, `{normalAxis}`.
+   *  Labels on faces that survive the shell are preserved (the same
+   *  hash-survivor propagation that `fillet`/`chamfer` use). */
+  shell(shape: BrepShape, thickness: number, openFaceFilter: FaceFilter): BrepShape;
   /** Identity check used by sandbox runtime and engines. */
   readonly _isBrep: true;
 }
@@ -1094,6 +1096,19 @@ export interface FaceFilter {
   bottomZ?: boolean;
   /** Pick faces whose outward normal is within 15° of this axis. */
   normalAxis?: [number, number, number];
+}
+
+/** Identify which cardinal axis the input vector aligns with. Returns
+ *  `'x' | 'y' | 'z' | null`. Tolerant of unit-vector roundoff (the input
+ *  doesn't have to be exactly `[1,0,0]`, just dominant on one axis with
+ *  the others below 1e-3). */
+function pickCardinalAxis(v: [number, number, number]): 'x' | 'y' | 'z' | null {
+  const ax = Math.abs(v[0]), ay = Math.abs(v[1]), az = Math.abs(v[2]);
+  const TOL = 1e-3;
+  if (ax > 0.99 && ay < TOL && az < TOL) return 'x';
+  if (ay > 0.99 && ax < TOL && az < TOL) return 'y';
+  if (az > 0.99 && ax < TOL && ay < TOL) return 'z';
+  return null;
 }
 
 function reduceShapes(
@@ -1242,7 +1257,7 @@ export function getBrepNamespace(): BrepNamespace | null {
 /** Build the namespace. Requires `ensureBrepLoaded()` to have completed. */
 export function createBrepNamespace(): BrepNamespace {
   if (!replicadModule) throw new Error('BREP runtime not loaded — call ensureBrepLoaded() first.');
-  const { makeBaseBox, makeCylinder, makeSphere, drawCircle, draw, FaceFinder } = replicadModule;
+  const { makeBaseBox, makeCylinder, makeSphere, drawCircle, draw } = replicadModule;
   return {
     box(size) {
       assertVec3(size, 'BREP.box(size)');
@@ -1359,7 +1374,7 @@ export function createBrepNamespace(): BrepNamespace {
       if (!opts || typeof opts !== 'object') {
         throw new Error('BREP.circularPattern(shape, count, opts): opts is required ({radius, axis?, rotateCopies?, angle?}).');
       }
-      const { radius, axis = [0, 0, 1], rotateCopies = true, angle = 360 } = opts;
+      const { radius, axis = [0, 0, 1], angle = 360 } = opts;
       if (typeof radius !== 'number' || !isFinite(radius) || radius < 0) {
         throw new Error('BREP.circularPattern.radius must be a non-negative finite number.');
       }
@@ -1367,37 +1382,32 @@ export function createBrepNamespace(): BrepNamespace {
       if (typeof angle !== 'number' || !isFinite(angle) || angle <= 0) {
         throw new Error('BREP.circularPattern.angle must be a positive finite number (degrees).');
       }
+      // Cardinal-axis restriction — the perpendicular-seed picker below
+      // assumes the rotation axis is one of [±1,0,0] / [0,±1,0] / [0,0,±1].
+      // An off-cardinal vector silently produced a tilted-cone layout
+      // (the seed offset wasn't actually perpendicular to the axis), so
+      // reject it explicitly rather than ship a wrong-looking pattern.
+      const cardinal = pickCardinalAxis(axis);
+      if (cardinal === null) {
+        throw new Error('BREP.circularPattern.axis must be one of [1,0,0], [0,1,0], [0,0,1] (or their negatives). Off-cardinal rotation axes are not supported.');
+      }
       // Full-circle: divide evenly into count slots, no copy at θ=2π
       // duplicating θ=0. Partial: span [0, angle] inclusive with count
       // points (so 5 copies over 90° lands at 0/22.5/45/67.5/90 deg).
       const isFull = Math.abs(angle - 360) < 1e-9;
       const step = isFull ? angle / count : (count > 1 ? angle / (count - 1) : 0);
-      const ax = axis[0], ay = axis[1], az = axis[2];
-      const al = Math.sqrt(ax * ax + ay * ay + az * az);
-      if (al < 1e-9) {
-        throw new Error('BREP.circularPattern.axis must be a non-zero vector.');
-      }
-      const ux = ax / al, uy = ay / al, uz = az / al;
+      // Perpendicular seed offset — pick whichever cardinal direction is
+      // perpendicular to the rotation axis. Translate→rotate puts each
+      // copy in the plane perpendicular to the rotation axis.
+      const perp: [number, number, number] =
+        cardinal === 'z' ? [radius, 0, 0] :
+        cardinal === 'x' ? [0, radius, 0] :
+        [radius, 0, 0];
       const copies: BrepShape[] = [];
       for (let i = 0; i < count; i++) {
         const theta = i * step;
-        // Build a copy offset by `radius` along an axis perpendicular to
-        // `axis`, then rotate around `axis` by theta. Default axis [0,0,1]
-        // places the seed at [radius, 0, 0]; other axes pick a sensible
-        // perpendicular ([1,0,0] for Z=±1, [0,1,0] otherwise) so the
-        // pattern lies in the plane perpendicular to `axis`.
-        const perp: [number, number, number] = Math.abs(uz) > 0.99
-          ? [radius, 0, 0]
-          : Math.abs(ux) > 0.99
-            ? [0, radius, 0]
-            : [radius, 0, 0];
         let copy = shape.translate(perp);
-        if (theta !== 0) copy = copy.rotate(theta, [ux, uy, uz]);
-        if (rotateCopies && theta !== 0) {
-          // The translate→rotate above already rotates the copy's local
-          // frame, so its +X faces outward at the new angular position.
-          // Nothing more to do — flag is here for API parity.
-        }
+        if (theta !== 0) copy = copy.rotate(theta, axis);
         copies.push(copy);
       }
       return reduceShapes(copies, 'fuse', 'BREP.circularPattern');
@@ -1440,18 +1450,22 @@ export function createBrepNamespace(): BrepNamespace {
       if (rBottom === 0 && rTop === 0) {
         throw new Error('BREP.cone(rBottom, rTop, h): both radii zero — degenerate cone.');
       }
-      // Build a trapezoidal profile in the XZ half-plane (x ≥ 0) and
-      // revolve around Z. Bottom-left at (0,0), bottom-right at (rB,0),
-      // top-right at (rT,h), top-left at (0,h). If a radius is zero,
-      // collapse to the apex.
-      const EPS = 1e-6;
-      const rB = Math.max(rBottom, EPS);
-      const rT = Math.max(rTop, EPS);
-      const pen = draw([0, 0])
-        .hLineTo(rB)
-        .lineTo([rT, h])
-        .hLineTo(0)
-        .close();
+      // Build a trapezoidal / triangular profile in the XZ half-plane
+      // (x ≥ 0) and revolve around Z. When either radius is exactly
+      // zero, build a true triangle that terminates at the Z axis so
+      // the revolve produces a true apex (not a frustum with an
+      // EPS-radius cap that misbehaves under .fillet / .shell).
+      let pen;
+      if (rTop === 0) {
+        // Bottom disk → apex at (0, h).
+        pen = draw([0, 0]).hLineTo(rBottom).lineTo([0, h]).close();
+      } else if (rBottom === 0) {
+        // Apex at (0, 0) → top disk.
+        pen = draw([0, 0]).lineTo([rTop, h]).hLineTo(0).close();
+      } else {
+        // Frustum — both radii nonzero.
+        pen = draw([0, 0]).hLineTo(rBottom).lineTo([rTop, h]).hLineTo(0).close();
+      }
       const profile = pen.sketchOnPlane('XZ');
       return wrap(profile.revolve([0, 0, 1]));
     },
@@ -1498,7 +1512,7 @@ export function createBrepNamespace(): BrepNamespace {
     shell(shape, thickness, openFaceFilter) {
       assertShape(shape, 'BREP.shell');
       if (typeof thickness !== 'number' || !isFinite(thickness) || thickness === 0) {
-        throw new Error('BREP.shell(shape, thickness, filter?): thickness must be a non-zero finite number (positive = outward, negative = inward).');
+        throw new Error('BREP.shell(shape, thickness, filter): thickness must be a non-zero finite number (positive = outward, negative = inward).');
       }
       if (!openFaceFilter) {
         throw new Error('BREP.shell(shape, thickness, filter): an openFaceFilter is required — OCCT shell needs to know which face to remove for the opening. Try {topZ: true} to open the top face of a box/cylinder.');
@@ -1506,7 +1520,11 @@ export function createBrepNamespace(): BrepNamespace {
       try {
         const finderFn = (f: AnyShape) => applyFaceFilter(f, openFaceFilter, shape._shape);
         const next = shape._shape.clone().shell(thickness, finderFn);
-        return wrap(next);
+        // Faces that survive the shell keep their position; labels
+        // propagate via the same hash-survivor mechanism fillet/chamfer
+        // use. Removed face's label is dropped (correct — it no longer
+        // exists). Signatures pass through unchanged.
+        return wrap(next, propagateByHashSurvivor(next, new Map(shape._faceLabels)), shape._labelSignatures);
       } catch (e) {
         const msg = e instanceof Error ? e.message : String(e);
         throw new Error(`BREP.shell failed (thickness: ${thickness}): ${msg}
@@ -1514,8 +1532,6 @@ Hints:
   • Shell thickness must be small relative to the smallest local curvature radius — try a smaller value.
   • The openFaceFilter must match exactly one face (the open side). For a box or cylinder, {topZ: true} picks the top face. For a sphere, this op generally won't work (no flat face to remove).`);
       }
-      // Use FaceFinder for the filter; suppress the unused-symbol noise.
-      void FaceFinder;
     },
     _isBrep: true,
   };
