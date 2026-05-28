@@ -317,10 +317,17 @@
     },
     {
       "id": "lighthouse-brep",
-      "name": "test",
+      "name": "Coastal Lighthouse",
       "file": "lighthouse_brep.partwright.json",
       "language": "replicad",
-      "description": "test"
+      "description": "A tall round lighthouse with red-and-white tower stripes, balcony railing, domed lantern, and conical cap — colorful BREP showcase with paint."
+    },
+    {
+      "id": "coffee-mug",
+      "name": "Coffee Mug",
+      "file": "coffee_mug.partwright.json",
+      "language": "replicad",
+      "description": "A white ceramic coffee mug with a colored rim band, painted coffee inside, and a curved torus handle — showcasing BREP's shell op + paint."
     }
   ]
 }

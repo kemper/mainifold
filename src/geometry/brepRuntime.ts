@@ -877,6 +877,20 @@ function buildLabelMapFromShape(
 
     const eps = 1e-3;
     // Pass 1: bbox containment + smallest-volume.
+    //
+    // Known limitation — five subagents reported `paintByLabel` painting
+    // wrong triangles on multi-feature BREP composites. The
+    // smallest-volume tiebreak fails for nested features (an eye sphere
+    // inside a head cone): both bboxes contain a head surface triangle's
+    // centroid near the eye, and the smaller eye-bbox wins even though
+    // the triangle is geometrically on the head's surface. A point-cloud
+    // distance tiebreak was tried but didn't help — the 64-sample-per-face
+    // signatures are too sparse to reliably distinguish "on the eye
+    // surface" from "on the head surface near the eye". Documented as a
+    // known limit in `public/ai/replicad.md` "Gotchas cheat sheet" with
+    // the working workaround: coordinate-based selectors
+    // (paintInCylinder / paintSlab / paintInBox / paintNear) for
+    // multi-feature composites.
     let bestLabel: string | null = null;
     let bestVolume = Infinity;
     for (const sig of labelSignatures) {
