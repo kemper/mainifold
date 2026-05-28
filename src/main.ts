@@ -127,7 +127,11 @@ import { setBucketTolerance as setPaintBucketTolerance, getBucketTolerance as ge
 import { buildStrokeMesh, buildRefinedMesh, brushRefineRegion, strokeFootprintTriangles, deriveSampleNormals, buildGeodesicField, tangentBasis, childrenByParent, type BrushStroke, type BrushShape, type RefineRegion } from './color/subdivide';
 import { refineInWorker, SubdivisionAbortError, terminateSubdivisionWorker } from './color/subdivisionClient';
 import { startProgress, endProgress, __setProgressModalDelayForTests } from './ui/progressModal';
-import { initEditorLock, syncLockState, setUnlockHandlers } from './color/editorLock';
+import { initEditorLock, syncLockState, setUnlockHandlers, disableRun, enableRun } from './color/editorLock';
+import { setReadOnlyReason } from './editor/editorAccess';
+import { asLanguage } from './storage/languageFallback';
+import { encodeShare, decodeShare, validateSharePayloadShape, ShareUnsupportedError } from './share/shareLink';
+import { openShareModal, renderSharedBanner, renderSharedOverlay } from './share/shareUI';
 import { buildAdjacency, findCoplanarRegion, findConnectedFromSeed, resolveSeed, findNearestTriangle, type AdjacencyGraph } from './color/adjacency';
 import { findSlabTriangles, slabRefineRegion, smoothEdgeForResolution } from './color/slabPaint';
 import { findBoxTriangles, findShapeTriangles, shapeRefineRegion } from './color/boxPaint';
@@ -289,6 +293,38 @@ let currentLostLabels: string[] | null = null;
 
 // #geometry-data element — always-updated machine-readable state
 let geometryDataEl: HTMLElement;
+
+// === Shared-link preview mode ===
+//
+// When the editor is showing a decoded share link (`/editor#share=…`), it is a
+// strictly READ-ONLY preview of UNTRUSTED code: nothing the sharer wrote may
+// execute until the viewer explicitly Forks. This module-scoped flag is the
+// chokepoint guard — `runCode`/`runCodeSync` (and therefore the console
+// `partwright.run()`/`runAndSave()`, which route through them) and
+// `saveCurrentVersion` all refuse while it's set. It's separate from the
+// CodeMirror read-only flag (which only blocks typing) and from the multi-tab
+// viewer flag.
+let _sharedPreview = false;
+
+/** True while the editor is showing a decoded share link (read-only preview).
+ *  Execution + save chokepoints bail when this returns true. */
+function isSharedPreview(): boolean {
+  return _sharedPreview;
+}
+
+/** The encoded value of the current `#share=` hash, or null when the hash isn't
+ *  a share link. Used to detect share links and to guard hashchange re-entrancy. */
+function getShareHashValue(): string | null {
+  const hash = window.location.hash;
+  if (!hash.startsWith('#share=')) return null;
+  const value = hash.slice('#share='.length);
+  return value.length > 0 ? value : null;
+}
+
+/** True when the URL hash carries a share link. */
+function hasShareHash(): boolean {
+  return getShareHashValue() !== null;
+}
 
 /** Paint selector containment test. `centroid` is the historical default
  *  (a triangle is in the selection when its centroid lies inside the
@@ -1255,6 +1291,9 @@ async function saveCurrentVersion(label?: string): Promise<
   | { id: string; index: number; label: string }
   | { skipped: true; reason: string }
 > {
+  if (isSharedPreview()) {
+    return { error: 'This is a read-only shared preview. Fork it first to make edits you can save.' };
+  }
   if (!getState().session) {
     return { error: 'No active session. Call createSession() or openSession(id) first.' };
   }
@@ -1338,8 +1377,10 @@ function shouldShowLanding(): boolean {
   const path = window.location.pathname;
   const params = new URLSearchParams(window.location.search);
   // Landing if at root path AND no query params that indicate a specific view
+  // AND no share-link hash (a bare `/#share=…` must open the shared preview, not
+  // the landing page).
   const isRootPath = path === '/' || path === '';
-  return isRootPath && !params.has('view') && !params.has('session') && !params.has('gallery') && !params.has('versions') && !params.has('images') && !params.has('diff') && !params.has('notes') && !params.has('data');
+  return isRootPath && !hasShareHash() && !params.has('view') && !params.has('session') && !params.has('gallery') && !params.has('versions') && !params.has('images') && !params.has('diff') && !params.has('notes') && !params.has('data');
 }
 
 function shouldShowHelp(): boolean {
@@ -2015,6 +2056,87 @@ async function main() {
     catch (e) { showToast(e instanceof Error ? e.message : '3MF export failed', { variant: 'warn' }); }
   };
 
+  // Hard cap on the encoded share string. Browsers and chat apps choke on very
+  // long URLs; past this we drop the thumbnail once and, if still too big, abort
+  // with a toast rather than minting a link that silently won't open.
+  const MAX_SHARE_ENCODED_CHARS = 1_500_000;
+
+  /** Encode the current committed version into a `#share=…` link and open the
+   *  copy modal. Saves the current buffer first (exportSession reads the SAVED
+   *  version), feature-detects CompressionStream, and trims the thumbnail if the
+   *  link is too large before giving up. */
+  const actionShareLink = async (): Promise<void> => {
+    if (typeof CompressionStream === 'undefined') {
+      showToast('Sharing needs a newer browser', { variant: 'warn' });
+      return;
+    }
+    if (!getState().session || !engineOk) {
+      showToast('Open or create a design before sharing.', { variant: 'warn' });
+      return;
+    }
+    // exportSession reads the SAVED version from IndexedDB, so commit the current
+    // buffer first — both to give a fresh /editor (currentVersion: null) a
+    // version to export and to capture any unsaved edits the user is sharing.
+    const saved = await saveCurrentVersion();
+    if ('error' in saved) {
+      showToast(saved.error, { variant: 'warn' });
+      return;
+    }
+    const state = getState();
+    const versionIndex = state.currentVersion?.index;
+    if (versionIndex === undefined) {
+      showToast('No saved version to share yet.', { variant: 'warn' });
+      return;
+    }
+
+    const sessionId = state.session!.id;
+    // Single-version, lean payload: no chat, no notes. Name the shared session
+    // after the current part when the session is multi-part so the preview reads
+    // sensibly (the share covers only the current part's current version).
+    const exported = await exportSession(sessionId, {
+      versionIndices: [versionIndex],
+      includeChat: false,
+      includeNotes: false,
+    });
+    if (!exported) {
+      showToast('Could not prepare this design for sharing.', { variant: 'warn' });
+      return;
+    }
+    if (state.parts.length > 1 && state.currentPart?.name) {
+      exported.session = { ...exported.session, name: state.currentPart.name };
+    }
+
+    try {
+      let encoded = await encodeShare(exported);
+      // If the link is too long, drop the (heavy) thumbnail and try once more.
+      if (encoded.length > MAX_SHARE_ENCODED_CHARS && exported.versions[0]?.thumbnail) {
+        const slimmed = {
+          ...exported,
+          versions: exported.versions.map((v, i) =>
+            i === 0 ? (() => { const { thumbnail: _t, ...rest } = v; return rest; })() : v,
+          ),
+        };
+        encoded = await encodeShare(slimmed);
+      }
+      if (encoded.length > MAX_SHARE_ENCODED_CHARS) {
+        showToast('Design too large to share via link', { variant: 'warn' });
+        return;
+      }
+      const url = `${location.origin}/editor#share=${encoded}`;
+      openShareModal(url, encoded.length);
+    } catch (e) {
+      if (e instanceof ShareUnsupportedError) {
+        showToast('Sharing needs a newer browser', { variant: 'warn' });
+      } else {
+        showToast('Could not create a share link.', { variant: 'warn' });
+        errorLog.capture({ level: 'error', source: 'app', message: `share encode failed: ${e instanceof Error ? e.message : String(e)}` });
+      }
+    }
+  };
+
+  /** True when the share action can run: an active session on a ready engine. */
+  const canShare = (): boolean => !!getState().session && engineOk && !isSharedPreview();
+
   // Create toolbar
   createToolbar(editorUI, {
     onGoHome: () => {
@@ -2068,6 +2190,7 @@ async function main() {
       const ok = await exportSessionJSON(undefined, opts);
       if (!ok) alert('No active session to export. Save a version first.');
     },
+    onShareLink: () => { void actionShareLink(); },
     onExportRawCode: () => {
       exportRawCode(getValue(), getActiveLanguage());
     },
@@ -2272,6 +2395,7 @@ async function main() {
     { id: 'export-stl', title: 'Export STL', hint: 'Export', keywords: 'download print', run: actionExportSTL, enabled: () => currentMeshData !== null },
     { id: 'export-obj', title: 'Export OBJ', hint: 'Export', keywords: 'download wavefront', run: actionExportOBJ, enabled: () => currentMeshData !== null },
     { id: 'export-3mf', title: 'Export 3MF', hint: 'Export', keywords: 'download print color', run: actionExport3MF, enabled: () => currentMeshData !== null },
+    { id: 'share-link', title: 'Share design (copy link)', hint: 'Share', keywords: 'url public link copy fork readonly', run: () => { void actionShareLink(); }, enabled: canShare },
     { id: 'toggle-ai', title: 'Toggle AI panel', hint: 'View', keywords: 'chat assistant drawer', run: () => toggleAiPanel() },
     { id: 'toggle-diagnostics', title: 'Toggle diagnostic log', hint: 'View', keywords: 'errors warnings console', run: () => toggleDiagnosticsPanel() },
     { id: 'open-catalog', title: 'Open catalog', hint: 'Navigate', keywords: 'examples premade browse', run: () => { void showCatalogPage(); } },
@@ -2598,6 +2722,149 @@ async function main() {
     updateDocumentTitle({ page: 'editor' });
   }
 
+  // === Shared-link preview mode (read-only) ===
+
+  // DOM owned by shared-preview mode, removed on exit so nothing leaks.
+  let sharedBannerEl: HTMLElement | null = null;
+  let sharedOverlayEl: HTMLElement | null = null;
+
+  /** Toggle a control's disabled state + dimmed/non-interactive styling. Used to
+   *  neutralize Paint, Save, and the language toggle in shared preview without
+   *  re-implementing each control's own logic. */
+  function setControlNeutralized(id: string, off: boolean): void {
+    const el = document.getElementById(id);
+    if (!el) return;
+    if ('disabled' in el) (el as HTMLButtonElement).disabled = off;
+    el.classList.toggle('opacity-40', off);
+    el.classList.toggle('pointer-events-none', off);
+  }
+
+  /** Enter read-only shared-preview mode: refuse execution + save (via the
+   *  module flag), hold the editor read-only, and neutralize Run / Paint / Save /
+   *  language toggle. Mounts the banner above the editor and the overlay (with
+   *  the decoded thumbnail + Fork CTA) over the viewport. */
+  function enterSharedMode(thumbnail: string | undefined): void {
+    _sharedPreview = true;
+    setReadOnlyReason('shared', true);
+    disableRun();
+    if (isPaintOpen()) closePaintMenu();
+    setControlNeutralized('paint-toggle', true);
+    setControlNeutralized('btn-save-version', true);
+    setControlNeutralized('lang-toggle', true);
+
+    if (!sharedBannerEl) {
+      sharedBannerEl = renderSharedBanner(() => { void onFork(); });
+      const editorPane = editorContainer.parentElement;
+      if (editorPane) editorPane.insertBefore(sharedBannerEl, editorContainer);
+    }
+    if (!sharedOverlayEl) {
+      sharedOverlayEl = renderSharedOverlay({ thumbnail, onFork: () => { void onFork(); } });
+      viewportPane.appendChild(sharedOverlayEl);
+    }
+  }
+
+  /** Leave shared-preview mode: re-enable every control and remove the banner +
+   *  overlay. Disposes nothing on the GPU here — the cold preview never built a
+   *  Three.js mesh — but tears down the overlay's <img> via .remove(). */
+  function exitSharedMode(): void {
+    _sharedPreview = false;
+    setReadOnlyReason('shared', false);
+    enableRun();
+    setControlNeutralized('paint-toggle', false);
+    setControlNeutralized('btn-save-version', false);
+    setControlNeutralized('lang-toggle', false);
+    if (sharedBannerEl) { sharedBannerEl.remove(); sharedBannerEl = null; }
+    if (sharedOverlayEl) { sharedOverlayEl.remove(); sharedOverlayEl = null; }
+  }
+
+  /** Strip the `#share=` hash from the URL without touching the back stack or
+   *  re-firing routing. Modeled on the ?takeover=1 strip — keeps path + search,
+   *  drops only the hash, so refresh / Back never re-decodes the link. */
+  function stripShareHash(): void {
+    window.history.replaceState(null, '', window.location.pathname + window.location.search);
+  }
+
+  /** Open a `#share=…` link as a read-only preview. Decodes + validates the
+   *  UNTRUSTED payload, strips the hash, and renders code/stats/thumbnail
+   *  WITHOUT touching IndexedDB or running anything. On any failure it degrades
+   *  to a normal editable empty editor (no uncaught error, no scary toast). */
+  async function enterSharedFromHash(): Promise<void> {
+    const hashValue = getShareHashValue();
+    if (hashValue === null) return;
+
+    transitionToEditor();
+    switchTab('interactive', { history: 'none' });
+    updateDocumentTitle({ page: 'editor' });
+    await ensureEditorReady();
+    if (!engineOk) return;
+
+    // Decode + validate. ANY failure → graceful fallback to a blank editor.
+    let payload: ExportedSession;
+    try {
+      const parsed = await decodeShare(hashValue);
+      // App-level brand/schema check first, then the structural/security shape
+      // validator (which also drops an unsafe thumbnail).
+      const branded = validateSessionPayload(parsed);
+      if (!branded) throw new Error('not a Partwright payload');
+      payload = validateSharePayloadShape(branded);
+    } catch (e) {
+      errorLog.capture({ level: 'warn', source: 'app', message: `invalid share link: ${e instanceof Error ? e.message : String(e)}` });
+      stripShareHash();
+      exitSharedMode();
+      // Fall through to a normal, editable empty editor.
+      if (!getState().session) await createSession();
+      setStatus(statusBar, 'ready', 'Ready');
+      runCode(defaultCode);
+      return;
+    }
+
+    // Valid: strip the hash immediately so refresh / Back can't re-fire it.
+    stripShareHash();
+
+    const version = payload.versions[0];
+    const lang = asLanguage(version.language ?? payload.session.language) ?? 'manifold-js';
+
+    // Apply the version's language with the BARE alias (engine + editor only —
+    // never switchLanguageWithDrafts, which would createSession() + runCode()).
+    if (lang !== getActiveLanguage()) await switchLanguage(lang);
+
+    // Read-only preview, no IndexedDB writes, no execution.
+    enterSharedMode(version.thumbnail);
+    setValue(version.code); // setValue does not auto-run
+    // Populate the live stats panel straight from the embedded geometryData —
+    // we deliberately do NOT run the code.
+    const stats = version.geometryData;
+    geometryDataEl.textContent = stats
+      ? JSON.stringify(stats, null, 2)
+      : JSON.stringify({ status: 'shared-preview' });
+    setStatus(statusBar, 'ready', 'Shared preview (read-only)');
+
+    // Stash the validated payload for the Fork handler (the consented import).
+    pendingSharedPayload = payload;
+  }
+
+  // The decoded share payload awaiting an explicit Fork (the first consented
+  // execution). Held only while a shared preview is on screen.
+  let pendingSharedPayload: ExportedSession | null = null;
+
+  /** Fork the previewed share into a real local session. Reuses the
+   *  catalog-load ORDER (push /editor → transition → ensureReady →
+   *  importSessionPayload, which runs the code) — this is the consented first
+   *  execution. Then leaves shared mode. */
+  async function onFork(): Promise<void> {
+    const payload = pendingSharedPayload;
+    if (!payload) return;
+    // Leave shared mode FIRST so the import's runCode() isn't refused by the
+    // execution guard.
+    exitSharedMode();
+    pendingSharedPayload = null;
+    updateAppHistory('/editor', 'push');
+    transitionToEditor();
+    await ensureEditorReady();
+    await importSessionPayload(payload);
+    updateDocumentTitle({ page: 'editor' });
+  }
+
   async function syncEditorFromURL() {
     transitionToEditor();
     const tab = getTabFromURL();
@@ -2658,7 +2925,12 @@ async function main() {
     if (shouldShowLanding() || shouldShowHelp() || shouldShowCatalog() || shouldShow404()) {
       void setAiActiveSession(null);
     }
-    if (shouldShowLanding()) {
+    // A share-link hash takes precedence over the normal editor sync on this
+    // path too (e.g. a popstate that lands back on a `#share=` URL), so we never
+    // createSession()+default-code over a shared preview.
+    if (hasShareHash()) {
+      await enterSharedFromHash();
+    } else if (shouldShowLanding()) {
       await showLandingPage();
     } else if (shouldShowHelp()) {
       showHelp({ history: 'none' });
@@ -2673,6 +2945,19 @@ async function main() {
 
   window.addEventListener('popstate', () => {
     void syncRouteFromURL();
+  });
+
+  // Pasting a share URL into an already-open editor changes only the hash, which
+  // fires `hashchange` (NOT popstate). Decode it into a read-only preview.
+  // Re-entrancy guard: skip if we're already previewing this exact hash (entering
+  // shared mode itself strips the hash, so this won't loop on our own change).
+  let lastSharedHash: string | null = null;
+  window.addEventListener('hashchange', () => {
+    const value = getShareHashValue();
+    if (value === null) return;
+    if (_sharedPreview && value === lastSharedHash) return;
+    lastSharedHash = value;
+    void enterSharedFromHash();
   });
 
   // Expose showHelp for toolbar
@@ -2968,15 +3253,25 @@ async function main() {
   editorReady = true;
   editorReadyResolve();
 
-  // Start guided tour on first visit (after editor fully renders)
-  if (!showLanding && !showHelpPage && !showCatalog && !show404) {
+  // Start guided tour on first visit (after editor fully renders) — but not over
+  // a shared preview, which is a read-only landing surface for an external link.
+  if (!showLanding && !showHelpPage && !showCatalog && !show404 && !hasShareHash()) {
     maybeStartTour();
     maybeShowShortcutsHint();
   }
 
-  // If not on landing/help/catalog/404, load session or default code now
+  // A `#share=…` link opens the read-only preview INSTEAD of the normal editor
+  // load. enterSharedFromHash must run before syncEditorFromURL so the latter
+  // never createSession()s + runs default code on this path; it strips the hash
+  // and degrades to a normal editable editor if the link is invalid. (The
+  // editor + engine are ready here, so its internal ensureEditorReady resolves
+  // immediately — no deadlock from awaiting it earlier in main().)
   if (!showLanding && !showHelpPage && !showCatalog && !show404 && engineOk) {
-    await syncEditorFromURL();
+    if (hasShareHash()) {
+      await enterSharedFromHash();
+    } else {
+      await syncEditorFromURL();
+    }
   }
 
   // Keep this tab's session state in sync with peer tabs that mutate the same
@@ -7935,6 +8230,8 @@ async function main() {
   }
 
   function runCode(code?: string, opts: { surfaceErrors?: boolean } = {}) {
+    // Never execute the sharer's untrusted code in a read-only preview. Fork first.
+    if (isSharedPreview()) return;
     const src = code ?? getValue();
     setStatus(statusBar, 'running', 'Running...');
     clearEditorDiagnostics();
@@ -7950,6 +8247,11 @@ async function main() {
   }
 
   async function runCodeSync(src: string, opts: { surfaceErrors?: boolean } = {}): Promise<boolean> {
+    // Hard refusal in shared-preview mode: this is the single execution
+    // chokepoint that the console API (partwright.run / runAndSave) also routes
+    // through, so guarding it here keeps the sharer's untrusted code from ever
+    // reaching `new Function('api', code)` until the viewer forks.
+    if (isSharedPreview()) return false;
     // Manual runs (Run button, version load, partwright.run) surface errors
     // immediately; auto-runs defer to the idle/blur triggers so the editor
     // doesn't flicker an error on every keystroke.
