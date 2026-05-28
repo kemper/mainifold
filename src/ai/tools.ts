@@ -49,7 +49,7 @@ const ALL_TOOLS: ToolDefinition[] = [
   },
   {
     name: 'setActiveLanguage',
-    description: 'Switch the editor between "manifold-js", "scad", and "replicad". "replicad" is a full BREP / OpenCASCADE session — use it when the user wants exact fillets, chamfers, STEP export, or mechanical-CAD interop. (Note: inside a manifold-js session you can also access BREP via `api.BREP.*` without switching languages — only switch when STEP export or a BREP-only workflow is required.) Switching DISCARDS the current editor contents and resets to a stub — only do this when the user asked for the switch, or when the new request is much better expressed in the new language. Do NOT switch back and forth speculatively.',
+    description: 'Switch the editor between "manifold-js", "scad", and "replicad". Your in-progress code in the previous language is stashed as a per-session draft and restored when you switch back, so flipping is cheap and non-destructive — saved versions in this session are untouched and remember the language they were authored in. "replicad" is a full BREP / OpenCASCADE session — pick it when the user wants exact fillets, chamfers, STEP export, or mechanical-CAD interop. (Inside a manifold-js session you can also access BREP via `api.BREP.*` without switching languages — only switch when STEP export or a BREP-only workflow is required.) Use when the user asks, or when the new request maps obviously better to one of the engines; still avoid unnecessary back-and-forth since each switch costs a tool round-trip.',
     input_schema: {
       type: 'object',
       properties: {

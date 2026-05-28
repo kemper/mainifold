@@ -8,7 +8,7 @@
 //   6. Built on / trust band
 //   7. Footer
 
-import { listSessions, type Session } from '../storage/sessionManager';
+import { listSessions, effectiveVersionLanguage, type Session, type Version } from '../storage/sessionManager';
 import { getSessionLatestVersion, getSessionVersionCount } from '../storage/db';
 import { partwrightMarkSvg } from './brand';
 import { languageBadge } from './languageBadge';
@@ -586,7 +586,7 @@ function buildFooter(): HTMLElement {
 
 function createSessionTile(
   session: Session,
-  latestVersion: { thumbnail: Blob | null; label: string; geometryData: Record<string, unknown> | null } | null,
+  latestVersion: Version | null,
   versionCount: number,
   onOpen: (id: string) => void,
 ): HTMLElement {
@@ -624,7 +624,12 @@ function createSessionTile(
   const meta = document.createElement('div');
   meta.className = 'text-xs text-zinc-500 mt-1 flex justify-between';
 
-  const badge = languageBadge(session.language);
+  // Show the latest version's language (per-version since schema 1.8), with
+  // session-level fallback. The session can hold mixed languages; this badge
+  // shows whichever language the user was last working in. The shared
+  // `languageBadge` helper handles the JS / SCAD / BREP colour-coding.
+  const sessionLang = effectiveVersionLanguage(latestVersion, session);
+  const badge = languageBadge(sessionLang);
   const langBadge = document.createElement('span');
   langBadge.className = `text-[10px] font-semibold border rounded px-1 ${badge.classes}`;
   langBadge.textContent = badge.label;

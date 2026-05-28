@@ -19,14 +19,18 @@ save your work into the current session with runAndSave (do not write to
 examples/). The current modeling language is shown in the per-turn suffix
 below — write code in that language. Three languages exist:
 'manifold-js' (default, mesh kernel), 'scad' (OpenSCAD), and 'replicad'
-(BREP / OpenCASCADE — true edge fillets, chamfers, STEP export). Switch via
-setActiveLanguage('scad' | 'manifold-js' | 'replicad') only when justified.
-When you write manifold-js, return a Manifold object. In manifold-js you can
-also call \`api.BREP.box([…]).fillet(r)\` (etc.) and pipe the result back
-through Manifold via \`api.BREP.toManifold(shape, api.Manifold)\` — useful
-when one feature needs an exact fillet but the rest of the model is mesh-
-native. The full BREP-language session is for STEP export and BREP-only
-workflows. See ai.md below for the full conventions.
+(BREP / OpenCASCADE — true edge fillets, chamfers, STEP import/export).
+Switch via setActiveLanguage('scad' | 'manifold-js' | 'replicad') only when
+justified. Switching is non-destructive: your in-progress draft in the
+previous language is stashed and restored on flip back, and saved versions
+are unaffected (each remembers the language it was authored in). Still
+avoid speculative flips since each costs a tool round-trip. When you write
+manifold-js, return a Manifold object. In manifold-js you can also call
+\`api.BREP.box([…]).fillet(r)\` (etc.) and pipe the result back through
+Manifold via \`api.BREP.toManifold(shape, api.Manifold)\` — useful when one
+feature needs an exact fillet but the rest of the model is mesh-native.
+The full BREP-language session is for STEP export and BREP-only workflows.
+See ai.md below for the full conventions.
 
 Be concise in chat. Long explanations cost tokens the user pays for. When a
 task involves geometry, prefer to act (call a tool, run code, save a
@@ -267,7 +271,7 @@ export function toggleSuffix(toggles: ChatToggles): string {
     '',
     '## Session toggle state',
     '',
-    `Active language: ${lang}  — write code in this language. Use setActiveLanguage to switch only when justified (e.g. user asked, or the request maps obviously better to another engine: OpenSCAD for parametric extrusion-heavy parts, manifold-js for boolean composition and fine programmatic control, replicad/BREP for exact fillets/chamfers and STEP export).${
+    `Active language: ${lang}  — write code in this language. setActiveLanguage swaps engines and preserves your draft in each language, so flipping is cheap, but every flip still costs a tool round-trip — switch only when justified (e.g. user asked, or the request maps obviously better to another engine: OpenSCAD for parametric extrusion-heavy parts, manifold-js for boolean composition and fine programmatic control, replicad/BREP for exact fillets/chamfers and STEP export). Saved versions remember the language they were authored in; navigating to one auto-swaps the engine.${
       lang === 'scad'
         ? ' Note: SCAD\'s revolve / linear_extrude / cylinder produce radial-fan triangle topology that is awkward to paint cleanly (every triangle radiates from the center axis). If the task involves precise painting of curved features, consider switching to manifold-js up front rather than wrestling with the fan mesh.'
         : lang === 'replicad'

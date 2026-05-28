@@ -16,9 +16,12 @@ test.describe('Language help modal', () => {
     );
 
     // The help link is a small "?" button right after the BREP toggle.
+    // Tour backdrop may overlay the toolbar on a fresh open; dispatchEvent
+    // bypasses the pointer-event interceptor without affecting the click
+    // semantics from JS's POV.
     const helpLink = page.locator('button[aria-label="Open language help"]');
     await expect(helpLink).toBeVisible();
-    await helpLink.click();
+    await helpLink.dispatchEvent('click');
 
     // Modal title.
     const modal = page.getByLabel('Pick a modeling language');

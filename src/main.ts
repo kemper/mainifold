@@ -142,7 +142,9 @@ import {
   listSessions,
   deleteSession,
   renameSession,
-  setSessionLanguage,
+  readDraft,
+  writeDraft,
+  effectiveVersionLanguage,
   saveVersion,
   navigateVersion,
   loadVersion as loadVersionFromStore,
@@ -1422,10 +1424,17 @@ async function main() {
   const defaultCode = examples[defaultExampleKey]?.code ?? '// Write your manifold code here\nconst { Manifold } = api;\nreturn Manifold.cube([5,5,5], true);';
 
   // Shared validator for parsed session JSON. Returns null if shape is wrong.
+  // A chat- or notes-only export (a session used before any geometry was saved)
+  // is legitimate per importSession's contract — accept it when versions are
+  // absent as long as chat or notes are present.
   function validateSessionPayload(data: unknown): ExportedSession | null {
     if (!data || typeof data !== 'object') return null;
     const d = data as ExportedSession;
-    if ((!d.partwright && !d.mainifold) || !d.session || !Array.isArray(d.versions)) return null;
+    if ((!d.partwright && !d.mainifold) || !d.session) return null;
+    const hasVersions = Array.isArray(d.versions);
+    const hasChat = Array.isArray(d.chat) && d.chat.length > 0;
+    const hasNotes = Array.isArray(d.notes) && d.notes.length > 0;
+    if (!hasVersions && !hasChat && !hasNotes) return null;
     return d;
   }
 
@@ -2058,31 +2067,14 @@ async function main() {
     onImportFile: async (file) => { await handleImportFile(file); },
     onImportInboxEntry: handleReimportInboxEntry,
     onLanguageHelp: async () => { await showLanguageHelpModal(); },
+    onToggleAi: () => { void toggleAiPanelFromToolbar(); },
     onLanguageSwitch: async (lang: 'manifold-js' | 'scad' | 'replicad') => {
       if (lang === getActiveLanguage()) return;
-      // If current session has work, ask before switching
-      const curState = getState();
-      if (curState.session && curState.versionCount > 0) {
-        const langLabel = lang === 'scad' ? 'OpenSCAD' : lang === 'replicad' ? 'BREP' : 'JavaScript';
-        const msg = `Your current session will be kept. Start new ${langLabel} session?`;
-        const ok = await showInlineConfirm(editorUI, msg);
-        if (!ok) return;
-      }
-      await switchLanguage(lang);
-      // Create a fresh session in the new language (empty previous session auto-deleted)
-      await createSession(undefined, lang);
-      const defaultScad = '// OpenSCAD\ncube([10, 10, 10], center=true);';
-      const defaultJs = 'const { Manifold } = api;\nreturn Manifold.cube([10, 10, 10], true);';
-      // BREP starter shows off the headline feature: a true filleted box that
-      // would be impossible at this quality in the mesh engine.
-      const defaultBrep = `// BREP — replicad / OpenCASCADE. Returns a BrepShape (api.BREP.*),
-// not a Manifold. The shape is tessellated for the viewport, but
-// the underlying B-rep is kept for STEP export.
-const { BREP } = api;
-return BREP.box([20, 20, 10]).fillet(2);`;
-      const code = lang === 'scad' ? defaultScad : lang === 'replicad' ? defaultBrep : defaultJs;
-      setValue(code);
-      runCode(code);
+      // Stash the current language's editor buffer as a draft on the active
+      // session, then swap engines and restore (or seed) the other language's
+      // draft. Versions in this session aren't touched — they remember the
+      // language they were authored in.
+      await switchLanguageWithDrafts(lang);
     },
   });
 
@@ -2097,6 +2089,10 @@ return BREP.box([20, 20, 10]).fillet(2);`;
   // fresh target must clear them here — otherwise the new (unpainted) session or
   // part inherits the previous one's regions and is born with a locked editor.
   function resetEditorToStarter(comment: string) {
+    // Drop any in-flight subdivision worker job before clearing regions, so a
+    // late continuation can't stamp triangle ids onto regions that no longer
+    // exist (or overwrite the freshly-loaded starter mesh).
+    resetPaintWorkerState();
     clearRegions();
     syncLockState();
     const freshCode = `// ${comment}\nconst { Manifold } = api;\nreturn Manifold.cube([10, 10, 10], true);`;
@@ -2132,15 +2128,15 @@ return BREP.box([20, 20, 10]).fillet(2);`;
       geometryData: enrichGeometryDataWithColors(getGeometryDataObj()),
       thumbnail: await captureThumbnail(),
     }),
-    onLoadVersion: async (code: string) => {
-      setValue(code);
-      const applied = await runCodeSync(code);
-      if (!applied) return;
-      const loadedVersion = getState().currentVersion;
-      if (loadedVersion) {
-        rehydrateColorRegions(loadedVersion.geometryData);
-      }
-      applyVersionAnnotations(loadedVersion);
+    onLoadVersion: async (_code: string) => {
+      // The session bar's prev/next/version-dropdown handlers update
+      // currentVersion before firing this; route through loadVersionIntoEditor
+      // so cross-language navigation swaps the engine and stashes the
+      // previous language's draft. The `code` argument is redundant once we
+      // read the version from state — kept on the callback to avoid churning
+      // the SessionBarCallbacks signature.
+      const v = getState().currentVersion;
+      if (v) await loadVersionIntoEditor(v);
     },
     onNewSession: startNewSessionInEditor,
   });
@@ -2277,17 +2273,12 @@ return BREP.box([20, 20, 10]).fillet(2);`;
     { id: 'retake-tour', title: 'Take the guided tour', hint: 'Help', keywords: 'onboarding walkthrough intro tutorial', run: () => { resetTour(); startTour(); } },
   ]);
 
-  // Init gallery
-  createGalleryView(galleryContainer, async (code: string) => {
-    setValue(code);
-    const applied = await runCodeSync(code);
-    if (!applied) return;
-    // Rehydrate color regions and annotations from the loaded version
-    const loadedVersion = getState().currentVersion;
-    if (loadedVersion) {
-      rehydrateColorRegions(loadedVersion.geometryData);
-    }
-    applyVersionAnnotations(loadedVersion);
+  // Init gallery — `loadVersion` (in gallery.ts) has already updated state to
+  // point at the clicked version by the time this fires, so route through
+  // loadVersionIntoEditor for the engine swap + draft stash + rehydration.
+  createGalleryView(galleryContainer, async (_code: string) => {
+    const v = getState().currentVersion;
+    if (v) await loadVersionIntoEditor(v);
     switchTab('interactive');
   });
 
@@ -2337,10 +2328,16 @@ return BREP.box([20, 20, 10]).fillet(2);`;
   // Init session list
   initSessionList(
     async (code: string) => {
-      // Restore language from the newly opened session
-      const sessionLang = getState().session?.language ?? 'manifold-js';
-      if (sessionLang !== getActiveLanguage()) {
-        await switchLanguage(sessionLang);
+      // Restore the engine to the loaded version's language. The opened
+      // session's current-version pointer was just refreshed by openSession,
+      // so currentVersion.language (with session-level fallback) is the
+      // right signal here — not session.language alone, which would miss
+      // mixed-language sessions where the active version uses the other
+      // engine.
+      const st = getState();
+      const versionLang = effectiveVersionLanguage(st.currentVersion, st.session);
+      if (versionLang !== getActiveLanguage()) {
+        await switchLanguage(versionLang);
       }
       setValue(code);
       runCode(code);
@@ -2411,9 +2408,18 @@ return BREP.box([20, 20, 10]).fillet(2);`;
   }
 
   async function loadVersionIntoEditor(version: Version) {
-    const sessionLang = getState().session?.language ?? 'manifold-js';
-    if (sessionLang !== getActiveLanguage()) {
-      await switchLanguage(sessionLang);
+    // Each version remembers the language it was authored in (per-version
+    // since schema 1.8); fall back to the session-level hint, then to the
+    // engine default. Lets a single session hold mixed JS + SCAD versions
+    // and switch the engine as you click between them. When crossing a
+    // language boundary we stash the current editor buffer as a draft for
+    // the previous language first, so navigate ↔ toggle round-trips don't
+    // silently drop work-in-progress in the language we're leaving.
+    const versionLang = effectiveVersionLanguage(version, getState().session);
+    if (versionLang !== getActiveLanguage()) {
+      const sid = getState().session?.id;
+      if (sid) await writeDraft(sid, getActiveLanguage(), getValue());
+      await switchLanguage(versionLang);
     }
     setActiveImports((version.importedMeshes ?? []) as ImportedMesh[]);
     setValue(version.code);
@@ -2739,6 +2745,10 @@ return BREP.box([20, 20, 10]).fillet(2);`;
   // refresh the viewport, paint-adjacency map, stats, and clip bounds. Mirrors
   // the tail of runCodeSync so exports / slicing / measurements stay correct.
   function applyLiveGeometry(mesh: MeshData): void {
+    // Bump the paint generation so any in-flight subdivision worker discards
+    // its result instead of stamping a refined mesh built from the OLD base
+    // over the new geometry.
+    resetPaintWorkerState();
     currentMeshData = mesh;
     paintBaseMesh = mesh;
     if (currentManifold && typeof currentManifold.delete === 'function') {
@@ -3076,13 +3086,19 @@ return BREP.box([20, 20, 10]).fillet(2);`;
     }
   });
 
-  // === Language switching helper ===
-  async function switchLanguage(lang: Language) {
+  // === Language switching helpers ===
+
+  /** Low-level: swap the engine and the editor's display language, leaving
+   *  the editor contents alone. Used by version navigation (where the new
+   *  contents are provided by the caller) and as a primitive for the
+   *  draft-swap path below. Does NOT touch session.language — that's still a
+   *  "default for new sessions / fallback for pre-1.8 versions" hint and is
+   *  only updated on session creation or by an explicit AI/console call. */
+  async function applyEngineLanguage(lang: Language) {
+    if (lang === getActiveLanguage()) return;
     setActiveLanguage(lang);
     setEditorLanguage(lang);
     setToolbarLanguage(lang);
-    // Update the editor title (shows the active part name, or the filename
-    // fallback when no part is open).
     syncEditorTitle(getState());
     const loadingLabel =
       lang === 'scad' ? 'Loading OpenSCAD...' :
@@ -3097,13 +3113,53 @@ return BREP.box([20, 20, 10]).fillet(2);`;
       errorLog.capture({ level: 'error', source: 'engine', message: msg });
       throw e;
     }
-    // Persist the language to the active session so reopening it loads in the
-    // correct mode. Without this, sessions created before a language switch
-    // keep their stale language field and reload in the wrong engine, parsing
-    // SCAD code as JS (or vice versa).
-    const sid = getState().session?.id;
-    if (sid) await setSessionLanguage(sid, lang);
     setStatus(statusBar, 'ready', 'Ready');
+  }
+
+  const DRAFT_STUB_JS = '// JavaScript\nconst { Manifold } = api;\nreturn Manifold.cube([10, 10, 10], true);';
+  const DRAFT_STUB_SCAD = '// OpenSCAD\ncube([10, 10, 10], center=true);';
+
+  /** Toolbar / AI language toggle: stash the current editor buffer as a draft
+   *  on the active session, swap engines, then restore the target language's
+   *  draft (seeded with a stub if none has been stashed yet). Versions are not
+   *  touched — they keep the language they were authored in. Auto-creates a
+   *  session first when none is open, so a sessionless toggle (rare — usually
+   *  there's an auto-created session on first edit) doesn't silently drop the
+   *  current editor buffer with no place to stash it. */
+  async function switchLanguageWithDrafts(lang: Language) {
+    if (lang === getActiveLanguage()) return;
+    const prevLang = getActiveLanguage();
+    const currentCode = getValue();
+    if (!getState().session) {
+      // No session means no draft store to stash into. Mirror the auto-create
+      // behavior used elsewhere in the editor so the user's in-progress code
+      // doesn't vanish. The new session is tagged with the PREVIOUS language
+      // (the one the current code is in) so its session-level fallback hint
+      // stays meaningful for the buffer being stashed.
+      await createSession(undefined, prevLang);
+    }
+    const sid = getState().session?.id;
+    if (sid) {
+      // Persist the previous language's working buffer so flipping back
+      // restores it exactly. Both languages stay live in IDB until the
+      // session is deleted.
+      await writeDraft(sid, prevLang, currentCode);
+    }
+    await applyEngineLanguage(lang);
+    let nextCode: string | null = null;
+    if (sid) nextCode = await readDraft(sid, lang);
+    if (nextCode === null) {
+      nextCode = lang === 'scad' ? DRAFT_STUB_SCAD : DRAFT_STUB_JS;
+    }
+    setValue(nextCode);
+    runCode(nextCode);
+  }
+
+  /** Pre-existing call sites that just need the engine swapped (version
+   *  navigation, programmatic openSession, import flows). Kept as a small
+   *  alias so the diff against the old name stays minimal. */
+  async function switchLanguage(lang: Language) {
+    await applyEngineLanguage(lang);
   }
 
   // === Execution state ===
@@ -3385,7 +3441,7 @@ return BREP.box([20, 20, 10]).fillet(2);`;
         try { payload = JSON.parse(payload); } catch { return { error: 'importSessionData(data): could not parse string as JSON' }; }
       }
       const validated = validateSessionPayload(payload);
-      if (!validated) return { error: 'importSessionData(data): payload missing partwright/mainifold brand, session, or versions[]' };
+      if (!validated) return { error: 'importSessionData(data): payload missing partwright/mainifold brand, session, or any of versions[]/chat[]/notes[]' };
       const result = await importSessionPayload(validated);
       return { sessionId: result.sessionId };
     },
@@ -3478,10 +3534,14 @@ return BREP.box([20, 20, 10]).fillet(2);`;
       return getActiveLanguage();
     },
 
-    /** Switch active engine language. Lazy-inits SCAD on first switch. */
+    /** Swap the active engine. The current editor buffer is stashed as a draft
+     *  on the active session, and the target language's draft is restored (or
+     *  a stub if you've never written in it on this session). Versions in the
+     *  session are not touched — they keep the language they were authored in
+     *  and re-load you into that engine when you navigate to them. */
     async setActiveLanguage(lang: Language): Promise<void> {
       assertEnum(lang, ['manifold-js', 'scad', 'replicad'], 'setActiveLanguage(lang)');
-      await switchLanguage(lang);
+      await switchLanguageWithDrafts(lang);
     },
 
     // === Clipping API ===
@@ -3994,8 +4054,9 @@ return BREP.box([20, 20, 10]).fillet(2);`;
       if (typeof check === 'object' && check !== null && 'error' in check) return check;
       const version = await openSession(id);
       if (version) {
-        // Restore language from session
-        const lang = getState().session?.language ?? 'manifold-js';
+        // Restore engine to the loaded version's language (per-version since
+        // schema 1.8, with session-level fallback for older data).
+        const lang = effectiveVersionLanguage(version, getState().session);
         if (lang !== getActiveLanguage()) {
           await switchLanguage(lang);
         }
@@ -4164,6 +4225,13 @@ return BREP.box([20, 20, 10]).fillet(2);`;
         const kind = parsed.kind;
         return { error: `No version found with ${kind} "${parsed.value}" in the active session. Use listVersions() to see valid ${kind}s.` };
       }
+      // Each version remembers the language it was authored in (since schema
+      // 1.8). Swap the engine before re-running so a JS version loaded while
+      // SCAD is active doesn't hit a parse error in the wrong engine.
+      const versionLang = effectiveVersionLanguage(version, getState().session);
+      if (versionLang !== getActiveLanguage()) {
+        await switchLanguage(versionLang);
+      }
       setValue(version.code);
       await runCodeSync(version.code);
       rehydrateColorRegions(version.geometryData);
@@ -4290,6 +4358,14 @@ return BREP.box([20, 20, 10]).fillet(2);`;
       const parent = await peekVersion(parsed.value);
       if (!parent) {
         return { error: `No version found with ${parsed.kind} "${parsed.value}" in the active session. Use listVersions() to see valid ${parsed.kind}s.` };
+      }
+
+      // Fork into the parent's language. If the active engine is the other
+      // one (e.g. user toggled to SCAD then forked a JS version), swap first
+      // so the isolated execution doesn't hit a parse error.
+      const parentLang = effectiveVersionLanguage(parent, getState().session);
+      if (parentLang !== getActiveLanguage()) {
+        await switchLanguage(parentLang);
       }
 
       let newCode: string;
@@ -4500,17 +4576,23 @@ return BREP.box([20, 20, 10]).fillet(2);`;
         assertString(s.name, 'importSession(data).session.name', { allowEmpty: true });
         assertNumber(s.created, 'importSession(data).session.created');
         assertNumber(s.updated, 'importSession(data).session.updated');
-        const versions = assertArray(d.versions, 'importSession(data).versions');
-        for (let i = 0; i < versions.length; i++) {
-          const v = assertObject(versions[i], `importSession(data).versions[${i}]`)!;
-          assertNumber(v.index, `importSession(data).versions[${i}].index`, { integer: true });
-          assertString(v.code, `importSession(data).versions[${i}].code`, { allowEmpty: true });
-          assertString(v.label, `importSession(data).versions[${i}].label`, { allowEmpty: true });
-          assertNumber(v.timestamp, `importSession(data).versions[${i}].timestamp`);
-          if (v.notes !== undefined) assertString(v.notes, `importSession(data).versions[${i}].notes`, { allowEmpty: true });
-          // geometryData may be null or an object; don't over-specify shape (historical data varies)
-          if (v.geometryData !== null && v.geometryData !== undefined) {
-            assertObject(v.geometryData, `importSession(data).versions[${i}].geometryData`);
+        // `versions` is optional — chat- or notes-only exports omit it.
+        // sessionManager.importSession rejects payloads where versions,
+        // chat, and notes are ALL empty, so we don't need to re-check
+        // that here.
+        if (d.versions !== undefined) {
+          const versions = assertArray(d.versions, 'importSession(data).versions');
+          for (let i = 0; i < versions.length; i++) {
+            const v = assertObject(versions[i], `importSession(data).versions[${i}]`)!;
+            assertNumber(v.index, `importSession(data).versions[${i}].index`, { integer: true });
+            assertString(v.code, `importSession(data).versions[${i}].code`, { allowEmpty: true });
+            assertString(v.label, `importSession(data).versions[${i}].label`, { allowEmpty: true });
+            assertNumber(v.timestamp, `importSession(data).versions[${i}].timestamp`);
+            if (v.notes !== undefined) assertString(v.notes, `importSession(data).versions[${i}].notes`, { allowEmpty: true });
+            // geometryData may be null or an object; don't over-specify shape (historical data varies)
+            if (v.geometryData !== null && v.geometryData !== undefined) {
+              assertObject(v.geometryData, `importSession(data).versions[${i}].geometryData`);
+            }
           }
         }
         if (d.notes !== undefined) {
@@ -4563,17 +4645,19 @@ return BREP.box([20, 20, 10]).fillet(2);`;
      *  the standard 4-iso composite; pass `view` to render a single
      *  named angle instead — useful when the feature you're verifying
      *  (a smile on a face, a logo on a flat panel) only reads from one
-     *  specific direction. Same shape `renderView` accepts. */
-    async runIsolated(code: string, view?: { elevation?: number; azimuth?: number; ortho?: boolean; size?: number }) {
+     *  specific direction. Same shape `renderView` accepts, including
+     *  `edges` ('none' | 'crease' | 'wireframe'). */
+    async runIsolated(code: string, view?: { elevation?: number; azimuth?: number; ortho?: boolean; size?: number; edges?: EdgeMode }) {
       const check = guard(() => {
         assertString(code, 'runIsolated(code)', { allowEmpty: false });
         if (view !== undefined) {
           const v = assertObject(view, 'runIsolated(code, view)')!;
-          assertNoUnknownKeys(v, ['elevation', 'azimuth', 'ortho', 'size'], 'runIsolated(code, view)');
+          assertNoUnknownKeys(v, ['elevation', 'azimuth', 'ortho', 'size', 'edges'], 'runIsolated(code, view)');
           assertNumber(v.elevation, 'runIsolated(code, view).elevation', { optional: true, min: -90, max: 90 });
           assertNumber(v.azimuth, 'runIsolated(code, view).azimuth', { optional: true });
           assertBoolean(v.ortho, 'runIsolated(code, view).ortho', { optional: true });
           assertNumber(v.size, 'runIsolated(code, view).size', { optional: true, min: 1, integer: true });
+          if (v.edges !== undefined) assertEnum(v.edges, EDGE_MODES, 'runIsolated(code, view).edges');
         }
         return true;
       });
@@ -6236,7 +6320,10 @@ return BREP.box([20, 20, 10]).fillet(2);`;
         descriptor,
       );
       if (region.triangles.size === 0) {
-        removeRegion(region.id);
+        // Drop the empty region through the same sync path so the async
+        // reconcile listener doesn't kick a wasted worker rebuild against a
+        // stale lastStrokeList.
+        withSyncReconcile(() => removeRegion(region.id));
         return { error: 'paintStroke: no surface fell within the stroke footprint — check the points are on the model and the radius is large enough.' };
       }
       return {
@@ -6318,7 +6405,10 @@ return BREP.box([20, 20, 10]).fillet(2);`;
         descriptor,
       );
       if (region.triangles.size === 0) {
-        removeRegion(region.id);
+        // Drop the empty region through the same sync path so the async
+        // reconcile listener doesn't kick a wasted worker rebuild against a
+        // stale lastStrokeList.
+        withSyncReconcile(() => removeRegion(region.id));
         return { error: 'paintAirbrush: no surface was sprayed — check the points are on the model, the radius is large enough, and strength > 0.' };
       }
       return {
@@ -7831,6 +7921,10 @@ return BREP.box([20, 20, 10]).fillet(2);`;
       clearEditorDiagnostics();
       clearEditorErrorPanel(editorErrorPanel);
       pendingEditorError = null;
+      // Bump the paint generation so any in-flight subdivision worker — started
+      // against the previous base mesh — discards its result instead of stamping
+      // a refined mesh built from the OLD base over result.mesh.
+      resetPaintWorkerState();
       currentMeshData = result.mesh;
       // A fresh run is the new pristine base for any subsequent smooth-brush
       // subdivision; rehydrating a saved version rebuilds the refined mesh from

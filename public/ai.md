@@ -57,7 +57,9 @@ await partwright.setActiveLanguage('manifold-js')
 await partwright.setActiveLanguage('replicad')
 ```
 
-Selecting a SCAD example from the toolbar dropdown auto-switches to OpenSCAD mode. Session versions remember which engine was used.
+Switching is non-destructive. Your in-progress code in the previous language is stashed as a per-session draft and restored when you switch back — both languages stay live until the session is deleted. Saved versions are not touched; each version remembers the language it was authored in, and navigating to one auto-swaps the engine. A single session can hold mixed manifold-js + SCAD versions.
+
+Selecting a SCAD example from the toolbar dropdown auto-switches to OpenSCAD mode.
 
 ## What do I do for X? (verb decision tree)
 
@@ -189,8 +191,8 @@ partwright.setCode(code)       // Set editor contents (no auto-run)
 partwright.sliceAtZ(z)         // Cross-section -> {polygons, svg, boundingBox, area}
 partwright.getBoundingBox()    // -> {min:[x,y,z], max:[x,y,z]}
 partwright.getModule()         // Raw manifold-3d WASM module
-partwright.getActiveLanguage() // -> 'manifold-js' or 'scad'
-await partwright.setActiveLanguage(lang) // Switch engine + editor mode ('manifold-js' | 'scad' | 'replicad')
+partwright.getActiveLanguage() // -> 'manifold-js' | 'scad' | 'replicad'
+await partwright.setActiveLanguage(lang) // Swap engine ('manifold-js' | 'scad' | 'replicad'); stashes the prev draft, restores the other
 partwright.toggleClip(on?)     // Toggle 3D clipping plane -> {enabled, z, min, max}
 partwright.setClipZ(z)         // Set clip height -> {enabled, z, min, max}
 partwright.getClipState()      // -> {enabled, z, min, max}
@@ -504,7 +506,7 @@ Booleans:   .add(other)  .subtract(other)  .intersect(other)  .hull()
 Transforms: .translate([x,y,z])  .rotate([rx,ry,rz]) (degrees, applied X->Y->Z)
             .scale(s) or .scale([x,y,z])  .mirror([nx,ny,nz]) (plane normal)
             .warp(fn)  .transform(mat4)
-Mesh ops:   .refine(n)  .simplify()  .smoothOut(minSharpAngle?, minSmoothness?)
+Mesh ops:   .refine(n)  .simplify(tolerance)  .smoothOut(minSharpAngle?, minSmoothness?)
             .calculateNormals(idx, angle?)
 Queries:    .volume()  .surfaceArea()  .genus()  .numVert()  .numTri()  .isEmpty()
             .boundingBox()  .status() (0=valid)  .decompose()

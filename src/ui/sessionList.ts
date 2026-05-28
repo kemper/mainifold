@@ -8,6 +8,7 @@ import {
   importSession,
   clearAllSessions,
   exportSession,
+  effectiveVersionLanguage,
   type Session,
   type ExportedSession,
 } from '../storage/sessionManager';
@@ -196,7 +197,12 @@ async function createSessionRow(session: Session): Promise<HTMLElement> {
 
   const meta = document.createElement('div');
   meta.className = 'text-xs text-zinc-500 font-mono mt-0.5 flex items-center gap-1.5';
-  const badge = languageBadge(session.language);
+  // Latest version's language (per-version since schema 1.8) with fallback to
+  // the session-level hint, so old data still renders the right badge. The
+  // shared `languageBadge` helper turns the language into a JS / SCAD / BREP
+  // chip that matches the toolbar / session-bar / catalog vocabulary.
+  const sessionLang = effectiveVersionLanguage(latestVersion, session);
+  const badge = languageBadge(sessionLang);
   meta.innerHTML = `<span class="text-[10px] font-semibold border rounded px-1 ${badge.classes}">${badge.label}</span>${count} version${count !== 1 ? 's' : ''} · ${formatDate(session.updated)}`;
   info.appendChild(meta);
 

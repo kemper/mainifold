@@ -9,6 +9,7 @@ import {
   navigateVersion,
   listCurrentVersions,
   renameSession,
+  effectiveVersionLanguage,
   type SessionState,
 } from '../storage/sessionManager';
 import { onChange as onColorRegionsChange } from '../color/regions';
@@ -109,9 +110,13 @@ function render(state: SessionState) {
   });
   barEl.appendChild(nameEl);
 
-  // Language badge — JS (manifold-js, default), SCAD (OpenSCAD), or BREP
-  // (replicad / OpenCASCADE). Colour-coded to match the toolbar toggle.
-  const badge = languageBadge(state.session.language);
+  // Language badge — reflects the CURRENT version's language (since schema
+  // 1.8 each version carries its own), falling back to the session's default
+  // for pre-1.8 versions and for fresh sessions with no current version. The
+  // colour/label come from the shared `languageBadge` helper so JS / SCAD /
+  // BREP all read consistently with the toolbar pill and the gallery tiles.
+  const activeLang = effectiveVersionLanguage(state.currentVersion, state.session);
+  const badge = languageBadge(activeLang);
   const langBadge = el('span', `text-[10px] font-semibold border rounded px-1 ${badge.classes}`, badge.label);
   barEl.appendChild(langBadge);
 
