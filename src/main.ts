@@ -2389,6 +2389,14 @@ async function main() {
   /** Drop an import wrapper for `components` into the current part: set the
    *  active imports, render, and save a version that carries the mesh data. */
   async function applyImportWrapper(components: ImportedMesh[], manifold: boolean): Promise<void> {
+    // Same reset as the other import chokepoints: an import wrapper replaces the
+    // part's geometry, so the previous part's regions can't survive (compose
+    // even rebuilds topology wholesale). Callers run preserveCurrentEditsIfNeeded
+    // first, so the painted version is already saved before we drop live paint —
+    // otherwise runCodeSync re-resolves stale regions onto the new mesh and locks
+    // the editor.
+    cancelVoxelPaintIfActive();
+    dropPaintState();
     const code = generateImportCode(components, { manifold });
     setActiveImports(components);
     setValue(code);
