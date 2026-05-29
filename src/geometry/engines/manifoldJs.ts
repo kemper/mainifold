@@ -7,6 +7,7 @@ import { getDefaultCircularSegments } from '../qualitySettings';
 import { getActiveImports } from '../../import/importedMesh';
 import { createSdfNamespace, SdfNode } from '../sdf';
 import { getBrepNamespace, consumeBrepAllocations, disposeBrepAllocationsExcept, consumeBrepToManifoldLabels } from '../brepRuntime';
+import { parseLabelColor } from '../../color/labelColor';
 
 /** Marker the sandbox attaches to render-only proxies (see `renderMesh` below).
  *  The engine looks for it on the user-returned object to decide whether the
@@ -136,14 +137,39 @@ export const manifoldJsEngine: Engine = {
     // the result mesh's `runOriginalID` array and build the inverse:
     // `{name -> Set<triangleId>}`. Cleared on every run.
     const labelRegistry = new Map<number, string>();
+    // Optional per-label color declared in code via the 3rd arg to
+    // `api.label(shape, name, { color })`. Keyed by label *name* (the same
+    // granularity as labelMap): the main thread resolves each name's triangles
+    // and renders/exports them as a derived "model color" underlay, so a model
+    // is self-describing without a manual paint pass. Last write per name wins.
+    const labelColors = new Map<string, [number, number, number]>();
 
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const label = (shape: any, name: unknown): any => {
+    const label = (shape: any, name: unknown, options?: unknown): any => {
       if (!shape || typeof shape.asOriginal !== 'function' || typeof shape.add !== 'function') {
         throw new Error('api.label(shape, name): shape must be a Manifold (returned by Manifold.cube/sphere/cylinder/extrude/etc.)');
       }
       if (typeof name !== 'string' || name.length === 0) {
         throw new Error('api.label(shape, name): name must be a non-empty string');
+      }
+      // Optional { color } — a hex string ('#rrggbb' / '#rgb', same form as a
+      // `color` param so `{ color: p.accent }` works) or an [r,g,b] array 0..1.
+      if (options !== undefined && options !== null) {
+        if (typeof options !== 'object' || Array.isArray(options)) {
+          throw new Error('api.label(shape, name, options): options must be an object like { color: "#rrggbb" }');
+        }
+        const { color, ...rest } = options as { color?: unknown };
+        const unknownKeys = Object.keys(rest);
+        if (unknownKeys.length > 0) {
+          throw new Error(`api.label options: unknown key(s) ${unknownKeys.map(k => `"${k}"`).join(', ')}. Only { color } is supported.`);
+        }
+        if (color !== undefined) {
+          const rgb = parseLabelColor(color);
+          if (!rgb) {
+            throw new Error('api.label color: expected a hex string like "#3b82f6" or an [r,g,b] array of three numbers in 0..1.');
+          }
+          labelColors.set(name, rgb);
+        }
       }
       // asOriginal() returns a copy with a fresh, unique originalID().
       // We register that id against the user-supplied name. After
@@ -163,17 +189,17 @@ export const manifoldJsEngine: Engine = {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const labeledUnion = (parts: unknown): any => {
       if (!Array.isArray(parts) || parts.length === 0) {
-        throw new Error('api.labeledUnion(parts): non-empty array required, each element { name: string, shape: Manifold }');
+        throw new Error('api.labeledUnion(parts): non-empty array required, each element { name: string, shape: Manifold, color? }');
       }
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       let acc: any = null;
       for (const p of parts) {
         if (!p || typeof p !== 'object') {
-          throw new Error('api.labeledUnion: each entry must be { name: string, shape: Manifold }');
+          throw new Error('api.labeledUnion: each entry must be { name: string, shape: Manifold, color? }');
         }
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        const entry = p as { name?: unknown; shape?: any };
-        const labelled = label(entry.shape, entry.name);
+        const entry = p as { name?: unknown; shape?: any; color?: unknown };
+        const labelled = label(entry.shape, entry.name, entry.color !== undefined ? { color: entry.color } : undefined);
         acc = acc === null ? labelled : acc.add(labelled);
       }
       return acc;
@@ -369,6 +395,7 @@ export const manifoldJsEngine: Engine = {
         manifold: renderOnly ? null : result,
         error: null,
         labelMap,
+        labelColors: labelColors.size > 0 ? labelColors : undefined,
         paramsSchema: collectParamsSchema(),
       };
     } catch (e: unknown) {

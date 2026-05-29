@@ -415,7 +415,22 @@ return Manifold.cube([p.width, p.width, p.rows * 10], true);
 
 **Types:** `number` / `int` (slider; `min`,`max`,`step`,`unit`), `boolean` (toggle), `select` (dropdown; `options` = array of strings or `{value,label}`), `text` (`maxLength`), `color` (hex). Optional `label` and `help` on any. A malformed *schema* throws a clear `api.params: …` error; bad *values* are clamped or fall back to the default, never throwing — so the model always renders. Reading an undeclared key (`p.widht`) throws too, so a typo can't silently become `NaN`.
 
-**Driving it yourself:** `partwright.getParams()` returns `{ schema, values }` so you can see what knobs exist; `partwright.setParams({ width: 50, rows: 3 })` changes values and re-runs (the `getParams`/`setParams` tools do the same). Prefer `setParams` over rewriting code when you only need to change a declared dimension — it's cheaper and keeps the model intact. The chosen values persist with each saved version (so a version re-renders exactly as saved). Today `color`/`text` params are captured but have no geometry sink — model code returns geometry only; coloring is a separate paint step.
+**Driving it yourself:** `partwright.getParams()` returns `{ schema, values }` so you can see what knobs exist; `partwright.setParams({ width: 50, rows: 3 })` changes values and re-runs (the `getParams`/`setParams` tools do the same). Prefer `setParams` over rewriting code when you only need to change a declared dimension — it's cheaper and keeps the model intact. The chosen values persist with each saved version (so a version re-renders exactly as saved). A `color` param's value (a hex string) drives geometry color by passing it to `api.label(shape, name, { color: p.accent })` (see [Model-declared color](#model-declared-color-self-coloring-models) below) — so a color knob recolors the model live. `text` params are captured but have no geometry sink yet.
+
+### Model-declared color (self-coloring models)
+
+Give a label a color right in the code and it renders **and exports** colored — no separate paint step, and the editor stays editable:
+
+```js
+const { Manifold } = api;
+const body = api.label(Manifold.cube([20, 20, 20], true), 'body', { color: '#3b82f6' });
+const knob = api.label(Manifold.cylinder(6, 4, 4, 32).translate([0, 0, 13]), 'knob', { color: [1, 0, 0] });
+return body.add(knob);   // renders blue body + red knob; GLB/3MF carry the colors
+```
+
+The `color` is a hex string (`'#rrggbb'` / `'#rgb'`, the same form a `color` param produces) or an `[r,g,b]` array in 0..1. `api.labeledUnion([{ name, shape, color }, …])` takes the same per-entry `color`. Because the color travels with the labelled name, it **re-resolves every run** — so it survives Customizer parameter changes, and a `color` param wired in as `{ color: p.accent }` recolors the model live. For per-instance color (e.g. a parametric count), give each instance a distinct name: `api.label(petal, 'petal' + i, { color: … })`.
+
+Model-declared colors are a derived **underlay**: manual paint (the paint tools / `paintByLabel`) composites on top as an optional override, and only manual paint locks the editor. They are **not** written into the saved paint sidecar — they come from the code, so re-running re-derives them. Inspect the active set with `partwright.getModelColors()` → `{ count, colors: [{ name, color, triangleCount }] }`; an empty `triangleCount` for a name means that label's triangles were consumed by a later boolean (check `listLabels().lostLabels`). See **[/ai/colors.md](/ai/colors.md)**.
 
 ### Primitive origins and orientations
 

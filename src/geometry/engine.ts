@@ -197,6 +197,7 @@ function handleEngineWorkerMessage(event: MessageEvent): void {
       (mesh.triColors as Uint8Array & { _painted?: Uint8Array })._painted = new Uint8Array(mesh.numTri).fill(1);
     }
     const labelMapEntries = msg.labelMapEntries as [string, number[]][] | null;
+    const labelColorEntries = msg.labelColorEntries as [string, [number, number, number]][] | null;
     const lostLabels = msg.lostLabels as string[] | null;
     const result: MeshResult = {
       mesh,
@@ -205,6 +206,9 @@ function handleEngineWorkerMessage(event: MessageEvent): void {
       diagnostics: msg.diagnostics as MeshResult['diagnostics'],
       labelMap: labelMapEntries
         ? new Map(labelMapEntries.map(([k, v]) => [k, new Set(v)]))
+        : undefined,
+      labelColors: labelColorEntries && labelColorEntries.length > 0
+        ? new Map(labelColorEntries)
         : undefined,
       lostLabels: lostLabels && lostLabels.length > 0 ? lostLabels : undefined,
       paramsSchema: (msg.paramsSchema as MeshResult['paramsSchema']) ?? undefined,

@@ -142,6 +142,10 @@ self.onmessage = async (event: MessageEvent) => {
       const labelMapEntries: [string, number[]][] | null = result.labelMap
         ? Array.from(result.labelMap.entries()).map(([k, v]) => [k, Array.from(v)])
         : null;
+      // Model-declared label colors (api.label(…, { color })) — plain entries.
+      const labelColorEntries: [string, [number, number, number]][] | null = result.labelColors
+        ? Array.from(result.labelColors.entries())
+        : null;
       const lostLabels = result.lostLabels ?? null;
       const paramsSchema = result.paramsSchema ?? null;
 
@@ -162,7 +166,7 @@ self.onmessage = async (event: MessageEvent) => {
 
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         (self as any).postMessage(
-          { type: 'execute_result', callId, mesh, error: null, diagnostics: [], labelMapEntries, lostLabels, paramsSchema },
+          { type: 'execute_result', callId, mesh, error: null, diagnostics: [], labelMapEntries, labelColorEntries, lostLabels, paramsSchema },
           transfer,
         );
       } else {

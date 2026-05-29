@@ -124,7 +124,7 @@ import {
 import { setColor as setAnnotateColor, setWidth as setAnnotateWidth, getWidth as getAnnotateWidth } from './annotations/annotateMode';
 import { addTextAnnotationAtAnchor, setFontSize as setAnnotateFontSize, getFontSize as getAnnotateFontSize } from './annotations/textMode';
 import { restoreView as restoreAnnotationViewById } from './annotations/selectMode';
-import { applyTriColors, applyTriColorsIfVisible, hasRegions as hasColorRegions, onChange as onColorRegionsChange, onVisibilityChange as onPaintVisibilityChange, clearRegions, serialize as serializeRegions, addRegion, getRegions, removeRegion, removeLastRegion, redoLastRegion, setRegionVisibility, setRegionTriangles, buildTriColors, createEmptyTriColors, overlayPainted, type SerializedColorRegion, type RegionDescriptor } from './color/regions';
+import { applyTriColors, applyTriColorsIfVisible, hasRegions as hasColorRegions, onChange as onColorRegionsChange, onVisibilityChange as onPaintVisibilityChange, clearRegions, serialize as serializeRegions, addRegion, getRegions, removeRegion, removeLastRegion, redoLastRegion, setRegionVisibility, setRegionTriangles, buildTriColors, createEmptyTriColors, overlayPainted, setModelColorRegions, hasModelColorRegions, clearModelColorRegions, getModelRegions, type SerializedColorRegion, type RegionDescriptor } from './color/regions';
 import { setPaintLabels } from './color/labels';
 import { setBucketTolerance as setPaintBucketTolerance, getBucketTolerance as getPaintBucketTolerance, setBrushRadius as setPaintBrushRadius, getBrushRadius as getPaintBrushRadius, setBrushSmooth as setPaintBrushSmooth, isBrushSmooth as isPaintBrushSmooth, setBrushSmoothDivisor as setPaintBrushSmoothDivisor, getBrushSmoothDivisor as getPaintBrushSmoothDivisor, setBrushSurface as setPaintBrushSurface, getBrushSurface as getPaintBrushSurface, setBrushPaintDepth as setPaintBrushDepth, getBrushPaintDepth as getPaintBrushDepth, SMOOTH_DIVISOR_MIN, SMOOTH_DIVISOR_MAX } from './color/paintMode';
 import { buildStrokeMesh, buildRefinedMesh, brushRefineRegion, strokeFootprintTriangles, deriveSampleNormals, buildGeodesicField, tangentBasis, childrenByParent, type BrushStroke, type BrushShape, type RefineRegion } from './color/subdivide';
@@ -2327,6 +2327,7 @@ async function main() {
     // exist (or overwrite the freshly-loaded starter mesh).
     resetPaintWorkerState();
     clearRegions();
+    clearModelColorRegions(); // model-declared underlay is module state too
     syncLockState();
     const freshCode = `// ${comment}\nconst { Manifold } = api;\nreturn Manifold.cube([10, 10, 10], true);`;
     setValue(freshCode);
@@ -7371,6 +7372,22 @@ async function main() {
       return { count: labels.length, labels, ...(lost ? { lostLabels: lost } : {}) };
     },
 
+    /** Report the colors the current run declared in code via
+     *  `api.label(shape, name, { color })` (and `api.labeledUnion` entries with a
+     *  `color`). These render and export automatically as a derived underlay —
+     *  no paint step — and the editor stays editable. Manual paint composites on
+     *  top. Returns `{ count, colors: [{name, color, triangleCount}] }`; an empty
+     *  list means no colors were declared (or the labelled triangles vanished in
+     *  a boolean — check `listLabels().lostLabels`). */
+    getModelColors() {
+      const colors = getModelRegions().map(r => ({
+        name: r.name,
+        color: r.color,
+        triangleCount: r.triangles.size,
+      }));
+      return { count: colors.length, colors };
+    },
+
     /** Paint a labelled feature by name. The label must have been
      *  registered in the current run's code via `api.label(shape, name)`
      *  or `api.labeledUnion([{name, shape}, ...])`. This is the cleanest
@@ -7761,6 +7778,7 @@ async function main() {
         'listComponents':  { signature: 'listComponents() -> {count, components: [{index, centroid, boundingBox, volume, surfaceArea}]} -- Decompose the manifold into boolean-distinct parts. For "paint each feature" workflows (e.g. unioned head + eyes + mouth).', docs: '/ai/colors.md' },
         'paintComponent':  { signature: 'paintComponent({index, color, name?, topOnly?}) -- One-call shortcut: listComponents + paintInBox for the Nth piece.', docs: '/ai/colors.md' },
         'listLabels':      { signature: 'listLabels() -> {count, labels: [{name, triangleCount, bbox, centroid}]} -- Labels registered in the current run via api.label(shape, name). Survives boolean ops; the cleanest paint primitive on agent-authored geometry.', docs: '/ai/colors.md' },
+        'getModelColors':  { signature: 'getModelColors() -> {count, colors: [{name, color, triangleCount}]} -- Colors declared in code via api.label(shape, name, {color}). Render + export automatically; editor stays editable; manual paint overrides.', docs: '/ai/colors.md' },
         'paintByLabel':    { signature: 'paintByLabel({label, color, name?}) -- Paint a labelled feature by name. Pair with api.label/labeledUnion in your code. No coordinate guessing.', docs: '/ai/colors.md' },
         'paintByLabels':   { signature: 'paintByLabels([{label, color, name?}, ...]) -- Batch sibling. N features painted in one call -> {results, failed}. Use for any multi-feature paint job.', docs: '/ai/colors.md' },
         'paintConnected':  { signature: 'paintConnected({seed: {point, normal?}, maxDeviationDeg?, color, name?}) -- BFS-flood from a surface seed, gated by deviation from SEED normal (not adjacent). Pairs with probePixel for "paint everything contiguous and facing this way".', docs: '/ai/colors.md' },
@@ -8568,6 +8586,22 @@ async function main() {
       currentLostLabels = result.lostLabels ?? null;
       setPaintLabels(currentLabelMap);
 
+      // Model-declared colors (api.label(shape, name, { color })) become a
+      // derived underlay: resolve each labelled name's triangles from the fresh
+      // labelMap and hand them to the model-region layer. Rebuilt every run
+      // (so editing a color in code updates the render) and replaced wholesale
+      // — passing [] when nothing was declared clears any prior run's layer.
+      // This layer never locks the editor and is never serialized; the user's
+      // manual paint composites on top of it. See src/color/regions.ts.
+      const modelColorDecls: { name: string; color: [number, number, number]; triangles: Set<number> }[] = [];
+      if (result.labelColors && currentLabelMap) {
+        for (const [name, color] of result.labelColors) {
+          const triangles = currentLabelMap.get(name);
+          if (triangles && triangles.size > 0) modelColorDecls.push({ name, color, triangles });
+        }
+      }
+      setModelColorRegions(modelColorDecls);
+
       // Apply any existing color regions to the mesh. Refining regions —
       // smooth brush strokes AND smooth slab/box regions — subdivide the mesh:
       // their triangle indices point into the REFINED tessellation, not this
@@ -8581,7 +8615,7 @@ async function main() {
       if (hasColorRegions() && hasRefineDescriptors()) {
         rebuildPaintedGeometry();
         lastStrokeList = strokeDescriptors();
-      } else if (hasColorRegions()) {
+      } else if (hasColorRegions() || hasModelColorRegions()) {
         // Re-resolve each non-refining region's triangles against the
         // freshly-run mesh. Without this, the in-memory `triangles` Set
         // still indexes the previous mesh — wrong colors when the

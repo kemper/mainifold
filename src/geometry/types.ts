@@ -44,6 +44,12 @@ export interface MeshResult {
    *  Resolved by walking `mesh.runOriginalID` + `runIndex`. Empty / absent
    *  when no labels were registered. */
   labelMap?: Map<string, Set<number>>;
+  /** Colors declared in code via `api.label(shape, name, { color })`, keyed by
+   *  label name (RGB 0..1). The main thread resolves each name's triangles from
+   *  `labelMap` and renders/exports them as a derived "model color" underlay —
+   *  no manual painting needed. Manual paint regions composite on top. Absent
+   *  when no labelled color was declared this run. */
+  labelColors?: Map<string, [number, number, number]>;
   /** Names that the user wrote `label("X")` for but didn't survive into
    *  `labelMap`. Typical causes (SCAD): the label sat inside a `{ ... }`
    *  block, so CGAL stripped provenance; a for-loop expanded one source
