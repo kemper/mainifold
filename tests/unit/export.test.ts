@@ -103,10 +103,22 @@ describe('Bambu 3MF — all-PLA filament metadata', () => {
     expect(text).toContain('#00FF00');
   });
 
-  it('still carries the standard mesh + colorgroup so it opens in any slicer', async () => {
+  it('emits a Bambu project package: marker, separate object part, paint_color', async () => {
     const text = asLatin1(await blobBytes(build3MFBambu(triPainted()).blob));
-    expect(text).toContain('<m:colorgroup');
-    expect(text).toContain('3D/3dmodel.model');
+    // The production-extension marker is what flips Bambu into project-load
+    // mode (else it nearest-color-matches each color to a PLA/ABS preset).
+    expect(text).toContain('BambuStudio:3mfVersion');
+    // Mesh lives in a referenced object part; color rides in Bambu's
+    // paint_color segmentation, NOT the standard m:colorgroup (real Bambu
+    // projects don't use colorgroup).
+    expect(text).toContain('3D/Objects/object_1.model');
+    expect(text).toContain('Metadata/model_settings.config');
+    expect(text).toContain('paint_color');
+    expect(text).not.toContain('<m:colorgroup');
+    // triPainted's two colors land in slots 1 and 2 → extruders 2 and 3 →
+    // paint_color bitstreams "8" and "C0".
+    expect(text).toContain('paint_color="8"');
+    expect(text).toContain('paint_color="C0"');
   });
 
   it('an uncolored model still pins a single PLA filament', async () => {
