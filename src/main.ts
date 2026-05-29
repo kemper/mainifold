@@ -73,10 +73,12 @@ import {
   getExport as getInboxExport,
   clearExports as clearInboxExports,
   registerExport as registerInboxExport,
+  hydrateExportInbox,
 } from './export/exportInbox';
 import {
   registerImport,
   classifyImportSource,
+  hydrateImportInbox,
   type ImportInboxEntry,
   type ImportMetadata,
 } from './import/importInbox';
@@ -1548,6 +1550,13 @@ async function main() {
 
   // Apply persisted theme before any UI renders
   initTheme();
+
+  // Rehydrate the Recent Imports / Recent Exports lists from IndexedDB so they
+  // survive a refresh. Fire-and-forget: each notifies its subscribers (the
+  // toolbar dropdowns) when the load completes, so boot isn't blocked on IDB
+  // and the order relative to toolbar mount doesn't matter.
+  void hydrateImportInbox();
+  void hydrateExportInbox();
 
   // Remove loading splash as soon as JS takes over
   document.getElementById('loading-splash')?.remove();
