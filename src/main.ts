@@ -72,7 +72,7 @@ import {
   registerExport as registerInboxExport,
 } from './export/exportInbox';
 import {
-  registerImport,
+  registerImportSnapshot,
   classifyImportSource,
   type ImportInboxEntry,
   type ImportMetadata,
@@ -2017,7 +2017,9 @@ async function main() {
       }
       // IMAGE registers itself inside handleImageImport (it owns the chosen
       // voxel options + thumbnail it needs to stash for a faithful re-import).
-      if (committed && source !== 'IMAGE') registerImport(file, file.name, source);
+      // Snapshot the bytes so a later re-import doesn't depend on the original
+      // (possibly moved/dropped) OS file handle.
+      if (committed && source !== 'IMAGE') await registerImportSnapshot(file, file.name, source);
       return committed;
     } catch (e) {
       alert(`Failed to import "${file.name}": ${(e as Error).message}`);
@@ -2089,7 +2091,9 @@ async function main() {
     // settings + a thumbnail, so re-clicking it reopens THIS modal (not relief)
     // pre-loaded with these knobs.
     const meta: ImportMetadata = { importer: 'voxel', options: opts };
-    registerImport(file, file.name, 'IMAGE', meta, createThumbnailFromImageData(imageData));
+    // Snapshot the file bytes (see registerImportSnapshot): a re-import months
+    // later must not depend on the original OS file still being readable.
+    await registerImportSnapshot(file, file.name, 'IMAGE', meta, createThumbnailFromImageData(imageData));
     return true;
   }
 
