@@ -23,5 +23,9 @@
     "noFallthroughCasesInSwitch": true,
     "noUncheckedSideEffectImports": true
   },
-  "include": ["src"]
+  "include": ["src"],
+  // The service worker uses WebWorker-lib globals (FetchEvent, the SW `self`)
+  // that conflict with this project's DOM lib. vite-plugin-pwa compiles it
+  // separately (injectManifest), so keep it out of the app type-check.
+  "exclude": ["src/sw.ts"]
 }

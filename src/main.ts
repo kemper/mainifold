@@ -39,6 +39,9 @@ import { registerCommands } from './ui/commandPalette';
 import { showQualitySettingsModal } from './ui/qualitySettingsModal';
 import { combo, MOD_LABEL, SHIFT_LABEL, ALT_LABEL } from './ui/shortcutDefs';
 import { showToast } from './ui/toast';
+import { initOfflineIndicator } from './ui/offlineIndicator';
+import { ensurePersistentStorage } from './storage/persist';
+import { registerServiceWorker } from './registerSW';
 import { initAiPanel, setActiveSession as setAiActiveSession, toggleAiPanel, toggleAiPanelFromToolbar } from './ui/aiPanel';
 import { mergeChatBucket } from './ai/db';
 import { aiConnectionMode, reloadSettingsFromStorage, getRenderBudget, getSpendingSummary, setSpendingMode as applyAiSpendingMode } from './ai/settings';
@@ -1551,6 +1554,21 @@ async function main() {
 
   // Apply persisted theme before any UI renders
   initTheme();
+
+  // Register the offline/isolation service worker (production-only). It
+  // precaches the app shell so a refresh with no network re-boots the editor,
+  // and re-stamps COOP/COEP on cached responses so cross-origin isolation holds
+  // offline. No-op in dev (the server provides the headers there).
+  registerServiceWorker();
+
+  // Ask the browser to make our IndexedDB + cached model weights durable
+  // (exempt from automatic eviction under storage pressure). Fire-and-forget —
+  // it never throws and the app works regardless of the outcome.
+  void ensurePersistentStorage();
+
+  // Surface an "offline" pill when the network drops. Additive and hidden
+  // while online, so it never affects normal use (or tests, which run online).
+  initOfflineIndicator();
 
   // Rehydrate the Recent Imports / Recent Exports lists from IndexedDB so they
   // survive a refresh. Fire-and-forget: each notifies its subscribers (the
@@ -3899,21 +3917,23 @@ async function main() {
 
   // Init geometry engine — wrapped in try/catch so editor/viewport still init
   // on failure. The WASM engines need SharedArrayBuffer, which requires
-  // cross-origin isolation (COOP+COEP). The coi-serviceworker.js shim installs
-  // those headers and reloads ONCE on a first visit to gain isolation, so a
-  // transient non-isolated state on the very first load is expected and must
-  // NOT flash the scary message — we gate on the shim having had its reload.
+  // cross-origin isolation (COOP+COEP). Those headers come from the server, but
+  // as a fallback for hosts that strip them the offline service worker
+  // (src/sw.ts + registerSW.ts) reloads ONCE on a first visit to serve a
+  // stamped, isolated document — so a transient non-isolated state on the very
+  // first load is expected and must NOT flash the scary message; we gate on
+  // that one reload having had its chance.
   const COI_MISSING_MSG =
     'This browser tab is not cross-origin isolated, so the WASM engine (which needs SharedArrayBuffer) can’t start. ' +
     'This usually fixes itself on reload; if it persists, the required COOP/COEP headers aren’t reaching the page ' +
     '(a proxy, extension, or unsupported browser can strip them).';
   setStatus(statusBar, 'loading', 'Loading WASM...');
   if (!isolationSupported()) {
-    // Has the COI shim already had a chance to reload this tab? It registers a
-    // service worker and reloads once; until a controller exists, that reload
-    // is still pending, so stay on the neutral "Loading…" message rather than
-    // alarming the user. We remember that we waited so a second non-isolated
-    // load (where the shim can't help) surfaces the explanation.
+    // Has the service worker already had a chance to reload this tab for
+    // isolation? It registers and reloads once; until a controller exists, that
+    // reload is still pending, so stay on the neutral "Loading…" message rather
+    // than alarming the user. We remember that we waited so a second non-isolated
+    // load (where the worker can't help) surfaces the explanation.
     let coiReloadPending = false;
     try {
       const waited = sessionStorage.getItem('partwright-coi-waited') === '1';

@@ -154,9 +154,8 @@ After any changes that touch routing, Vite config, index.html, or initialization
 1. **Landing page**: Navigate to `http://localhost:5173/` — should show the hero section ("Partwright", "AI-driven parametric CAD in your browser"), CTA buttons, and a Recent Sessions grid (or empty state).
 2. **Open Editor**: Click "Open Editor" on the landing page — URL should change to `/editor`, status should show "Ready" (green), the code editor should appear on the left with a default example, and a 3D model should render in the viewport on the right.
 3. **WASM engine loads**: The status indicator (small pill in the top-left of the viewport) should say "Ready" in green, NOT "Loading WASM..." or "WASM failed". If it shows "WASM failed", check:
-   - `coi-serviceworker.js` loads without 404 (check Network tab)
    - `manifold.wasm` loads without 403 (check Network tab) — if 403, check `server.fs.strict` in vite.config.ts
-   - COEP/COOP headers are present on responses (check Response Headers)
+   - COEP/COOP headers are present on responses (check Response Headers) — they come from the server (Vite `server.headers` in dev, `public/_headers` in prod); the offline service worker (`src/sw.ts`) re-applies them when serving a cached document offline
 4. **Help page**: Click the `?` icon in the toolbar — should navigate to `/help` and show the help content. "Back" should return to the editor.
 5. **AI agent bypass**: `http://localhost:5173/editor` should skip the landing page and go straight to the editor (Interactive tab). `window.partwright.renderViews({views:"box"})` returns a 6-face composite PNG data URL.
 6. **Session loading**: Click a session tile on the landing page — should load the session code in the editor, show the session name in the session bar, and update the URL to `/editor?session=<id>`.
@@ -281,6 +280,19 @@ The user pays for a non-default engine only when they reach for it:
 Each loader is idempotent and caches the resolved module. Vite splits each one into its own chunk (verify by inspecting `npm run build` output — the OCCT WASM lands as `replicad_single-*.wasm` (~10 MB) outside the main bundle).
 
 When adding a new lazy-loaded module, follow `brepRuntime.ts`'s pattern: one `ensureXLoaded()` promise that's cached after success and cleared on failure so the next call retries.
+
+### Offline support (service worker)
+
+The app works offline once it has loaded online once: a refresh with no network re-boots the editor instead of going blank, and modeling + the local WebLLM model keep working (cloud AI providers obviously don't). There's **one** service worker, `src/sw.ts`, built by **vite-plugin-pwa** (`injectManifest`) — it supersedes the old `coi-serviceworker.js`. It owns two jobs:
+
+1. **Offline app shell** — `precache(self.__WB_MANIFEST)` caches the core build (the heavy lazy engines — OpenSCAD / replicad WASM — and the ~6 MB WebLLM worker are excluded via `globIgnores` and runtime-cached on first use instead). Navigations are network-first (online users always get the freshest build) with a cached-shell fallback; assets are precache-first via revision-aware `matchPrecache`.
+2. **Cross-origin isolation** — COOP/COEP normally come from the server (Vite `server.headers` in dev, `public/_headers` in prod), but a cached *document* served offline needs them re-applied, so the worker re-stamps COOP/COEP on every navigation response. It's also the fallback for hosts that strip the headers (the old shim's role), via a one-time reload from `src/registerSW.ts`.
+
+Key rules if you touch this:
+- **Don't add a second service worker** — a page gets one controller per scope. Extend `src/sw.ts`.
+- **`src/sw.ts` is excluded from the app `tsconfig`** (it uses WebWorker-lib globals); vite-plugin-pwa compiles it. The literal token `self.__WB_MANIFEST` must survive (don't alias it) or manifest injection fails.
+- **Registration is production-only** (`src/registerSW.ts` gates on `import.meta.env.PROD`). The SW is intentionally **not** active in dev / the e2e suite (it would fight Vite's module pipeline), so dev relies on the server headers and the offline-caching path is verified against `npm run build` + `npm run preview` (whose `preview.headers` mirror prod isolation), not Playwright. The connectivity-aware UI (the offline pill in `src/ui/offlineIndicator.ts`, the AI panel's local-model nudge) *is* e2e-tested via `context.setOffline` in `tests/offline-mode.spec.ts`.
+- Durable storage is requested at boot via `navigator.storage.persist()` (`src/storage/persist.ts`) so IndexedDB + cached weights aren't evicted.
 
 ## Coordinate System
 
