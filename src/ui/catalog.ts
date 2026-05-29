@@ -46,7 +46,7 @@ interface LoadedEntry {
 /** The catalog is sectioned so each tile's reason for being here is obvious.
  *  Categories are mutually exclusive and assigned in {@link categorize}; the
  *  array order is the on-page section order. */
-type CategoryId = 'customizable' | 'manifold' | 'sdf' | 'scad' | 'brep';
+type CategoryId = 'customizable' | 'manifold' | 'sdf' | 'voxel' | 'scad' | 'brep';
 
 interface CategoryDef {
   id: CategoryId;
@@ -57,7 +57,8 @@ interface CategoryDef {
 const CATEGORIES: CategoryDef[] = [
   { id: 'customizable', title: 'Customizable', blurb: 'Tweak these live with sliders and toggles — open the 🎛 Customize panel in the editor, no code changes needed.' },
   { id: 'manifold', title: 'JavaScript Models', blurb: 'Built with the default manifold-3d mesh API — the everyday JS modeling path.' },
-  { id: 'sdf', title: 'Implicit Surfaces (SDF)', blurb: 'Signed-distance-field models via levelSet — gyroids, lattices, and organic blends.' },
+  { id: 'sdf', title: 'Implicit Surfaces (SDF)', blurb: 'Signed-distance-field models via the Sdf builder — gyroids, lattices, and organic blends.' },
+  { id: 'voxel', title: 'Voxel Models', blurb: 'Built by painting and baking a voxel grid.' },
   { id: 'scad', title: 'OpenSCAD', blurb: 'Authored in OpenSCAD with the BOSL2 library — gears, threads, and machined parts.' },
   { id: 'brep', title: 'Solid CAD (BREP)', blurb: 'Exact OpenCASCADE solids (replicad) with true fillets and STEP export.' },
 ];
@@ -70,6 +71,7 @@ function categorize(entry: LoadedEntry): CategoryId {
   const lang = entry.payload?.session.language ?? entry.manifest.language ?? 'manifold-js';
   if (lang === 'scad') return 'scad';
   if (lang === 'replicad') return 'brep';
+  if (lang === 'voxel') return 'voxel';
   if (entry.isSDF) return 'sdf';
   return 'manifold';
 }
@@ -80,7 +82,13 @@ function categorize(entry: LoadedEntry): CategoryId {
 function deriveCharacteristics(entry: CatalogManifestEntry, payload: ExportedSession | null): { hasParams: boolean; isSDF: boolean } {
   const code = (payload?.versions ?? []).map(v => v.code ?? '').join('\n');
   const hasParams = /\bapi\.params\s*\(/.test(code);
-  const isSDF = /\blevelSet\s*\(/.test(code) || /^sdf[-_]/i.test(entry.id);
+  // SDF catalog entries reach the surface builder through the `sdf` api
+  // namespace — either `api.sdf.…` or, more often, destructured as
+  // `const { sdf, Manifold } = api`. Detect both, plus the raw manifold
+  // `levelSet`, and fall back to the `sdf-` id prefix so a thumbnail-only or
+  // differently-authored entry still classifies.
+  const usesSdfApi = /\bapi\.sdf\b/.test(code) || /[{,]\s*sdf\s*[,}]/.test(code);
+  const isSDF = usesSdfApi || /\blevelSet\s*\(/.test(code) || /^sdf[-_]/i.test(entry.id);
   return { hasParams, isSDF };
 }
 
