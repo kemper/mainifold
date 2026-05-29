@@ -182,24 +182,42 @@ await partwright.bakeVoxelsToCode({ label: 'sad-cube' });   // commits + saves
 ## Image import
 
 Drag an image (`.png`, `.jpg`, `.gif`, `.webp`) onto the editor, or use
-Import → choose an image file. Opaque pixels become colored voxels in a new
-voxel session; transparent pixels drop out (so logos and sprites voxelize
-cleanly). The image stands upright as a billboard: image width → X, image
-height → Z, extruded along Y. Large images are downsampled so the longest side
-fits 64 voxels by default.
+Import → choose an image file. A parameter modal opens with a live preview so
+you can dial in resolution, mode, depth/relief, transparency cutoff, and color
+before committing to a new voxel session. The image stands upright: image
+width → X, image height → Z, extruded along Y. Transparent pixels drop out (so
+logos and sprites voxelize cleanly).
+
+Two modes:
+
+- **Billboard** (default) — every surviving pixel becomes a flat column
+  `depth` voxels thick: a standing colored picture.
+- **Heightmap** — each pixel's brightness drives a per-column height, turning
+  the image into a 3D relief (lithophane-style). An optional `baseThickness`
+  adds a solid backing so dark areas stay connected/printable, and `invert`
+  raises dark areas instead of bright ones.
 
 Programmatic / AI equivalent:
 
 ```js
 // imageUrl is a data: URL or a same-origin URL.
+// Billboard:
 await partwright.importImageAsVoxels(imageUrl, { maxSize: 64, depth: 1, alphaThreshold: 128 });
+// Heightmap relief:
+await partwright.importImageAsVoxels(imageUrl, { mode: 'heightmap', maxSize: 96, maxHeight: 24, baseThickness: 2 });
 // -> { sessionId, voxelCount }  (or { error })
 ```
 
 - `maxSize` — longest side after downsampling (default 64).
-- `depth` — how many voxels deep to extrude (default 1).
+- `mode` — `'billboard'` (default) or `'heightmap'`.
+- `depth` — billboard extrusion thickness in voxels (default 1).
+- `maxHeight` — heightmap: tallest relief column in voxels (default 16).
+- `baseThickness` — heightmap: solid backing slab in voxels (default 1).
+- `invert` — heightmap: raise dark areas instead of bright (default false).
 - `alphaThreshold` — minimum alpha 0–255 for a pixel to become a voxel
   (default 128). Opaque photos (no alpha) become a full slab.
+- `colorMode` — `'original'` (default), `'grayscale'`, or `'flat'`.
+- `flatColor` — `[r, g, b]` used when `colorMode` is `'flat'`.
 
 ## Gotchas
 

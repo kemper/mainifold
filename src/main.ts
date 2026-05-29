@@ -75,13 +75,14 @@ import {
 } from './import/importInbox';
 import { showImportPreview, summarizeSessionImport } from './ui/importPreview';
 import { showImportTargetModal } from './ui/importTargetModal';
+import { showImageVoxelImportModal } from './ui/imageVoxelImportModal';
 import { showStepImportTargetModal } from './ui/stepImportTargetModal';
 import { showLanguageHelpModal } from './ui/languageHelpModal';
 import { showMergePartsModal } from './ui/mergePartsModal';
 import { parseSTL } from './import/parsers/stl';
 import { parseVox } from './import/parsers/vox';
 import { generateImportCode } from './import/codegen';
-import { imageDataToVoxelGrid, generateVoxelImportCode } from './import/imageToVoxel';
+import { imageDataToVoxelGrid, generateVoxelImportCode, type ImageToVoxelOptions } from './import/imageToVoxel';
 import * as voxelPaint from './color/voxelPaint';
 import { setActiveImports, getActiveImports, type ImportedMesh } from './import/importedMesh';
 import type { BuiltExport } from './export/gltf';
@@ -1575,8 +1576,9 @@ async function main() {
     // Raw code imports don't get a preview modal of their own — confirm before clobber.
     // JSON imports skip this confirm because the preview modal already serves as
     // confirmation; STL and STEP imports skip it because their target modals let
-    // the user choose where the import should go.
-    if (!options.skipPreActiveConfirm && source !== 'JSON' && source !== 'STL' && source !== 'STEP') {
+    // the user choose where the import should go; IMAGE imports skip it because
+    // the image→voxel parameter modal (with its own Cancel) serves the same role.
+    if (!options.skipPreActiveConfirm && source !== 'JSON' && source !== 'STL' && source !== 'STEP' && source !== 'IMAGE') {
       const cur = getState();
       if (cur.session && cur.versionCount > 0) {
         const ok = await showInlineConfirm(
@@ -1664,9 +1666,14 @@ async function main() {
       alert(`Could not read image "${file.name}": ${(e as Error).message}`);
       return false;
     }
-    const grid = imageDataToVoxelGrid(imageData);
+    // Let the user dial in resolution / mode / depth / color before
+    // committing. The modal's Cancel doubles as the back-out, so the generic
+    // pre-import confirm is skipped for images (see handleImportFile).
+    const opts = await showImageVoxelImportModal({ filename: file.name, image: imageData });
+    if (!opts) return false;
+    const grid = imageDataToVoxelGrid(imageData, opts);
     if (grid.size === 0) {
-      alert(`"${file.name}" produced no voxels — every sampled pixel was transparent. Try an image with opaque content.`);
+      alert(`"${file.name}" produced no voxels at the chosen settings. Try lowering the transparency cutoff.`);
       return false;
     }
     const code = generateVoxelImportCode(grid, file.name);
@@ -3990,16 +3997,27 @@ async function main() {
     },
 
     /** Import an image (a `data:` URL or a same-origin URL) as a colored voxel
-     *  billboard in a new voxel session — the programmatic equivalent of the
-     *  Import → image file flow. Transparent pixels drop out; opaque images
-     *  become a full slab. Returns `{ sessionId, voxelCount }` or `{ error }`. */
-    async importImageAsVoxels(imageUrl: string, opts: { maxSize?: number; depth?: number; alphaThreshold?: number } = {}) {
+     *  model in a new voxel session — the programmatic equivalent of the
+     *  Import → image file flow. `mode: 'billboard'` (default) extrudes every
+     *  surviving pixel to a uniform `depth`; `mode: 'heightmap'` drives a
+     *  per-column height from pixel brightness (with an optional `baseThickness`
+     *  backing, and `invert` to raise dark areas). `colorMode` keeps the
+     *  original color, converts to `grayscale`, or paints a single `flatColor`.
+     *  Transparent pixels below `alphaThreshold` drop out. Returns
+     *  `{ sessionId, voxelCount }` or `{ error }`. */
+    async importImageAsVoxels(imageUrl: string, opts: ImageToVoxelOptions = {}) {
       const check = guard(() => {
         assertString(imageUrl, 'importImageAsVoxels(imageUrl)', { allowEmpty: false });
         assertObject(opts, 'importImageAsVoxels(opts)', { optional: true });
         if (opts.maxSize !== undefined) assertNumber(opts.maxSize, 'importImageAsVoxels(opts.maxSize)', { min: 1, integer: true });
+        if (opts.mode !== undefined) assertEnum(opts.mode, ['billboard', 'heightmap'], 'importImageAsVoxels(opts.mode)');
         if (opts.depth !== undefined) assertNumber(opts.depth, 'importImageAsVoxels(opts.depth)', { min: 1, integer: true });
+        if (opts.maxHeight !== undefined) assertNumber(opts.maxHeight, 'importImageAsVoxels(opts.maxHeight)', { min: 1, integer: true });
+        if (opts.baseThickness !== undefined) assertNumber(opts.baseThickness, 'importImageAsVoxels(opts.baseThickness)', { min: 0, integer: true });
+        if (opts.invert !== undefined) assertBoolean(opts.invert, 'importImageAsVoxels(opts.invert)');
         if (opts.alphaThreshold !== undefined) assertNumber(opts.alphaThreshold, 'importImageAsVoxels(opts.alphaThreshold)', { min: 0, max: 255, integer: true });
+        if (opts.colorMode !== undefined) assertEnum(opts.colorMode, ['original', 'grayscale', 'flat'], 'importImageAsVoxels(opts.colorMode)');
+        if (opts.flatColor !== undefined) assertNumberTuple(opts.flatColor, 3, 'importImageAsVoxels(opts.flatColor)');
       });
       if (typeof check === 'object' && check !== null && 'error' in check) return check;
       let imageData: ImageData;

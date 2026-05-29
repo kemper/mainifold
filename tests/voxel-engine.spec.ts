@@ -99,6 +99,32 @@ test.describe('voxel engine', () => {
     expect(result.geo.isManifold).toBe(true);
   });
 
+  test('importImageAsVoxels heightmap mode raises brighter pixels', async ({ page }) => {
+    const result = await page.evaluate(async () => {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const pw = (window as any).partwright;
+      // 2×1 image: a white pixel (tall) and a black pixel (base only).
+      const canvas = document.createElement('canvas');
+      canvas.width = 2;
+      canvas.height = 1;
+      const ctx = canvas.getContext('2d')!;
+      ctx.fillStyle = '#ffffff';
+      ctx.fillRect(0, 0, 1, 1);
+      ctx.fillStyle = '#000000';
+      ctx.fillRect(1, 0, 1, 1);
+      const url = canvas.toDataURL('image/png');
+      const imp = await pw.importImageAsVoxels(url, {
+        mode: 'heightmap', maxHeight: 10, baseThickness: 1,
+      });
+      return { imp, geo: pw.getGeometryData() };
+    });
+
+    expect(result.imp.error).toBeFalsy();
+    // White column = base(1) + 10 = 11, black column = base(1) + 0 = 1 → 12.
+    expect(result.imp.voxelCount).toBe(12);
+    expect(result.geo.isManifold).toBe(true);
+  });
+
   test('smooth surfacing rounds the mesh while staying a manifold', async ({ page }) => {
     const result = await page.evaluate(async () => {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
