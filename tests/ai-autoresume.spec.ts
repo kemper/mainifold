@@ -94,6 +94,102 @@ test.describe('Auto-continue (finish-tool resume)', () => {
     expect(out.reason).toBe('end_turn'); // stopped cleanly, not iteration_cap
   });
 
+  test('an EMPTY end_turn (empty_final) auto-resumes without breaking turn alternation', async ({ page }) => {
+    // Regression: an empty assistant turn is dropped by the request builders, so
+    // appending the user nudge after it would leave two consecutive user turns
+    // (a hard 400 on Anthropic). The empty turn must get a placeholder so the
+    // model/user/model/user alternation holds.
+    await page.goto('/editor');
+    await waitForEditorReady(page);
+    const out = await page.evaluate(async () => {
+      const chatLoop = await import('/src/ai/chatLoop.ts');
+      const settings = await import('/src/ai/settings.ts');
+      const toggles = settings.setToggles(settings.loadSettings(), {
+        provider: 'gemini', geminiModel: 'gemini-flash-latest', autoResume: true,
+        maxIterations: 'medium', vision: { views: false },
+      }).toggles;
+
+      let n = 0;
+      const bodies: string[] = [];
+      const origFetch = window.fetch;
+      // @ts-expect-error test stub
+      window.fetch = async (input: unknown, init?: RequestInit) => {
+        const url = String(input);
+        if (!url.includes('generativelanguage.googleapis.com')) return origFetch(input as RequestInfo, init);
+        n++;
+        bodies.push(String(init?.body ?? ''));
+        // Call 1: a truly empty end_turn (no parts). Call 2: finish.
+        const frame = n === 1
+          ? 'data: {"candidates":[{"content":{"parts":[]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":1,"candidatesTokenCount":0}}'
+          : 'data: {"candidates":[{"content":{"parts":[{"functionCall":{"name":"finish","args":{}}}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":1,"candidatesTokenCount":1}}';
+        return new Response(new Blob([frame + '\r\n\r\n']), { status: 200, headers: { 'Content-Type': 'text/event-stream' } });
+      };
+      try {
+        await chatLoop.runTurn(
+          { apiKey: 'k', toggles, sessionId: 'autoresume-empty', history: [], userBlocks: [{ type: 'text', text: 'do it' }] },
+          {},
+        );
+        // The SECOND request carries the resumed history — assert its roles
+        // strictly alternate (no two consecutive 'user' contents).
+        const contents = JSON.parse(bodies[1]).contents as Array<{ role: string }>;
+        let consecutiveUser = false;
+        for (let i = 1; i < contents.length; i++) {
+          if (contents[i].role === 'user' && contents[i - 1].role === 'user') consecutiveUser = true;
+        }
+        return { calls: n, roles: contents.map(c => c.role), consecutiveUser };
+      } finally {
+        window.fetch = origFetch;
+      }
+    });
+    expect(out.calls).toBe(2);
+    expect(out.consecutiveUser).toBe(false);
+    // user("do it") → model("(no response)" placeholder) → user(nudge)
+    expect(out.roles).toEqual(['user', 'model', 'user']);
+  });
+
+  test('a model that never calls finish is bounded by the no-progress ceiling', async ({ page }) => {
+    // Regression: without a no-progress ceiling, autoResume + a model that keeps
+    // ending its turn without calling finish would loop until the iteration cap
+    // (or forever under an infinite cap). The ceiling stops it well before the
+    // high iteration cap (32) and lands on a normal end_turn outcome.
+    await page.goto('/editor');
+    await waitForEditorReady(page);
+    const out = await page.evaluate(async () => {
+      const chatLoop = await import('/src/ai/chatLoop.ts');
+      const settings = await import('/src/ai/settings.ts');
+      const toggles = settings.setToggles(settings.loadSettings(), {
+        provider: 'gemini', geminiModel: 'gemini-flash-latest', autoResume: true,
+        maxIterations: 'high', vision: { views: false }, // cap 32 — must NOT be the limiter
+      }).toggles;
+
+      let n = 0;
+      const origFetch = window.fetch;
+      // @ts-expect-error test stub
+      window.fetch = async (input: unknown, init?: RequestInit) => {
+        const url = String(input);
+        if (!url.includes('generativelanguage.googleapis.com')) return origFetch(input as RequestInfo, init);
+        n++;
+        // Always a plain text end_turn — the model never calls finish.
+        const frame = 'data: {"candidates":[{"content":{"parts":[{"text":"still going"}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":1,"candidatesTokenCount":1}}';
+        return new Response(new Blob([frame + '\r\n\r\n']), { status: 200, headers: { 'Content-Type': 'text/event-stream' } });
+      };
+      const ev = { autoResume: 0, reason: '' };
+      try {
+        await chatLoop.runTurn(
+          { apiKey: 'k', toggles, sessionId: 'autoresume-stuck', history: [], userBlocks: [{ type: 'text', text: 'do it' }] },
+          { onAutoResume: () => { ev.autoResume++; }, onTurnComplete: info => { ev.reason = info.reason; } },
+        );
+        return { calls: n, autoResume: ev.autoResume, reason: ev.reason };
+      } finally {
+        window.fetch = origFetch;
+      }
+    });
+    // 8 nudges, then the 9th request falls through to the normal outcome.
+    expect(out.autoResume).toBe(8);
+    expect(out.calls).toBe(9);
+    expect(out.reason).toBe('end_turn'); // not iteration_cap (32) — the ceiling stopped it first
+  });
+
   test('the Auto-continue pill toggles the setting', async ({ page }) => {
     await page.goto('/editor');
     await waitForEditorReady(page);

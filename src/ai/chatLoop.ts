@@ -79,6 +79,15 @@ const AUTO_RESUME_PROMPT =
   'Continue — your previous turn ended without calling the `finish` tool, so you have NOT signaled completion. '
   + 'If the request is fully done and verified, call `finish` now. Otherwise keep working toward it.';
 
+/** Hard ceiling on CONSECUTIVE auto-resume nudges that make no progress (no
+ *  tool call, no `finish`). Resets to 0 whenever the model calls a tool. This
+ *  bounds the degenerate "model keeps ending its turn but never calls finish or
+ *  acts" case even when both the iteration and spend caps are set to infinity —
+ *  without limiting a genuinely productive long run (which keeps calling
+ *  tools). Hitting it just falls through to the normal end_turn outcome (a
+ *  resumable Keep-going notice), never an infinite loop. */
+const MAX_CONSECUTIVE_AUTO_RESUMES = 8;
+
 export interface RunTurnInput {
   /** Hosted-provider API key. Required only when toggles.provider === 'anthropic'. */
   apiKey?: string;
@@ -223,8 +232,12 @@ export async function runTurn(input: RunTurnInput, callbacks: RunTurnCallbacks =
   const maxIter = ITERATION_CAP[toggles.maxIterations];
   const maxSpend = SPEND_CAP_USD[toggles.maxSpend];
   // Auto-continue mode: the model only stops cleanly by calling `finish`; a
-  // plain end_turn is auto-resumed (bounded by maxIter + maxSpend).
+  // plain end_turn is auto-resumed (bounded by maxIter + maxSpend, plus the
+  // no-progress ceiling below).
   const autoResume = toggles.autoResume === true;
+  // Consecutive auto-resume nudges with no intervening progress (tool call or
+  // human message). Reset on the tool path; trips MAX_CONSECUTIVE_AUTO_RESUMES.
+  let consecutiveNudges = 0;
   // Spend cap is a session budget — count what prior turns already
   // burned so this turn stops when the running total tips over the cap,
   // not when this single turn would exceed the whole cap on its own.
@@ -446,22 +459,43 @@ export async function runTurn(input: RunTurnInput, callbacks: RunTurnCallbacks =
     if (result.stopReason !== 'tool_use' || result.toolCalls.length === 0) {
       // Auto-continue mode: the model signals completion by calling `finish`,
       // so a plain end_turn means it stopped early — append a nudge and loop so
-      // it keeps working. Bounded by maxIter (this for-loop) and the spend cap
-      // (checked above), so it can't run away. Only end_turn is auto-resumed;
-      // max_tokens / refusal keep their own handling + Keep-going notice.
-      if (autoResume && result.stopReason === 'end_turn') {
-        const nudge: ChatMessage = {
+      // it keeps working. Bounded by maxIter (this for-loop), the spend cap
+      // (checked above), and the no-progress ceiling, so it can't run away.
+      // Only end_turn is auto-resumed; max_tokens / refusal keep their own
+      // handling + Keep-going notice.
+      if (autoResume && result.stopReason === 'end_turn' && consecutiveNudges < MAX_CONSECUTIVE_AUTO_RESUMES) {
+        // Preserve user/assistant alternation: an empty assistant turn
+        // (empty_final — the model said nothing) is dropped by every provider's
+        // request builder, which would leave the prior tool-result user turn
+        // directly before the user turn we add below — a hard 400 on Anthropic.
+        // Give the empty turn a minimal marker so it survives between them.
+        if (assistantBlocks.length === 0) {
+          assistantMsg.blocks = [{ type: 'text', text: '(no response)' }];
+          await putMessages([assistantMsg]);
+        }
+        // If the human queued a follow-up while the model was wrapping up,
+        // deliver THAT as the next turn instead of the synthetic nudge — their
+        // instruction takes priority and counts as progress.
+        const queued = input.onDrainQueuedBlocks?.() ?? [];
+        const useHuman = queued.length > 0;
+        const nextUser: ChatMessage = {
           id: generateId(),
           sessionId,
           role: 'user',
-          blocks: [{ type: 'text', text: AUTO_RESUME_PROMPT }],
+          blocks: useHuman ? queued : [{ type: 'text', text: AUTO_RESUME_PROMPT }],
           createdAt: Date.now(),
           seq: seqStart + 2 + iter * 2,
-          autoResumeNudge: true,
+          ...(useHuman ? {} : { autoResumeNudge: true }),
         };
-        await putMessages([nudge]);
-        workingHistory = [...workingHistory, nudge];
-        callbacks.onAutoResume?.(nudge);
+        await putMessages([nextUser]);
+        workingHistory = [...workingHistory, nextUser];
+        if (useHuman) {
+          consecutiveNudges = 0;
+          callbacks.onUserMessageUpdated?.(nextUser);
+        } else {
+          consecutiveNudges++;
+          callbacks.onAutoResume?.(nextUser);
+        }
         continue;
       }
       // Map stop reason to a UI-friendly outcome so the panel can show
@@ -474,6 +508,10 @@ export async function runTurn(input: RunTurnInput, callbacks: RunTurnCallbacks =
       callbacks.onTurnComplete?.({ totalCostUsd, toolCalls: totalToolCalls, reason, detail: result.stopReason, iterations: iter + 1 });
       return workingHistory;
     }
+
+    // The model made a tool call — that's progress, so clear the no-progress
+    // auto-resume counter.
+    consecutiveNudges = 0;
 
     // Auto-continue: did the model call the `finish` sentinel this turn? If so
     // we let any other tools in the batch run (they may be the final actions),
@@ -543,18 +581,23 @@ export async function runTurn(input: RunTurnInput, callbacks: RunTurnCallbacks =
     }
 
     // Auto-continue: the model called `finish` and its final tools have run, so
-    // the task is done — stop cleanly. If the human queued a follow-up mid-turn
-    // it was just merged above, so fall through and let the loop deliver it
-    // rather than dropping it on the floor.
-    if (calledFinish && queuedBlocks.length === 0) {
+    // the task is done — stop cleanly. Two reasons NOT to stop:
+    //  - a non-finish tool in the same batch errored: the model declared done
+    //    but its last real action failed, so loop once more to let it react.
+    //  - the human queued a follow-up mid-turn (merged above): deliver it
+    //    rather than dropping it on the floor.
+    const finishBatchErrored = result.toolCalls.some((tc, i) => tc.name !== FINISH_TOOL && toolResults[i]?.isError === true);
+    if (calledFinish && !finishBatchErrored && queuedBlocks.length === 0) {
       callbacks.onTurnComplete?.({ totalCostUsd, toolCalls: totalToolCalls, reason: 'end_turn', detail: 'finish', iterations: iter + 1 });
       return workingHistory;
     }
   }
 
   // Hit iteration cap — surface to the user so they can intervene.
-  // Sentinel — only reachable for finite caps. The infinite case loops
-  // forever above and exits via end_turn / error / abort.
+  // Sentinel — only reachable for finite caps. The infinite case loops above
+  // and exits via end_turn / error / abort; under auto-continue the end_turn
+  // exit is reached once the no-progress ceiling trips (so even infinity caps
+  // can't spin forever on a model that never calls `finish`).
   const reached = Number.isFinite(maxIter) ? maxIter : totalToolCalls;
   callbacks.onTurnComplete?.({ totalCostUsd, toolCalls: totalToolCalls, reason: 'iteration_cap', iterations: reached });
   return workingHistory;
