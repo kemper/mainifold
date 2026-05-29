@@ -224,12 +224,14 @@ await partwright.exportGLB()   // Download GLB (browser file dialog -- prefer ex
 partwright.exportSTL()         // Download STL ("                                       exportSTLData() ")
 partwright.exportOBJ()         // Download OBJ ("                                       exportOBJData() ")
 partwright.export3MF()         // Download 3MF ("                                       export3MFData() ")
+partwright.export3MFBambu()    // Download Bambu-Studio 3MF -- same geometry + color, plus project data pinning every filament to PLA ("  export3MFBambuData() ")
 partwright.exportVOX()         // Download MagicaVoxel .vox (voxel sessions only -- keeps the editable grid). See /ai/voxel.md
 // Agent-friendly variants -- bytes return inline, no file dialog. See /ai/file-io.md.
 await partwright.exportGLBData()        // -> {filename, mimeType, base64, sizeBytes}
 await partwright.exportSTLData()
 await partwright.exportOBJData()        // text or base64 depending on whether colors are painted
 await partwright.export3MFData()
+await partwright.export3MFBambuData()   // Bambu 3MF (all-PLA filament data) -> {filename, mimeType, base64, sizeBytes}
 await partwright.exportVOXData()        // -> {filename, mimeType, base64, sizeBytes} (voxel sessions only)
 await partwright.exportSessionData()    // -> {filename, mimeType, data, sizeBytes} (parsed JSON)
 partwright.exportCodeData()             // -> {filename, mimeType, language, text, sizeBytes}
@@ -697,7 +699,7 @@ Before exporting anything intended for printing, **call `readDoc({name: "print-s
 
 ## Color regions
 
-Color regions tag a coplanar set of triangles with an RGB color. Regions are persisted on the saved version, ride through GLB and 3MF exports (vertex colors / `<basematerials>` `pid` attributes), and show as swatch badges in the gallery. They do **not** modify the geometry. STL and OBJ exports drop them — formats don't carry color.
+Color regions tag a coplanar set of triangles with an RGB color. Regions are persisted on the saved version, ride through GLB and 3MF exports (GLB vertex colors / 3MF `m:colorgroup` with per-triangle `pid`/`p1`), and show as swatch badges in the gallery. They do **not** modify the geometry. STL and OBJ exports drop them — formats don't carry color. `export3MF()` writes a portable file; `export3MFBambu()` writes the same geometry + colors plus Bambu project data that pins every filament to PLA (a standard 3MF carries no filament *type*, so Bambu otherwise guesses PLA/ABS by color-matching the user's presets).
 
 The paint helpers are exposed both as tool calls (`paintRegion`, `paintFaces`, `paintNear`, `paintStroke`, `paintInBox`, `paintSlab`, `paintNearestRegion`, `paintComponent`, `paintByLabel`, `paintByLabels`, `paintConnected`, `paintPreview`, `paintExplain`, `findFaces`, `probePixel`, `probeRay`, `getMeshSummary`, `listComponents`, `listLabels`, `undoLastPaint`, `redoLastPaint`, `removeRegion`, `clearColors`) and on `window.partwright`.
 

@@ -63,7 +63,7 @@ import { initSessionList, showSessionList } from './ui/sessionList';
 import { exportGLB, buildGLB } from './export/gltf';
 import { exportSTL, buildSTL } from './export/stl';
 import { exportOBJ, buildOBJ } from './export/obj';
-import { export3MF, build3MF } from './export/threemf';
+import { export3MF, build3MF, export3MFBambu, build3MFBambu } from './export/threemf';
 import { exportVOX, buildVOX } from './export/vox';
 import { assertFiniteMesh } from './export/meshClean';
 import { exportSessionJSON, exportRawCode, buildSessionJSON, buildRawCode } from './export/session';
@@ -2773,6 +2773,13 @@ async function main() {
     try { showToast(`Exported ${export3MF((hasColorRegions() || hasModelColorRegions()) ? applyTriColors(currentMeshData) : currentMeshData)}`, { variant: 'success' }); }
     catch (e) { showToast(e instanceof Error ? e.message : '3MF export failed', { variant: 'warn' }); }
   };
+  const actionExport3MFBambu = async () => {
+    if (isSharedPreview()) { showToast('Fork this shared design before exporting.', { variant: 'warn' }); return; }
+    if (!currentMeshData) return;
+    if (!(await confirmExportOrProceed('3MF'))) return;
+    try { showToast(`Exported ${export3MFBambu((hasColorRegions() || hasModelColorRegions()) ? applyTriColors(currentMeshData) : currentMeshData)}`, { variant: 'success' }); }
+    catch (e) { showToast(e instanceof Error ? e.message : '3MF export failed', { variant: 'warn' }); }
+  };
   // The integer VoxelGrid behind a voxel session. The engine meshes in the
   // Worker, so the grid isn't on the main thread after a normal run — re-run the
   // current code locally to recover it (the same trick voxel paint uses), or use
@@ -2905,6 +2912,7 @@ async function main() {
     onExportSTL: actionExportSTL,
     onExportOBJ: actionExportOBJ,
     onExport3MF: actionExport3MF,
+    onExport3MFBambu: actionExport3MFBambu,
     onExportVOX: actionExportVOX,
     onExportSTEP: async () => {
       // Inlined rather than calling partwrightAPI.exportSTEP because that
@@ -3170,6 +3178,7 @@ async function main() {
     { id: 'export-stl', title: 'Export STL', hint: 'Export', keywords: 'download print', run: actionExportSTL, enabled: () => currentMeshData !== null },
     { id: 'export-obj', title: 'Export OBJ', hint: 'Export', keywords: 'download wavefront', run: actionExportOBJ, enabled: () => currentMeshData !== null },
     { id: 'export-3mf', title: 'Export 3MF', hint: 'Export', keywords: 'download print color', run: actionExport3MF, enabled: () => currentMeshData !== null },
+    { id: 'export-3mf-bambu', title: 'Export 3MF (Bambu — all PLA)', hint: 'Export', keywords: 'download print color bambu studio pla filament', run: actionExport3MFBambu, enabled: () => currentMeshData !== null },
     { id: 'export-vox', title: 'Export VOX', hint: 'Export', keywords: 'download magicavoxel voxel goxel', run: actionExportVOX, enabled: () => getActiveLanguage() === 'voxel' && currentMeshData !== null },
     { id: 'share-link', title: 'Share design (copy link)', hint: 'Share', keywords: 'url public link copy fork readonly', run: () => { void actionShareLink(); }, enabled: canShare },
     { id: 'toggle-ai', title: 'Toggle AI panel', hint: 'View', keywords: 'chat assistant drawer', run: () => toggleAiPanel() },
@@ -4832,6 +4841,14 @@ async function main() {
       if (currentMeshData) export3MF((hasColorRegions() || hasModelColorRegions()) ? applyTriColors(currentMeshData) : currentMeshData, filename);
     },
 
+    /** Export current model as a Bambu-Studio 3MF download — same geometry +
+     *  color as export3MF, plus Bambu project data that pins every filament to
+     *  PLA. Optional filename override. */
+    export3MFBambu(filename?: string) {
+      assertString(filename, 'export3MFBambu(filename)', { optional: true });
+      if (currentMeshData) export3MFBambu((hasColorRegions() || hasModelColorRegions()) ? applyTriColors(currentMeshData) : currentMeshData, filename);
+    },
+
     /** Export the current voxel grid as a MagicaVoxel `.vox` download. Voxel
      *  sessions only (the integer grid is re-derived from the current code, or
      *  the live painted grid when paint is active). Returns
@@ -4939,6 +4956,23 @@ async function main() {
       const mesh = (hasColorRegions() || hasModelColorRegions()) ? applyTriColors(currentMeshData) : currentMeshData;
       const built = build3MF(mesh, filename);
       registerExportFromBuilt(built, '3MF');
+      return {
+        filename: built.filename,
+        mimeType: built.mimeType,
+        sizeBytes: built.blob.size,
+        base64: await blobToBase64(built.blob),
+      };
+    },
+
+    /** Build a Bambu-Studio 3MF (always a ZIP) and return its bytes as base64.
+     *  Same blob as export3MFBambu() — geometry + color + Bambu project data
+     *  declaring every filament as PLA. */
+    async export3MFBambuData(filename?: string) {
+      assertString(filename, 'export3MFBambuData(filename)', { optional: true });
+      if (!currentMeshData) return { error: 'No geometry loaded' };
+      const mesh = (hasColorRegions() || hasModelColorRegions()) ? applyTriColors(currentMeshData) : currentMeshData;
+      const built = build3MFBambu(mesh, filename);
+      registerExportFromBuilt(built, '3MF (Bambu)');
       return {
         filename: built.filename,
         mimeType: built.mimeType,
@@ -8984,13 +9018,15 @@ async function main() {
         'exportGLB':       { signature: 'await exportGLB() -- Download GLB file', docs: '/ai.md#console-api--windowpartwright' },
         'exportSTL':       { signature: 'exportSTL() -- Download STL file', docs: '/ai.md#console-api--windowpartwright' },
         'exportOBJ':       { signature: 'exportOBJ() -- Download OBJ file', docs: '/ai.md#console-api--windowpartwright' },
-        'export3MF':       { signature: 'export3MF() -- Download 3MF file', docs: '/ai.md#console-api--windowpartwright' },
+        'export3MF':       { signature: 'export3MF() -- Download 3MF file (portable; opens in any modern slicer)', docs: '/ai.md#console-api--windowpartwright' },
+        'export3MFBambu':  { signature: 'export3MFBambu() -- Download Bambu-Studio 3MF: same geometry + color, plus Bambu project data pinning every filament to PLA', docs: '/ai.md#console-api--windowpartwright' },
         'exportVOX':       { signature: 'exportVOX() -- Download MagicaVoxel .vox (voxel sessions)', docs: '/ai/voxel.md' },
         // AI-friendly export — return bytes over the API instead of triggering a download
         'exportGLBData':   { signature: 'await exportGLBData() -- Return GLB as {filename, mimeType, base64, sizeBytes}', docs: '/ai/file-io.md' },
         'exportSTLData':   { signature: 'await exportSTLData() -- Return STL as {filename, mimeType, base64, sizeBytes}', docs: '/ai/file-io.md' },
         'exportOBJData':   { signature: 'await exportOBJData() -- Return OBJ as {filename, mimeType, text? | base64, sizeBytes}', docs: '/ai/file-io.md' },
         'export3MFData':   { signature: 'await export3MFData() -- Return 3MF as {filename, mimeType, base64, sizeBytes}', docs: '/ai/file-io.md' },
+        'export3MFBambuData': { signature: 'await export3MFBambuData() -- Return Bambu 3MF (all-PLA filament data) as {filename, mimeType, base64, sizeBytes}', docs: '/ai/file-io.md' },
         'exportVOXData':   { signature: 'await exportVOXData() -- Return .vox as {filename, mimeType, base64, sizeBytes} (voxel sessions)', docs: '/ai/file-io.md' },
         'exportSessionData': { signature: 'await exportSessionData(sessionId?) -- Return parsed session JSON {filename, mimeType, data, sizeBytes}', docs: '/ai/file-io.md' },
         'exportCodeData':  { signature: 'exportCodeData() -- Return editor source as {filename, mimeType, language, text, sizeBytes}', docs: '/ai/file-io.md' },

@@ -112,11 +112,17 @@ test.describe('Model-declared color', () => {
       await pw.run(code); // model-declared colors, NO manual paint
       const obj = await pw.exportOBJData();
       const tmf = await pw.export3MFData();
+      const bambu = await pw.export3MFBambuData();
+      // The 3MF ZIP uses STORE, so the config text is embedded verbatim.
+      const bambuText = bambu.base64 ? atob(bambu.base64 as string) : '';
       return {
         objMime: obj.mimeType as string,
         objFile: obj.filename as string,
         objColored: !!obj.base64 && obj.text === undefined,
         tmfBytes: (tmf.sizeBytes as number) ?? 0,
+        bambuFile: bambu.filename as string,
+        bambuHasPlaConfig: bambuText.includes('project_settings.config') && bambuText.includes('"filament_type"') && bambuText.includes('"PLA"'),
+        bambuHasAbs: bambuText.includes('ABS'),
       };
     }, COLOR_MODEL);
 
@@ -128,5 +134,11 @@ test.describe('Model-declared color', () => {
     expect(out.objColored).toBe(true);
     // 3MF shares the same gate and is always a ZIP — assert it built.
     expect(out.tmfBytes).toBeGreaterThan(0);
+
+    // The Bambu variant carries the all-PLA project config and no ABS, and
+    // lands under a distinct _bambu filename.
+    expect(out.bambuFile.endsWith('_bambu.3mf')).toBe(true);
+    expect(out.bambuHasPlaConfig).toBe(true);
+    expect(out.bambuHasAbs).toBe(false);
   });
 });

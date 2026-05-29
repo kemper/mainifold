@@ -21,6 +21,9 @@ export interface ToolbarCallbacks {
   onExportSTL: () => void;
   onExportOBJ: () => void;
   onExport3MF: () => void;
+  /** Bambu-Studio-flavored 3MF — same geometry + color as {@link onExport3MF}
+   *  plus Bambu project metadata that pins every filament to PLA. */
+  onExport3MFBambu: () => void;
   /** Voxel-only — silently hidden from the menu unless the active language is
    *  'voxel' (gated at menu-open time, like {@link onExportSTEP}). */
   onExportVOX: () => void;
@@ -522,12 +525,21 @@ export function createToolbar(
 
   const threemfOpt = createDescribedItem(
     '3MF',
-    'Geometry + color. Native format for Bambu Studio multi-color prints.',
+    'Geometry + color. Portable — opens in Bambu Studio, OrcaSlicer, PrusaSlicer.',
     'Recommended',
   );
   threemfOpt.addEventListener('click', () => {
     dropdown.classList.add('hidden');
     callbacks.onExport3MF();
+  });
+
+  const threemfBambuOpt = createDescribedItem(
+    '3MF (Bambu — all PLA)',
+    'Adds Bambu project data so every color imports as PLA, never ABS. Still opens in other slicers.',
+  );
+  threemfBambuOpt.addEventListener('click', () => {
+    dropdown.classList.add('hidden');
+    callbacks.onExport3MFBambu();
   });
 
   const objOpt = createDescribedItem(
@@ -583,6 +595,7 @@ export function createToolbar(
   });
 
   dropdown.appendChild(threemfOpt);
+  dropdown.appendChild(threemfBambuOpt);
   dropdown.appendChild(objOpt);
   dropdown.appendChild(stlOpt);
   dropdown.appendChild(glbOpt);

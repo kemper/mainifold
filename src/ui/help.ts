@@ -192,6 +192,7 @@ export function createHelpPage(
         '<strong class="text-zinc-300">Export — 3D model formats:</strong>' +
         '<ul class="list-disc list-inside mt-2 space-y-1 text-zinc-400">' +
         '<li><strong class="text-zinc-300">3MF</strong> (recommended for printing) — Geometry plus native color regions. Imports cleanly into Bambu Studio and other modern slicers.</li>' +
+        '<li><strong class="text-zinc-300">3MF (Bambu — all PLA)</strong> — Same geometry and colors, plus Bambu project data so every color imports as PLA (never ABS). A plain 3MF carries no filament <em>type</em>, so Bambu otherwise guesses one per color by matching your presets. Still opens in OrcaSlicer / PrusaSlicer.</li>' +
         '<li><strong class="text-zinc-300">OBJ</strong> — Geometry plus color via an MTL sidecar. Delivered as a ZIP — extract before importing into a slicer.</li>' +
         '<li><strong class="text-zinc-300">STL</strong> — Geometry only, no color. Universal slicer support.</li>' +
         '<li><strong class="text-zinc-300">GLB</strong> — Web/preview format with vertex colors. Good for embedding online, not read by slicers.</li>' +
