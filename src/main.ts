@@ -63,6 +63,7 @@ import { exportGLB, buildGLB } from './export/gltf';
 import { exportSTL, buildSTL } from './export/stl';
 import { exportOBJ, buildOBJ } from './export/obj';
 import { export3MF, build3MF } from './export/threemf';
+import { exportVOX, buildVOX } from './export/vox';
 import { assertFiniteMesh } from './export/meshClean';
 import { exportSessionJSON, exportRawCode, buildSessionJSON, buildRawCode } from './export/session';
 import { blobToBase64, downloadBlob } from './export/download';
@@ -89,12 +90,15 @@ import { parseSTL } from './import/parsers/stl';
 import { parseVox } from './import/parsers/vox';
 import { generateImportCode } from './import/codegen';
 import { imageDataToVoxelGrid, generateVoxelImportCode, type ImageToVoxelOptions } from './import/imageToVoxel';
+import { runVoxelForPaint } from './geometry/engines/voxel';
+import type { VoxelGrid } from './geometry/voxel/grid';
 import * as voxelPaint from './color/voxelPaint';
 import { setActiveImports, getActiveImports, type ImportedMesh } from './import/importedMesh';
 import { generateRelief, generateReliefFromSvg } from './relief/imageToRelief';
 import { DEFAULT_RELIEF_OPTIONS, type ReliefOptions, type ReliefImportMode, type ReliefCommonOptions, type SeedRegion, type PreviewMode, type GenerateReliefResult } from './relief/types';
 import { computeReliefTriColors, getSwapGuideFor, setPreviewMode as ctlSetReliefPreviewMode, getPreviewMode as ctlGetReliefPreviewMode, isPreviewActive as isReliefPreviewActive } from './relief/reliefController';
 import { setReliefSettings, getReliefSettings, updateReliefSettings, isReliefSession, getPreviewModeFor } from './relief/reliefSettings';
+import { saveReliefSource, getReliefSource } from './relief/reliefSource';
 import { listFilaments, hexToRgb } from './relief/filaments';
 import { meshBounds } from './color/slabPaint';
 import { openReliefImportModal } from './ui/reliefImportModal';
@@ -204,6 +208,7 @@ import {
   type ExportedSession,
   type ExportOptions,
 } from './storage/sessionManager';
+import { isQuotaError } from './storage/quota';
 import { acquireSession as acquireSessionLock, initSessionLeader, onOwnershipChange } from './storage/sessionLock';
 import { initViewerMode, isReadOnlyViewer } from './ui/viewerMode';
 import type { Version, Part } from './storage/db';
@@ -1838,7 +1843,7 @@ async function main() {
   // ImportedMesh, persist the relief settings, and open the studio. Used by
   // both the raster (createReliefFromImageData) and SVG (createReliefFromSvgText)
   // entry points so the post-generation flow stays in lockstep.
-  async function commitGeneratedRelief(result: GenerateReliefResult, opts: ReliefOptions, sourceName: string): Promise<{ sessionId: string }> {
+  async function commitGeneratedRelief(result: GenerateReliefResult, opts: ReliefOptions, sourceName: string, sourceFile: File | null = null, isSvg = false): Promise<{ sessionId: string }> {
     if (result.mesh.numTri === 0) throw new Error('Source too small to build a relief — use a larger image or SVG.');
     const mesh: ImportedMesh = {
       id: generateId(),
@@ -1869,6 +1874,11 @@ async function main() {
       previewMode: 'flat',
       options: opts,
     });
+    // Persist the source so the wizard can be reopened pre-loaded (no
+    // re-upload). Best-effort — saveReliefSource swallows storage errors.
+    if (sourceFile) {
+      await saveReliefSource(sessionId, sourceFile, sourceFile.name || `${sourceName}${isSvg ? '.svg' : '.png'}`, isSvg);
+    }
     showReliefStudio();
     return { sessionId };
   }
@@ -1889,7 +1899,7 @@ async function main() {
     return null;
   }
 
-  async function createReliefFromImageData(image: ImageData, options: ReliefOptions, sourceName: string): Promise<{ sessionId: string }> {
+  async function createReliefFromImageData(image: ImageData, options: ReliefOptions, sourceName: string, sourceFile: File | null = null): Promise<{ sessionId: string }> {
     const opts: ReliefOptions = {
       ...options,
       common: clampReliefCommon(options.common),
@@ -1899,10 +1909,10 @@ async function main() {
     const fitError = steppedReliefLayerFitError(opts);
     if (fitError) throw new Error(fitError);
     const result = generateRelief(image, opts);
-    return commitGeneratedRelief(result, opts, sourceName);
+    return commitGeneratedRelief(result, opts, sourceName, sourceFile, false);
   }
 
-  async function createReliefFromSvgText(svgText: string, options: ReliefOptions, sourceName: string): Promise<{ sessionId: string }> {
+  async function createReliefFromSvgText(svgText: string, options: ReliefOptions, sourceName: string, sourceFile: File | null = null): Promise<{ sessionId: string }> {
     const opts: ReliefOptions = {
       ...options,
       common: clampReliefCommon(options.common),
@@ -1913,7 +1923,7 @@ async function main() {
     const fitError = steppedReliefLayerFitError(opts);
     if (fitError) throw new Error(fitError);
     const result = await generateReliefFromSvg(svgText, opts);
-    return commitGeneratedRelief(result, opts, sourceName);
+    return commitGeneratedRelief(result, opts, sourceName, sourceFile, true);
   }
 
   // Seed color regions from an imported stepped-relief STL's existing Z plateaus so the
@@ -1988,13 +1998,26 @@ async function main() {
       // already shows an inline aiNote and keeps the modal open so the user
       // doesn't lose their tuned settings. Swallowing here would also let the
       // wizard think the create succeeded and close itself.
-      onCreate: async (image, opts, name) => {
-        await createReliefFromImageData(image, opts, name || 'relief');
+      onCreate: async (image, opts, name, sourceFile) => {
+        await createReliefFromImageData(image, opts, name || 'relief', sourceFile);
       },
-      onCreateSvg: async (svgText, opts, name) => {
-        await createReliefFromSvgText(svgText, opts, name || 'relief');
+      onCreateSvg: async (svgText, opts, name, sourceFile) => {
+        await createReliefFromSvgText(svgText, opts, name || 'relief', sourceFile);
       },
     });
+  }
+
+  /** Reopen the relief import wizard for an existing relief session, pre-loaded
+   *  with its saved source image + the settings it was generated with — so the
+   *  user re-tunes without re-uploading. Falls back to a blank wizard when no
+   *  source was stored (old sessions, or a storage miss). */
+  async function reopenReliefImport(sessionId: string): Promise<void> {
+    const savedOpts = getReliefSettings(sessionId)?.options;
+    // getReliefSource swallows storage errors and returns null, so a miss (old
+    // session, no stored source) just falls back to a blank picker pre-filled
+    // with the saved settings.
+    const source = await getReliefSource(sessionId);
+    openReliefImportFlow(source?.file, savedOpts);
   }
 
   function dataUrlToImageData(src: string): Promise<ImageData> {
@@ -2145,21 +2168,28 @@ async function main() {
     // committing. The modal's Cancel doubles as the back-out, so the generic
     // pre-import confirm is skipped for images (see handleImportFile).
     // `initialOptions` pre-fills the controls when re-importing a past entry.
-    const opts = await showImageVoxelImportModal({ filename: file.name, image: imageData, initialOptions });
-    if (!opts) return false;
-    const grid = imageDataToVoxelGrid(imageData, opts);
+    // The user may also swap the source image inside the modal ("Choose a
+    // different image…"), so build everything below from the RESULT's image /
+    // file / name rather than the originally-picked one.
+    const result = await showImageVoxelImportModal({ filename: file.name, image: imageData, file, initialOptions });
+    if (!result) return false;
+    const { options: opts, image: chosenImage, file: chosenFile, filename: chosenName } = result;
+    const sourceFile = chosenFile ?? file;
+    const grid = imageDataToVoxelGrid(chosenImage, opts);
     if (grid.size === 0) {
-      alert(`"${file.name}" produced no voxels at the chosen settings. Try lowering the transparency cutoff.`);
+      alert(`"${chosenName}" produced no voxels at the chosen settings. Try lowering the transparency cutoff.`);
       return false;
     }
-    const code = generateVoxelImportCode(grid, file.name);
-    const sessionName = file.name.replace(/\.(png|jpe?g|gif|webp|bmp)$/i, '');
+    const code = generateVoxelImportCode(grid, chosenName);
+    const sessionName = chosenName.replace(/\.(png|jpe?g|gif|webp|bmp)$/i, '');
     await importCodePayload(code, 'voxel', sessionName);
     // Register in Recent Imports tagged as a voxel import, with the chosen
     // settings + a thumbnail, so re-clicking it reopens THIS modal (not relief)
-    // pre-loaded with these knobs.
+    // pre-loaded with these knobs. Use the swapped-in source when present.
     const meta: ImportMetadata = { importer: 'voxel', options: opts };
-    registerImport(file, file.name, 'IMAGE', meta, createThumbnailFromImageData(imageData));
+    // chosenImage always originates from decodeImage*ToImageData (a real
+    // ImageData), so the ImageDataLike→ImageData narrowing is safe here.
+    registerImport(sourceFile, chosenName, 'IMAGE', meta, createThumbnailFromImageData(chosenImage as ImageData));
     return true;
   }
 
@@ -2664,6 +2694,29 @@ async function main() {
     try { showToast(`Exported ${export3MF((hasColorRegions() || hasModelColorRegions()) ? applyTriColors(currentMeshData) : currentMeshData)}`, { variant: 'success' }); }
     catch (e) { showToast(e instanceof Error ? e.message : '3MF export failed', { variant: 'warn' }); }
   };
+  // The integer VoxelGrid behind a voxel session. The engine meshes in the
+  // Worker, so the grid isn't on the main thread after a normal run — re-run the
+  // current code locally to recover it (the same trick voxel paint uses), or use
+  // the live painted grid when paint is active so unbaked edits are exported.
+  const getCurrentVoxelGrid = (): VoxelGrid | null => {
+    if (getActiveLanguage() !== 'voxel') return null;
+    const painted = voxelPaint.getGrid();
+    if (painted) return painted;
+    const r = runVoxelForPaint(getValue());
+    return r.ok ? r.data.grid : null;
+  };
+  const actionExportVOX = () => {
+    if (isSharedPreview()) { showToast('Fork this shared design before exporting.', { variant: 'warn' }); return; }
+    const grid = getCurrentVoxelGrid();
+    if (!grid) {
+      showToast(getActiveLanguage() === 'voxel'
+        ? 'Run a voxel model before exporting .vox.'
+        : 'Switch to the Voxel language to export .vox.', { variant: 'warn' });
+      return;
+    }
+    try { showToast(`Exported ${exportVOX(grid)}`, { variant: 'success' }); }
+    catch (e) { showToast(e instanceof Error ? e.message : 'VOX export failed', { variant: 'warn' }); }
+  };
 
   // Hard cap on the encoded share string. Browsers and chat apps choke on very
   // long URLs; past this we drop the thumbnail once and, if still too big, abort
@@ -2773,6 +2826,7 @@ async function main() {
     onExportSTL: actionExportSTL,
     onExportOBJ: actionExportOBJ,
     onExport3MF: actionExport3MF,
+    onExportVOX: actionExportVOX,
     onExportSTEP: async () => {
       // Inlined rather than calling partwrightAPI.exportSTEP because that
       // const is defined further down main() — using it here would land in
@@ -2821,7 +2875,14 @@ async function main() {
     },
     onImportFile: async (file) => { await handleImportFile(file); },
     onImportInboxEntry: handleReimportInboxEntry,
-    onCreateRelief: () => { openReliefImportFlow(); },
+    onCreateRelief: () => {
+      // If the active session is itself a relief, reopen the wizard pre-loaded
+      // with its stored source + settings (re-tune without re-uploading);
+      // otherwise start a fresh blank import.
+      const sid = getState().session?.id ?? null;
+      if (sid && isReliefSession(sid)) void reopenReliefImport(sid);
+      else openReliefImportFlow();
+    },
     onLanguageHelp: async () => { await showLanguageHelpModal(); },
     onToggleAi: () => { void toggleAiPanelFromToolbar(); },
     onLanguageSwitch: async (lang: 'manifold-js' | 'scad' | 'replicad' | 'voxel') => {
@@ -2982,7 +3043,22 @@ async function main() {
 
   // Global undo / redo / save shortcuts (OS-aware, focus/tool-routed).
   const saveVersionWithToast = async () => {
-    const result = await saveCurrentVersion();
+    let result;
+    try {
+      result = await saveCurrentVersion();
+    } catch (e) {
+      // An explicit Save that fails (e.g. a full quota) must surface the
+      // failure — never the "Saved" toast — so the user knows it didn't
+      // persist. No caller inspects the result, so a warn toast is the
+      // signal (we don't re-throw, which would just be an unhandled
+      // rejection through the `void` call sites).
+      if (isQuotaError(e)) {
+        showToast('Storage full — could not save this version. Free up space or export your work.', { variant: 'warn' });
+      } else {
+        showToast(e instanceof Error ? e.message : 'Save failed', { variant: 'warn' });
+      }
+      return;
+    }
     if ('error' in result) {
       showToast(result.error, { variant: 'warn' });
     } else if ('skipped' in result) {
@@ -3012,6 +3088,7 @@ async function main() {
     { id: 'export-stl', title: 'Export STL', hint: 'Export', keywords: 'download print', run: actionExportSTL, enabled: () => currentMeshData !== null },
     { id: 'export-obj', title: 'Export OBJ', hint: 'Export', keywords: 'download wavefront', run: actionExportOBJ, enabled: () => currentMeshData !== null },
     { id: 'export-3mf', title: 'Export 3MF', hint: 'Export', keywords: 'download print color', run: actionExport3MF, enabled: () => currentMeshData !== null },
+    { id: 'export-vox', title: 'Export VOX', hint: 'Export', keywords: 'download magicavoxel voxel goxel', run: actionExportVOX, enabled: () => getActiveLanguage() === 'voxel' && currentMeshData !== null },
     { id: 'share-link', title: 'Share design (copy link)', hint: 'Share', keywords: 'url public link copy fork readonly', run: () => { void actionShareLink(); }, enabled: canShare },
     { id: 'toggle-ai', title: 'Toggle AI panel', hint: 'View', keywords: 'chat assistant drawer', run: () => toggleAiPanel() },
     { id: 'toggle-diagnostics', title: 'Toggle diagnostic log', hint: 'View', keywords: 'errors warnings console', run: () => toggleDiagnosticsPanel() },
@@ -3577,6 +3654,30 @@ async function main() {
     updateDocumentTitle({ page: 'editor' });
   }
 
+  // On a session open where we land on the LATEST version (the version the
+  // user would be actively editing — the URL pins ?v=<latest> after every
+  // save, so this is the normal reopen case), prefer an autosaved draft for
+  // the active language when it exists and differs from the code we just
+  // loaded. This is what makes editor autosave recover unsaved typing across a
+  // reload / crash. It is deliberately skipped when we loaded an OLDER version
+  // (explicit history navigation), so a stale draft never shadows a version
+  // the user intentionally went back to.
+  async function restoreDraftIfNewer(): Promise<void> {
+    const sid = getState().session?.id;
+    if (!sid) return;
+    // Only at the tip: if a specific older version is loaded, don't override it.
+    const current = getState().currentVersion;
+    if (current) {
+      const versions = await listCurrentVersions();
+      const latestIndex = versions.reduce((m, v) => Math.max(m, v.index), -Infinity);
+      if (current.index !== latestIndex) return;
+    }
+    const draft = await readDraft(sid, getActiveLanguage());
+    if (draft == null || draft === getValue()) return;
+    setValue(draft);
+    await runCodeSync(draft);
+  }
+
   async function syncEditorFromURL() {
     transitionToEditor();
     const tab = getTabFromURL();
@@ -3597,6 +3698,10 @@ async function main() {
         const version = await openSession(sessionId, versionIndex ?? undefined, partId ?? undefined);
         if (version) {
           await loadVersionIntoEditor(version);
+          // restoreDraftIfNewer self-gates: it only acts when this is the
+          // latest version (the tip the user edits), not an older one they
+          // navigated back to.
+          await restoreDraftIfNewer();
           if (tab === 'gallery') refreshGallery();
           if (tab === 'versions') refreshVersions();
           return;
@@ -3607,6 +3712,7 @@ async function main() {
         // generic default example.
         if (getState().session?.id === sessionId) {
           await loadPartIntoEditor(getState().currentVersion);
+          await restoreDraftIfNewer();
           if (tab === 'gallery') refreshGallery();
           if (tab === 'versions') refreshVersions();
           return;
@@ -3784,17 +3890,53 @@ async function main() {
     getSwapGuide: () => (currentMeshData ? getSwapGuideFor(currentMeshData, currentLayerHeight()) : null),
     detectLevels: () => detectReliefLevels(),
     onClose: () => closeReliefStudio(),
+    onEditImage: () => {
+      const sid = getState().session?.id ?? null;
+      if (sid) void reopenReliefImport(sid);
+      else openReliefImportFlow();
+    },
   });
+
+  // Persist the editor's working buffer to the active session's draft so an
+  // accidental reload / tab-close / crash doesn't lose unsaved typing. Reads
+  // getActiveLanguage() + getValue() SYNCHRONOUSLY at fire time so the draft
+  // lands under the right (session, language) key — same key version-load and
+  // the language-toggle path use — and never writes OLD code under a NEW
+  // language. Skips when no session is open so we don't auto-create empty
+  // sessions (which would fight deleteIfEmpty on unload). Best-effort: a quota
+  // failure is swallowed with a warn toast since autosave is non-critical.
+  function autosaveDraft(): void {
+    const sid = getState().session?.id;
+    if (!sid) return;
+    const lang = getActiveLanguage();
+    const code = getValue();
+    void writeDraft(sid, lang, code).catch((e) => {
+      if (isQuotaError(e)) {
+        showToast('Storage full — could not autosave your draft. Free up space or export your work.', { variant: 'warn' });
+      }
+      // Other autosave failures are non-fatal and intentionally silent.
+    });
+  }
 
   // Init editor — only auto-run if auto-run is enabled. Auto-runs drive the
   // live preview but defer error surfacing (no panel/markers/log mid-keystroke);
   // the idle + blur hooks surface the held-back error gently once typing settles.
+  // The same idle/blur ticks autosave the draft. A programmatic setValue
+  // (version load / language switch) cancels the pending onIdle (see
+  // codeEditor.setValue), so autosave never fires for code the user didn't type.
   initEditor(editorContainer, defaultCode, (code: string) => {
     if (isAutoRun()) runCode(code, { surfaceErrors: false });
   }, 'manifold-js', {
     onEdit: () => clearEditorErrorPanel(editorErrorPanel),
-    onIdle: () => surfacePendingError(),
-    onBlur: () => surfacePendingError(),
+    onIdle: () => { surfacePendingError(); autosaveDraft(); },
+    onBlur: () => { surfacePendingError(); autosaveDraft(); },
+  });
+
+  // Autosave when the tab is hidden (switching apps, closing) — the most
+  // reliable "user is leaving" signal that still permits an async IDB write,
+  // unlike beforeunload which can't await. Singleton listener (main runs once).
+  document.addEventListener('visibilitychange', () => {
+    if (document.hidden) autosaveDraft();
   });
 
   // When the user changes the modeling-quality preset, re-render the
@@ -4516,6 +4658,19 @@ async function main() {
       if (currentMeshData) export3MF((hasColorRegions() || hasModelColorRegions()) ? applyTriColors(currentMeshData) : currentMeshData, filename);
     },
 
+    /** Export the current voxel grid as a MagicaVoxel `.vox` download. Voxel
+     *  sessions only (the integer grid is re-derived from the current code, or
+     *  the live painted grid when paint is active). Returns
+     *  `{ ok, filename }` or `{ error }` (no grid, or a model larger than the
+     *  format's 256-per-axis limit). */
+    exportVOX(filename?: string) {
+      assertString(filename, 'exportVOX(filename)', { optional: true });
+      const grid = getCurrentVoxelGrid();
+      if (!grid) return { error: 'No voxel grid — switch to the Voxel language (setActiveLanguage("voxel")) and run a model first.' };
+      try { return { ok: true as const, filename: exportVOX(grid, filename) }; }
+      catch (e) { return { error: e instanceof Error ? e.message : String(e) }; }
+    },
+
     /** Export the most-recent BREP shape as a STEP file. Only meaningful in
      *  replicad-language sessions — BREP shapes built ad-hoc inside a
      *  manifold-js session (via api.BREP.*) are not retained past the
@@ -4610,6 +4765,25 @@ async function main() {
       const mesh = (hasColorRegions() || hasModelColorRegions()) ? applyTriColors(currentMeshData) : currentMeshData;
       const built = build3MF(mesh, filename);
       registerExportFromBuilt(built, '3MF');
+      return {
+        filename: built.filename,
+        mimeType: built.mimeType,
+        sizeBytes: built.blob.size,
+        base64: await blobToBase64(built.blob),
+      };
+    },
+
+    /** Build a MagicaVoxel `.vox` and return its bytes as base64. Voxel sessions
+     *  only. Returns `{ error }` with no grid, or when the model exceeds the
+     *  format's 256-per-axis limit. */
+    async exportVOXData(filename?: string) {
+      assertString(filename, 'exportVOXData(filename)', { optional: true });
+      const grid = getCurrentVoxelGrid();
+      if (!grid) return { error: 'No voxel grid — switch to the Voxel language (setActiveLanguage("voxel")) and run a model first.' };
+      let built;
+      try { built = buildVOX(grid, filename); }
+      catch (e) { return { error: e instanceof Error ? e.message : String(e) }; }
+      registerExportFromBuilt(built, 'VOX');
       return {
         filename: built.filename,
         mimeType: built.mimeType,
@@ -8637,11 +8811,13 @@ async function main() {
         'exportSTL':       { signature: 'exportSTL() -- Download STL file', docs: '/ai.md#console-api--windowpartwright' },
         'exportOBJ':       { signature: 'exportOBJ() -- Download OBJ file', docs: '/ai.md#console-api--windowpartwright' },
         'export3MF':       { signature: 'export3MF() -- Download 3MF file', docs: '/ai.md#console-api--windowpartwright' },
+        'exportVOX':       { signature: 'exportVOX() -- Download MagicaVoxel .vox (voxel sessions)', docs: '/ai/voxel.md' },
         // AI-friendly export — return bytes over the API instead of triggering a download
         'exportGLBData':   { signature: 'await exportGLBData() -- Return GLB as {filename, mimeType, base64, sizeBytes}', docs: '/ai/file-io.md' },
         'exportSTLData':   { signature: 'await exportSTLData() -- Return STL as {filename, mimeType, base64, sizeBytes}', docs: '/ai/file-io.md' },
         'exportOBJData':   { signature: 'await exportOBJData() -- Return OBJ as {filename, mimeType, text? | base64, sizeBytes}', docs: '/ai/file-io.md' },
         'export3MFData':   { signature: 'await export3MFData() -- Return 3MF as {filename, mimeType, base64, sizeBytes}', docs: '/ai/file-io.md' },
+        'exportVOXData':   { signature: 'await exportVOXData() -- Return .vox as {filename, mimeType, base64, sizeBytes} (voxel sessions)', docs: '/ai/file-io.md' },
         'exportSessionData': { signature: 'await exportSessionData(sessionId?) -- Return parsed session JSON {filename, mimeType, data, sizeBytes}', docs: '/ai/file-io.md' },
         'exportCodeData':  { signature: 'exportCodeData() -- Return editor source as {filename, mimeType, language, text, sizeBytes}', docs: '/ai/file-io.md' },
         // AI-friendly import — bypass the file picker
