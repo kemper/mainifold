@@ -214,7 +214,7 @@ export function computeImageVoxelLayout(image: ImageDataLike, options: ImageToVo
       : detectBackgroundMask(colorsU8, tw, th);
   }
 
-  const g = gamma > 0 ? gamma : 1;
+  const gam = gamma > 0 ? gamma : 1;
   const offX = Math.floor(tw / 2); // center horizontally on X=0
   const columns: VoxelColumn[] = [];
   let voxelCount = 0;
@@ -232,7 +232,7 @@ export function computeImageVoxelLayout(image: ImageDataLike, options: ImageToVo
       if (mode === 'heightmap') {
         let norm = luminance(r, gg, b) / 255;
         if (invert) norm = 1 - norm;
-        if (g !== 1) norm = Math.pow(Math.max(0, Math.min(1, norm)), g);
+        if (gam !== 1) norm = Math.pow(Math.max(0, Math.min(1, norm)), gam);
         height = baseThickness + Math.round(norm * maxHeight);
       } else {
         height = depth;
