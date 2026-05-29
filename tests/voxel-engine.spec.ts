@@ -18,6 +18,11 @@ test.describe('voxel engine', () => {
     );
   });
 
+  test('import dropdown has a dedicated "Image → voxel" row', async ({ page }) => {
+    await page.locator('#btn-import').click();
+    await expect(page.getByText('Image → voxel…')).toBeVisible();
+  });
+
   test('switching to voxel renders a watertight, colored, manifold mesh', async ({ page }) => {
     const result = await page.evaluate(async () => {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any

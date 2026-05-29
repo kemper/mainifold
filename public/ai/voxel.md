@@ -182,7 +182,8 @@ await partwright.bakeVoxelsToCode({ label: 'sad-cube' });   // commits + saves
 ## Image import
 
 Drag an image (`.png`, `.jpg`, `.gif`, `.webp`) onto the editor, or use
-Import → choose an image file. A parameter modal opens with a live preview so
+Import → **Image → voxel…** (its own row in the import menu, below
+Image → keychain / tile / relief). A parameter modal opens with a live preview so
 you can dial in resolution, mode, depth/relief, transparency cutoff, and color
 before committing to a new voxel session. The image stands upright: image
 width → X, image height → Z, extruded along Y. Transparent pixels drop out (so

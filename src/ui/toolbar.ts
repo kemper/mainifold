@@ -95,6 +95,8 @@ export function setAiToolbarState(mode: AiToolbarMode | boolean): void {
 
 /** File extensions accepted by the Import button and drag-and-drop. */
 export const IMPORT_ACCEPT = '.partwright.json,.json,.js,.scad,.stl,.step,.stp,.vox,.png,.jpg,.jpeg,.gif,.webp,.bmp';
+/** Raster image types accepted by the dedicated "Image → voxel" picker. */
+export const IMAGE_ACCEPT = '.png,.jpg,.jpeg,.gif,.webp,.bmp';
 
 let _autoRun = true;
 let _onAutoRunChange: ((on: boolean) => void) | null = null;
@@ -308,6 +310,20 @@ export function createToolbar(
   });
   importWrapper.appendChild(importInput);
 
+  // Dedicated image picker for the "Image → voxel" row, so it pre-filters to
+  // raster images and routes straight into the voxel-import modal (the same
+  // handler as a dropped image, just discoverable as its own menu row).
+  const imageVoxelInput = document.createElement('input');
+  imageVoxelInput.type = 'file';
+  imageVoxelInput.accept = IMAGE_ACCEPT;
+  imageVoxelInput.className = 'hidden';
+  imageVoxelInput.addEventListener('change', async () => {
+    const file = imageVoxelInput.files?.[0];
+    if (file) await callbacks.onImportFile(file);
+    imageVoxelInput.value = '';
+  });
+  importWrapper.appendChild(imageVoxelInput);
+
   const importDropdown = document.createElement('div');
   importDropdown.id = 'import-dropdown';
   importDropdown.className = 'fixed left-2 right-2 top-14 bg-zinc-800 border border-zinc-600 rounded shadow-lg py-1 hidden z-20 max-h-[80vh] overflow-y-auto md:absolute md:left-auto md:right-0 md:top-full md:mt-1 md:w-72';
@@ -334,6 +350,16 @@ export function createToolbar(
     callbacks.onCreateRelief();
   });
   importDropdown.appendChild(reliefOpt);
+
+  const imageVoxelOpt = createDescribedItem(
+    'Image → voxel…',
+    'Turn an image into a colored voxel model — flat billboard or brightness-driven relief — with adjustable resolution, depth, and color.',
+  );
+  imageVoxelOpt.addEventListener('click', () => {
+    importDropdown.classList.add('hidden');
+    imageVoxelInput.click();
+  });
+  importDropdown.appendChild(imageVoxelOpt);
 
   // Recent Imports section — populated from the import inbox.
   const importRecentDivider = createDivider();
