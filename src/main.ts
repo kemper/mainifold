@@ -4017,7 +4017,10 @@ async function main() {
         if (opts.invert !== undefined) assertBoolean(opts.invert, 'importImageAsVoxels(opts.invert)');
         if (opts.alphaThreshold !== undefined) assertNumber(opts.alphaThreshold, 'importImageAsVoxels(opts.alphaThreshold)', { min: 0, max: 255, integer: true });
         if (opts.colorMode !== undefined) assertEnum(opts.colorMode, ['original', 'grayscale', 'flat'], 'importImageAsVoxels(opts.colorMode)');
-        if (opts.flatColor !== undefined) assertNumberTuple(opts.flatColor, 3, 'importImageAsVoxels(opts.flatColor)');
+        if (opts.flatColor !== undefined) {
+          const c = assertNumberTuple(opts.flatColor, 3, 'importImageAsVoxels(opts.flatColor)');
+          c.forEach((n, i) => assertNumber(n, `importImageAsVoxels(opts.flatColor[${i}])`, { min: 0, max: 255, integer: true }));
+        }
       });
       if (typeof check === 'object' && check !== null && 'error' in check) return check;
       let imageData: ImageData;
