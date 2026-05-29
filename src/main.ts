@@ -75,16 +75,19 @@ import {
   registerImport,
   classifyImportSource,
   type ImportInboxEntry,
+  type ImportMetadata,
 } from './import/importInbox';
+import { createThumbnailFromImageData } from './import/imageThumbnail';
 import { showImportPreview, summarizeSessionImport } from './ui/importPreview';
 import { showImportTargetModal } from './ui/importTargetModal';
+import { showImageVoxelImportModal } from './ui/imageVoxelImportModal';
 import { showStepImportTargetModal } from './ui/stepImportTargetModal';
 import { showLanguageHelpModal } from './ui/languageHelpModal';
 import { showMergePartsModal } from './ui/mergePartsModal';
 import { parseSTL } from './import/parsers/stl';
 import { parseVox } from './import/parsers/vox';
 import { generateImportCode } from './import/codegen';
-import { imageDataToVoxelGrid, generateVoxelImportCode } from './import/imageToVoxel';
+import { imageDataToVoxelGrid, generateVoxelImportCode, type ImageToVoxelOptions } from './import/imageToVoxel';
 import * as voxelPaint from './color/voxelPaint';
 import { setActiveImports, getActiveImports, type ImportedMesh } from './import/importedMesh';
 import { generateRelief, generateReliefFromSvg } from './relief/imageToRelief';
@@ -1976,8 +1979,9 @@ async function main() {
     // Raw code imports don't get a preview modal of their own — confirm before clobber.
     // JSON imports skip this confirm because the preview modal already serves as
     // confirmation; STL and STEP imports skip it because their target modals let
-    // the user choose where the import should go.
-    if (!options.skipPreActiveConfirm && source !== 'JSON' && source !== 'STL' && source !== 'STEP') {
+    // the user choose where the import should go; IMAGE imports skip it because
+    // the image→voxel parameter modal (with its own Cancel) serves the same role.
+    if (!options.skipPreActiveConfirm && source !== 'JSON' && source !== 'STL' && source !== 'STEP' && source !== 'IMAGE') {
       const cur = getState();
       if (cur.session && cur.versionCount > 0) {
         const ok = await showInlineConfirm(
@@ -2011,7 +2015,9 @@ async function main() {
       } else if (source === 'VOX') {
         committed = await handleVoxImport(file);
       }
-      if (committed) registerImport(file, file.name, source);
+      // IMAGE registers itself inside handleImageImport (it owns the chosen
+      // voxel options + thumbnail it needs to stash for a faithful re-import).
+      if (committed && source !== 'IMAGE') registerImport(file, file.name, source);
       return committed;
     } catch (e) {
       alert(`Failed to import "${file.name}": ${(e as Error).message}`);
@@ -2057,7 +2063,7 @@ async function main() {
    *  sprites voxelize cleanly; opaque photos become a full extruded slab.
    *  The grid is embedded in the generated `voxels.decode(...)` code, so the
    *  session persists as code with no special schema. */
-  async function handleImageImport(file: File): Promise<boolean> {
+  async function handleImageImport(file: File, initialOptions?: ImageToVoxelOptions): Promise<boolean> {
     let imageData: ImageData;
     try {
       imageData = await decodeImageToImageData(file);
@@ -2065,14 +2071,25 @@ async function main() {
       alert(`Could not read image "${file.name}": ${(e as Error).message}`);
       return false;
     }
-    const grid = imageDataToVoxelGrid(imageData);
+    // Let the user dial in resolution / mode / depth / color before
+    // committing. The modal's Cancel doubles as the back-out, so the generic
+    // pre-import confirm is skipped for images (see handleImportFile).
+    // `initialOptions` pre-fills the controls when re-importing a past entry.
+    const opts = await showImageVoxelImportModal({ filename: file.name, image: imageData, initialOptions });
+    if (!opts) return false;
+    const grid = imageDataToVoxelGrid(imageData, opts);
     if (grid.size === 0) {
-      alert(`"${file.name}" produced no voxels — every sampled pixel was transparent. Try an image with opaque content.`);
+      alert(`"${file.name}" produced no voxels at the chosen settings. Try lowering the transparency cutoff.`);
       return false;
     }
     const code = generateVoxelImportCode(grid, file.name);
     const sessionName = file.name.replace(/\.(png|jpe?g|gif|webp|bmp)$/i, '');
     await importCodePayload(code, 'voxel', sessionName);
+    // Register in Recent Imports tagged as a voxel import, with the chosen
+    // settings + a thumbnail, so re-clicking it reopens THIS modal (not relief)
+    // pre-loaded with these knobs.
+    const meta: ImportMetadata = { importer: 'voxel', options: opts };
+    registerImport(file, file.name, 'IMAGE', meta, createThumbnailFromImageData(imageData));
     return true;
   }
 
@@ -2482,12 +2499,19 @@ async function main() {
         if (parsed) await placeImportedMesh(parsed, entry.filename);
         return;
       }
-      // Image / SVG re-imports re-open the Relief Studio wizard with the
-      // original file pre-loaded — the user keeps their previous tweaks fresh
-      // but gets to adjust knobs before re-generating.
+      // Image / SVG re-imports reopen the same importer that produced them,
+      // pre-loaded with the original settings: voxel imports return to the
+      // voxel modal, everything else (relief, SVG) to the Relief Studio.
       if (entry.source === 'IMAGE' || entry.source === 'SVG') {
         const file = new File([entry.blob], entry.filename, { type: entry.blob.type });
-        const savedOpts = (entry.metadata && typeof entry.metadata === 'object') ? entry.metadata as ReliefOptions : undefined;
+        const meta = (entry.metadata && typeof entry.metadata === 'object') ? entry.metadata as Partial<ImportMetadata> : undefined;
+        if (meta?.importer === 'voxel') {
+          await handleImageImport(file, meta.options as ImageToVoxelOptions);
+          return;
+        }
+        // Relief imports store { importer:'relief', options }; older/plain
+        // entries stored the ReliefOptions directly — accept both shapes.
+        const savedOpts = (meta?.importer === 'relief' ? meta.options : entry.metadata) as ReliefOptions | undefined;
         openReliefImportFlow(file, savedOpts);
         return;
       }
@@ -4559,16 +4583,40 @@ async function main() {
     },
 
     /** Import an image (a `data:` URL or a same-origin URL) as a colored voxel
-     *  billboard in a new voxel session — the programmatic equivalent of the
-     *  Import → image file flow. Transparent pixels drop out; opaque images
-     *  become a full slab. Returns `{ sessionId, voxelCount }` or `{ error }`. */
-    async importImageAsVoxels(imageUrl: string, opts: { maxSize?: number; depth?: number; alphaThreshold?: number } = {}) {
+     *  model in a new voxel session — the programmatic equivalent of the
+     *  Import → image file flow. `mode: 'billboard'` (default) extrudes every
+     *  surviving pixel to a uniform `depth`; `mode: 'heightmap'` drives a
+     *  per-column height from pixel brightness (with an optional `baseThickness`
+     *  backing, and `invert` to raise dark areas). `colorMode` keeps the
+     *  original color, converts to `grayscale`, or paints a single `flatColor`.
+     *  Transparent pixels below `alphaThreshold` drop out. Returns
+     *  `{ sessionId, voxelCount }` or `{ error }`. */
+    async importImageAsVoxels(imageUrl: string, opts: ImageToVoxelOptions = {}) {
       const check = guard(() => {
         assertString(imageUrl, 'importImageAsVoxels(imageUrl)', { allowEmpty: false });
         assertObject(opts, 'importImageAsVoxels(opts)', { optional: true });
         if (opts.maxSize !== undefined) assertNumber(opts.maxSize, 'importImageAsVoxels(opts.maxSize)', { min: 1, integer: true });
+        if (opts.mode !== undefined) assertEnum(opts.mode, ['billboard', 'heightmap'], 'importImageAsVoxels(opts.mode)');
         if (opts.depth !== undefined) assertNumber(opts.depth, 'importImageAsVoxels(opts.depth)', { min: 1, integer: true });
+        if (opts.maxHeight !== undefined) assertNumber(opts.maxHeight, 'importImageAsVoxels(opts.maxHeight)', { min: 1, integer: true });
+        if (opts.baseThickness !== undefined) assertNumber(opts.baseThickness, 'importImageAsVoxels(opts.baseThickness)', { min: 0, integer: true });
+        if (opts.invert !== undefined) assertBoolean(opts.invert, 'importImageAsVoxels(opts.invert)');
         if (opts.alphaThreshold !== undefined) assertNumber(opts.alphaThreshold, 'importImageAsVoxels(opts.alphaThreshold)', { min: 0, max: 255, integer: true });
+        if (opts.colorMode !== undefined) assertEnum(opts.colorMode, ['original', 'grayscale', 'flat'], 'importImageAsVoxels(opts.colorMode)');
+        if (opts.flatColor !== undefined) {
+          const c = assertNumberTuple(opts.flatColor, 3, 'importImageAsVoxels(opts.flatColor)');
+          c.forEach((n, i) => assertNumber(n, `importImageAsVoxels(opts.flatColor[${i}])`, { min: 0, max: 255, integer: true }));
+        }
+        if (opts.gamma !== undefined) assertNumber(opts.gamma, 'importImageAsVoxels(opts.gamma)', { min: 0.01 });
+        if (opts.brightness !== undefined) assertNumber(opts.brightness, 'importImageAsVoxels(opts.brightness)', { min: -1, max: 1 });
+        if (opts.contrast !== undefined) assertNumber(opts.contrast, 'importImageAsVoxels(opts.contrast)', { min: -1, max: 1 });
+        if (opts.saturation !== undefined) assertNumber(opts.saturation, 'importImageAsVoxels(opts.saturation)', { min: -1, max: 1 });
+        if (opts.posterizeColors !== undefined) assertNumber(opts.posterizeColors, 'importImageAsVoxels(opts.posterizeColors)', { min: 0, integer: true });
+        if (opts.removeBackground !== undefined) assertBoolean(opts.removeBackground, 'importImageAsVoxels(opts.removeBackground)');
+        if (opts.backgroundColor !== undefined) {
+          const c = assertNumberTuple(opts.backgroundColor, 3, 'importImageAsVoxels(opts.backgroundColor)');
+          c.forEach((n, i) => assertNumber(n, `importImageAsVoxels(opts.backgroundColor[${i}])`, { min: 0, max: 255, integer: true }));
+        }
       });
       if (typeof check === 'object' && check !== null && 'error' in check) return check;
       let imageData: ImageData;
