@@ -23,7 +23,7 @@ test.describe('getShareLink chat tool', () => {
     await page.addInitScript(() => localStorage.setItem('partwright-tour-completed', '1'));
   });
 
-  test('is always listed (even with every scope paused) and dispatches to the console API', async ({ page }) => {
+  test('is always listed (even with every toggle paused) and dispatches to the console API', async ({ page }) => {
     await page.goto('/editor');
     await waitForEngine(page);
 
@@ -46,10 +46,13 @@ test.describe('getShareLink chat tool', () => {
       const listFor = (t: any) => tools.buildToolList(t).map((d) => d.name);
       const listedDefault = listFor(baseToggles).includes('getShareLink');
       // The prompt steers EVERY session toward handing back a share link, so the
-      // tool must survive even when the user has paused running/saving/painting/notes.
-      const listedAllScopesOff = listFor({
+      // tool must survive with EVERY toggle paused — running, saving, painting,
+      // notes, and vision all off. That's the whole point of ALWAYS_AVAILABLE:
+      // no toggle can remove it (gating it is what caused the original failure).
+      const listedAllTogglesOff = listFor({
         ...baseToggles,
         scope: { runCode: false, saveVersions: false, paintFaces: false, sessionNotes: false },
+        vision: { ...baseToggles.vision, views: false },
       }).includes('getShareLink');
 
       // End-to-end dispatch: a session with a saved version so there's a design
@@ -62,12 +65,12 @@ test.describe('getShareLink chat tool', () => {
       await pw.runAndSave('const { Manifold } = api; return Manifold.cube([10, 10, 10], true);', 'base');
 
       const exec = await tools.executeTool('getShareLink', {});
-      return { listedDefault, listedAllScopesOff, exec, origin: location.origin };
+      return { listedDefault, listedAllTogglesOff, exec, origin: location.origin };
     });
 
-    // Always available — present with full scope and with every scope paused.
+    // Always available — present with full scope and with every toggle paused.
     expect(result.listedDefault).toBe(true);
-    expect(result.listedAllScopesOff).toBe(true);
+    expect(result.listedAllTogglesOff).toBe(true);
 
     // The call dispatched to window.partwright instead of throwing the old
     // "Unknown tool" error, and returned a self-contained hash URL.
