@@ -87,6 +87,9 @@ export function getTool(): VoxelTool { return tool; }
  *  first box corner and never completing the box). */
 export function setTool(t: VoxelTool): void {
   if (t === tool) return;
+  // Finish any open stroke before switching so it commits cleanly (and a later
+  // endStroke can't push a stale snapshot taken under the previous tool).
+  if (strokeActive) endStroke();
   tool = t;
   boxCorner = null;
   cbStateChange?.();
@@ -125,7 +128,10 @@ export function pendingBoxCorner(): [number, number, number] | null {
 // single undo step: snapshot once at begin, mutate in place per sample, push
 // the one snapshot at end.
 export function beginStroke(): void {
-  if (!active || !run || strokeActive) return;
+  // Strokes only make sense for the brush tools (paint/add/remove); other tools
+  // are single-shot, so opening a stroke for them would just leave a stale,
+  // never-committed snapshot.
+  if (!active || !run || strokeActive || !isBrushTool(tool)) return;
   strokeActive = true;
   strokeBefore = run.grid.clone();
   strokeChanged = false;
@@ -363,13 +369,20 @@ function sameVoxel(a: [number, number, number] | null, b: [number, number, numbe
   return !!a && !!b && a[0] === b[0] && a[1] === b[1] && a[2] === b[2];
 }
 
-function onPointerDown(event: MouseEvent): void {
+// Pointer Events (not mouse) so click-drag strokes work for mouse, touch, and
+// stylus alike (per the project's mobile-drag guideline). The active drag
+// pointer is captured so moves keep flowing even if it leaves the canvas.
+let capturedPointerId: number | null = null;
+
+function onPointerDown(event: PointerEvent): void {
   if (!active || event.button !== 0) return;
   const hit = pickFace(event);
   if (!hit) return;
   // Brush tools paint a drag stroke (one undo step); other tools are single
   // clicks. Box tools manage their own two-click state.
   if (isBrushTool(tool)) {
+    const canvas = getRenderer().domElement;
+    try { canvas.setPointerCapture(event.pointerId); capturedPointerId = event.pointerId; } catch { /* not capturable */ }
     beginStroke();
     strokeLastVoxel = triangleVoxel(hit.triangleIndex);
     applyAtTriangle(hit.triangleIndex);
@@ -378,31 +391,36 @@ function onPointerDown(event: MouseEvent): void {
   }
 }
 
-function onPointerMove(event: MouseEvent): void {
+function onPointerMove(event: PointerEvent): void {
   if (!active || !strokeActive || (event.buttons & 1) === 0) return;
   const hit = pickFace(event);
   if (!hit) return;
   const v = triangleVoxel(hit.triangleIndex);
   // Skip if the cursor is still over the same source voxel (avoids redundant
-  // re-stamps + re-meshes as the mouse jitters within one cell).
+  // re-stamps + re-meshes as the pointer jitters within one cell).
   if (sameVoxel(v, strokeLastVoxel)) return;
   strokeLastVoxel = v;
   applyAtTriangle(hit.triangleIndex);
 }
 
 function onPointerUp(): void {
+  if (capturedPointerId !== null) {
+    try { getRenderer().domElement.releasePointerCapture(capturedPointerId); } catch { /* already released */ }
+    capturedPointerId = null;
+  }
   if (strokeActive) endStroke();
 }
 
 function attachPointerHandler(): void {
   const canvas = getRenderer().domElement;
-  canvas.addEventListener('mousedown', onPointerDown);
-  canvas.addEventListener('mousemove', onPointerMove);
+  canvas.addEventListener('pointerdown', onPointerDown);
+  canvas.addEventListener('pointermove', onPointerMove);
   // End the stroke on release even if the pointer left the canvas first.
-  window.addEventListener('mouseup', onPointerUp);
+  window.addEventListener('pointerup', onPointerUp);
   canvas.style.cursor = 'crosshair';
-  // Veto OrbitControls on left-button hits over the model so editing doesn't
-  // orbit. Off-model clicks fall through so the camera still rotates.
+  canvas.style.touchAction = 'none'; // claim the gesture so touch-drag paints
+  // Veto OrbitControls on primary-button hits over the model so editing
+  // doesn't orbit. Off-model clicks fall through so the camera still rotates.
   removeSuppressor = addPointerSuppressor((event) => {
     if (event.button !== 0) return false;
     return isPointerOverModel(event);
@@ -411,9 +429,14 @@ function attachPointerHandler(): void {
 
 function detachPointerHandler(): void {
   const canvas = getRenderer().domElement;
-  canvas.removeEventListener('mousedown', onPointerDown);
-  canvas.removeEventListener('mousemove', onPointerMove);
-  window.removeEventListener('mouseup', onPointerUp);
+  canvas.removeEventListener('pointerdown', onPointerDown);
+  canvas.removeEventListener('pointermove', onPointerMove);
+  window.removeEventListener('pointerup', onPointerUp);
   canvas.style.cursor = '';
+  canvas.style.touchAction = '';
+  if (capturedPointerId !== null) {
+    try { canvas.releasePointerCapture(capturedPointerId); } catch { /* already released */ }
+    capturedPointerId = null;
+  }
   if (removeSuppressor) { removeSuppressor(); removeSuppressor = null; }
 }

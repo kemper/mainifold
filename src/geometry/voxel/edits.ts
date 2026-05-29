@@ -145,7 +145,9 @@ export function brushApply(
     for (let dy = -ri; dy <= ri; dy++)
       for (let dz = -ri; dz <= ri; dz++) {
         if (!inBrush(shape, dx, dy, dz, ri)) continue;
-        if (density < 1 && rng() > density) continue;
+        // Spray scatters the footprint, but never drops a single-voxel (ri=0)
+        // stamp — otherwise a plain click with spray on would no-op at random.
+        if (ri > 0 && density < 1 && rng() > density) continue;
         const x = cx + dx, y = cy + dy, z = cz + dz;
         if (!inRange(x, y, z)) continue;
         if (op === 'remove') {
