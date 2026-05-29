@@ -1,6 +1,6 @@
 # Partwright -- AI Agent Instructions
 
-Partwright is a browser-based parametric CAD tool with three modeling engines: **manifold-js** (default, JavaScript DSL with manifold-3d API + a `Curves` helper namespace), **OpenSCAD** (SCAD language via WASM, with BOSL2 bundled), and **BREP / replicad** (JavaScript with `api.BREP.*` — OpenCASCADE B-rep for exact fillets/chamfers and STEP export). You write code that constructs 3D geometry, which renders live. All interaction is via the `window.partwright` programmatic API -- do not drive the app through clicks or keystrokes. `window.mainifold` remains available as a legacy alias for older prompts.
+Partwright is a browser-based parametric CAD tool with four modeling engines: **manifold-js** (default, JavaScript DSL with manifold-3d API + a `Curves` helper namespace), **OpenSCAD** (SCAD language via WASM, with BOSL2 bundled), **BREP / replicad** (JavaScript with `api.BREP.*` — OpenCASCADE B-rep for exact fillets/chamfers and STEP export), and **voxel** (JavaScript — blocky colored-cube modeling for pixel-art and image-derived models; see `/ai/voxel.md`). You write code that constructs 3D geometry, which renders live. All interaction is via the `window.partwright` programmatic API -- do not drive the app through clicks or keystrokes. `window.mainifold` remains available as a legacy alias for older prompts.
 
 **Coordinate system:** Right-handed, Z-up. XY plane is the ground. Units are arbitrary.
 
@@ -35,7 +35,7 @@ Partwright is a browser-based parametric CAD tool with three modeling engines: *
 
 ## Choosing an engine
 
-Partwright supports three modeling engines. Pick whichever is best for the task:
+Partwright supports four modeling engines. The table below covers the three solid/CSG engines; the fourth, **voxel**, is a blocky colored-cube engine for pixel-art and image-derived models (`return api.voxels()…`) — see `/ai/voxel.md`. Pick whichever is best for the task:
 
 | | **manifold-js** (default) | **OpenSCAD** (SCAD) | **BREP / replicad** |
 |---|---|---|---|
@@ -51,10 +51,11 @@ Partwright supports three modeling engines. Pick whichever is best for the task:
 ### Switching engines
 
 ```js
-partwright.getActiveLanguage()        // -> 'manifold-js' or 'scad' or 'replicad'
+partwright.getActiveLanguage()        // -> 'manifold-js' or 'scad' or 'replicad' or 'voxel'
 await partwright.setActiveLanguage('scad')
 await partwright.setActiveLanguage('manifold-js')
 await partwright.setActiveLanguage('replicad')
+await partwright.setActiveLanguage('voxel')
 ```
 
 Switching is non-destructive. Your in-progress code in the previous language is stashed as a per-session draft and restored when you switch back — both languages stay live until the session is deleted. Saved versions are not touched; each version remembers the language it was authored in, and navigating to one auto-swaps the engine. A single session can hold mixed manifold-js + SCAD versions.
@@ -69,6 +70,7 @@ Reach for the right tool the first time. If the table sends you to a subdoc, fet
 |---|---|---|---|
 | Cube / sphere / cylinder | `Manifold.cube/sphere/cylinder(...)` | `cube()`, `sphere()`, `cylinder()` | `BREP.box([w,d,h])`, `BREP.sphere(r)`, `BREP.cylinder(r, h)` |
 | Boolean union / difference / intersection | `.add(o)`, `.subtract(o)`, `.intersect(o)` | `union(){...}`, `difference(){...}`, `intersection(){...}` | `.fuse(o)` / `.cut(o)` / `.intersect(o)`, or `BREP.fuseAll([a,b,c])` / `BREP.cutAll([body,…holes])` / `BREP.intersectAll([…])` for N-way |
+| Expose tweakable knobs (make it customizable) | `api.params({...})` at the top → live Parameters panel; `partwright.getParams()`/`setParams({...})` to drive | (manifold-js only) | (manifold-js only) |
 | 2D shape extruded to 3D | `cs.extrude(h, nDiv?, twist?, scaleTop?)` | `linear_extrude(h, twist=, slices=, scale=) polygon(...)` | (use manifold-js + BREP for one piece) |
 | Surface of revolution (vase, lens, bottle) | `cs.revolve(n?, degrees?)` | `rotate_extrude(angle=) polygon(...)` | (use manifold-js) |
 | Smooth curve from a few points | `Curves.bezier(controls)` -> `/ai/curves.md` | `bezier_curve()` (BOSL2) -> `/ai/bosl2.md` | (use manifold-js Curves) |
@@ -93,7 +95,11 @@ Reach for the right tool the first time. If the table sends you to a subdoc, fet
 | Cross-section image (any axis, for debugging cavities) | `partwright.renderSection({axis, offset?, size?})` | `partwright.renderSection(...)` — same window API | `partwright.renderSection(...)` — same window API |
 | Threaded rod / bolt / nut | (write a helix manually) | BOSL2 `threaded_rod()`, `screw()`, `nut()` | (coming; today use OpenSCAD/BOSL2) |
 | Spur / bevel / worm gear | (sample involute manually) | BOSL2 `spur_gear()`, `bevel_gear()`, `worm_gear()` | (coming; today use OpenSCAD/BOSL2) |
-| Implicit surface (gyroid, metaball, SDF blend) | `Manifold.levelSet(sdf, bounds, edgeLen)` | (not available) | (mesh-only; not in BREP) |
+| Smooth fillet / blend between two shapes (no edge-picking) | `a.smoothUnion(b, k)` via `api.sdf` -> `/ai/sdf.md` | (not available) | (mesh-only; not in BREP) |
+| Lattice / gyroid / periodic infill | `api.sdf.gyroid(cell, thickness)` -> `/ai/sdf.md` | (not available) | (mesh-only; not in BREP) |
+| Twisted / bent body (one expression) | `api.sdf.<shape>(...).twist(deg)` -> `/ai/sdf.md` | (`linear_extrude(twist=)` for the extrusion case only) | (mesh-only; not in BREP) |
+| Constant-thickness shell of any shape | `node.shell(t)` via `api.sdf` -> `/ai/sdf.md` | (not available) | (mesh-only; not in BREP) |
+| Implicit surface / raw SDF function | `Manifold.levelSet(sdf, bounds, edgeLen)` | (not available) | (mesh-only; not in BREP) |
 | Mesh-level smoothing (rounded blob from cube) | `.smoothOut(angle).refine(n)` | (not available) | (mesh-only; not in BREP) |
 | Arbitrary vertex warp (bend extrusion) | `.warp(fn)` | (not available) | (mesh-only; not in BREP) |
 
@@ -120,8 +126,10 @@ The main reference splits into focused subdocs. **Fetch each by calling `readDoc
 | `readDoc` name | When to read it |
 |---|---|
 | `curves` | Before writing manifold-js code with `Curves.loft/sweep/bezier/arc/naca4/polyline/fillet/...` (smooth curves, organic shapes, airfoils, lofted surfaces). |
+| `sdf` | Before reaching for `api.sdf.*` — smooth blends (`smoothUnion`), domain warps (`twist`/`bend`), lattices (`gyroid`), constant-thickness shells. Anything the prompt frames as "smooth", "blended", "twisted", "lattice", or "gyroid" lives here. |
 | `bosl2` | Before writing SCAD code that needs edge rounding (`cuboid(rounding=)`), threads (`screw`), gears (`spur_gear`), path-following (`path_sweep`), or attachables. |
 | `replicad` | Before using `api.BREP.*` inside a manifold-js session, or before switching to the replicad/BREP language. Covers exact fillets/chamfers, STEP export, and the manifold-js ↔ BREP boundary. |
+| `voxel` | Before writing voxel-language code or importing an image as voxels. Covers the `api.voxels()` grid API, colors, coordinate system, and image import. |
 | `print-safety` | Before exporting STL/3MF for FDM printing — minimum wall thickness, taper traps, sub-extrusion-width layer detection. |
 | `colors` | Before any paint operation — the picker decision tree, labelled construction, vision-driven painting, export behavior. |
 | `reference-images` | When the user attaches a photo or asks you to model from one — `setImages` shape, label conventions, the five-step photo-to-model loop. |
@@ -188,11 +196,14 @@ partwright.getGeometryData()   // Current stats (same as #geometry-data)
 partwright.validate(code)      // Check code without rendering -> {valid, error?}
 partwright.getCode()           // Read editor contents
 partwright.setCode(code)       // Set editor contents (no auto-run)
+partwright.getParams()         // Customizer schema + current values -> {schema, values}
+await partwright.setParams({k:v}) // Tweak declared api.params knobs and re-run -> {geometry, params}
 partwright.sliceAtZ(z)         // Cross-section -> {polygons, svg, boundingBox, area}
 partwright.getBoundingBox()    // -> {min:[x,y,z], max:[x,y,z]}
 partwright.getModule()         // Raw manifold-3d WASM module
-partwright.getActiveLanguage() // -> 'manifold-js' | 'scad' | 'replicad'
-await partwright.setActiveLanguage(lang) // Swap engine ('manifold-js' | 'scad' | 'replicad'); stashes the prev draft, restores the other
+partwright.getActiveLanguage() // -> 'manifold-js' | 'scad' | 'replicad' | 'voxel'
+await partwright.setActiveLanguage(lang) // Swap engine ('manifold-js' | 'scad' | 'replicad' | 'voxel'); stashes the prev draft, restores the other
+partwright.importImageAsVoxels(imageUrl, opts?) // Image (data:/URL) -> colored voxel session. See /ai/voxel.md
 partwright.toggleClip(on?)     // Toggle 3D clipping plane -> {enabled, z, min, max}
 partwright.setClipZ(z)         // Set clip height -> {enabled, z, min, max}
 partwright.getClipState()      // -> {enabled, z, min, max}
@@ -378,9 +389,48 @@ const { Manifold, CrossSection, Curves, setCircularSegments } = api;
 **Sandbox environment:** The `api` object provides:
 - `Manifold` and `CrossSection` -- the raw manifold-3d bindings
 - `Curves` -- helpers for smooth/organic shapes (loft, sweep, bezier, arc, naca4, polyline with fillet, arbitrary-axis revolve, fillet/chamfer, pattern arrays). See **[/ai/curves.md](/ai/curves.md)**.
+- `params` -- declare tweakable **Customizer** knobs that surface as sliders/toggles in the viewport (see below).
+- `sdf` -- signed-distance-field builder for smooth blends, twists, gyroids, and shells. Tree-of-expressions style, lowered to a Manifold via `.build()`. See **[/ai/sdf.md](/ai/sdf.md)**.
 - `setCircularSegments`, `setMinCircularAngle`, `setMinCircularEdgeLength` -- global curve resolution defaults.
 
 Standard JavaScript globals (`Math`, `Array`, `Object`, `JSON`, `Date`, `console`, etc.) are available. There is no DOM access, no `fetch`/network, no `require`/`import`, and no file I/O. Do not attempt to load external libraries or make HTTP requests in model code.
+
+### Customizer parameters (`api.params`)
+
+Declare the model's tweakable dimensions/options at the top via `api.params(schema)`. It returns an object of resolved values; a **Parameters panel** appears in the viewport so the user (or you) can adjust them with sliders/toggles/dropdowns and the model re-runs live — Tinkercad-style customization without leaving code. This is the preferred way to make a model reusable: expose the few dimensions someone would actually want to change.
+
+```js
+const { Manifold } = api;
+const p = api.params({
+  width:   { type: 'number',  default: 30, min: 10, max: 120, step: 1, unit: 'mm' },
+  rows:    { type: 'int',     default: 2,  min: 1,  max: 6 },
+  rounded: { type: 'boolean', default: true, label: 'Rounded corners' },
+  style:   { type: 'select',  default: 'flat', options: ['flat', 'beveled', 'round'] },
+  title:   { type: 'text',    default: 'PARTS', maxLength: 12 },
+  accent:  { type: 'color',   default: '#3b82f6' },
+});
+// use p.width, p.rows, p.rounded, p.style, p.title, p.accent ...
+return Manifold.cube([p.width, p.width, p.rows * 10], true);
+```
+
+**Types:** `number` / `int` (slider; `min`,`max`,`step`,`unit`), `boolean` (toggle), `select` (dropdown; `options` = array of strings or `{value,label}`), `text` (`maxLength`), `color` (hex). Optional `label` and `help` on any. A malformed *schema* throws a clear `api.params: …` error; bad *values* are clamped or fall back to the default, never throwing — so the model always renders. Reading an undeclared key (`p.widht`) throws too, so a typo can't silently become `NaN`.
+
+**Driving it yourself:** `partwright.getParams()` returns `{ schema, values }` so you can see what knobs exist; `partwright.setParams({ width: 50, rows: 3 })` changes values and re-runs (the `getParams`/`setParams` tools do the same). Prefer `setParams` over rewriting code when you only need to change a declared dimension — it's cheaper and keeps the model intact. The chosen values persist with each saved version (so a version re-renders exactly as saved). A `color` param's value (a hex string) drives geometry color by passing it to `api.label(shape, name, { color: p.accent })` (see [Model-declared color](#model-declared-color-self-coloring-models) below) — so a color knob recolors the model live. `text` params are captured but have no geometry sink yet.
+
+### Model-declared color (self-coloring models)
+
+Give a label a color right in the code and it renders **and exports** colored — no separate paint step, and the editor stays editable:
+
+```js
+const { Manifold } = api;
+const body = api.label(Manifold.cube([20, 20, 20], true), 'body', { color: '#3b82f6' });
+const knob = api.label(Manifold.cylinder(6, 4, 4, 32).translate([0, 0, 13]), 'knob', { color: [1, 0, 0] });
+return body.add(knob);   // renders blue body + red knob; GLB/3MF carry the colors
+```
+
+The `color` is a hex string (`'#rrggbb'` / `'#rgb'`, the same form a `color` param produces) or an `[r,g,b]` array in 0..1. `api.labeledUnion([{ name, shape, color }, …])` takes the same per-entry `color`. Because the color travels with the labelled name, it **re-resolves every run** — so it survives Customizer parameter changes, and a `color` param wired in as `{ color: p.accent }` recolors the model live. For per-instance color (e.g. a parametric count), give each instance a distinct name: `api.label(petal, 'petal' + i, { color: … })`.
+
+Model-declared colors are a derived **underlay**: manual paint (the paint tools / `paintByLabel`) composites on top as an optional override, and only manual paint locks the editor. They are **not** written into the saved paint sidecar — they come from the code, so re-running re-derives them. Inspect the active set with `partwright.getModelColors()` → `{ count, colors: [{ name, color, triangleCount }] }`; an empty `triangleCount` for a name means that label's triangles were consumed by a later boolean (check `listLabels().lostLabels`). See **[/ai/colors.md](/ai/colors.md)**.
 
 ### Primitive origins and orientations
 
@@ -413,6 +463,13 @@ CrossSection: square, circle, ofPolygons (CCW outer, CW holes),
               compose, union, difference, intersection, hull
 Curves: arc, bezier, naca4, polyline, loft, sweep, revolveAxis,
         fillet, chamfer, ringCopy, linearCopy, mirrorCopy   (see /ai/curves.md)
+sdf: sphere, ellipsoid, box, roundedBox, cylinder, roundedCylinder,
+     torus, capsule,
+     gyroid/schwarzP/diamond/lidinoid + their graded* variants (TPMS),
+     union/subtract/intersect, smoothUnion/Subtract/Intersect,
+     .translate/.rotate/.scale/.mirror, .shell/.round/.twist/.bend/.taper,
+     .polarArray/.polarRepeat/.mirrorPair/.repeat/.repeatN,
+     .label(name), .build({edgeLength?, bounds?})        (see /ai/sdf.md)
 meshOps (flat on api): intersects, contains, pointInside, bbox,
                        componentBounds, volumeDelta,
                        alignTo, placeOn, mirrorAcross, mirrorCopy,

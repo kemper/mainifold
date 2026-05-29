@@ -116,8 +116,14 @@ import { effectiveVersionLanguage, asLanguage } from './languageFallback';
  *           per-version field; on import each version falls back to the
  *           session-level `language` (then to 'manifold-js'). Older readers
  *           ignore the field.
+ *  - `1.9` — per-version Customizer parameter overrides (`versions[].paramValues`).
+ *           When a model declares tweakable parameters via `api.params({...})`,
+ *           the values the user dialed in are stored here so the version re-runs
+ *           with them (and matches its saved thumbnail/stats). Only non-default
+ *           keys are written; pre-1.9 files have none and import with all
+ *           defaults. Older readers ignore the field.
  */
-export const SCHEMA_VERSION = '1.8';
+export const SCHEMA_VERSION = '1.9';
 
 const CURRENT_MAJOR = 1;
 
@@ -139,7 +145,7 @@ export interface ExportedSession {
   mainifold?: string;
   /** Images may be the array form or the legacy object map ({front, right, ...}).
    * Both also exist under `referenceImages` for pre-rename exports. */
-  session: { name: string; created: number; updated: number; images?: AttachedImage[] | Partial<Record<LegacyImageAngle, string>> | null; referenceImages?: AttachedImage[] | Partial<Record<LegacyImageAngle, string>> | null; language?: 'manifold-js' | 'scad' | 'replicad' };
+  session: { name: string; created: number; updated: number; images?: AttachedImage[] | Partial<Record<LegacyImageAngle, string>> | null; referenceImages?: AttachedImage[] | Partial<Record<LegacyImageAngle, string>> | null; language?: 'manifold-js' | 'scad' | 'replicad' | 'voxel' };
   /**
    * The session's parts, ordered by `order`. Present from schema 1.7. Pre-1.7
    * files omit this; on import they collapse into a single default part.
@@ -192,7 +198,15 @@ export interface ExportedSession {
      * mixed JS + SCAD versions.
      * @since 1.8
      */
-    language?: 'manifold-js' | 'scad' | 'replicad';
+    language?: 'manifold-js' | 'scad' | 'replicad' | 'voxel';
+    /**
+     * Customizer parameter overrides — the values dialed in against the model's
+     * `api.params({...})` schema. Only keys that differ from the model defaults
+     * are written. Re-applied on import so the version's geometry matches its
+     * saved thumbnail. Absent ⇒ all defaults.
+     * @since 1.9
+     */
+    paramValues?: Record<string, number | boolean | string>;
   }[];
   notes?: { text: string; timestamp: number }[];
   /**
@@ -428,7 +442,7 @@ export function getVersionFromURL(): number | null {
 
 // === Session operations ===
 
-export async function createSession(name?: string, language?: 'manifold-js' | 'scad' | 'replicad'): Promise<Session> {
+export async function createSession(name?: string, language?: 'manifold-js' | 'scad' | 'replicad' | 'voxel'): Promise<Session> {
   // Clean up the previous session if it was empty
   if (currentState.session) {
     await deleteIfEmpty(currentState.session.id);
@@ -544,20 +558,20 @@ export async function renameSession(id: string, newName: string): Promise<void> 
 
 /** Read the working buffer for a session in a given language. Returns null
  *  when no draft has been stashed yet (caller should fall back to a stub). */
-export async function readDraft(sessionId: string, language: 'manifold-js' | 'scad' | 'replicad'): Promise<string | null> {
+export async function readDraft(sessionId: string, language: 'manifold-js' | 'scad' | 'replicad' | 'voxel'): Promise<string | null> {
   const row = await dbGetDraft(sessionId, language);
   return row ? row.code : null;
 }
 
 /** Write the working buffer for a session in a given language. Idempotent —
  *  the row is upserted by composite key. */
-export async function writeDraft(sessionId: string, language: 'manifold-js' | 'scad' | 'replicad', code: string): Promise<void> {
+export async function writeDraft(sessionId: string, language: 'manifold-js' | 'scad' | 'replicad' | 'voxel', code: string): Promise<void> {
   await dbSetDraft(sessionId, language, code);
 }
 
 /** Drop the working buffer for a (session, language) pair — used when the
  *  caller wants to force the next language switch to land on a stub. */
-export async function clearDraft(sessionId: string, language: 'manifold-js' | 'scad' | 'replicad'): Promise<void> {
+export async function clearDraft(sessionId: string, language: 'manifold-js' | 'scad' | 'replicad' | 'voxel'): Promise<void> {
   await dbDeleteDraft(sessionId, language);
 }
 
@@ -821,6 +835,17 @@ function annotationsEqual(a: unknown[] | undefined, b: unknown[] | undefined): b
   return JSON.stringify(aArr) === JSON.stringify(bArr);
 }
 
+/** Customizer parameter overrides are persisted per version. Compare them so a
+ *  save that only changes a parameter value still creates a new version — the
+ *  code is identical (params live in code; values are overrides), but the dialed
+ *  geometry is the change. Key order is irrelevant, so compare sorted entries. */
+function paramValuesEqual(a: Record<string, unknown> | undefined, b: Record<string, unknown> | undefined): boolean {
+  const aKeys = a ? Object.keys(a).sort() : [];
+  const bKeys = b ? Object.keys(b).sort() : [];
+  if (aKeys.length !== bKeys.length) return false;
+  return aKeys.every((k, i) => bKeys[i] === k && a![k] === b![k]);
+}
+
 /** Color regions are persisted as `geometryData.colorRegions` on each version.
  *  Compare them so a save that only adds/edits color regions still creates a
  *  new version — code may be identical, but the painted state is the change. */
@@ -840,11 +865,12 @@ export async function saveVersion(
   thumbnail: Blob | null,
   label?: string,
   notes?: string,
-  options?: { force?: boolean; importedMeshes?: ImportedMesh[] },
+  options?: { force?: boolean; importedMeshes?: ImportedMesh[]; paramValues?: Record<string, number | boolean | string> },
 ): Promise<Version | null> {
   if (!currentState.session || !currentState.currentPart) return null;
 
   const annotationSnapshot = serializeAnnotations();
+  const paramValues = options?.paramValues;
 
   // Imports carry forward to new versions automatically: if the user edits
   // their imported-mesh code and re-saves, the same mesh data should still
@@ -862,7 +888,8 @@ export async function saveVersion(
     currentState.currentVersion &&
     currentState.currentVersion.code === code &&
     annotationsEqual(currentState.currentVersion.annotations, annotationSnapshot) &&
-    colorRegionsEqual(currentState.currentVersion.geometryData as Record<string, unknown> | null, geometryData)
+    colorRegionsEqual(currentState.currentVersion.geometryData as Record<string, unknown> | null, geometryData) &&
+    paramValuesEqual(currentState.currentVersion.paramValues, paramValues)
   ) {
     return null;
   }
@@ -882,6 +909,7 @@ export async function saveVersion(
     // language they were authored in, so navigating between them swaps the
     // engine independently of the session's default.
     getActiveLanguage(),
+    paramValues,
   );
 
   currentState = {
@@ -1117,7 +1145,7 @@ export function getRecentErrors(): { error: string; timestamp: number }[] {
 // === Session context (single call for AI agents) ===
 
 export interface SessionContext {
-  session: { id: string; name: string; created: number; updated: number; language: 'manifold-js' | 'scad' | 'replicad' };
+  session: { id: string; name: string; created: number; updated: number; language: 'manifold-js' | 'scad' | 'replicad' | 'voxel' };
   /** All parts in the session. The `versions`/`currentVersion` fields below are
    *  scoped to {@link currentPart}; switch parts with `changePart` to inspect
    *  another part's history. */
@@ -1130,7 +1158,7 @@ export interface SessionContext {
     notes?: string;
     /** Modeling language this version was authored in (resolved via the
      *  per-version → session-level → default fallback chain). */
-    language: 'manifold-js' | 'scad' | 'replicad';
+    language: 'manifold-js' | 'scad' | 'replicad' | 'voxel';
     geometrySummary: {
       volume?: number;
       surfaceArea?: number;
@@ -1141,7 +1169,7 @@ export interface SessionContext {
     } | null;
   }[];
   notes: { id: string; text: string; timestamp: number }[];
-  currentVersion: { index: number; label: string; language: 'manifold-js' | 'scad' | 'replicad' } | null;
+  currentVersion: { index: number; label: string; language: 'manifold-js' | 'scad' | 'replicad' | 'voxel' } | null;
   versionCount: number;
   agentHints: {
     apiDocsUrl: string;
@@ -1150,7 +1178,7 @@ export interface SessionContext {
     /** Active engine language right now. May differ from
      *  {@link SessionContext.session.language} when the user/agent has
      *  navigated to a version authored in another language. */
-    language: 'manifold-js' | 'scad' | 'replicad';
+    language: 'manifold-js' | 'scad' | 'replicad' | 'voxel';
     supportedLanguages: string[];
     recentErrors: { error: string; timestamp: number }[];
     /** The AI spending budget the user has set. Agents should respect it. */
@@ -1220,7 +1248,7 @@ export async function getSessionContext(): Promise<SessionContext | null> {
       // means the active language can differ from session.language.
       codeMustReturnManifold: getActiveLanguage() === 'manifold-js',
       language: getActiveLanguage(),
-      supportedLanguages: ['manifold-js', 'scad', 'replicad'],
+      supportedLanguages: ['manifold-js', 'scad', 'replicad', 'voxel'],
       recentErrors: getRecentErrors(),
       spending: getSpendingSummary(),
     },
@@ -1491,6 +1519,7 @@ export async function exportSession(
         ...(versionAnnotations.length > 0 ? { annotations: versionAnnotations } : {}),
         ...(thumbDataUrl ? { thumbnail: thumbDataUrl } : {}),
         ...(importedMeshes ? { importedMeshes } : {}),
+        ...(v.paramValues && Object.keys(v.paramValues).length > 0 ? { paramValues: v.paramValues } : {}),
       };
     }),
     ...(notes.length > 0 ? { notes: notes.map(n => ({ text: n.text, timestamp: n.timestamp })) } : {}),
@@ -1617,6 +1646,11 @@ export async function importSession(
         // (e.g. {language: 'python'}) drops the field rather than poisoning
         // the engine + editor when this version is later loaded.
         asLanguage(v.language),
+        // Customizer parameter overrides (schema 1.9+). Pre-1.9 files omit it;
+        // the version then runs at the model's declared defaults. Validation of
+        // the values against the model's schema happens at run time (coerced /
+        // clamped in resolveParamValues), so a stale value can't break a load.
+        v.paramValues && typeof v.paramValues === 'object' ? v.paramValues : undefined,
       );
     }
   }

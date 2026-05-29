@@ -6,7 +6,7 @@
 //
 // Protocol — Main → Worker:
 //   { type: 'init' }
-//   { type: 'execute',           callId, code, lang?, imports? }
+//   { type: 'execute',           callId, code, lang?, imports?, circularSegments?, params? }
 //   { type: 'validate',          callId, code, lang? }
 //   { type: 'exportSTEP',        callId }
 //   { type: 'importSTEPToBrep',  callId, bytes, filename }
@@ -17,7 +17,7 @@
 //
 // Protocol — Worker → Main:
 //   { type: 'ready' }
-//   { type: 'execute_result',          callId, mesh, error, diagnostics, labelMapEntries }
+//   { type: 'execute_result',          callId, mesh, error, diagnostics, labelMapEntries, lostLabels, paramsSchema }
 //   { type: 'validate_result',         callId, result }
 //   { type: 'exportSTEP_result',       callId, blob, error }
 //   { type: 'importSTEPToBrep_result', callId, filename, error }
@@ -33,6 +33,7 @@
 import { manifoldJsEngine, getManifoldModule } from './engines/manifoldJs';
 import { runScadAsync, openscadEngine } from './engines/openscad';
 import { runReplicadAsync, replicadEngine, getLastBrepShape } from './engines/replicad';
+import { voxelEngine } from './engines/voxel';
 import { ensureBrepLoaded, sourceUsesBrep, parseStepBlob, pushPendingBrepImport, clearPendingBrepImports } from './brepRuntime';
 import { setActiveImports, type ImportedMesh } from '../import/importedMesh';
 import { setCircularSegmentsOverride } from './qualitySettings';
@@ -80,27 +81,36 @@ self.onmessage = async (event: MessageEvent) => {
 
   // ── execute ────────────────────────────────────────────────────────────
   if (msg.type === 'execute') {
-    const { callId, code, lang, imports, circularSegments } = msg as unknown as {
+    const { callId, code, lang, imports, circularSegments, params } = msg as unknown as {
       callId: string;
       code: string;
       lang?: Language;
       imports?: ImportedMesh[];
       circularSegments?: number;
+      params?: Record<string, unknown> | null;
     };
     try {
-      // Propagate main-thread quality setting so Worker uses same segment count.
-      // Reset in finally so a subsequent execution doesn't inherit a stale value
-      // if this execution's circularSegments message arrives out of order.
-      setCircularSegmentsOverride(typeof circularSegments === 'number' ? circularSegments : null);
+      // Propagate the main-thread quality setting so the Worker uses the same
+      // segment count. SCAD/replicad execute asynchronously, so two runs can
+      // overlap inside the worker; each carries its own circularSegments and
+      // sets it here before generating geometry, in message (== generation)
+      // order. We deliberately do NOT clear it back afterwards (see below) — the
+      // most-recently-started run, whose result the main thread keeps, sets the
+      // override last and so always reads the correct value.
+      if (typeof circularSegments === 'number') setCircularSegmentsOverride(circularSegments);
       // Populate the per-run import registry so api.imports works in user code.
       setActiveImports(imports ?? []);
 
       const effectiveLang: Language =
         lang === 'scad' ? 'scad' :
         lang === 'replicad' ? 'replicad' :
+        lang === 'voxel' ? 'voxel' :
         'manifold-js';
       let result;
-      if (effectiveLang === 'scad') {
+      if (effectiveLang === 'voxel') {
+        // Pure-JS voxel meshing — no WASM, no lazy init, synchronous.
+        result = voxelEngine.run(code as string);
+      } else if (effectiveLang === 'scad') {
         // Ensure the OpenSCAD engine is loaded (lazy init).
         if (!openscadEngine.isReady()) await openscadEngine.init();
         result = await runScadAsync(code as string);
@@ -125,14 +135,19 @@ self.onmessage = async (event: MessageEvent) => {
         if (sourceUsesBrep(code as string)) {
           await ensureBrepLoaded();
         }
-        result = manifoldJsEngine.run(code as string);
+        result = manifoldJsEngine.run(code as string, params ?? undefined);
       }
 
       // labelMap is Map<string, Set<number>> — not directly serialisable.
       const labelMapEntries: [string, number[]][] | null = result.labelMap
         ? Array.from(result.labelMap.entries()).map(([k, v]) => [k, Array.from(v)])
         : null;
+      // Model-declared label colors (api.label(…, { color })) — plain entries.
+      const labelColorEntries: [string, [number, number, number]][] | null = result.labelColors
+        ? Array.from(result.labelColors.entries())
+        : null;
       const lostLabels = result.lostLabels ?? null;
+      const paramsSchema = result.paramsSchema ?? null;
 
       const mesh = result.mesh;
       if (mesh) {
@@ -145,10 +160,13 @@ self.onmessage = async (event: MessageEvent) => {
         if (mesh.mergeToVert)   transfer.push(mesh.mergeToVert.buffer);
         if (mesh.runIndex)      transfer.push(mesh.runIndex.buffer);
         if (mesh.runOriginalID) transfer.push(mesh.runOriginalID.buffer);
+        // Voxel meshes carry per-triangle colors; transfer them too (the
+        // manifold-js path leaves triColors undefined).
+        if (mesh.triColors)     transfer.push(mesh.triColors.buffer);
 
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         (self as any).postMessage(
-          { type: 'execute_result', callId, mesh, error: null, diagnostics: [], labelMapEntries, lostLabels },
+          { type: 'execute_result', callId, mesh, error: null, diagnostics: [], labelMapEntries, labelColorEntries, lostLabels, paramsSchema },
           transfer,
         );
       } else {
@@ -160,6 +178,7 @@ self.onmessage = async (event: MessageEvent) => {
           diagnostics: result.diagnostics ?? [],
           labelMapEntries: null,
           lostLabels: null,
+          paramsSchema,
         });
       }
 
@@ -180,10 +199,14 @@ self.onmessage = async (event: MessageEvent) => {
         callId,
         message: err instanceof Error ? err.message : String(err),
       });
-    } finally {
-      // Always reset so a subsequent execution doesn't inherit this run's value.
-      setCircularSegmentsOverride(null);
     }
+    // NB: intentionally no `finally { setCircularSegmentsOverride(null) }`.
+    // Clearing here would race a concurrent async run: when this (older) run
+    // finishes first, it would yank the override out from under a still-
+    // compiling newer run, which would then fall back to the worker's
+    // localStorage-less default segment count and silently render at the wrong
+    // quality. The per-run set above is sufficient; nothing reads the override
+    // outside an execute, and every execute sets it before generating geometry.
     return;
   }
 
@@ -281,9 +304,12 @@ self.onmessage = async (event: MessageEvent) => {
       const effectiveLang: Language =
         lang === 'scad' ? 'scad' :
         lang === 'replicad' ? 'replicad' :
+        lang === 'voxel' ? 'voxel' :
         'manifold-js';
       let result;
-      if (effectiveLang === 'scad') {
+      if (effectiveLang === 'voxel') {
+        result = voxelEngine.validate(code);
+      } else if (effectiveLang === 'scad') {
         if (!openscadEngine.isReady()) await openscadEngine.init();
         result = await openscadEngine.validate(code);
       } else if (effectiveLang === 'replicad') {
