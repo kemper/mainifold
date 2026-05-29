@@ -2190,7 +2190,7 @@ async function main() {
       alert(`"${chosenName}" produced no voxels at the chosen settings. Try lowering the transparency cutoff.`);
       return false;
     }
-    const code = generateVoxelImportCode(grid, chosenName);
+    const code = generateVoxelImportCode(grid, chosenName, { style: opts.codeStyle });
     const sessionName = chosenName.replace(/\.(png|jpe?g|gif|webp|bmp)$/i, '');
     await importCodePayload(code, 'voxel', sessionName);
     // Register in Recent Imports tagged as a voxel import, with the chosen
@@ -4931,8 +4931,11 @@ async function main() {
      *  per-column height from pixel brightness (with an optional `baseThickness`
      *  backing, and `invert` to raise dark areas). `colorMode` keeps the
      *  original color, converts to `grayscale`, or paints a single `flatColor`.
-     *  Transparent pixels below `alphaThreshold` drop out. Returns
-     *  `{ sessionId, voxelCount }` or `{ error }`. */
+     *  Transparent pixels below `alphaThreshold` drop out. `palette` (an array
+     *  of `[r,g,b]` triples) snaps each `original`-mode pixel to its nearest
+     *  entry (overrides `posterizeColors`); `codeStyle: 'calls'` emits editable
+     *  `v.fillBox(...)` builder code instead of the compact `voxels.decode(...)`
+     *  blob. Returns `{ sessionId, voxelCount }` or `{ error }`. */
     async importImageAsVoxels(imageUrl: string, opts: ImageToVoxelOptions = {}) {
       const check = guard(() => {
         assertString(imageUrl, 'importImageAsVoxels(imageUrl)', { allowEmpty: false });
@@ -4954,6 +4957,14 @@ async function main() {
         if (opts.contrast !== undefined) assertNumber(opts.contrast, 'importImageAsVoxels(opts.contrast)', { min: -1, max: 1 });
         if (opts.saturation !== undefined) assertNumber(opts.saturation, 'importImageAsVoxels(opts.saturation)', { min: -1, max: 1 });
         if (opts.posterizeColors !== undefined) assertNumber(opts.posterizeColors, 'importImageAsVoxels(opts.posterizeColors)', { min: 0, integer: true });
+        if (opts.palette !== undefined && opts.palette !== null) {
+          if (!Array.isArray(opts.palette)) throw new Error('importImageAsVoxels(opts.palette) must be an array of [r,g,b] triples');
+          opts.palette.forEach((c, i) => {
+            const t = assertNumberTuple(c, 3, `importImageAsVoxels(opts.palette[${i}])`);
+            t.forEach((n, j) => assertNumber(n, `importImageAsVoxels(opts.palette[${i}][${j}])`, { min: 0, max: 255, integer: true }));
+          });
+        }
+        if (opts.codeStyle !== undefined) assertEnum(opts.codeStyle, ['decode', 'calls'], 'importImageAsVoxels(opts.codeStyle)');
         if (opts.removeBackground !== undefined) assertBoolean(opts.removeBackground, 'importImageAsVoxels(opts.removeBackground)');
         if (opts.backgroundColor !== undefined) {
           const c = assertNumberTuple(opts.backgroundColor, 3, 'importImageAsVoxels(opts.backgroundColor)');
@@ -4969,7 +4980,7 @@ async function main() {
       }
       const grid = imageDataToVoxelGrid(imageData, opts);
       if (grid.size === 0) return { error: 'importImageAsVoxels: image produced no voxels (every sampled pixel was transparent).' };
-      const code = generateVoxelImportCode(grid, 'image');
+      const code = generateVoxelImportCode(grid, 'image', { style: opts.codeStyle });
       const result = await importCodePayload(code, 'voxel', 'image-voxels');
       return { sessionId: result.sessionId, voxelCount: grid.size };
     },

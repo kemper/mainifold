@@ -247,6 +247,11 @@ Programmatic / AI equivalent:
 await partwright.importImageAsVoxels(imageUrl, { maxSize: 64, depth: 1, alphaThreshold: 128 });
 // Heightmap relief:
 await partwright.importImageAsVoxels(imageUrl, { mode: 'heightmap', maxSize: 96, maxHeight: 24, baseThickness: 2 });
+// Fixed palette + editable builder code instead of a decode blob:
+await partwright.importImageAsVoxels(imageUrl, {
+  palette: [[20, 20, 30], [200, 60, 60], [240, 220, 180]],   // pixels snap to nearest
+  codeStyle: 'calls',                                          // v.fillBox(...) you can edit
+});
 // -> { sessionId, voxelCount }  (or { error })
 ```
 
@@ -266,16 +271,32 @@ await partwright.importImageAsVoxels(imageUrl, { mode: 'heightmap', maxSize: 96,
   sampling, each −1..+1 (0 = unchanged). Reuses the Relief Studio's preprocessor.
 - `posterizeColors` — quantize `original` colors to this many clusters via
   k-means for a clean limited voxel-art palette (0 = off; the in-app modal
-  exposes 2–12).
+  exposes 2–12). Ignored when `palette` is set.
+- `palette` — a fixed list of `[r, g, b]` colors; each surviving `original`-mode
+  pixel snaps to its nearest entry (perceptual / LAB distance). This both
+  **limits the color count** and lets you **choose the exact colors** (overrides
+  `posterizeColors`). Empty / omitted / `null` = keep per-pixel color (or
+  posterize). Use `partwright`'s extraction (the modal's "Palette" tab seeds
+  from the image) to start from the image's own colors, then tweak.
+- `codeStyle` — `'decode'` (default) writes the compact `voxels.decode("…")`
+  blob; `'calls'` writes human-readable `v.fillBox(…)` / `v.set(…)` builder
+  calls you can hand-edit (same-color blocks are merged into boxes via greedy
+  run-length grouping). Very large or very colorful grids automatically fall
+  back to `'decode'` so the editor stays responsive — limit the palette or
+  lower the resolution to keep the output editable.
 - `removeBackground` — drop a solid-color backdrop the alpha cutoff can't (an
   opaque photo's background). `backgroundColor: [r, g, b]` removes that exact
   color; omit it to auto-detect the dominant border color.
 
 The in-app modal exposes all of these (image adjustments live under an
-"Image adjustments" disclosure) with a live preview. The Recent Imports list
-shows a thumbnail beside each image import and remembers whether it was a voxel
-or a relief import — re-clicking a voxel import reopens this modal pre-loaded
-with the settings you used.
+"Image adjustments" disclosure) with a live preview. Under **Color → Palette**
+the modal seeds an editable swatch list from the image (k-means), and you can
+recolor, add, or remove swatches or re-extract a different count; every pixel
+then snaps to the nearest swatch. The **Editor code** toggle picks between the
+compact data blob and editable builder calls. The Recent Imports list shows a
+thumbnail beside each image import and remembers whether it was a voxel or a
+relief import — re-clicking a voxel import reopens this modal pre-loaded with
+the settings you used.
 
 ## Gotchas
 

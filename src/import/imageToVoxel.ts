@@ -6,7 +6,7 @@
 // ImageData); the DOM step that turns a `File` into pixels lives in main.ts.
 
 import { VoxelGrid, encodeGrid, COORD_MIN, COORD_MAX } from '../geometry/voxel/grid';
-import { preprocessRgb, quantizeColors, detectBackgroundMask, bgMaskFromColor } from '../relief/imageToRelief';
+import { preprocessRgb, quantizeColors, detectBackgroundMask, bgMaskFromColor, rgbToLab, nearestPalette } from '../relief/imageToRelief';
 
 /** Minimal shape of the browser `ImageData` we consume (also satisfiable by a
  *  plain object in tests). */
@@ -64,12 +64,22 @@ export interface ImageToVoxelOptions {
   /** Posterize `original` colors to this many clusters (k-means, perceptual).
    *  0 = off (keep per-pixel color). Gives a clean limited voxel-art palette. */
   posterizeColors?: number;
+  /** Snap each surviving `original`-mode pixel to the nearest color in this
+   *  fixed palette (perceptual / LAB distance). Takes precedence over
+   *  `posterizeColors`. Omit / empty / null = keep per-pixel color (or
+   *  posterize). Use {@link extractImagePalette} to seed it from the image. */
+  palette?: [number, number, number][] | null;
   /** Drop a solid-color background so an opaque photo's subject voxelizes
    *  without its backdrop (the alpha cutoff only catches transparency). */
   removeBackground?: boolean;
   /** Explicit background RGB to remove; when omitted (and `removeBackground`
    *  is on) the dominant border color is auto-detected. */
   backgroundColor?: [number, number, number];
+  /** How {@link generateVoxelImportCode} renders the grid: a compact
+   *  `voxels.decode("…")` blob (`'decode'`, default) or human-readable
+   *  `v.fillBox(…)` / `v.set(…)` builder calls (`'calls'`). Very large or
+   *  colorful grids fall back to `'decode'` so the editor stays usable. */
+  codeStyle?: 'decode' | 'calls';
 }
 
 const DEFAULTS = {
@@ -104,6 +114,58 @@ export function luminance(r: number, g: number, b: number): number {
 
 function clampByte(n: number): number {
   return Math.max(0, Math.min(255, Math.round(n)));
+}
+
+interface DownsampledImage {
+  tw: number;
+  th: number;
+  count: number;
+  /** Interleaved RGB (length count*3) in a Float32 grid so the relief
+   *  preprocessor can operate on it in place. */
+  rgb: Float32Array;
+  /** Per-pixel alpha (length count); relief is alpha-blind, the voxel cutoff
+   *  needs it. */
+  alpha: Uint8Array;
+}
+
+/** Nearest-neighbor downsample so the image's longest side fits `maxSize`.
+ *  Shared by {@link computeImageVoxelLayout} and {@link extractImagePalette} so
+ *  a palette seeded from the image matches what the import samples. Returns
+ *  null for a degenerate (zero-area) image. */
+function downsampleImage(image: ImageDataLike, maxSize: number): DownsampledImage | null {
+  const { width: sw, height: sh, data } = image;
+  if (sw <= 0 || sh <= 0) return null;
+  const scale = Math.min(1, maxSize / Math.max(sw, sh));
+  const tw = Math.max(1, Math.round(sw * scale));
+  const th = Math.max(1, Math.round(sh * scale));
+  const count = tw * th;
+  const rgb = new Float32Array(count * 3);
+  const alpha = new Uint8Array(count);
+  for (let ty = 0; ty < th; ty++) {
+    const sy = Math.min(sh - 1, Math.floor((ty / th) * sh));
+    for (let tx = 0; tx < tw; tx++) {
+      const sx = Math.min(sw - 1, Math.floor((tx / tw) * sw));
+      const p = (sy * sw + sx) * 4;
+      const c = ty * tw + tx;
+      rgb[c * 3] = data[p];
+      rgb[c * 3 + 1] = data[p + 1];
+      rgb[c * 3 + 2] = data[p + 2];
+      alpha[c] = data[p + 3];
+    }
+  }
+  return { tw, th, count, rgb, alpha };
+}
+
+/** Validate + clamp a user-supplied palette to non-empty RGB byte triples, or
+ *  null when there's nothing usable. */
+function clampPalette(p?: [number, number, number][] | null): [number, number, number][] | null {
+  if (!p || !Array.isArray(p) || p.length === 0) return null;
+  const out: [number, number, number][] = [];
+  for (const c of p) {
+    if (!Array.isArray(c) || c.length < 3) continue;
+    out.push([clampByte(c[0]), clampByte(c[1]), clampByte(c[2])]);
+  }
+  return out.length ? out : null;
 }
 
 /** One downsampled pixel that survived the alpha test, resolved to a voxel
@@ -155,41 +217,27 @@ export function computeImageVoxelLayout(image: ImageDataLike, options: ImageToVo
   const posterizeColors = Math.max(0, Math.floor(options.posterizeColors ?? DEFAULTS.posterizeColors));
   const removeBackground = options.removeBackground ?? DEFAULTS.removeBackground;
 
-  const { width: sw, height: sh, data } = image;
-  if (sw <= 0 || sh <= 0) return { tw: 0, th: 0, columns: [], voxelCount: 0, dims: { x: 0, y: 0, z: 0 } };
-
-  // Downsample (nearest-neighbor) so the longest side fits maxSize. We keep the
-  // RGB in a Float32 grid (so the relief module's image-processing helpers can
-  // operate on it in-place) and the alpha in a separate byte array (relief is
-  // alpha-blind; the voxel transparency cutoff needs it).
-  const scale = Math.min(1, maxSize / Math.max(sw, sh));
-  const tw = Math.max(1, Math.round(sw * scale));
-  const th = Math.max(1, Math.round(sh * scale));
-  const count = tw * th;
-  const rgb = new Float32Array(count * 3);
-  const alpha = new Uint8Array(count);
-  for (let ty = 0; ty < th; ty++) {
-    const sy = Math.min(sh - 1, Math.floor((ty / th) * sh));
-    for (let tx = 0; tx < tw; tx++) {
-      const sx = Math.min(sw - 1, Math.floor((tx / tw) * sw));
-      const p = (sy * sw + sx) * 4;
-      const c = ty * tw + tx;
-      rgb[c * 3] = data[p];
-      rgb[c * 3 + 1] = data[p + 1];
-      rgb[c * 3 + 2] = data[p + 2];
-      alpha[c] = data[p + 3];
-    }
-  }
+  // Downsample (nearest-neighbor) so the longest side fits maxSize.
+  const ds = downsampleImage(image, maxSize);
+  if (!ds) return { tw: 0, th: 0, columns: [], voxelCount: 0, dims: { x: 0, y: 0, z: 0 } };
+  const { tw, th, count, rgb, alpha } = ds;
 
   // Tonal adjustments (brightness / contrast / saturation) — reuses the relief
   // pipeline's pure preprocessor. No-op at defaults (preserves prior output).
   preprocessRgb(rgb, tw, th, { brightness, contrast, saturation, levelsLow: 0, levelsHigh: 255 });
 
-  // Optional posterize: collapse `original` colors to a small palette via the
-  // shared k-means (only affects the color, not the heightmap heights).
+  // Color reduction for `original` mode. A fixed user palette (snap each pixel
+  // to its nearest entry, perceptually) takes precedence over posterize (auto
+  // k-means clusters). `palette` holds the resolved colors; pixels reach them
+  // via `assign` (posterize) or a nearest-LAB lookup over `snapLab` (palette).
   let palette: [number, number, number][] | null = null;
   let assign: Int32Array | null = null;
-  if (posterizeColors >= 2 && colorMode === 'original') {
+  let snapLab: [number, number, number][] | null = null;
+  const userPalette = clampPalette(options.palette);
+  if (colorMode === 'original' && userPalette) {
+    palette = userPalette;
+    snapLab = userPalette.map(([r, g, b]) => rgbToLab(r, g, b));
+  } else if (posterizeColors >= 2 && colorMode === 'original') {
     const r = quantizeColors(rgb, count, posterizeColors, 'lab');
     assign = r.assign;
     palette = [];
@@ -246,6 +294,9 @@ export function computeImageVoxelLayout(image: ImageDataLike, options: ImageToVo
       } else if (colorMode === 'grayscale') {
         const l = clampByte(luminance(r, gg, b));
         color = [l, l, l];
+      } else if (snapLab && palette) {
+        const lab = rgbToLab(clampByte(r), clampByte(gg), clampByte(b));
+        color = palette[nearestPalette(lab[0], lab[1], lab[2], snapLab)];
       } else if (palette && assign) {
         color = palette[assign[c]];
       } else {
@@ -284,15 +335,109 @@ export function imageDataToVoxelGrid(image: ImageDataLike, options: ImageToVoxel
   return grid;
 }
 
-/** Emit editor code that rebuilds a grid via `voxels.decode(...)`. Mirrors the
+/** Extract `k` representative colors from an image using the same downsample +
+ *  tonal pipeline the voxel import samples through, so a palette seeded here
+ *  matches what the posterize option would produce (and what the import will
+ *  snap to). Returns `[]` for a degenerate image. */
+export function extractImagePalette(
+  image: ImageDataLike,
+  k: number,
+  options: Pick<ImageToVoxelOptions, 'maxSize' | 'brightness' | 'contrast' | 'saturation'> = {},
+): [number, number, number][] {
+  const maxSize = Math.max(1, Math.min(Math.floor(options.maxSize ?? DEFAULTS.maxSize), HARD_MAX));
+  const ds = downsampleImage(image, maxSize);
+  if (!ds) return [];
+  preprocessRgb(ds.rgb, ds.tw, ds.th, {
+    brightness: options.brightness ?? 0,
+    contrast: options.contrast ?? 0,
+    saturation: options.saturation ?? 0,
+    levelsLow: 0,
+    levelsHigh: 255,
+  });
+  const kk = Math.max(1, Math.min(Math.floor(k), 64));
+  const r = quantizeColors(ds.rgb, ds.count, kk, 'lab');
+  const out: [number, number, number][] = [];
+  for (let i = 0; i < r.k; i++) {
+    out.push([clampByte(r.repRGB[i * 3]), clampByte(r.repRGB[i * 3 + 1]), clampByte(r.repRGB[i * 3 + 2])]);
+  }
+  return out;
+}
+
+/** Above this many builder calls, `'calls'` codegen falls back to the compact
+ *  `voxels.decode(...)` blob so the editor stays responsive. */
+const MAX_BUILDER_CALLS = 6000;
+
+function hexOf(rgb: number): string {
+  return '#' + (rgb & 0xffffff).toString(16).padStart(6, '0');
+}
+
+/** Decompose a grid into a small set of same-color axis-aligned boxes via
+ *  greedy growth (X, then Y, then Z) and emit `v.fillBox(...)` / `v.set(...)`
+ *  builder calls in canonical x→y→z order. Each cell is covered exactly once.
+ *  Returns null for an empty grid. */
+function gridToBuilderCalls(grid: VoxelGrid): string[] | null {
+  const b = grid.bounds();
+  if (!b) return null;
+  const visited = new Set<number>();
+  const key = (x: number, y: number, z: number) => VoxelGrid.keyOf(x, y, z);
+  const lines: string[] = [];
+  for (let x = b.min[0]; x <= b.max[0]; x++) {
+    for (let y = b.min[1]; y <= b.max[1]; y++) {
+      for (let z = b.min[2]; z <= b.max[2]; z++) {
+        const c = grid.get(x, y, z);
+        if (c === null || visited.has(key(x, y, z))) continue;
+        // Grow a maximal same-color box of still-unvisited cells: +X first,
+        // then extend the whole row in +Y, then the whole slab in +Z.
+        let x1 = x;
+        while (x1 + 1 <= b.max[0] && grid.get(x1 + 1, y, z) === c && !visited.has(key(x1 + 1, y, z))) x1++;
+        let y1 = y;
+        growY: while (y1 + 1 <= b.max[1]) {
+          for (let xi = x; xi <= x1; xi++) {
+            if (grid.get(xi, y1 + 1, z) !== c || visited.has(key(xi, y1 + 1, z))) break growY;
+          }
+          y1++;
+        }
+        let z1 = z;
+        growZ: while (z1 + 1 <= b.max[2]) {
+          for (let xi = x; xi <= x1; xi++)
+            for (let yi = y; yi <= y1; yi++) {
+              if (grid.get(xi, yi, z1 + 1) !== c || visited.has(key(xi, yi, z1 + 1))) break growZ;
+            }
+          z1++;
+        }
+        for (let xi = x; xi <= x1; xi++)
+          for (let yi = y; yi <= y1; yi++)
+            for (let zi = z; zi <= z1; zi++) visited.add(key(xi, yi, zi));
+        const hex = hexOf(c);
+        lines.push(x === x1 && y === y1 && z === z1
+          ? `v.set(${x}, ${y}, ${z}, '${hex}');`
+          : `v.fillBox([${x}, ${y}, ${z}], [${x1}, ${y1}, ${z1}], '${hex}');`);
+      }
+    }
+  }
+  return lines;
+}
+
+/** Options for {@link generateVoxelImportCode}. */
+export interface VoxelCodeOptions {
+  /** `'decode'` (default) = compact blob; `'calls'` = editable builder calls. */
+  style?: 'decode' | 'calls';
+  /** Override the builder-call cap above which `'calls'` falls back to decode
+   *  (mainly for tests). */
+  maxCalls?: number;
+}
+
+/** Emit editor code that rebuilds a grid. The default `'decode'` style writes a
+ *  compact `voxels.decode(...)` blob; `'calls'` writes human-readable
+ *  `v.fillBox(...)` / `v.set(...)` builder calls (falling back to decode when
+ *  the grid needs more than the cap, so the editor stays usable). Mirrors the
  *  imported-mesh codegen: human-readable header, one self-contained `return`. */
-export function generateVoxelImportCode(grid: VoxelGrid, filename: string): string {
+export function generateVoxelImportCode(grid: VoxelGrid, filename: string, opts: VoxelCodeOptions = {}): string {
   const date = new Date().toISOString().slice(0, 10);
   const b = grid.bounds();
   const dims = b
     ? `${b.max[0] - b.min[0] + 1}×${b.max[1] - b.min[1] + 1}×${b.max[2] - b.min[2] + 1}`
     : '0×0×0';
-  const encoded = encodeGrid(grid);
   // Preserve the grid's surfacing setting in the emitted code so a
   // smooth-surfaced model that's baked (e.g. via the voxel paint flow) keeps
   // its rounded edges after the next run, instead of silently reverting to
@@ -301,8 +446,32 @@ export function generateVoxelImportCode(grid: VoxelGrid, filename: string): stri
   const surfaceCall = surf.mode === 'smooth'
     ? `\nv.smooth({ iterations: ${surf.iterations}, detail: ${surf.detail} });`
     : '';
-  return `// Imported from ${filename} on ${date}
-// ${grid.size} voxels (${dims}). Edit below — e.g. add v.fillBox(...) before returning.
+  const header = `// Imported from ${filename} on ${date}\n`;
+
+  if (opts.style === 'calls') {
+    const calls = gridToBuilderCalls(grid);
+    const cap = opts.maxCalls ?? MAX_BUILDER_CALLS;
+    if (calls && calls.length > 0 && calls.length <= cap) {
+      return `${header}// ${grid.size} voxels (${dims}) as editable builder calls. Tweak any line, add v.fillBox(...), etc.
+const { voxels } = api;
+const v = voxels();
+${calls.join('\n')}${surfaceCall}
+return v;
+`;
+    }
+    // Too many distinct blocks to stay readable — fall back to the compact form
+    // but say why, so the user knows to lower resolution / limit colors.
+    const encoded = encodeGrid(grid);
+    return `${header}// ${grid.size} voxels (${dims}). Too many distinct blocks for readable builder calls,
+// so stored as compact data. Lower the resolution or limit the color palette to get editable code.
+const { voxels } = api;
+const v = voxels.decode(${JSON.stringify(encoded)});${surfaceCall}
+return v;
+`;
+  }
+
+  const encoded = encodeGrid(grid);
+  return `${header}// ${grid.size} voxels (${dims}). Edit below — e.g. add v.fillBox(...) before returning.
 const { voxels } = api;
 const v = voxels.decode(${JSON.stringify(encoded)});${surfaceCall}
 return v;
