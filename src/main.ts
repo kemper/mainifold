@@ -8440,7 +8440,8 @@ async function main() {
         'changePart':      { signature: 'await changePart(id) -- Switch active part (loads its latest version)', docs: '/ai.md#console-api--windowpartwright' },
         'renamePart':      { signature: 'await renamePart(id, name) -- Rename a part', docs: '/ai.md#console-api--windowpartwright' },
         'deletePart':      { signature: 'await deletePart(id) -- Delete a part and its versions', docs: '/ai.md#console-api--windowpartwright' },
-        'getGalleryUrl':   { signature: 'getGalleryUrl() -- URL for gallery view (human review)', docs: '/ai.md#console-api--windowpartwright' },
+        'getShareLink':    { signature: 'await getShareLink() -- Read-only share link for the current version -> {url, encodedBytes} or {error}; the link to hand the user when done', docs: '/ai.md#console-api--windowpartwright' },
+        'getGalleryUrl':   { signature: 'getGalleryUrl() -- URL for gallery view (local browser only)', docs: '/ai.md#console-api--windowpartwright' },
         // Notes
         'addSessionNote':  { signature: 'await addSessionNote(text) -- Add note with [PREFIX] tag', docs: '/ai.md#session-notes----tracking-design-context' },
         'listSessionNotes': { signature: 'await listSessionNotes() -- List all session notes', docs: '/ai.md#session-notes----tracking-design-context' },
