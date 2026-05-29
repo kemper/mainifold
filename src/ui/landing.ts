@@ -15,6 +15,7 @@ import { languageBadge } from './languageBadge';
 import { showUninstallModal } from './uninstallModal';
 import { getTheme, onThemeChange, toggleTheme } from './theme';
 import type { ExportedSession } from '../storage/sessionManager';
+import type { CatalogManifestEntry } from './catalog';
 
 export interface LandingCallbacks {
   onOpenEditor: () => void;
@@ -23,14 +24,6 @@ export interface LandingCallbacks {
   onOpenSession: (sessionId: string) => void;
   /** Load a single catalog entry straight into the editor as a fresh session. */
   onLoadCatalogEntry: (entry: CatalogManifestEntry, payload: ExportedSession) => void | Promise<void>;
-}
-
-interface CatalogManifestEntry {
-  id: string;
-  name: string;
-  file: string;
-  language?: 'manifold-js' | 'scad' | 'replicad' | 'voxel';
-  description?: string;
 }
 
 interface FeaturedCatalogEntry {
