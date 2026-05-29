@@ -31,7 +31,7 @@ import { initViewport, updateMesh, setOnMeshUpdate, setOnContextLost, setOnConte
 import { renderCompositeCanvas, renderSingleView, renderSingleViewCanvas, renderSliceSVG, setImages as _setImages, clearImages as _clearImages, getImages as _getImages, buildViewCamera, RENDER_VIEW_MODES, EDGE_MODES, STANDARD_VIEWS, type AttachedImage, type RenderViewMode, type EdgeMode } from './renderer/multiview';
 import { generateId, getLatestVersion } from './storage/db';
 import { setPhantom, clearPhantom, hasPhantom, type PhantomOptions } from './renderer/phantomGeometry';
-import { initEditor, setValue, getValue, setLanguage as setEditorLanguage, setEditorDiagnostics, clearEditorDiagnostics, revealFirstDiagnostic, formatCode, getAutoFormat, setAutoFormat, editorContentDiffersFrom } from './editor/codeEditor';
+import { initEditor, setValue, getValue, getSelection, setLanguage as setEditorLanguage, setEditorDiagnostics, clearEditorDiagnostics, revealFirstDiagnostic, formatCode, getAutoFormat, setAutoFormat, editorContentDiffersFrom } from './editor/codeEditor';
 import { createLayout, type TabName } from './ui/layout';
 import { createToolbar, isAutoRun, setAutoRun, setToolbarLanguage, setAiToolbarState } from './ui/toolbar';
 import { installKeyboardShortcuts } from './ui/keyboardShortcuts';
@@ -153,11 +153,12 @@ import { setBucketTolerance as setPaintBucketTolerance, getBucketTolerance as ge
 import { buildStrokeMesh, buildRefinedMesh, brushRefineRegion, strokeFootprintTriangles, deriveSampleNormals, buildGeodesicField, tangentBasis, childrenByParent, type BrushStroke, type BrushShape, type RefineRegion } from './color/subdivide';
 import { refineInWorker, SubdivisionAbortError, terminateSubdivisionWorker } from './color/subdivisionClient';
 import { startProgress, endProgress, __setProgressModalDelayForTests } from './ui/progressModal';
-import { initEditorLock, syncLockState, setUnlockHandlers, disableRun, enableRun } from './color/editorLock';
+import { initEditorLock, syncLockState, setUnlockHandlers, isLocked, disableRun, enableRun } from './color/editorLock';
 import { setReadOnlyReason } from './editor/editorAccess';
 import { asLanguage } from './storage/languageFallback';
 import { encodeShare, decodeShare, validateSharePayloadShape, ShareUnsupportedError } from './share/shareLink';
 import { openShareModal, renderSharedBanner, renderSharedOverlay } from './share/shareUI';
+import { initInsertPalette, setInsertPaletteAvailable } from './ui/insertPalette';
 import { buildAdjacency, findCoplanarRegion, findConnectedFromSeed, resolveSeed, findNearestTriangle, type AdjacencyGraph } from './color/adjacency';
 import { findSlabTriangles, slabRefineRegion, smoothEdgeForResolution } from './color/slabPaint';
 import { findBoxTriangles, findShapeTriangles, shapeRefineRegion } from './color/boxPaint';
@@ -4278,6 +4279,25 @@ async function main() {
   initDimensionsToggle(clipControls);
   initAnnotateUI(clipControls);
   initPaintUI(clipControls);
+  initInsertPalette(clipControls, {
+    getLanguage: () => getActiveLanguage() as 'manifold-js' | 'scad',
+    getCode: () => getValue(),
+    setCode: (code: string) => setValue(code),
+    getSelection: () => getSelection(),
+    run: (code?: string) => runCode(code),
+    isLocked: () => isLocked(),
+    showToast: (msg, opts) => showToast(msg, opts),
+    getMeshData: () => currentMeshData,
+    getCamera: () => getCamera(),
+    getCanvas: () => getCanvas(),
+    onOpen: () => {
+      if (isPaintOpen()) closePaintMenu();
+      if (isSimplifyOpen()) closeSimplifyMenu();
+    },
+  });
+  // initInsertPalette wires the toolbar button itself; codegen only covers
+  // manifold-js + scad so hide it on voxel / replicad sessions.
+  setInsertPaletteAvailable(getActiveLanguage() === 'manifold-js' || getActiveLanguage() === 'scad');
   initVoxelPaintUI(clipControls, {
     activate: async () => {
       const code = getValue();
@@ -4564,6 +4584,7 @@ async function main() {
     setEditorLanguage(lang);
     setToolbarLanguage(lang);
     setVoxelPaintAvailable(lang === 'voxel');
+    setInsertPaletteAvailable(lang === 'manifold-js' || lang === 'scad');
     syncEditorTitle(getState());
     const loadingLabel =
       lang === 'scad' ? 'Loading OpenSCAD...' :
@@ -10129,7 +10150,10 @@ function setStatus(el: HTMLElement, state: 'ready' | 'running' | 'error' | 'load
   el.setAttribute('aria-live', 'polite');
   el.textContent = text;
   el.title = text;
-  el.className = 'text-xs font-mono max-w-[60%] truncate text-right ';
+  // Keep the indicator click-transparent — `setStatus` overwrites the className
+  // so the original `pointer-events-none` from layout.ts would otherwise be
+  // lost, letting it intercept clicks on the Insert button it overlaps.
+  el.className = 'text-xs font-mono max-w-[60%] truncate text-right pointer-events-none ';
   switch (state) {
     case 'ready':
       el.className += 'text-emerald-400';
