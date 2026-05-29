@@ -5,7 +5,7 @@
 
 const MAX_ENTRIES = 10;
 
-export type ImportSource = 'JSON' | 'JS' | 'SCAD' | 'STL' | 'STEP';
+export type ImportSource = 'JSON' | 'JS' | 'SCAD' | 'STL' | 'STEP' | 'IMAGE' | 'VOX' | 'SVG';
 
 export interface ImportInboxEntry {
   id: string;
@@ -14,6 +14,26 @@ export interface ImportInboxEntry {
   source: ImportSource;
   sizeBytes: number;
   timestamp: number;
+  /** Source-specific settings used at create time (e.g. ReliefOptions for an
+   *  IMAGE/SVG). Re-clicking the entry pre-loads these into the wizard so the
+   *  user can tweak from there; the dedupe key is (filename, settings) so a
+   *  Create with unchanged settings doesn't pile up a duplicate entry.
+   *
+   *  Image-based imports tag this as `{ importer, options }` (see
+   *  `ImportMetadata`) so a re-import reopens the right wizard — voxel imports
+   *  return to the voxel modal, relief imports to the Relief Studio. */
+  metadata?: unknown;
+  /** Small data-URL thumbnail of the source (image / SVG), shown beside the
+   *  entry in the Recent Imports list. Optional — code/mesh imports omit it. */
+  thumbnail?: string;
+}
+
+/** Discriminated metadata for image-based imports, so a re-import knows which
+ *  importer produced the entry and what settings to restore. */
+export interface ImportMetadata {
+  importer: 'relief' | 'voxel';
+  /** ReliefOptions or ImageToVoxelOptions depending on `importer`. */
+  options: unknown;
 }
 
 const entries: ImportInboxEntry[] = [];
@@ -25,8 +45,22 @@ function notify() {
   for (const fn of listeners) fn();
 }
 
-/** Add an entry to the inbox. Newest entries are at index 0. */
-export function registerImport(blob: Blob, filename: string, source: ImportSource): ImportInboxEntry {
+function importKey(filename: string, metadata?: unknown): string {
+  let metaPart = '';
+  if (metadata !== undefined) {
+    try { metaPart = JSON.stringify(metadata); } catch { metaPart = ''; }
+  }
+  return `${filename}::${metaPart}`;
+}
+
+/** Add an entry to the inbox. Newest entries are at index 0. When an entry
+ *  with the same (filename, metadata) key already exists, it's bubbled to the
+ *  top with a fresh timestamp instead of duplicated — re-importing the same
+ *  image with the same tweaks should leave the recent list tidy. */
+export function registerImport(blob: Blob, filename: string, source: ImportSource, metadata?: unknown, thumbnail?: string): ImportInboxEntry {
+  const key = importKey(filename, metadata);
+  const existingIdx = entries.findIndex(e => importKey(e.filename, e.metadata) === key);
+  if (existingIdx >= 0) entries.splice(existingIdx, 1);
   const entry: ImportInboxEntry = {
     id: `imp_${Date.now().toString(36)}_${nextSeq++}`,
     blob,
@@ -34,6 +68,8 @@ export function registerImport(blob: Blob, filename: string, source: ImportSourc
     source,
     sizeBytes: blob.size,
     timestamp: Date.now(),
+    metadata,
+    thumbnail,
   };
   entries.unshift(entry);
   while (entries.length > MAX_ENTRIES) entries.pop();
@@ -72,5 +108,8 @@ export function classifyImportSource(filename: string): ImportSource | null {
   if (lower.endsWith('.js')) return 'JS';
   if (lower.endsWith('.stl')) return 'STL';
   if (lower.endsWith('.step') || lower.endsWith('.stp')) return 'STEP';
+  if (lower.endsWith('.vox')) return 'VOX';
+  if (lower.endsWith('.svg')) return 'SVG';
+  if (/\.(png|jpe?g|gif|webp|bmp|avif)$/i.test(lower)) return 'IMAGE';
   return null;
 }

@@ -15,20 +15,16 @@ import { languageBadge } from './languageBadge';
 import { showUninstallModal } from './uninstallModal';
 import { getTheme, onThemeChange, toggleTheme } from './theme';
 import type { ExportedSession } from '../storage/sessionManager';
+import type { CatalogManifestEntry } from './catalog';
 
 export interface LandingCallbacks {
   onOpenEditor: () => void;
   onOpenHelp: () => void;
   onOpenCatalog: () => void;
+  onOpenWhatsNew: () => void;
   onOpenSession: (sessionId: string) => void;
-}
-
-interface CatalogManifestEntry {
-  id: string;
-  name: string;
-  file: string;
-  language?: 'manifold-js' | 'scad' | 'replicad';
-  description?: string;
+  /** Load a single catalog entry straight into the editor as a fresh session. */
+  onLoadCatalogEntry: (entry: CatalogManifestEntry, payload: ExportedSession) => void | Promise<void>;
 }
 
 interface FeaturedCatalogEntry {
@@ -153,6 +149,18 @@ function buildHero(callbacks: LandingCallbacks): HTMLElement {
   }
   hero.appendChild(pills);
 
+  // "What's new" announcement link — a discoverable entry point to the
+  // recently-shipped-features changelog.
+  const whatsNew = document.createElement('button');
+  whatsNew.className =
+    'mt-6 inline-flex items-center gap-2 text-xs text-zinc-300 bg-zinc-800/60 hover:bg-zinc-800 border border-zinc-700 rounded-full px-4 py-1.5 transition-colors';
+  whatsNew.innerHTML =
+    '<span class="text-[10px] font-semibold uppercase tracking-wider text-blue-400">New</span>' +
+    '<span>Voxels, BREP solids, image relief &amp; more</span>' +
+    '<span class="text-zinc-500">→</span>';
+  whatsNew.addEventListener('click', callbacks.onOpenWhatsNew);
+  hero.appendChild(whatsNew);
+
   return hero;
 }
 
@@ -224,7 +232,7 @@ async function buildFeaturedCatalog(callbacks: LandingCallbacks): Promise<HTMLEl
   section.className = 'w-full max-w-5xl px-6 py-12 border-t border-zinc-800';
 
   const header = document.createElement('div');
-  header.className = 'flex items-baseline justify-between mb-6';
+  header.className = 'flex items-center justify-between mb-6';
 
   const heading = document.createElement('h2');
   heading.id = 'catalog-heading';
@@ -233,7 +241,7 @@ async function buildFeaturedCatalog(callbacks: LandingCallbacks): Promise<HTMLEl
   header.appendChild(heading);
 
   const browseAll = document.createElement('button');
-  browseAll.className = 'text-xs text-blue-400 hover:text-blue-300 transition-colors';
+  browseAll.className = 'shrink-0 inline-flex items-center gap-1 px-3 py-1.5 rounded-md text-sm font-medium border border-blue-500/60 text-blue-300 hover:bg-blue-500/10 hover:border-blue-400 transition-colors';
   browseAll.textContent = 'Browse the full catalog →';
   browseAll.addEventListener('click', callbacks.onOpenCatalog);
   header.appendChild(browseAll);
@@ -255,9 +263,27 @@ async function buildFeaturedCatalog(callbacks: LandingCallbacks): Promise<HTMLEl
   }
 
   for (const entry of entries) {
-    grid.appendChild(buildCatalogTile(entry, callbacks.onOpenCatalog));
+    grid.appendChild(buildCatalogTile(entry, () => { void loadFeaturedCatalogEntry(entry.manifest, callbacks); }));
   }
   return section;
+}
+
+/**
+ * Fetch a featured catalog entry's session payload and hand it to the editor.
+ * Mirrors the catalog page's load path so clicking a landing tile opens the
+ * item directly instead of routing through the full catalog.
+ */
+async function loadFeaturedCatalogEntry(manifest: CatalogManifestEntry, callbacks: LandingCallbacks): Promise<void> {
+  try {
+    const res = await fetch(`/catalog/${manifest.file}`, { cache: 'no-cache' });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const payload = await res.json() as ExportedSession;
+    await callbacks.onLoadCatalogEntry(manifest, payload);
+  } catch {
+    // If the entry can't be loaded directly, fall back to the full catalog
+    // page so the user still has a path to the content.
+    callbacks.onOpenCatalog();
+  }
 }
 
 async function loadFeaturedCatalogEntries(): Promise<FeaturedCatalogEntry[]> {
@@ -335,7 +361,7 @@ Then navigate to ${origin}/editor and use the window.partwright console API to:
 2. Build a standard 2x4 Lego brick (approximately 31.8mm x 15.8mm x 11.4mm with studs on top and hollow underside with tubes)
 3. Save each major step as a version (e.g. v1 - base block, v2 - add studs, v3 - hollow underside with tubes)
 4. Use assertions to verify each version is a valid manifold with maxComponents: 1
-5. Give me the gallery URL when done so I can review the versions`;
+5. Give me a share link (partwright.getShareLink()) when done so I can open the design`;
 
 function buildAgentSection(): HTMLElement {
   const section = document.createElement('section');
@@ -547,6 +573,7 @@ function buildFooter(): HTMLElement {
   const items: { label: string; href: string; external?: boolean }[] = [
     { label: 'Editor', href: '/editor' },
     { label: 'Catalog', href: '/catalog' },
+    { label: "What's new", href: '/whats-new' },
     { label: 'How it works', href: '/help' },
     { label: 'Legal', href: '/legal' },
     { label: 'AI agent docs', href: '/ai.md' },

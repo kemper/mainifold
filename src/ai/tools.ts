@@ -44,16 +44,16 @@ export interface ToolExecResult {
 const ALL_TOOLS: ToolDefinition[] = [
   {
     name: 'getActiveLanguage',
-    description: 'Returns the editor\'s current modeling language: "manifold-js", "scad", or "replicad". The per-turn system suffix already includes this, but call when in doubt or after a tool sequence that might have switched it.',
+    description: 'Returns the editor\'s current modeling language: "manifold-js", "scad", "replicad", or "voxel". The per-turn system suffix already includes this, but call when in doubt or after a tool sequence that might have switched it.',
     input_schema: { type: 'object', properties: {} },
   },
   {
     name: 'setActiveLanguage',
-    description: 'Switch the editor between "manifold-js", "scad", and "replicad". Your in-progress code in the previous language is stashed as a per-session draft and restored when you switch back, so flipping is cheap and non-destructive — saved versions in this session are untouched and remember the language they were authored in. "replicad" is a full BREP / OpenCASCADE session — pick it when the user wants exact fillets, chamfers, STEP export, or mechanical-CAD interop. (Inside a manifold-js session you can also access BREP via `api.BREP.*` without switching languages — only switch when STEP export or a BREP-only workflow is required.) Use when the user asks, or when the new request maps obviously better to one of the engines; still avoid unnecessary back-and-forth since each switch costs a tool round-trip.',
+    description: 'Switch the editor between "manifold-js", "scad", and "replicad". Your in-progress code in the previous language is stashed as a per-session draft and restored when you switch back, so flipping is cheap and non-destructive — saved versions in this session are untouched and remember the language they were authored in. "replicad" is a full BREP / OpenCASCADE session — pick it when the user wants exact fillets, chamfers, STEP export, or mechanical-CAD interop. (Inside a manifold-js session you can also access BREP via `api.BREP.*` without switching languages — only switch when STEP export or a BREP-only workflow is required.) "voxel" is a blocky colored-cube engine (pure JS): build with `api.voxels()` then v.set/v.fillBox/v.sphere/v.line in hex or [r,g,b] colors and `return v` — pick it for Minecraft-style / pixel-art models or after an image-to-voxel import. Use when the user asks, or when the new request maps obviously better to one of the engines; still avoid unnecessary back-and-forth since each switch costs a tool round-trip.',
     input_schema: {
       type: 'object',
       properties: {
-        lang: { type: 'string', enum: ['manifold-js', 'scad', 'replicad'] },
+        lang: { type: 'string', enum: ['manifold-js', 'scad', 'replicad', 'voxel'] },
       },
       required: ['lang'],
     },
@@ -72,6 +72,25 @@ const ALL_TOOLS: ToolDefinition[] = [
         code: { type: 'string', description: 'New editor contents (must be a complete program ending in `return manifold;`).' },
       },
       required: ['code'],
+    },
+  },
+  {
+    name: 'getParams',
+    description: 'Read the current model\'s Customizer parameters — the tweakable knobs it declares via `api.params({...})`. Returns `{ schema, values }`: `schema` lists each parameter (key, type, default, min/max/options) and `values` its current resolved value. Returns empty arrays/objects when the model declares none. Call before setParams to discover what can be tweaked without re-reading the code.',
+    input_schema: { type: 'object', properties: {} },
+  },
+  {
+    name: 'setParams',
+    description: 'Tweak one or more Customizer parameters and re-run the model — the same effect as the user dragging the Parameters panel\'s sliders, but driven from code. Pass an object of `{ paramKey: value }`. Out-of-range or wrong-type values are clamped / fall back to the default (never errors on a bad value); unknown keys are ignored. Returns the updated geometry stats and resolved parameter values. Prefer this over rewriting the code when you only need to change a declared dimension/option — it\'s cheaper and preserves the model. Errors only if the model declares no parameters.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        values: {
+          type: 'object',
+          description: 'Map of parameter key → new value, e.g. { "width": 50, "rows": 3, "rounded": false }.',
+        },
+      },
+      required: ['values'],
     },
   },
   {
@@ -401,13 +420,13 @@ const ALL_TOOLS: ToolDefinition[] = [
   },
   {
     name: 'readDoc',
-    description: 'Fetch one of the topic-specific docs from /ai/<name>.md. Use this when the core ai.md points you at a subdoc and you need its full content before writing code. Names: curves, bosl2, replicad, colors, print-safety, reference-images, file-io, annotations.',
+    description: 'Fetch one of the topic-specific docs from /ai/<name>.md. Use this when the core ai.md points you at a subdoc and you need its full content before writing code. Names: curves, bosl2, replicad, sdf, voxel, colors, print-safety, reference-images, file-io, annotations, relief.',
     input_schema: {
       type: 'object',
       properties: {
         name: {
           type: 'string',
-          enum: ['curves', 'bosl2', 'replicad', 'colors', 'print-safety', 'reference-images', 'file-io', 'annotations'],
+          enum: ['curves', 'bosl2', 'replicad', 'sdf', 'voxel', 'colors', 'print-safety', 'reference-images', 'file-io', 'annotations', 'relief'],
           description: 'Subdoc name without the .md extension.',
         },
       },
@@ -921,6 +940,115 @@ const ALL_TOOLS: ToolDefinition[] = [
       required: ['rMin', 'rMax', 'zMin', 'zMax', 'color'],
     },
   },
+  {
+    name: 'importImageAsRelief',
+    description: 'Generate a colour-printable Part from a raster image. By default produces a FLAT colour tile (keychain-style — paint regions on a thin tile, AMS-friendly). Pass quantized.output="silhouette" to cut the tile to the image\'s subject outline (background removed), or quantized.output="relief" for a stepped-height relief (each cluster gets its own Z layer). Pass mode="luminance" for a tonal embossment with no colour clusters. `src` is a data: or http(s) image URL. After creation, paint, then read getReliefSwapGuide() for the single-nozzle swap plan if relevant.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        src: { type: 'string', description: 'Image data: URL or http(s) URL.' },
+        mode: { type: 'string', enum: ['luminance', 'quantized', 'ai'], description: 'Image→geometry mapping. "luminance" is a heightmap relief. "quantized" produces a coloured tile (see quantized.output). Default quantized.' },
+        options: {
+          type: 'object',
+          description: 'Common relief knobs to override.',
+          properties: {
+            widthMm: { type: 'number' },
+            layerHeight: { type: 'number' },
+            baseThickness: { type: 'number' },
+            maxHeight: { type: 'number' },
+            resolution: { type: 'integer', description: 'Max grid columns (<=512).' },
+            smoothing: { type: 'number' },
+          },
+        },
+        quantized: {
+          type: 'object',
+          description: 'Quantized-mode + tile overrides. Only used when mode is "quantized" (or "ai").',
+          properties: {
+            clusters: { type: 'integer', description: 'Number of colour clusters (2..12). Default 5.' },
+            colorSpace: { type: 'string', enum: ['rgb', 'lab'], description: 'Clustering colour space. Lab is perceptual (default).' },
+            dither: { type: 'boolean', description: 'Floyd–Steinberg dithering at cluster boundaries.' },
+            output: { type: 'string', enum: ['flat', 'silhouette', 'relief'], description: '"flat" (default) = flat colour tile (keychain). "silhouette" = flat tile cut to the image subject (background removed). "relief" = stepped relief — each cluster gets its own Z layer.' },
+            paintingMode: { type: 'string', enum: ['multi-color', 'single-nozzle'], description: 'Stepped-relief painting mode. Both values produce the SAME per-cluster relief geometry (a continuous quantized-height relief); this only gates single-nozzle printability validation, not the mesh. "multi-color" (default) skips the check (AMS / multi-material). "single-nozzle" runs the swap-guide layer-fit check that verifies each colour can be reproduced by horizontal filament swaps.' },
+            shape: { type: 'string', enum: ['rect', 'rounded', 'circle'], description: 'Tile outline for flat mode. Default "rect".' },
+            cornerRadiusMm: { type: 'number', description: 'Corner radius for "rounded" shape, mm.' },
+            chamferMm: { type: 'number', description: 'Top-edge chamfer / bevel depth, mm. 0 = sharp. Up to ~2 mm.' },
+            holes: {
+              type: 'array',
+              description: 'Zero or more circular keychain holes. Centre coords are mm with (0,0) at the tile centre and +Y toward the top edge.',
+              items: {
+                type: 'object',
+                properties: {
+                  cxMm: { type: 'number' },
+                  cyMm: { type: 'number' },
+                  diameterMm: { type: 'number' },
+                },
+                required: ['cxMm', 'cyMm', 'diameterMm'],
+              },
+            },
+          },
+        },
+      },
+      required: ['src'],
+    },
+  },
+  {
+    name: 'importSvgAsRelief',
+    description: 'Generate a multi-colour tile Part from raw SVG text. Each `<path fill>` becomes one seed colour region with CRISP boundaries — no k-means clustering, so the SVG\'s exact colours and shapes are preserved. Vastly better than importImageAsRelief for vector logos, icons, and illustrations. Tile geometry knobs (output/shape/hole) work the same as importImageAsRelief; default output is "silhouette" so the tile takes the SVG\'s overall outline.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        svgText: { type: 'string', description: 'Raw SVG source text (including the <svg>...</svg> root).' },
+        options: {
+          type: 'object',
+          properties: {
+            widthMm: { type: 'number' },
+            layerHeight: { type: 'number' },
+            baseThickness: { type: 'number' },
+            maxHeight: { type: 'number' },
+            resolution: { type: 'integer', description: 'Max grid columns (<=512). Higher = crisper.' },
+            smoothing: { type: 'number' },
+          },
+        },
+        quantized: {
+          type: 'object',
+          description: 'Tile overrides (the SVG path doesn\'t cluster — fields like clusters/dither are ignored here).',
+          properties: {
+            output: { type: 'string', enum: ['flat', 'silhouette'], description: 'Default "silhouette" — uses the SVG outline as the tile shape.' },
+            shape: { type: 'string', enum: ['rect', 'rounded', 'circle'] },
+            cornerRadiusMm: { type: 'number' },
+            chamferMm: { type: 'number', description: 'Top-edge chamfer depth, mm. 0 = sharp.' },
+            holes: {
+              type: 'array',
+              items: {
+                type: 'object',
+                properties: {
+                  cxMm: { type: 'number' },
+                  cyMm: { type: 'number' },
+                  diameterMm: { type: 'number' },
+                },
+                required: ['cxMm', 'cyMm', 'diameterMm'],
+              },
+            },
+          },
+        },
+      },
+      required: ['svgText'],
+    },
+  },
+  {
+    name: 'getReliefSwapGuide',
+    description: 'Return the advisory single-nozzle filament-swap guide for the current relief: ordered swaps {atLayer, atZ, color, filamentName?}, derived height bands, totals, a printability score (0..1), and warnings where horizontal color variation cannot be reproduced on a single nozzle (use AMS or constrain paint to Z-slabs there). Reflects the current painting — call after painting.',
+    input_schema: { type: 'object', properties: {} },
+  },
+  {
+    name: 'setReliefPreviewMode',
+    description: 'Switch the relief optical preview: "flat" (raw paint), "ams" (glossy filament look), or "single-nozzle" (simulates light through the translucent layer stack — what a single-nozzle swap print would look like). Affects what renderView/renderViews show, so set "single-nozzle" before rendering to self-check a stepped-relief print.',
+    input_schema: {
+      type: 'object',
+      properties: { mode: { type: 'string', enum: ['flat', 'ams', 'single-nozzle'] } },
+      required: ['mode'],
+    },
+  },
 ];
 
 const ALWAYS_AVAILABLE = new Set([
@@ -928,6 +1056,7 @@ const ALWAYS_AVAILABLE = new Set([
   'setActiveLanguage',
   'getCode',
   'setCode',
+  'getParams',
   'getGeometryData',
   'getMeshSummary',
   'getFeatureCentroids',
@@ -965,9 +1094,13 @@ const ALWAYS_AVAILABLE = new Set([
   'assertPaint',
   'sliceAtZVisual',
   'paintInCylinder',
+  'importImageAsRelief',
+  'importSvgAsRelief',
+  'getReliefSwapGuide',
+  'setReliefPreviewMode',
 ]);
 
-const RUN_GATED = new Set(['runCode']);
+const RUN_GATED = new Set(['runCode', 'setParams']);
 const SAVE_GATED = new Set(['runAndSave', 'loadVersion', 'saveVersion']);
 const PAINT_GATED = new Set(['paintRegion', 'paintFaces', 'paintNear', 'paintStroke', 'paintInBox', 'paintInOrientedBox', 'paintSlab', 'paintNearestRegion', 'paintComponent', 'paintByLabel', 'paintByLabels', 'paintConnected', 'undoLastPaint', 'redoLastPaint', 'removeRegion', 'clearColors', 'copyColorsFromVersion']);
 /** Tools that ship a PNG back to the model via a multimodal content
@@ -1075,13 +1208,15 @@ function detectLanguageMismatch(code: string): string | null {
     if (/^\s*return\s+(api\.)?Manifold\b/m.test(code)) {
       return 'Language mismatch: this session is BREP/replicad, which must `return` a BREP shape (api.BREP.box/cylinder/sphere/…), not a Manifold. If you want fillets/chamfers inside a Manifold session instead, call setActiveLanguage("manifold-js") and use api.BREP from within it.';
     }
-  } else {
+  } else if (lang === 'manifold-js') {
     // Strong SCAD markers in a JS session — `module name() {}` /
     // `function foo() = …` / `$fn = …;` are SCAD-only constructs.
     if (/^\s*module\s+\w+\s*\(/m.test(code) || /^\s*\$fn\s*=/m.test(code) || /^\s*function\s+\w+\s*\([^)]*\)\s*=/m.test(code)) {
       return 'Language mismatch: this session is manifold-js (JavaScript) but the code uses OpenSCAD-only syntax (`module`, `$fn`, or function-equals). Rewrite using the manifold-js API: `const { Manifold, CrossSection } = api;`, `Manifold.cube(...)`, `.translate(...)`, ending with `return manifold;`.';
     }
   }
+  // 'voxel' sessions get no mismatch heuristic — the voxel engine surfaces a
+  // targeted "return a grid" error on its own.
   return null;
 }
 
@@ -1089,7 +1224,7 @@ function detectLanguageMismatch(code: string): string | null {
  *  `tools.ts` to import the engine module statically. The function lives
  *  in `src/geometry/engine.ts` and is already loaded by the app shell at
  *  startup, so a require-style lookup via `window.partwright` is safe. */
-const SUBDOC_NAMES = new Set(['curves', 'bosl2', 'replicad', 'colors', 'print-safety', 'reference-images', 'file-io', 'annotations']);
+const SUBDOC_NAMES = new Set(['curves', 'bosl2', 'replicad', 'sdf', 'voxel', 'colors', 'print-safety', 'reference-images', 'file-io', 'annotations', 'relief']);
 
 /** Fetch a topic subdoc by short name. Same fetch path for Anthropic and
  *  local providers — both run inside the user's browser tab, so this is
@@ -1109,11 +1244,11 @@ async function readSubdoc(name: string): Promise<{ content: string; isError: boo
   }
 }
 
-function readActiveLanguage(): 'manifold-js' | 'scad' | 'replicad' | null {
+function readActiveLanguage(): 'manifold-js' | 'scad' | 'replicad' | 'voxel' | null {
   try {
-    const w = window as unknown as { partwright?: { getActiveLanguage?: () => 'manifold-js' | 'scad' | 'replicad' } };
+    const w = window as unknown as { partwright?: { getActiveLanguage?: () => 'manifold-js' | 'scad' | 'replicad' | 'voxel' } };
     const lang = w.partwright?.getActiveLanguage?.();
-    return lang === 'manifold-js' || lang === 'scad' || lang === 'replicad' ? lang : null;
+    return lang === 'manifold-js' || lang === 'scad' || lang === 'replicad' || lang === 'voxel' ? lang : null;
   } catch {
     return null;
   }
@@ -1243,6 +1378,10 @@ async function dispatch(api: PartwrightAPI, name: string, input: Record<string, 
       return api.run(input.code as string | undefined);
     case 'runAndSave':
       return api.runAndSave(input.code as string, input.label as string | undefined, input.assertions as Record<string, unknown> | undefined);
+    case 'getParams':
+      return api.getParams();
+    case 'setParams':
+      return api.setParams(input.values as Record<string, unknown>);
     case 'getGeometryData':
       return api.getGeometryData();
     case 'getMeshSummary':
@@ -1394,6 +1533,14 @@ async function dispatch(api: PartwrightAPI, name: string, input: Record<string, 
       return api.assertPaint(input);
     case 'paintInCylinder':
       return api.paintInCylinder(input);
+    case 'importImageAsRelief':
+      return api.importImageAsRelief(input);
+    case 'importSvgAsRelief':
+      return api.importSvgAsRelief(input);
+    case 'getReliefSwapGuide':
+      return api.getReliefSwapGuide();
+    case 'setReliefPreviewMode':
+      return api.setReliefPreviewMode(input.mode);
     default:
       throw new Error(`Unknown tool: ${name}`);
   }

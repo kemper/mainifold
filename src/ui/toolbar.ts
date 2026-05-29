@@ -25,11 +25,16 @@ export interface ToolbarCallbacks {
    *  decide visibility. */
   onExportSTEP: () => void;
   onExportSessionJSON: () => void;
+  /** "Share link…" — encode the current version into a read-only,
+   *  hash-encoded share URL and open the copy modal. */
+  onShareLink: () => void;
   onExportRawCode: () => void;
   onImportFile: (file: File) => void | Promise<void>;
   /** Re-import a blob already held in the inbox (e.g. recent-imports re-click). */
   onImportInboxEntry: (entry: ImportInboxEntry) => void | Promise<void>;
-  onLanguageSwitch: (lang: 'manifold-js' | 'scad' | 'replicad') => void;
+  /** Open the image → keychain / tile / stepped-relief import wizard. */
+  onCreateRelief: () => void;
+  onLanguageSwitch: (lang: 'manifold-js' | 'scad' | 'replicad' | 'voxel') => void;
   /** "?" link next to the language toggle — opens a modal explaining
    *  what each engine is best for. */
   onLanguageHelp: () => void | Promise<void>;
@@ -89,7 +94,9 @@ export function setAiToolbarState(mode: AiToolbarMode | boolean): void {
 }
 
 /** File extensions accepted by the Import button and drag-and-drop. */
-export const IMPORT_ACCEPT = '.partwright.json,.json,.js,.scad,.stl,.step,.stp';
+export const IMPORT_ACCEPT = '.partwright.json,.json,.js,.scad,.stl,.step,.stp,.vox,.png,.jpg,.jpeg,.gif,.webp,.bmp';
+/** Raster image types accepted by the dedicated "Image → voxel" picker. */
+export const IMAGE_ACCEPT = '.png,.jpg,.jpeg,.gif,.webp,.bmp';
 
 let _autoRun = true;
 let _onAutoRunChange: ((on: boolean) => void) | null = null;
@@ -113,20 +120,22 @@ export function onAutoRunChange(cb: (on: boolean) => void): void { _onAutoRunCha
 let _langBtnJs: HTMLButtonElement | null = null;
 let _langBtnScad: HTMLButtonElement | null = null;
 let _langBtnBrep: HTMLButtonElement | null = null;
-let _currentLang: 'manifold-js' | 'scad' | 'replicad' = 'manifold-js';
+let _langBtnVoxel: HTMLButtonElement | null = null;
+let _currentLang: 'manifold-js' | 'scad' | 'replicad' | 'voxel' = 'manifold-js';
 
 const LANG_ACTIVE = 'px-2 py-0.5 rounded text-xs font-medium transition-colors bg-zinc-700 text-zinc-100';
 const LANG_INACTIVE = 'px-2 py-0.5 rounded text-xs font-medium transition-colors text-zinc-500 hover:text-zinc-300';
 
 function syncLangToggle() {
-  if (!_langBtnJs || !_langBtnScad || !_langBtnBrep) return;
+  if (!_langBtnJs || !_langBtnScad || !_langBtnBrep || !_langBtnVoxel) return;
   _langBtnJs.className = _currentLang === 'manifold-js' ? LANG_ACTIVE : LANG_INACTIVE;
   _langBtnScad.className = _currentLang === 'scad' ? LANG_ACTIVE : LANG_INACTIVE;
   _langBtnBrep.className = _currentLang === 'replicad' ? LANG_ACTIVE : LANG_INACTIVE;
+  _langBtnVoxel.className = _currentLang === 'voxel' ? LANG_ACTIVE : LANG_INACTIVE;
 }
 
 /** Update the toolbar language toggle from outside (e.g. when opening a session). */
-export function setToolbarLanguage(lang: 'manifold-js' | 'scad' | 'replicad'): void {
+export function setToolbarLanguage(lang: 'manifold-js' | 'scad' | 'replicad' | 'voxel'): void {
   _currentLang = lang;
   syncLangToggle();
 }
@@ -219,10 +228,20 @@ export function createToolbar(
     }
   });
 
+  _langBtnVoxel = document.createElement('button');
+  _langBtnVoxel.textContent = 'VOXEL';
+  _langBtnVoxel.title = 'Voxel — blocky colored-cube modeling. Pure JS, no WASM; great for pixel-art and image imports.';
+  _langBtnVoxel.addEventListener('click', () => {
+    if (_currentLang !== 'voxel') {
+      callbacks.onLanguageSwitch('voxel');
+    }
+  });
+
   syncLangToggle();
   langGroup.appendChild(_langBtnJs);
   langGroup.appendChild(_langBtnScad);
   langGroup.appendChild(_langBtnBrep);
+  langGroup.appendChild(_langBtnVoxel);
   toolbar.appendChild(langGroup);
 
   // Help link next to the language toggle — "?" icon that opens a modal
@@ -293,7 +312,7 @@ export function createToolbar(
 
   const importDropdown = document.createElement('div');
   importDropdown.id = 'import-dropdown';
-  importDropdown.className = 'absolute right-0 top-full mt-1 bg-zinc-800 border border-zinc-600 rounded shadow-lg py-1 hidden z-20 w-72 max-h-[80vh] overflow-y-auto';
+  importDropdown.className = 'fixed left-2 right-2 top-14 bg-zinc-800 border border-zinc-600 rounded shadow-lg py-1 hidden z-20 max-h-[80vh] overflow-y-auto md:absolute md:left-auto md:right-0 md:top-full md:mt-1 md:w-72';
 
   importDropdown.appendChild(createSectionHeader('From file'));
   const chooseFileOpt = createDescribedItem(
@@ -302,9 +321,37 @@ export function createToolbar(
   );
   chooseFileOpt.addEventListener('click', () => {
     importDropdown.classList.add('hidden');
+    importInput.accept = IMPORT_ACCEPT; // restore the full filter (the image row narrows it)
     importInput.click();
   });
   importDropdown.appendChild(chooseFileOpt);
+
+  importDropdown.appendChild(createDivider());
+  importDropdown.appendChild(createSectionHeader('Create'));
+  const reliefOpt = createDescribedItem(
+    'Image → keychain / tile / relief…',
+    'Turn an image (or SVG) into a printable colour tile, keychain, sticker, or stepped relief.',
+  );
+  reliefOpt.addEventListener('click', () => {
+    importDropdown.classList.add('hidden');
+    callbacks.onCreateRelief();
+  });
+  importDropdown.appendChild(reliefOpt);
+
+  const imageVoxelOpt = createDescribedItem(
+    'Image → voxel…',
+    'Turn an image into a colored voxel model — flat billboard or brightness-driven relief — with adjustable resolution, depth, and color.',
+  );
+  imageVoxelOpt.addEventListener('click', () => {
+    importDropdown.classList.add('hidden');
+    // Reuse the single import file input (a second one would break the
+    // `#import-wrapper input[type=file]` selector other tests rely on), just
+    // narrowed to raster images for this row. The change handler routes the
+    // picked image into the voxel-import modal via onImportFile.
+    importInput.accept = IMAGE_ACCEPT;
+    importInput.click();
+  });
+  importDropdown.appendChild(imageVoxelOpt);
 
   // Recent Imports section — populated from the import inbox.
   const importRecentDivider = createDivider();
@@ -338,15 +385,32 @@ export function createToolbar(
 
   function renderImportRecentItem(entry: ImportInboxEntry): HTMLElement {
     const btn = document.createElement('button');
-    btn.className = 'block w-full text-left px-3 py-1 hover:bg-zinc-700 transition-colors';
+    btn.className = 'flex items-center gap-2 w-full text-left px-3 py-1 hover:bg-zinc-700 transition-colors';
     btn.title = `Re-import ${entry.filename}`;
+
+    // Thumbnail (image/SVG imports only); a checkered backdrop reads through
+    // transparent PNGs so a logo's shape is still legible.
+    if (entry.thumbnail) {
+      const thumb = document.createElement('img');
+      thumb.src = entry.thumbnail;
+      thumb.alt = '';
+      thumb.className = 'w-8 h-8 rounded border border-zinc-600 object-contain shrink-0 bg-zinc-900';
+      btn.appendChild(thumb);
+    }
+
+    const textCol = document.createElement('div');
+    textCol.className = 'min-w-0 flex-1';
 
     const top = document.createElement('div');
     top.className = 'flex items-center gap-1.5';
 
     const sourceBadge = document.createElement('span');
     sourceBadge.className = 'text-[9px] uppercase tracking-wide text-zinc-400 border border-zinc-600 rounded px-1 py-px shrink-0';
-    sourceBadge.textContent = entry.source;
+    // Tag voxel image imports distinctly from relief ones in the badge.
+    const meta = entry.metadata as { importer?: string } | undefined;
+    sourceBadge.textContent = meta?.importer === 'voxel' ? 'VOXEL'
+      : meta?.importer === 'relief' ? 'RELIEF'
+      : entry.source;
     top.appendChild(sourceBadge);
 
     const nameEl = document.createElement('span');
@@ -354,12 +418,14 @@ export function createToolbar(
     nameEl.textContent = entry.filename;
     top.appendChild(nameEl);
 
-    btn.appendChild(top);
+    textCol.appendChild(top);
 
-    const meta = document.createElement('div');
-    meta.className = 'text-[10px] text-zinc-500 leading-tight mt-0.5';
-    meta.textContent = `${formatSize(entry.sizeBytes)} • ${formatRelativeTime(entry.timestamp)}`;
-    btn.appendChild(meta);
+    const metaEl = document.createElement('div');
+    metaEl.className = 'text-[10px] text-zinc-500 leading-tight mt-0.5';
+    metaEl.textContent = `${formatSize(entry.sizeBytes)} • ${formatRelativeTime(entry.timestamp)}`;
+    textCol.appendChild(metaEl);
+
+    btn.appendChild(textCol);
 
     btn.addEventListener('click', () => {
       importDropdown.classList.add('hidden');
@@ -406,7 +472,7 @@ export function createToolbar(
 
   const dropdown = document.createElement('div');
   dropdown.id = 'export-dropdown';
-  dropdown.className = 'absolute right-0 top-full mt-1 bg-zinc-800 border border-zinc-600 rounded shadow-lg py-1 hidden z-20 w-72 max-h-[80vh] overflow-y-auto';
+  dropdown.className = 'fixed left-2 right-2 top-14 bg-zinc-800 border border-zinc-600 rounded shadow-lg py-1 hidden z-20 max-h-[80vh] overflow-y-auto md:absolute md:left-auto md:right-0 md:top-full md:mt-1 md:w-72';
 
   // Section: 3D model formats
   dropdown.appendChild(createSectionHeader('3D model'));
@@ -490,8 +556,18 @@ export function createToolbar(
     callbacks.onExportRawCode();
   });
 
+  const shareOpt = createDescribedItem(
+    'Share link…',
+    'Create a public read-only link to this version. Anyone can preview and fork it — nothing is uploaded.',
+  );
+  shareOpt.addEventListener('click', () => {
+    dropdown.classList.add('hidden');
+    callbacks.onShareLink();
+  });
+
   dropdown.appendChild(sessionOpt);
   dropdown.appendChild(codeOpt);
+  dropdown.appendChild(shareOpt);
 
   // Section: Recent Exports — reuse-anything-you-just-downloaded list. Hidden when empty.
   const recentDivider = createDivider();

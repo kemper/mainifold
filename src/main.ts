@@ -24,6 +24,8 @@ import { errorLog } from './diagnostics/errorLog';
 import { initDiagnosticsPanel, toggleDiagnosticsPanel } from './ui/diagnosticsPanel';
 import { initEngine, executeCode, executeCodeAsync, validateCodeAsync, ensureEngineReady, getModule, getActiveLanguage, setActiveLanguage, exportLastBrepAsSTEP, importSTEPToBrep, importSTEPToMesh, simplifyInWorker, type Language } from './geometry/engine';
 import { onQualitySettingsChange } from './geometry/qualitySettings';
+import { resolveParamValues, pruneParamValues, type ParamSpec, type ParamValue } from './geometry/params';
+import { createParamsPanel, type ParamsPanelController } from './ui/paramsPanel';
 import { sliceAtZ, getBoundingBox } from './geometry/crossSection';
 import { initViewport, updateMesh, setOnMeshUpdate, setClipping, setClipZ, getClipState, getCameraState, getCanvas, getMeshGroup, getCamera, setMeasureLock, setUserOrbitLock, isUserOrbitLocked, onUserOrbitLockChange, setDimensionsVisible, isDimensionsVisible, setGridVisible, isGridVisible, setWireframeVisible, isWireframeVisible, onWireframeChange } from './renderer/viewport';
 import { renderCompositeCanvas, renderSingleView, renderSingleViewCanvas, renderSliceSVG, setImages as _setImages, clearImages as _clearImages, getImages as _getImages, buildViewCamera, RENDER_VIEW_MODES, EDGE_MODES, STANDARD_VIEWS, type AttachedImage, type RenderViewMode, type EdgeMode } from './renderer/multiview';
@@ -45,6 +47,7 @@ import { createHelpPage } from './ui/help';
 import { createLegalPage } from './ui/legal';
 import { showExportOptionsDialog } from './ui/exportOptionsDialog';
 import { createCatalogPage, type CatalogManifestEntry } from './ui/catalog';
+import { createWhatsNewPage } from './ui/whatsNew';
 import { createNotFoundPage } from './ui/notFound';
 import { applyRouteMeta, routeTitle, type RouteName } from './seo/meta';
 import { createSessionBar } from './ui/sessionBar';
@@ -73,15 +76,29 @@ import {
   registerImport,
   classifyImportSource,
   type ImportInboxEntry,
+  type ImportMetadata,
 } from './import/importInbox';
+import { createThumbnailFromImageData } from './import/imageThumbnail';
 import { showImportPreview, summarizeSessionImport } from './ui/importPreview';
 import { showImportTargetModal } from './ui/importTargetModal';
+import { showImageVoxelImportModal } from './ui/imageVoxelImportModal';
 import { showStepImportTargetModal } from './ui/stepImportTargetModal';
 import { showLanguageHelpModal } from './ui/languageHelpModal';
 import { showMergePartsModal } from './ui/mergePartsModal';
 import { parseSTL } from './import/parsers/stl';
+import { parseVox } from './import/parsers/vox';
 import { generateImportCode } from './import/codegen';
+import { imageDataToVoxelGrid, generateVoxelImportCode, type ImageToVoxelOptions } from './import/imageToVoxel';
+import * as voxelPaint from './color/voxelPaint';
 import { setActiveImports, getActiveImports, type ImportedMesh } from './import/importedMesh';
+import { generateRelief, generateReliefFromSvg } from './relief/imageToRelief';
+import { DEFAULT_RELIEF_OPTIONS, type ReliefOptions, type ReliefImportMode, type ReliefCommonOptions, type SeedRegion, type PreviewMode, type GenerateReliefResult } from './relief/types';
+import { computeReliefTriColors, getSwapGuideFor, setPreviewMode as ctlSetReliefPreviewMode, getPreviewMode as ctlGetReliefPreviewMode, isPreviewActive as isReliefPreviewActive } from './relief/reliefController';
+import { setReliefSettings, getReliefSettings, updateReliefSettings, isReliefSession, getPreviewModeFor } from './relief/reliefSettings';
+import { listFilaments, hexToRgb } from './relief/filaments';
+import { meshBounds } from './color/slabPaint';
+import { openReliefImportModal } from './ui/reliefImportModal';
+import { mountReliefStudio, type ReliefStudioHandle } from './ui/reliefStudio';
 import type { BuiltExport } from './export/gltf';
 
 /** Register a freshly-built export blob in the inbox so it shows up in Recent Exports. */
@@ -99,8 +116,9 @@ import { initTooltips } from './ui/tooltip';
 import { initTheme, getTheme, setTheme } from './ui/theme';
 import type { Theme } from './ui/theme';
 import { initPaintUI, isPaintOpen, forceDeactivate as closePaintMenu } from './color/paintUI';
+import { initVoxelPaintUI, setVoxelPaintAvailable, syncActiveState as syncVoxelPaintUI } from './color/voxelPaintUI';
 import { initSimplifyUI, isSimplifyOpen, refreshSimplifyIfOpen, forceDeactivate as closeSimplifyMenu, type SimplifyHandlers } from './ui/simplifyUI';
-import { updatePaintMesh, setOnRegionPainted, isActive as isPaintActive } from './color/paintMode';
+import { updatePaintMesh, setOnRegionPainted } from './color/paintMode';
 import { initAnnotateUI, isAnnotateOpen, closeMenu as closeAnnotateMenu } from './annotations/annotateUI';
 import { isActive as isSelectActive, getSelectedId as getSelectedAnnotationId } from './annotations/selectMode';
 import {
@@ -122,13 +140,17 @@ import {
 import { setColor as setAnnotateColor, setWidth as setAnnotateWidth, getWidth as getAnnotateWidth } from './annotations/annotateMode';
 import { addTextAnnotationAtAnchor, setFontSize as setAnnotateFontSize, getFontSize as getAnnotateFontSize } from './annotations/textMode';
 import { restoreView as restoreAnnotationViewById } from './annotations/selectMode';
-import { applyTriColors, applyTriColorsIfVisible, hasRegions as hasColorRegions, onChange as onColorRegionsChange, onVisibilityChange as onPaintVisibilityChange, clearRegions, serialize as serializeRegions, addRegion, getRegions, removeRegion, removeLastRegion, redoLastRegion, setRegionVisibility, setRegionTriangles, buildTriColors, createEmptyTriColors, overlayPainted, type SerializedColorRegion, type RegionDescriptor } from './color/regions';
+import { applyTriColors, applyTriColorsIfVisible, hasRegions as hasColorRegions, onChange as onColorRegionsChange, onVisibilityChange as onPaintVisibilityChange, clearRegions, serialize as serializeRegions, addRegion, getRegions, removeRegion, removeLastRegion, redoLastRegion, setRegionVisibility, setRegionTriangles, buildTriColors, createEmptyTriColors, overlayPainted, setModelColorRegions, hasModelColorRegions, clearModelColorRegions, getModelRegions, type SerializedColorRegion, type RegionDescriptor } from './color/regions';
 import { setPaintLabels } from './color/labels';
 import { setBucketTolerance as setPaintBucketTolerance, getBucketTolerance as getPaintBucketTolerance, setBrushRadius as setPaintBrushRadius, getBrushRadius as getPaintBrushRadius, setBrushSmooth as setPaintBrushSmooth, isBrushSmooth as isPaintBrushSmooth, setBrushSmoothDivisor as setPaintBrushSmoothDivisor, getBrushSmoothDivisor as getPaintBrushSmoothDivisor, setBrushSurface as setPaintBrushSurface, getBrushSurface as getPaintBrushSurface, setBrushPaintDepth as setPaintBrushDepth, getBrushPaintDepth as getPaintBrushDepth, SMOOTH_DIVISOR_MIN, SMOOTH_DIVISOR_MAX } from './color/paintMode';
 import { buildStrokeMesh, buildRefinedMesh, brushRefineRegion, strokeFootprintTriangles, deriveSampleNormals, buildGeodesicField, tangentBasis, childrenByParent, type BrushStroke, type BrushShape, type RefineRegion } from './color/subdivide';
 import { refineInWorker, SubdivisionAbortError, terminateSubdivisionWorker } from './color/subdivisionClient';
 import { startProgress, endProgress, __setProgressModalDelayForTests } from './ui/progressModal';
-import { initEditorLock, syncLockState, setUnlockHandlers } from './color/editorLock';
+import { initEditorLock, syncLockState, setUnlockHandlers, disableRun, enableRun } from './color/editorLock';
+import { setReadOnlyReason } from './editor/editorAccess';
+import { asLanguage } from './storage/languageFallback';
+import { encodeShare, decodeShare, validateSharePayloadShape, ShareUnsupportedError } from './share/shareLink';
+import { openShareModal, renderSharedBanner, renderSharedOverlay } from './share/shareUI';
 import { buildAdjacency, findCoplanarRegion, findConnectedFromSeed, resolveSeed, findNearestTriangle, type AdjacencyGraph } from './color/adjacency';
 import { findSlabTriangles, slabRefineRegion, smoothEdgeForResolution } from './color/slabPaint';
 import { findBoxTriangles, findShapeTriangles, shapeRefineRegion } from './color/boxPaint';
@@ -217,6 +239,32 @@ export interface ExampleEntry {
   language: Language;
 }
 
+// Customizer state. `currentParamSchema` is the parameter schema the active
+// model declared via `api.params({...})` on its last run (null when it declared
+// none); `currentParamValues` holds the user's overrides (only keys differing
+// from defaults — pruned each run). `paramsPanel` is the viewport overlay that
+// renders the schema as widgets. All three are kept in sync by runCodeSync.
+let currentParamSchema: ParamSpec[] | null = null;
+let currentParamValues: Record<string, ParamValue> = {};
+let paramsPanel: ParamsPanelController | null = null;
+
+/** Reconcile the Customizer panel + override state with the parameter schema a
+ *  model declared on its latest run. Pass `undefined` when the model declared
+ *  none (hides the panel and clears overrides). */
+function syncParamsPanel(schema: ParamSpec[] | undefined): void {
+  if (schema && schema.length > 0) {
+    currentParamSchema = schema;
+    // Keep only overrides the model still declares (drops stale keys from a
+    // previously-run model) and store the minimal non-default set.
+    currentParamValues = pruneParamValues(schema, currentParamValues);
+    paramsPanel?.update(schema, resolveParamValues(schema, currentParamValues));
+  } else {
+    currentParamSchema = null;
+    currentParamValues = {};
+    paramsPanel?.update(undefined, {});
+  }
+}
+
 let currentMeshData: MeshData | null = null;
 /** The pristine mesh produced by the authored code, before any smooth brush
  *  subdivision. `currentMeshData` equals this until a `brushStroke` region
@@ -261,6 +309,12 @@ let paintGeneration = 0;
  *  an orphan — neither applies to an internal abort. Cleared after the
  *  cancel handler runs. */
 let pendingInternalAbort = false;
+/** Id of the most recently created brushStroke region that is still awaiting
+ *  the worker's triangle resolution. `handlePaintCancel` removes exactly this
+ *  region on a user cancel — narrowing to the id avoids wiping an unrelated
+ *  brushStroke region that legitimately resolved to zero triangles. Cleared
+ *  once the stroke's refine lands (or its cancel is handled). */
+let pendingStrokeRegionId: number | null = null;
 /** Deferred that resolves once `asyncReconcileInFlight` flips false (so any
  *  coalesced follow-ups have also drained). `partwright.waitForPaint()` and
  *  the e2e tests that drive the brush via mouse events await this to know
@@ -291,6 +345,44 @@ let currentLostLabels: string[] | null = null;
 // #geometry-data element — always-updated machine-readable state
 let geometryDataEl: HTMLElement;
 
+// === Shared-link preview mode ===
+//
+// When the editor is showing a decoded share link (`/editor#share=…`), it is a
+// strictly READ-ONLY preview of UNTRUSTED code: nothing the sharer wrote may
+// execute until the viewer explicitly Forks. This module-scoped flag is the
+// chokepoint guard — every code-execution entry point bails while it's set:
+// `runCode`/`runCodeSync` (and the console `partwright.run()`/`runAndSave()`
+// that route through them), `executeIsolated` (which backs the AI-exposed
+// `runIsolated`/`runAndAssert`/`runDecompose`, modify/test, and forkVersion),
+// and `setReferenceGeometry`, plus `saveCurrentVersion` and the export actions.
+// It's separate from the CodeMirror read-only flag (which only blocks typing)
+// and from the multi-tab viewer flag.
+let _sharedPreview = false;
+
+/** Error string returned by the execution chokepoints while a read-only shared
+ *  preview is on screen — the sharer's untrusted code must not run until Fork. */
+const SHARED_PREVIEW_REFUSAL = 'Read-only shared preview — fork this design first to run code.';
+
+/** True while the editor is showing a decoded share link (read-only preview).
+ *  Execution + save chokepoints bail when this returns true. */
+function isSharedPreview(): boolean {
+  return _sharedPreview;
+}
+
+/** The encoded value of the current `#share=` hash, or null when the hash isn't
+ *  a share link. Used to detect share links and to guard hashchange re-entrancy. */
+function getShareHashValue(): string | null {
+  const hash = window.location.hash;
+  if (!hash.startsWith('#share=')) return null;
+  const value = hash.slice('#share='.length);
+  return value.length > 0 ? value : null;
+}
+
+/** True when the URL hash carries a share link. */
+function hasShareHash(): boolean {
+  return getShareHashValue() !== null;
+}
+
 /** Paint selector containment test. `centroid` is the historical default
  *  (a triangle is in the selection when its centroid lies inside the
  *  box / sphere / slab). `fully_inside` and `any_vertex_inside` are
@@ -307,7 +399,7 @@ export type CoverageMode = typeof COVERAGE_MODES[number];
 const BASE_TITLE = 'Partwright';
 let _expectedTitle = 'Partwright — AI-Driven Parametric CAD in Your Browser';
 
-function updateDocumentTitle(context?: { page?: 'landing' | 'editor' | 'help' | '404' | 'catalog' | 'legal'; sessionName?: string | null }) {
+function updateDocumentTitle(context?: { page?: 'landing' | 'editor' | 'help' | '404' | 'catalog' | 'legal' | 'whats-new'; sessionName?: string | null }) {
   let route: RouteName;
   let titleOverride: string | undefined;
   if (context?.page === 'landing' || (context?.page === undefined && shouldShowLanding())) {
@@ -318,6 +410,8 @@ function updateDocumentTitle(context?: { page?: 'landing' | 'editor' | 'help' | 
     route = 'catalog';
   } else if (context?.page === 'legal') {
     route = 'legal';
+  } else if (context?.page === 'whats-new') {
+    route = 'whats-new';
   } else if (context?.page === '404') {
     route = '404';
   } else {
@@ -787,6 +881,19 @@ function rehydrateColorRegions(geometryData: Record<string, unknown> | null): { 
 
 function paintedColorRefresh(): void {
   if (!currentMeshData) return;
+  // Relief sessions in a non-flat preview mode show the optical (translucent /
+  // glossy) composite instead of raw region colors. This is the one chokepoint
+  // every paint path funnels through, so the preview tracks strokes, undo/redo,
+  // and programmatic paints alike.
+  const sid = getState().session?.id ?? null;
+  if (sid && isReliefSession(sid) && isReliefPreviewActive()) {
+    const lh = getReliefSettings(sid)?.layerHeight ?? 0.08;
+    const preview = computeReliefTriColors(currentMeshData, lh);
+    if (preview) {
+      updateMesh({ ...currentMeshData, triColors: preview }, { skipAutoFrame: true });
+      return;
+    }
+  }
   const colored = applyTriColorsIfVisible(currentMeshData);
   updateMesh(colored, { skipAutoFrame: true });
 }
@@ -871,7 +978,10 @@ function reconcilePaintedGeometrySync(): void {
   const refinedActive = currentMeshData !== paintBaseMesh || hasRefineDescriptors();
   if (!refinedActive) {
     lastStrokeList = [];
-    if (isPaintActive()) paintedColorRefresh();
+    // Mirror the async tick (see reconcilePaintedGeometryAsyncTick) — color
+    // mutations from the Edit colors panel must refresh the mesh even when
+    // the Paint UI is closed.
+    paintedColorRefresh();
     return;
   }
   if (strokesNow.length === lastStrokeList.length + 1 && prefixRefEqual(strokesNow, lastStrokeList)) {
@@ -918,7 +1028,10 @@ function paintBrushStrokeSync(
   color: [number, number, number],
   descriptor: Extract<RegionDescriptor, { kind: 'brushStroke' }>,
 ): { id: number; name: string; triangles: Set<number> } {
-  return withSyncReconcile(() => addRegion(name, color, 'paintbrush', descriptor, new Set<number>()));
+  const region = withSyncReconcile(() => addRegion(name, color, 'paintbrush', descriptor, new Set<number>()));
+  // Track this as the in-flight stroke so a user cancel removes exactly it.
+  pendingStrokeRegionId = region.id;
+  return region;
 }
 
 /** True when `a` starts with exactly the entries of `b` (by reference). */
@@ -966,7 +1079,13 @@ async function reconcilePaintedGeometryAsyncTick(): Promise<void> {
   const refinedActive = currentMeshData !== paintBaseMesh || hasRefineDescriptors();
   if (!refinedActive) {
     lastStrokeList = [];
-    if (isPaintActive()) paintedColorRefresh();
+    // Re-bake per-triangle colours regardless of whether the Paint UI is
+    // open — the Relief Studio's Edit colors panel also mutates regions
+    // (updateRegionColor / removeRegion) and the user expects the model to
+    // update in realtime from there too. paintedColorRefresh is a no-op
+    // when there are no regions or paint visibility is off, so calling it
+    // unconditionally is cheap.
+    paintedColorRefresh();
     return;
   }
 
@@ -975,6 +1094,8 @@ async function reconcilePaintedGeometryAsyncTick(): Promise<void> {
     const newDesc = strokesNow[strokesNow.length - 1] as Extract<RegionDescriptor, { kind: 'brushStroke' }>;
     try {
       await appendStrokeRefineAsync(newDesc);
+      // The stroke resolved successfully, so it's no longer a cancel orphan.
+      pendingStrokeRegionId = null;
       // Region set may have shifted while the await was in flight (coalesced
       // changes, or an agent-API sync action via withSyncReconcile). Re-read.
       lastStrokeList = strokeDescriptors();
@@ -1168,8 +1289,16 @@ function handlePaintCancel(): void {
 
   // Real user-initiated cancel. The mesh is still pre-stroke (the worker
   // never applied a result, since the rejection happened before the apply).
-  // Drop any orphaned brushStroke regions (empty triangles → unresolved).
-  const orphans = getRegions().filter(r => r.descriptor.kind === 'brushStroke' && r.triangles.size === 0);
+  // Drop the orphaned brushStroke region (empty triangles → unresolved). We
+  // remove exactly the region this cancelled stroke added (tracked by id at
+  // creation), still requiring its triangle set to be empty — removing every
+  // zero-triangle brushStroke region would also wipe an unrelated region that
+  // legitimately resolved to zero triangles.
+  const cancelledId = pendingStrokeRegionId;
+  pendingStrokeRegionId = null;
+  const orphans = cancelledId == null
+    ? []
+    : getRegions().filter(r => r.id === cancelledId && r.descriptor.kind === 'brushStroke' && r.triangles.size === 0);
   if (orphans.length > 0) {
     suspendReconcile = true;
     try {
@@ -1258,6 +1387,9 @@ async function saveCurrentVersion(label?: string): Promise<
   | { id: string; index: number; label: string }
   | { skipped: true; reason: string }
 > {
+  if (isSharedPreview()) {
+    return { error: 'This is a read-only shared preview. Fork it first to make edits you can save.' };
+  }
   if (!getState().session) {
     return { error: 'No active session. Call createSession() or openSession(id) first.' };
   }
@@ -1265,7 +1397,7 @@ async function saveCurrentVersion(label?: string): Promise<
     return { error: 'This session is open and being edited in another tab. Use "Take over" in the viewer banner to edit here.' };
   }
   const thumbnail = await captureThumbnail();
-  const version = await saveVersion(getValue(), enrichGeometryDataWithColors(getGeometryDataObj()), thumbnail, label);
+  const version = await saveVersion(getValue(), enrichGeometryDataWithColors(getGeometryDataObj()), thumbnail, label, undefined, { paramValues: currentParamValues });
   if (version) return { id: version.id, index: version.index, label: version.label };
   return {
     skipped: true as const,
@@ -1341,16 +1473,24 @@ function shouldShowLanding(): boolean {
   const path = window.location.pathname;
   const params = new URLSearchParams(window.location.search);
   // Landing if at root path AND no query params that indicate a specific view
+  // AND no share-link hash (a bare `/#share=…` must open the shared preview, not
+  // the landing page).
   const isRootPath = path === '/' || path === '';
-  return isRootPath && !params.has('view') && !params.has('session') && !params.has('gallery') && !params.has('versions') && !params.has('images') && !params.has('diff') && !params.has('notes') && !params.has('data');
+  return isRootPath && !hasShareHash() && !params.has('view') && !params.has('session') && !params.has('gallery') && !params.has('versions') && !params.has('images') && !params.has('diff') && !params.has('notes') && !params.has('data');
 }
 
 function shouldShowHelp(): boolean {
-  return window.location.pathname === '/help';
+  // A `/help#share=…` link must open the shared preview (editor), not Help —
+  // mirrors shouldShowLanding's share-hash exclusion.
+  return window.location.pathname === '/help' && !hasShareHash();
 }
 
 function shouldShowCatalog(): boolean {
-  return window.location.pathname === '/catalog';
+  return window.location.pathname === '/catalog' && !hasShareHash();
+}
+
+function shouldShowWhatsNew(): boolean {
+  return window.location.pathname === '/whats-new';
 }
 
 function shouldShowLegal(): boolean {
@@ -1358,8 +1498,9 @@ function shouldShowLegal(): boolean {
 }
 
 function shouldShow404(): boolean {
+  if (hasShareHash()) return false;
   const path = window.location.pathname;
-  return path !== '/' && path !== '' && path !== '/help' && path !== '/editor' && path !== '/catalog' && path !== '/legal';
+  return path !== '/' && path !== '' && path !== '/help' && path !== '/editor' && path !== '/catalog' && path !== '/legal' && path !== '/whats-new';
 }
 
 function getTabFromURL(): TabName {
@@ -1480,21 +1621,360 @@ async function main() {
   // so the imports survive a reload and so future saveVersion calls (which
   // carry forward `importedMeshes` from the prior version) have something to
   // build on.
-  async function importMeshPayload(mesh: ImportedMesh, sessionName: string, opts: { manifold: boolean } = { manifold: true }): Promise<{ sessionId: string }> {
+  async function importMeshPayload(mesh: ImportedMesh, sessionName: string, opts: { manifold: boolean; seedRegions?: SeedRegion[] } = { manifold: true }): Promise<{ sessionId: string }> {
     if (getActiveLanguage() !== 'manifold-js') await switchLanguage('manifold-js');
     const session = await createSession(sessionName, 'manifold-js');
     setActiveImports([mesh]);
     const code = generateImportCode([mesh], { manifold: opts.manifold });
     setValue(code);
     await runCodeSync(code);
+    if (opts.seedRegions && opts.seedRegions.length > 0) {
+      for (const seed of opts.seedRegions) {
+        addRegion(seed.name, seed.color, 'subtree', { kind: 'triangles', ids: seed.triangleIds }, new Set(seed.triangleIds));
+      }
+      if (currentMeshData) updateMesh(applyTriColorsIfVisible(currentMeshData), { skipAutoFrame: true });
+    }
     const thumbnail = await captureThumbnail();
-    const geometryData = getGeometryDataObj();
+    const geometryData = enrichGeometryDataWithColors(getGeometryDataObj());
     const label = opts.manifold ? 'imported' : 'imported (render-only)';
     await saveVersion(code, geometryData, thumbnail, label, undefined, {
       force: true,
       importedMeshes: [mesh],
     });
     return { sessionId: session.id };
+  }
+
+  // === Relief Studio (image → printable colour tile / stepped relief) ===
+  let reliefStudio: ReliefStudioHandle | null = null;
+  // True only while the editor pane was collapsed by THIS module's show-studio
+  // call, so the close path can restore symmetrically without clobbering a
+  // pre-existing manual collapse the user set up before opening the studio.
+  let studioCollapsedEditor = false;
+
+  function currentLayerHeight(): number {
+    const sid = getState().session?.id ?? null;
+    return sid ? (getReliefSettings(sid)?.layerHeight ?? 0.08) : 0.08;
+  }
+
+  // Single source of truth for recoloring the displayed mesh: relief preview
+  // when active (and only in a relief session — the preview mode is a module
+  // global, so gating on isReliefSession keeps a leftover mode from bleeding
+  // onto a normal session's mesh), otherwise the normal painted-region colors.
+  // Relief preview + normal painted-region coloring share one chokepoint
+  // (module-level paintedColorRefresh) so the smooth-brush reconcile path and
+  // the relief/AI paths stay in sync.
+  function refreshModelColors(): void {
+    paintedColorRefresh();
+  }
+
+  // Restore the saved preview mode for the active session (reset to 'flat' for
+  // non-relief sessions so the global never carries over).
+  function syncReliefPreviewFromSettings(): void {
+    const sid = getState().session?.id ?? null;
+    ctlSetReliefPreviewMode(isReliefSession(sid) ? getPreviewModeFor(sid) : 'flat');
+  }
+
+  function showReliefStudio(): void {
+    if (!reliefStudio) return;
+    syncReliefPreviewFromSettings();
+    if (!studioCollapsedEditor) {
+      collapseEditor();
+      studioCollapsedEditor = true;
+    }
+    reliefStudio.show();
+    reliefStudio.setChipVisible(false);
+    reliefStudio.refresh();
+  }
+
+  function closeReliefStudio(): void {
+    if (!reliefStudio) return;
+    reliefStudio.hide();
+    // Surface the "Edit colors" chip so users can find their way back to the
+    // palette without remembering the toolbar button.
+    const sid = getState().session?.id ?? null;
+    reliefStudio.setChipVisible(isReliefSession(sid));
+    if (studioCollapsedEditor) { expandEditor(); studioCollapsedEditor = false; }
+  }
+
+  function toggleReliefStudio(): void {
+    if (!reliefStudio) return;
+    const sid = getState().session?.id ?? null;
+    // No relief session yet — the studio's filaments/swap-guide/etc. are
+    // contextless. Send the user to the import wizard so the button has an
+    // intuitive meaning regardless of whether they've made a relief yet.
+    if (!isReliefSession(sid) && !reliefStudio.isOpen()) {
+      openReliefImportFlow();
+      return;
+    }
+    if (reliefStudio.isOpen()) closeReliefStudio();
+    else showReliefStudio();
+  }
+
+  // Show/hide the studio in response to a session change. Keeps the panel from
+  // hovering over an unrelated session, and re-syncs the preview mode pills
+  // from the new session's saved settings.
+  function syncReliefStudioForSession(): void {
+    if (!reliefStudio) return;
+    const sid = getState().session?.id ?? null;
+    if (isReliefSession(sid)) showReliefStudio();
+    else {
+      // Non-relief session — hide the panel AND the re-open chip; the chip
+      // is only meaningful for image-derived sessions.
+      if (reliefStudio.isOpen()) reliefStudio.hide();
+      reliefStudio.setChipVisible(false);
+      if (studioCollapsedEditor) { expandEditor(); studioCollapsedEditor = false; }
+    }
+  }
+
+  // Clamp the common knobs to sane physical/perf bounds. The wizard enforces
+  // these via input attributes, but the programmatic (AI/console) path bypasses
+  // the UI, so guard here against OOM (huge resolution) and degenerate values.
+  // Clamp the quantized + tile knobs to safe bounds. The wizard enforces these
+  // via input min/max, but the programmatic (AI/console) path bypasses the UI,
+  // so guard against an OOM hang (e.g. clusters=1e6) and degenerate tile sizes.
+  // Image pre-processing knobs: defaults are no-op so unset fields pass through
+  // untouched. Caps keep the API path from over-saturating / inverting wildly.
+  function clampReliefPreprocess(p: ReliefOptions['preprocess'] | undefined): ReliefOptions['preprocess'] {
+    const num = (v: number, def: number) => (Number.isFinite(v) ? v : def);
+    const defaults = DEFAULT_RELIEF_OPTIONS.preprocess;
+    if (!p) return { ...defaults };
+    return {
+      brightness: Math.max(-1, Math.min(1, num(p.brightness, defaults.brightness))),
+      contrast: Math.max(-1, Math.min(1, num(p.contrast, defaults.contrast))),
+      saturation: Math.max(-1, Math.min(1, num(p.saturation, defaults.saturation))),
+      levelsLow: Math.max(0, Math.min(254, Math.floor(num(p.levelsLow, defaults.levelsLow)))),
+      levelsHigh: Math.max(1, Math.min(255, Math.floor(num(p.levelsHigh, defaults.levelsHigh)))),
+    };
+  }
+
+  function clampReliefQuantized(q: ReliefOptions['quantized']): ReliefOptions['quantized'] {
+    const num = (v: number, def: number) => (Number.isFinite(v) ? v : def);
+    const widthGuess = 200; // generous clamp range; real bounds enforced by tile mesh
+    const clampHole = (h: { cxMm?: number; cyMm?: number; diameterMm?: number }) => ({
+      cxMm: num(h.cxMm ?? 0, 0),
+      cyMm: num(h.cyMm ?? 0, 0),
+      diameterMm: Math.max(0.5, Math.min(widthGuess, num(h.diameterMm ?? 6, 6))),
+    });
+    // Migrate the legacy single-hole knobs to holes[] when no explicit array is
+    // present — keeps saved presets and old API callers working.
+    let holes: ReliefOptions['quantized']['holes'] = Array.isArray(q.holes)
+      ? q.holes.map(clampHole)
+      : [];
+    if (holes.length === 0 && q.holeEnabled) {
+      const widthMm = 100;
+      const heightMm = widthMm; // unknown aspect at clamp time; cyMm in mm anyway
+      holes = [clampHole({
+        cxMm: 0,
+        cyMm: heightMm / 2 - num(q.holeOffsetMm ?? 6, 6),
+        diameterMm: num(q.holeDiameterMm ?? 6, 6),
+      })];
+    }
+    return {
+      clusters: Math.max(2, Math.min(12, Math.floor(num(q.clusters, 5)))),
+      colorSpace: q.colorSpace === 'rgb' ? 'rgb' : 'lab',
+      dither: !!q.dither,
+      output: q.output === 'relief' || q.output === 'silhouette' ? q.output : 'flat',
+      shape: q.shape === 'rounded' || q.shape === 'circle' ? q.shape : 'rect',
+      cornerRadiusMm: Math.max(0, Math.min(50, num(q.cornerRadiusMm, 4))),
+      chamferMm: Math.max(0, Math.min(5, num(q.chamferMm, 0))),
+      holes,
+      paintingMode: q.paintingMode === 'multi-color' ? 'multi-color' : 'single-nozzle',
+      invertHeights: !!q.invertHeights,
+      manualBackground: q.manualBackground,
+    };
+  }
+
+  function clampReliefCommon(c: ReliefCommonOptions): ReliefCommonOptions {
+    const num = (v: number, def: number) => (Number.isFinite(v) ? v : def);
+    return {
+      widthMm: Math.max(1, Math.min(2000, num(c.widthMm, 100))),
+      layerHeight: Math.max(0.02, Math.min(2, num(c.layerHeight, 0.08))),
+      baseThickness: Math.max(0, Math.min(50, num(c.baseThickness, 0.6))),
+      maxHeight: Math.max(0.1, Math.min(100, num(c.maxHeight, 3))),
+      resolution: Math.max(8, Math.min(512, Math.floor(num(c.resolution, 200)))),
+      smoothing: Math.max(0, Math.min(20, num(c.smoothing, 0))),
+    };
+  }
+
+  // Shared finalisation step: package a generated relief result as an
+  // ImportedMesh, persist the relief settings, and open the studio. Used by
+  // both the raster (createReliefFromImageData) and SVG (createReliefFromSvgText)
+  // entry points so the post-generation flow stays in lockstep.
+  async function commitGeneratedRelief(result: GenerateReliefResult, opts: ReliefOptions, sourceName: string): Promise<{ sessionId: string }> {
+    if (result.mesh.numTri === 0) throw new Error('Source too small to build a relief — use a larger image or SVG.');
+    const mesh: ImportedMesh = {
+      id: generateId(),
+      filename: `${sourceName}.relief`,
+      format: 'relief',
+      vertProperties: result.mesh.vertProperties,
+      triVerts: result.mesh.triVerts,
+      numVert: result.mesh.numVert,
+      numTri: result.mesh.numTri,
+      numProp: result.mesh.numProp,
+    };
+    // Quantized + SVG modes pre-compute seedRegion triangle ids in the input
+    // mesh's order; Manifold.ofMesh reorders triangles internally, which would
+    // scramble that mapping. Bring those imports in as render-only
+    // (api.renderMesh preserves ids). Luminance imports have no pre-computed
+    // ids, so they keep the real Manifold (and stay manifold:true) for
+    // downstream booleans/slice.
+    const hasSeeds = !!(result.seedRegions && result.seedRegions.length > 0);
+    const useManifold = result.mesh.watertight && !hasSeeds;
+    const { sessionId } = await importMeshPayload(mesh, sourceName, {
+      manifold: useManifold,
+      seedRegions: result.seedRegions,
+    });
+    setReliefSettings(sessionId, {
+      isRelief: true,
+      layerHeight: opts.common.layerHeight,
+      baseThickness: opts.common.baseThickness,
+      previewMode: 'flat',
+      options: opts,
+    });
+    showReliefStudio();
+    return { sessionId };
+  }
+
+  /** Single-nozzle stepped relief needs each cluster on its own layer-height
+   *  band, otherwise two cluster filaments would have to swap mid-layer and
+   *  the user would see colour stripes inside a single Z. The minimum
+   *  maxHeight is `(clusters - 1) * layerHeight` — anything less can't fit. */
+  function steppedReliefLayerFitError(opts: ReliefOptions): string | null {
+    if (opts.mode !== 'quantized') return null;
+    if (opts.quantized.output !== 'relief') return null;
+    if (opts.quantized.paintingMode !== 'single-nozzle') return null;
+    const lh = opts.common.layerHeight;
+    const minMaxHeight = (opts.quantized.clusters - 1) * lh;
+    if (opts.common.maxHeight + 1e-6 < minMaxHeight) {
+      return `Single-nozzle stepped relief needs max height ≥ ${minMaxHeight.toFixed(2)} mm for ${opts.quantized.clusters} colours at ${lh} mm layers — otherwise two filaments would have to swap inside one print layer. Increase max height to at least ${minMaxHeight.toFixed(2)} mm, or reduce the cluster count.`;
+    }
+    return null;
+  }
+
+  async function createReliefFromImageData(image: ImageData, options: ReliefOptions, sourceName: string): Promise<{ sessionId: string }> {
+    const opts: ReliefOptions = {
+      ...options,
+      common: clampReliefCommon(options.common),
+      quantized: clampReliefQuantized(options.quantized),
+      preprocess: clampReliefPreprocess(options.preprocess),
+    };
+    const fitError = steppedReliefLayerFitError(opts);
+    if (fitError) throw new Error(fitError);
+    const result = generateRelief(image, opts);
+    return commitGeneratedRelief(result, opts, sourceName);
+  }
+
+  async function createReliefFromSvgText(svgText: string, options: ReliefOptions, sourceName: string): Promise<{ sessionId: string }> {
+    const opts: ReliefOptions = {
+      ...options,
+      common: clampReliefCommon(options.common),
+      quantized: clampReliefQuantized(options.quantized),
+      preprocess: clampReliefPreprocess(options.preprocess),
+      mode: 'svg',
+    };
+    const fitError = steppedReliefLayerFitError(opts);
+    if (fitError) throw new Error(fitError);
+    const result = await generateReliefFromSvg(svgText, opts);
+    return commitGeneratedRelief(result, opts, sourceName);
+  }
+
+  // Seed color regions from an imported stepped-relief STL's existing Z plateaus so the
+  // user can recolor each printed layer band. Reuses the slab selector.
+  function detectReliefLevels(): void {
+    if (!currentMeshData) return;
+    const bounds = meshBounds(currentMeshData);
+    const span = bounds.max[2] - bounds.min[2];
+    if (span <= 0) return;
+    // Replace-instead-of-stack: clicking the button twice used to pile 24+
+    // overlapping slab regions on the mesh. Ask first, then start clean.
+    if (getRegions().length > 0) {
+      const ok = window.confirm('Replace existing colour regions with detected levels?');
+      if (!ok) return;
+      clearRegions();
+    }
+    const lh = currentLayerHeight();
+    const maxBands = 12;
+    const bandCount = Math.max(2, Math.min(maxBands, Math.round(span / Math.max(lh, span / maxBands))));
+    const thickness = span / bandCount;
+    const palette = listFilaments();
+    for (let i = 0; i < bandCount; i++) {
+      const offset = bounds.min[2] + i * thickness;
+      const tris = findSlabTriangles(currentMeshData, [0, 0, 1], offset, thickness);
+      if (tris.size === 0) continue;
+      // palette is empty if the user hid every default filament and added no
+      // custom ones; fall back to neutral grey so we colour the slab instead
+      // of throwing on `fil.hex` (palette[NaN] === undefined).
+      const fil = palette.length > 0 ? palette[i % palette.length] : { hex: '#808080' };
+      addRegion(`Level ${i + 1}`, hexToRgb(fil.hex), 'slab', { kind: 'slab', normal: [0, 0, 1], offset, thickness }, tris);
+    }
+    refreshModelColors();
+    reliefStudio?.refresh();
+  }
+
+  // Quick offline auto-tune used by the import wizard's "AI assist" button.
+  // (A hosted-LLM suggestion path can replace this; the hook is the same.)
+  function suggestReliefOptions(image: ImageData, opts: ReliefOptions): Partial<ReliefOptions> & { note?: string } {
+    const total = image.width * image.height;
+    if (total === 0) return { note: 'Could not analyze image.' };
+    const d = image.data;
+    const stride = Math.max(1, Math.floor(total / 4096));
+    let n = 0, sumL = 0, sumL2 = 0, sumSat = 0;
+    for (let i = 0; i < total; i += stride) {
+      const p = i * 4;
+      const r = d[p], g = d[p + 1], b = d[p + 2];
+      const l = (0.2126 * r + 0.7152 * g + 0.0722 * b) / 255;
+      sumL += l; sumL2 += l * l;
+      const mx = Math.max(r, g, b), mn = Math.min(r, g, b);
+      sumSat += mx > 0 ? (mx - mn) / mx : 0;
+      n++;
+    }
+    const mean = sumL / n;
+    const contrast = Math.sqrt(Math.max(0, sumL2 / n - mean * mean));
+    const sat = sumSat / n;
+    if (sat > 0.35) {
+      const clusters = Math.max(3, Math.min(8, Math.round(3 + sat * 6)));
+      return { mode: 'quantized', quantized: { ...opts.quantized, clusters }, note: `Colorful image — suggested Color levels with ${clusters} clusters.` };
+    }
+    const levels = Math.max(4, Math.min(24, Math.round(6 + contrast * 40)));
+    const invert = mean > 0.6;
+    return { mode: 'luminance', luminance: { ...opts.luminance, levels, invert }, note: `Tonal image — suggested Luminance relief with ${levels} levels${invert ? ' (inverted)' : ''}.` };
+  }
+
+  function openReliefImportFlow(initialFile?: File, initialOptions?: ReliefOptions): void {
+    openReliefImportModal({
+      aiAvailable: true,
+      initialFile,
+      initialOptions,
+      onAiAssist: async (image, opts) => suggestReliefOptions(image, opts),
+      // Don't catch — let runCreate (inside the wizard) handle the error: it
+      // already shows an inline aiNote and keeps the modal open so the user
+      // doesn't lose their tuned settings. Swallowing here would also let the
+      // wizard think the create succeeded and close itself.
+      onCreate: async (image, opts, name) => {
+        await createReliefFromImageData(image, opts, name || 'relief');
+      },
+      onCreateSvg: async (svgText, opts, name) => {
+        await createReliefFromSvgText(svgText, opts, name || 'relief');
+      },
+    });
+  }
+
+  function dataUrlToImageData(src: string): Promise<ImageData> {
+    return new Promise((resolve, reject) => {
+      const img = new Image();
+      img.crossOrigin = 'anonymous';
+      img.onload = () => {
+        const c = document.createElement('canvas');
+        c.width = img.naturalWidth;
+        c.height = img.naturalHeight;
+        const ctx = c.getContext('2d');
+        if (!ctx) { reject(new Error('no canvas 2d context')); return; }
+        ctx.drawImage(img, 0, 0);
+        resolve(ctx.getImageData(0, 0, c.width, c.height));
+      };
+      img.onerror = () => reject(new Error('image decode failed'));
+      img.src = src;
+    });
   }
 
   // Run a JSON session import end-to-end: validate, show the preview modal, import.
@@ -1524,15 +2004,16 @@ async function main() {
   async function handleImportFile(file: File, options: { skipPreActiveConfirm?: boolean } = {}): Promise<boolean> {
     const source = classifyImportSource(file.name);
     if (!source) {
-      alert(`Unsupported file type: ${file.name}\n\nSupported: .partwright.json, .js, .scad, .stl, .step / .stp`);
+      alert(`Unsupported file type: ${file.name}\n\nSupported: .partwright.json, .js, .scad, .stl, .step / .stp, .vox, .png / .jpg / .gif / .webp`);
       return false;
     }
 
     // Raw code imports don't get a preview modal of their own — confirm before clobber.
     // JSON imports skip this confirm because the preview modal already serves as
     // confirmation; STL and STEP imports skip it because their target modals let
-    // the user choose where the import should go.
-    if (!options.skipPreActiveConfirm && source !== 'JSON' && source !== 'STL' && source !== 'STEP') {
+    // the user choose where the import should go; IMAGE imports skip it because
+    // the image→voxel parameter modal (with its own Cancel) serves the same role.
+    if (!options.skipPreActiveConfirm && source !== 'JSON' && source !== 'STL' && source !== 'STEP' && source !== 'IMAGE') {
       const cur = getState();
       if (cur.session && cur.versionCount > 0) {
         const ok = await showInlineConfirm(
@@ -1561,13 +2042,109 @@ async function main() {
         }
       } else if (source === 'STEP') {
         committed = await handleStepImport(file);
+      } else if (source === 'IMAGE') {
+        committed = await handleImageImport(file);
+      } else if (source === 'VOX') {
+        committed = await handleVoxImport(file);
       }
-      if (committed) registerImport(file, file.name, source);
+      // IMAGE registers itself inside handleImageImport (it owns the chosen
+      // voxel options + thumbnail it needs to stash for a faithful re-import).
+      if (committed && source !== 'IMAGE') registerImport(file, file.name, source);
       return committed;
     } catch (e) {
       alert(`Failed to import "${file.name}": ${(e as Error).message}`);
       return false;
     }
+  }
+
+  /** Decode an image File/Blob into ImageData via an offscreen canvas. */
+  async function decodeImageToImageData(blob: Blob): Promise<ImageData> {
+    const bmp = await createImageBitmap(blob);
+    try {
+      const canvas = document.createElement('canvas');
+      canvas.width = bmp.width;
+      canvas.height = bmp.height;
+      const ctx = canvas.getContext('2d', { willReadFrequently: true });
+      if (!ctx) throw new Error('Could not get a 2D canvas context to read image pixels.');
+      ctx.drawImage(bmp, 0, 0);
+      return ctx.getImageData(0, 0, bmp.width, bmp.height);
+    } finally {
+      bmp.close();
+    }
+  }
+
+  /** Decode an image URL (a `data:` URL or same-origin URL) into ImageData via
+   *  an `<img>` element. Uses an img-src load, not `fetch`, so it isn't blocked
+   *  by the app's strict CSP `connect-src` (which rejects `fetch('data:…')`). */
+  async function decodeImageUrlToImageData(url: string): Promise<ImageData> {
+    const img = new Image();
+    img.crossOrigin = 'anonymous';
+    img.src = url;
+    await img.decode();
+    const canvas = document.createElement('canvas');
+    canvas.width = img.naturalWidth;
+    canvas.height = img.naturalHeight;
+    const ctx = canvas.getContext('2d', { willReadFrequently: true });
+    if (!ctx) throw new Error('Could not get a 2D canvas context to read image pixels.');
+    ctx.drawImage(img, 0, 0);
+    return ctx.getImageData(0, 0, canvas.width, canvas.height);
+  }
+
+  /** Import an image as a colored voxel billboard in a new voxel session.
+   *  Transparent pixels (alpha below threshold) drop out, so logos and
+   *  sprites voxelize cleanly; opaque photos become a full extruded slab.
+   *  The grid is embedded in the generated `voxels.decode(...)` code, so the
+   *  session persists as code with no special schema. */
+  async function handleImageImport(file: File, initialOptions?: ImageToVoxelOptions): Promise<boolean> {
+    let imageData: ImageData;
+    try {
+      imageData = await decodeImageToImageData(file);
+    } catch (e) {
+      alert(`Could not read image "${file.name}": ${(e as Error).message}`);
+      return false;
+    }
+    // Let the user dial in resolution / mode / depth / color before
+    // committing. The modal's Cancel doubles as the back-out, so the generic
+    // pre-import confirm is skipped for images (see handleImportFile).
+    // `initialOptions` pre-fills the controls when re-importing a past entry.
+    const opts = await showImageVoxelImportModal({ filename: file.name, image: imageData, initialOptions });
+    if (!opts) return false;
+    const grid = imageDataToVoxelGrid(imageData, opts);
+    if (grid.size === 0) {
+      alert(`"${file.name}" produced no voxels at the chosen settings. Try lowering the transparency cutoff.`);
+      return false;
+    }
+    const code = generateVoxelImportCode(grid, file.name);
+    const sessionName = file.name.replace(/\.(png|jpe?g|gif|webp|bmp)$/i, '');
+    await importCodePayload(code, 'voxel', sessionName);
+    // Register in Recent Imports tagged as a voxel import, with the chosen
+    // settings + a thumbnail, so re-clicking it reopens THIS modal (not relief)
+    // pre-loaded with these knobs.
+    const meta: ImportMetadata = { importer: 'voxel', options: opts };
+    registerImport(file, file.name, 'IMAGE', meta, createThumbnailFromImageData(imageData));
+    return true;
+  }
+
+  /** Import a MagicaVoxel `.vox` file as a voxel session. Mirrors the image
+   *  flow: parse → grid → bake as `voxels.decode(...)` editor code so the
+   *  session persists as code with no schema change. */
+  async function handleVoxImport(file: File): Promise<boolean> {
+    let grid;
+    try {
+      const bytes = new Uint8Array(await file.arrayBuffer());
+      grid = parseVox(bytes);
+    } catch (e) {
+      alert(`Could not read .vox file "${file.name}": ${(e as Error).message}`);
+      return false;
+    }
+    if (grid.size === 0) {
+      alert(`"${file.name}" contained no voxels.`);
+      return false;
+    }
+    const code = generateVoxelImportCode(grid, file.name);
+    const sessionName = file.name.replace(/\.vox$/i, '');
+    await importCodePayload(code, 'voxel', sessionName);
+    return true;
   }
 
   interface ParsedSTL {
@@ -1954,6 +2531,22 @@ async function main() {
         if (parsed) await placeImportedMesh(parsed, entry.filename);
         return;
       }
+      // Image / SVG re-imports reopen the same importer that produced them,
+      // pre-loaded with the original settings: voxel imports return to the
+      // voxel modal, everything else (relief, SVG) to the Relief Studio.
+      if (entry.source === 'IMAGE' || entry.source === 'SVG') {
+        const file = new File([entry.blob], entry.filename, { type: entry.blob.type });
+        const meta = (entry.metadata && typeof entry.metadata === 'object') ? entry.metadata as Partial<ImportMetadata> : undefined;
+        if (meta?.importer === 'voxel') {
+          await handleImageImport(file, meta.options as ImageToVoxelOptions);
+          return;
+        }
+        // Relief imports store { importer:'relief', options }; older/plain
+        // entries stored the ReliefOptions directly — accept both shapes.
+        const savedOpts = (meta?.importer === 'relief' ? meta.options : entry.metadata) as ReliefOptions | undefined;
+        openReliefImportFlow(file, savedOpts);
+        return;
+      }
       const cur = getState();
       if (cur.session && cur.versionCount > 0) {
         const ok = await showInlineConfirm(
@@ -1998,6 +2591,7 @@ async function main() {
   // Mesh export actions, shared by the toolbar and the command palette so the
   // guards + success/error toasts stay in one place.
   const actionExportGLB = async () => {
+    if (isSharedPreview()) { showToast('Fork this shared design before exporting.', { variant: 'warn' }); return; }
     try {
       if (currentMeshData) assertFiniteMesh(currentMeshData);
       const filename = await exportGLB();
@@ -2007,20 +2601,120 @@ async function main() {
     }
   };
   const actionExportSTL = () => {
+    if (isSharedPreview()) { showToast('Fork this shared design before exporting.', { variant: 'warn' }); return; }
     if (!currentMeshData) return;
     try { showToast(`Exported ${exportSTL(currentMeshData)}`, { variant: 'success' }); }
     catch (e) { showToast(e instanceof Error ? e.message : 'STL export failed', { variant: 'warn' }); }
   };
   const actionExportOBJ = () => {
+    if (isSharedPreview()) { showToast('Fork this shared design before exporting.', { variant: 'warn' }); return; }
     if (!currentMeshData) return;
-    try { showToast(`Exported ${exportOBJ(hasColorRegions() ? applyTriColors(currentMeshData) : currentMeshData)}`, { variant: 'success' }); }
+    try { showToast(`Exported ${exportOBJ((hasColorRegions() || hasModelColorRegions()) ? applyTriColors(currentMeshData) : currentMeshData)}`, { variant: 'success' }); }
     catch (e) { showToast(e instanceof Error ? e.message : 'OBJ export failed', { variant: 'warn' }); }
   };
   const actionExport3MF = () => {
+    if (isSharedPreview()) { showToast('Fork this shared design before exporting.', { variant: 'warn' }); return; }
     if (!currentMeshData) return;
-    try { showToast(`Exported ${export3MF(hasColorRegions() ? applyTriColors(currentMeshData) : currentMeshData)}`, { variant: 'success' }); }
+    try { showToast(`Exported ${export3MF((hasColorRegions() || hasModelColorRegions()) ? applyTriColors(currentMeshData) : currentMeshData)}`, { variant: 'success' }); }
     catch (e) { showToast(e instanceof Error ? e.message : '3MF export failed', { variant: 'warn' }); }
   };
+
+  // Hard cap on the encoded share string. Browsers and chat apps choke on very
+  // long URLs; past this we drop the thumbnail once and, if still too big, abort
+  // with a toast rather than minting a link that silently won't open.
+  const MAX_SHARE_ENCODED_CHARS = 1_500_000;
+
+  /** Encode the current committed version into a self-contained `#share=…`
+   *  read-only link. Saves the current buffer first (exportSession reads the
+   *  SAVED version), feature-detects CompressionStream, and trims the thumbnail
+   *  if the link is too large before giving up. Returns `{ url, encodedBytes }`
+   *  on success or `{ error }` with a user-facing message. Pure builder: it does
+   *  no UI — callers decide whether to open the modal (toolbar) or just return
+   *  the string (the partwright API).
+   *
+   *  `notify` optionally surfaces the "multi-part designs share one part" toast;
+   *  the API path passes a no-op so it never pops UI out from under an agent. */
+  const buildShareLink = async (
+    notify: (msg: string) => void = () => {},
+  ): Promise<{ url: string; encodedBytes: number } | { error: string }> => {
+    if (typeof CompressionStream === 'undefined') {
+      return { error: 'Sharing needs a newer browser' };
+    }
+    if (!getState().session || !engineOk) {
+      return { error: 'Open or create a design before sharing.' };
+    }
+    // exportSession reads the SAVED version from IndexedDB, so commit the current
+    // buffer first — both to give a fresh /editor (currentVersion: null) a
+    // version to export and to capture any unsaved edits the user is sharing.
+    const saved = await saveCurrentVersion();
+    if ('error' in saved) {
+      return { error: saved.error };
+    }
+    const state = getState();
+    const versionIndex = state.currentVersion?.index;
+    if (versionIndex === undefined) {
+      return { error: 'No saved version to share yet.' };
+    }
+
+    const sessionId = state.session!.id;
+    // Single-version, lean payload: no chat, no notes. Name the shared session
+    // after the current part when the session is multi-part so the preview reads
+    // sensibly (the share covers only the current part's current version).
+    const exported = await exportSession(sessionId, {
+      versionIndices: [versionIndex],
+      includeChat: false,
+      includeNotes: false,
+    });
+    if (!exported) {
+      return { error: 'Could not prepare this design for sharing.' };
+    }
+    if (state.parts.length > 1) {
+      // A share link carries one version of one part. Tell the user so a
+      // multi-part assembly isn't silently reduced, and name the shared session
+      // after the current part.
+      const partName = state.currentPart?.name;
+      if (partName) exported.session = { ...exported.session, name: partName };
+      notify(`Sharing only "${partName ?? 'the current part'}" — multi-part designs share one part per link.`);
+    }
+
+    try {
+      let encoded = await encodeShare(exported);
+      // If the link is too long, drop the (heavy) thumbnail and try once more.
+      if (encoded.length > MAX_SHARE_ENCODED_CHARS && exported.versions[0]?.thumbnail) {
+        const slimmed = {
+          ...exported,
+          versions: exported.versions.map((v, i) =>
+            i === 0 ? (() => { const { thumbnail: _t, ...rest } = v; return rest; })() : v,
+          ),
+        };
+        encoded = await encodeShare(slimmed);
+      }
+      if (encoded.length > MAX_SHARE_ENCODED_CHARS) {
+        return { error: 'Design too large to share via link' };
+      }
+      return { url: `${location.origin}/editor#share=${encoded}`, encodedBytes: encoded.length };
+    } catch (e) {
+      if (e instanceof ShareUnsupportedError) {
+        return { error: 'Sharing needs a newer browser' };
+      }
+      errorLog.capture({ level: 'error', source: 'app', message: `share encode failed: ${e instanceof Error ? e.message : String(e)}` });
+      return { error: 'Could not create a share link.' };
+    }
+  };
+
+  /** Build the share link and open the copy modal. Thin toolbar wrapper around
+   *  {@link buildShareLink}; surfaces every error path as a toast. */
+  const actionShareLink = async (): Promise<void> => {
+    const result = await buildShareLink((msg) => showToast(msg, { variant: 'neutral' }));
+    if ('error' in result) {
+      showToast(result.error, { variant: 'warn' });
+      return;
+    }
+    openShareModal(result.url, result.encodedBytes);
+  };
+
+  /** True when the share action can run: an active session on a ready engine. */
+  const canShare = (): boolean => !!getState().session && engineOk && !isSharedPreview() && typeof CompressionStream !== 'undefined';
 
   // Create toolbar
   createToolbar(editorUI, {
@@ -2075,14 +2769,16 @@ async function main() {
       const ok = await exportSessionJSON(undefined, opts);
       if (!ok) alert('No active session to export. Save a version first.');
     },
+    onShareLink: () => { void actionShareLink(); },
     onExportRawCode: () => {
       exportRawCode(getValue(), getActiveLanguage());
     },
     onImportFile: async (file) => { await handleImportFile(file); },
     onImportInboxEntry: handleReimportInboxEntry,
+    onCreateRelief: () => { openReliefImportFlow(); },
     onLanguageHelp: async () => { await showLanguageHelpModal(); },
     onToggleAi: () => { void toggleAiPanelFromToolbar(); },
-    onLanguageSwitch: async (lang: 'manifold-js' | 'scad' | 'replicad') => {
+    onLanguageSwitch: async (lang: 'manifold-js' | 'scad' | 'replicad' | 'voxel') => {
       if (lang === getActiveLanguage()) return;
       // Stash the current language's editor buffer as a draft on the active
       // session, then swap engines and restore (or seed) the other language's
@@ -2108,6 +2804,7 @@ async function main() {
     // exist (or overwrite the freshly-loaded starter mesh).
     resetPaintWorkerState();
     clearRegions();
+    clearModelColorRegions(); // model-declared underlay is module state too
     syncLockState();
     const freshCode = `// ${comment}\nconst { Manifold } = api;\nreturn Manifold.cube([10, 10, 10], true);`;
     setValue(freshCode);
@@ -2156,7 +2853,7 @@ async function main() {
   });
 
   // Create layout
-  const { editorContainer, editorErrorPanel, viewportPane, galleryContainer, versionsContainer, imagesContainer, diffContainer, notesContainer, dataContainer, statusBar, clipControls, formatBtn, autoFormatToggle, switchTab, partsRail, togglePartsRail } = createLayout(editorUI, {
+  const { editorContainer, editorErrorPanel, viewportPane, galleryContainer, versionsContainer, imagesContainer, diffContainer, notesContainer, dataContainer, statusBar, clipControls, formatBtn, autoFormatToggle, switchTab, partsRail, togglePartsRail, collapseEditor, expandEditor } = createLayout(editorUI, {
     onToggleAi: () => { void toggleAiPanelFromToolbar(); },
     onOpenCatalog: () => { void showCatalogPage(); },
     onToggleDiagnostics: () => { toggleDiagnosticsPanel(); },
@@ -2279,10 +2976,12 @@ async function main() {
     { id: 'export-stl', title: 'Export STL', hint: 'Export', keywords: 'download print', run: actionExportSTL, enabled: () => currentMeshData !== null },
     { id: 'export-obj', title: 'Export OBJ', hint: 'Export', keywords: 'download wavefront', run: actionExportOBJ, enabled: () => currentMeshData !== null },
     { id: 'export-3mf', title: 'Export 3MF', hint: 'Export', keywords: 'download print color', run: actionExport3MF, enabled: () => currentMeshData !== null },
+    { id: 'share-link', title: 'Share design (copy link)', hint: 'Share', keywords: 'url public link copy fork readonly', run: () => { void actionShareLink(); }, enabled: canShare },
     { id: 'toggle-ai', title: 'Toggle AI panel', hint: 'View', keywords: 'chat assistant drawer', run: () => toggleAiPanel() },
     { id: 'toggle-diagnostics', title: 'Toggle diagnostic log', hint: 'View', keywords: 'errors warnings console', run: () => toggleDiagnosticsPanel() },
     { id: 'open-catalog', title: 'Open catalog', hint: 'Navigate', keywords: 'examples premade browse', run: () => { void showCatalogPage(); } },
     { id: 'open-help', title: 'Open help', hint: 'Navigate', keywords: 'docs documentation guide', run: () => showHelp() },
+    { id: 'open-whats-new', title: "Open what's new", hint: 'Navigate', keywords: 'changelog recent features updates release notes', run: () => showWhatsNewPage() },
     { id: 'open-quality', title: 'Modeling quality settings', hint: 'Settings', keywords: 'resolution curve segments smoothness', run: () => showQualitySettingsModal() },
     { id: 'retake-tour', title: 'Take the guided tour', hint: 'Help', keywords: 'onboarding walkthrough intro tutorial', run: () => { resetTour(); startTour(); } },
   ]);
@@ -2425,6 +3124,14 @@ async function main() {
   }
 
   async function loadVersionIntoEditor(version: Version) {
+    // Cancel any active voxel paint before loading a different version — its
+    // live grid and provenance map are bound to the OUTGOING code, so a Bake
+    // after navigation would write the wrong session's voxels into the new
+    // editor. Also unlocks the editor and clears the floating panel.
+    if (voxelPaint.isActive()) {
+      voxelPaint.deactivate();
+      syncVoxelPaintUI();
+    }
     // Each version remembers the language it was authored in (per-version
     // since schema 1.8); fall back to the session-level hint, then to the
     // engine default. Lets a single session hold mixed JS + SCAD versions
@@ -2440,6 +3147,11 @@ async function main() {
     }
     setActiveImports((version.importedMeshes ?? []) as ImportedMesh[]);
     setValue(version.code);
+    // Restore this version's Customizer overrides so it re-runs (and renders)
+    // with the values it was saved at — keeping geometry consistent with the
+    // saved thumbnail/stats. runCodeSync prunes these against the model's
+    // declared schema, so stale keys from a previous model fall away.
+    currentParamValues = { ...(version.paramValues ?? {}) };
     const applied = await runCodeSync(version.code);
     // If a newer version-switch arrived while we were compiling, our result
     // was discarded — don't rehydrate colours or annotations for the wrong version.
@@ -2490,7 +3202,9 @@ async function main() {
         onOpenEditor: openEditorFromLanding,
         onOpenHelp: () => showHelp(),
         onOpenCatalog: () => { void showCatalogPage(); },
+        onOpenWhatsNew: () => showWhatsNewPage(),
         onOpenSession: openSessionFromLanding,
+        onLoadCatalogEntry: handleCatalogEntryLoad,
       });
     }
     return landingEl;
@@ -2504,6 +3218,7 @@ async function main() {
     notFoundEl?.classList.add('hidden');
     catalogEl?.classList.add('hidden');
     legalEl?.classList.add('hidden');
+    whatsNewEl?.classList.add('hidden');
     page.classList.remove('hidden');
     updateDocumentTitle({ page: 'landing' });
   }
@@ -2523,6 +3238,7 @@ async function main() {
     helpEl?.classList.add('hidden');
     catalogEl?.classList.add('hidden');
     legalEl?.classList.add('hidden');
+    whatsNewEl?.classList.add('hidden');
     notFoundEl.classList.remove('hidden');
     updateDocumentTitle({ page: '404' });
   }
@@ -2563,6 +3279,7 @@ async function main() {
     if (notFoundEl) notFoundEl.classList.add('hidden');
     if (catalogEl) catalogEl.classList.add('hidden');
     if (legalEl) legalEl.classList.add('hidden');
+    if (whatsNewEl) whatsNewEl.classList.add('hidden');
     helpEl.classList.remove('hidden');
     updateDocumentTitle({ page: 'help' });
   }
@@ -2623,8 +3340,40 @@ async function main() {
     if (helpEl) helpEl.classList.add('hidden');
     if (notFoundEl) notFoundEl.classList.add('hidden');
     if (legalEl) legalEl.classList.add('hidden');
+    if (whatsNewEl) whatsNewEl.classList.add('hidden');
     catalogEl.classList.remove('hidden');
     updateDocumentTitle({ page: 'catalog' });
+  }
+
+  let whatsNewEl: HTMLElement | null = null;
+  let whatsNewHasAppBackTarget = false;
+  function showWhatsNewPage(options: { history?: 'push' | 'replace' | 'none' } = {}) {
+    const historyMode = options.history ?? 'push';
+    if (historyMode !== 'none') {
+      whatsNewHasAppBackTarget = currentURLPathAndSearch() !== '/whats-new';
+      updateAppHistory('/whats-new', historyMode);
+    }
+    if (!whatsNewEl) {
+      whatsNewEl = createWhatsNewPage(overlayContainer, {
+        onBack: () => {
+          if (whatsNewHasAppBackTarget) {
+            window.history.back();
+          } else {
+            updateAppHistory('/', 'replace');
+            void syncRouteFromURL();
+          }
+        },
+        onOpenEditor: openEditorFromLanding,
+      });
+    }
+    overlayContainer.classList.remove('hidden');
+    editorUI.classList.add('hidden');
+    if (landingEl) landingEl.classList.add('hidden');
+    if (helpEl) helpEl.classList.add('hidden');
+    if (catalogEl) catalogEl.classList.add('hidden');
+    if (notFoundEl) notFoundEl.classList.add('hidden');
+    whatsNewEl.classList.remove('hidden');
+    updateDocumentTitle({ page: 'whats-new' });
   }
 
   // Import a catalog entry as a fresh session and navigate to the editor.
@@ -2634,6 +3383,160 @@ async function main() {
     // sessionManager.updateURL). Without an earlier push, that replaceState
     // would clobber whatever page we came from (e.g. /catalog) and break the
     // browser back button.
+    updateAppHistory('/editor', 'push');
+    transitionToEditor();
+    await ensureEditorReady();
+    await importSessionPayload(payload);
+    updateDocumentTitle({ page: 'editor' });
+  }
+
+  // === Shared-link preview mode (read-only) ===
+
+  // DOM owned by shared-preview mode, removed on exit so nothing leaks.
+  let sharedBannerEl: HTMLElement | null = null;
+  let sharedOverlayEl: HTMLElement | null = null;
+
+  /** Toggle a control's disabled state + dimmed/non-interactive styling. Used to
+   *  neutralize Paint, Save, and the language toggle in shared preview without
+   *  re-implementing each control's own logic. */
+  function setControlNeutralized(id: string, off: boolean): void {
+    const el = document.getElementById(id);
+    if (!el) return;
+    if ('disabled' in el) (el as HTMLButtonElement).disabled = off;
+    el.classList.toggle('opacity-40', off);
+    el.classList.toggle('pointer-events-none', off);
+  }
+
+  /** Enter read-only shared-preview mode: refuse execution + save (via the
+   *  module flag), hold the editor read-only, and neutralize Run / Paint / Save /
+   *  language toggle. Mounts the banner above the editor and the overlay (with
+   *  the decoded thumbnail + Fork CTA) over the viewport. */
+  function enterSharedMode(thumbnail: string | undefined): void {
+    _sharedPreview = true;
+    setReadOnlyReason('shared', true);
+    disableRun();
+    if (isPaintOpen()) closePaintMenu();
+    setControlNeutralized('paint-toggle', true);
+    setControlNeutralized('btn-save-version', true);
+    setControlNeutralized('lang-toggle', true);
+
+    // Rebuild the banner + overlay fresh on every entry so re-previewing a
+    // DIFFERENT share link (pasted over an active preview) shows the new
+    // thumbnail rather than a stale one carried over from the previous link.
+    if (sharedBannerEl) { sharedBannerEl.remove(); sharedBannerEl = null; }
+    if (sharedOverlayEl) { sharedOverlayEl.remove(); sharedOverlayEl = null; }
+    sharedBannerEl = renderSharedBanner(() => { void onFork(); });
+    const editorPane = editorContainer.parentElement;
+    if (editorPane) editorPane.insertBefore(sharedBannerEl, editorContainer);
+    sharedOverlayEl = renderSharedOverlay({ thumbnail, onFork: () => { void onFork(); } });
+    viewportPane.appendChild(sharedOverlayEl);
+  }
+
+  /** Leave shared-preview mode: re-enable every control and remove the banner +
+   *  overlay. Disposes nothing on the GPU here — the cold preview never built a
+   *  Three.js mesh — but tears down the overlay's <img> via .remove(). */
+  function exitSharedMode(): void {
+    _sharedPreview = false;
+    setReadOnlyReason('shared', false);
+    enableRun();
+    setControlNeutralized('paint-toggle', false);
+    setControlNeutralized('btn-save-version', false);
+    setControlNeutralized('lang-toggle', false);
+    if (sharedBannerEl) { sharedBannerEl.remove(); sharedBannerEl = null; }
+    if (sharedOverlayEl) { sharedOverlayEl.remove(); sharedOverlayEl = null; }
+    // Re-derive the Run button state from the (reason-counted) editor lock, so we
+    // never leave Run enabled if a color lock happens to be active.
+    syncLockState();
+  }
+
+  /** Strip the `#share=` hash from the URL without touching the back stack or
+   *  re-firing routing. Modeled on the ?takeover=1 strip — keeps path + search,
+   *  drops only the hash, so refresh / Back never re-decodes the link. */
+  function stripShareHash(): void {
+    // Entering a shared preview always shows the editor, so normalize the path
+    // to /editor — otherwise pasting #share=… onto /catalog or /help would
+    // leave the URL claiming a non-editor page while the editor is on screen.
+    // App-generated links already use /editor#share=, so this is a no-op there.
+    window.history.replaceState(null, '', '/editor' + window.location.search);
+  }
+
+  /** Open a `#share=…` link as a read-only preview. Decodes + validates the
+   *  UNTRUSTED payload, strips the hash, and renders code/stats/thumbnail
+   *  WITHOUT touching IndexedDB or running anything. On any failure it degrades
+   *  to a normal editable empty editor (no uncaught error, no scary toast). */
+  async function enterSharedFromHash(): Promise<void> {
+    const hashValue = getShareHashValue();
+    if (hashValue === null) return;
+
+    transitionToEditor();
+    switchTab('interactive', { history: 'none' });
+    updateDocumentTitle({ page: 'editor' });
+    await ensureEditorReady();
+    if (!engineOk) return;
+
+    // Decode + validate. ANY failure → graceful fallback to a blank editor.
+    let payload: ExportedSession;
+    try {
+      const parsed = await decodeShare(hashValue);
+      // App-level brand/schema check first, then the structural/security shape
+      // validator (which also drops an unsafe thumbnail).
+      const branded = validateSessionPayload(parsed);
+      if (!branded) throw new Error('not a Partwright payload');
+      payload = validateSharePayloadShape(branded);
+    } catch (e) {
+      // A malformed/hostile share link is an expected degrade path, not an app
+      // error — log to the console only (keep it out of the user-facing
+      // diagnostic log) and fall back to a normal editable editor.
+      console.debug('Partwright: ignoring invalid share link —', e instanceof Error ? e.message : String(e));
+      stripShareHash();
+      exitSharedMode();
+      // Fall through to a normal, editable empty editor.
+      if (!getState().session) await createSession();
+      setStatus(statusBar, 'ready', 'Ready');
+      runCode(defaultCode);
+      return;
+    }
+
+    // Valid: strip the hash immediately so refresh / Back can't re-fire it.
+    stripShareHash();
+
+    const version = payload.versions[0];
+    const lang = asLanguage(version.language ?? payload.session.language) ?? 'manifold-js';
+
+    // Apply the version's language with the BARE alias (engine + editor only —
+    // never switchLanguageWithDrafts, which would createSession() + runCode()).
+    if (lang !== getActiveLanguage()) await switchLanguage(lang);
+
+    // Read-only preview, no IndexedDB writes, no execution.
+    enterSharedMode(version.thumbnail);
+    setValue(version.code); // setValue does not auto-run
+    // Populate the live stats panel straight from the embedded geometryData —
+    // we deliberately do NOT run the code.
+    const stats = version.geometryData;
+    geometryDataEl.textContent = stats
+      ? JSON.stringify(stats, null, 2)
+      : JSON.stringify({ status: 'shared-preview' });
+    setStatus(statusBar, 'ready', 'Shared preview (read-only)');
+
+    // Stash the validated payload for the Fork handler (the consented import).
+    pendingSharedPayload = payload;
+  }
+
+  // The decoded share payload awaiting an explicit Fork (the first consented
+  // execution). Held only while a shared preview is on screen.
+  let pendingSharedPayload: ExportedSession | null = null;
+
+  /** Fork the previewed share into a real local session. Reuses the
+   *  catalog-load ORDER (push /editor → transition → ensureReady →
+   *  importSessionPayload, which runs the code) — this is the consented first
+   *  execution. Then leaves shared mode. */
+  async function onFork(): Promise<void> {
+    const payload = pendingSharedPayload;
+    if (!payload) return;
+    // Leave shared mode FIRST so the import's runCode() isn't refused by the
+    // execution guard.
+    exitSharedMode();
+    pendingSharedPayload = null;
     updateAppHistory('/editor', 'push');
     transitionToEditor();
     await ensureEditorReady();
@@ -2698,10 +3601,15 @@ async function main() {
     // Home — confusing because no editor / session is loaded to act on
     // it. /editor's own loader updates the AI session via onStateChange
     // when a session opens, so we don't need to set it explicitly here.
-    if (shouldShowLanding() || shouldShowHelp() || shouldShowCatalog() || shouldShowLegal() || shouldShow404()) {
+    if (shouldShowLanding() || shouldShowHelp() || shouldShowCatalog() || shouldShowLegal() || shouldShowWhatsNew() || shouldShow404()) {
       void setAiActiveSession(null);
     }
-    if (shouldShowLanding()) {
+    // A share-link hash takes precedence over the normal editor sync on this
+    // path too (e.g. a popstate that lands back on a `#share=` URL), so we never
+    // createSession()+default-code over a shared preview.
+    if (hasShareHash()) {
+      await enterSharedFromHash();
+    } else if (shouldShowLanding()) {
       await showLandingPage();
     } else if (shouldShowHelp()) {
       showHelp({ history: 'none' });
@@ -2709,6 +3617,8 @@ async function main() {
       await showCatalogPage({ history: 'none' });
     } else if (shouldShowLegal()) {
       showLegal({ history: 'none' });
+    } else if (shouldShowWhatsNew()) {
+      showWhatsNewPage({ history: 'none' });
     } else if (shouldShow404()) {
       showNotFoundPage();
     } else {
@@ -2718,6 +3628,19 @@ async function main() {
 
   window.addEventListener('popstate', () => {
     void syncRouteFromURL();
+  });
+
+  // Pasting a share URL into an already-open editor changes only the hash, which
+  // fires `hashchange` (NOT popstate). Decode it into a read-only preview.
+  // Re-entrancy guard: skip if we're already previewing this exact hash (entering
+  // shared mode itself strips the hash, so this won't loop on our own change).
+  let lastSharedHash: string | null = null;
+  window.addEventListener('hashchange', () => {
+    const value = getShareHashValue();
+    if (value === null) return;
+    if (_sharedPreview && value === lastSharedHash) return;
+    lastSharedHash = value;
+    void enterSharedFromHash();
   });
 
   // Expose showHelp for toolbar
@@ -2730,6 +3653,7 @@ async function main() {
   const showHelpPage = shouldShowHelp();
   const showCatalog = shouldShowCatalog();
   const showLegalPage = shouldShowLegal();
+  const showWhatsNew = shouldShowWhatsNew();
   const show404 = shouldShow404();
 
   if (showLanding) {
@@ -2740,6 +3664,8 @@ async function main() {
     await showCatalogPage({ history: 'none' });
   } else if (showLegalPage) {
     showLegal({ history: 'none' });
+  } else if (showWhatsNew) {
+    showWhatsNewPage({ history: 'none' });
   } else if (show404) {
     showNotFoundPage();
   }
@@ -2760,8 +3686,72 @@ async function main() {
   // with every displayed mesh — runs, paint strokes, simplify, clear.
   setOnMeshUpdate((mesh) => refreshTriangleCount(mesh.numTri));
 
+  // Customizer panel — a viewport overlay that surfaces the parameters a model
+  // declares via api.params({...}). Editing a widget records the override and
+  // re-runs (live preview); Reset clears all overrides back to model defaults.
+  // Hidden until a run reports a parameter schema.
+  //
+  // A "Customize" toggle pill in the viewport toolbar (created below) is the
+  // discoverable open/reopen affordance: it appears only when the active model
+  // declares parameters, shows the count, and mirrors the panel's open state —
+  // so closing the panel never strands the user without a way back in.
+  const customizeBtn = document.createElement('button');
+  customizeBtn.id = 'customize-toggle';
+  customizeBtn.title = 'Tweak this model’s parameters';
+  customizeBtn.className = 'hidden'; // shown by syncCustomizeBtn once a run reports params
+  customizeBtn.addEventListener('click', () => paramsPanel?.toggle());
+  const CUSTOMIZE_BTN_BASE = 'md:px-2 md:py-1 px-3 py-2 rounded text-sm md:text-xs backdrop-blur transition-colors border';
+  const CUSTOMIZE_BTN_OPEN = `${CUSTOMIZE_BTN_BASE} bg-blue-500/30 text-blue-300 border-blue-500/50`;
+  const CUSTOMIZE_BTN_CLOSED = `${CUSTOMIZE_BTN_BASE} bg-zinc-800/80 text-zinc-400 [@media(hover:hover)]:hover:text-zinc-200 [@media(hover:hover)]:hover:bg-zinc-700/80 border-zinc-600/50`;
+  const syncCustomizeBtn = (state: { hasParams: boolean; open: boolean; count: number }) => {
+    customizeBtn.textContent = state.count > 0 ? `🎛 Customize (${state.count})` : '🎛 Customize';
+    customizeBtn.className = state.open ? CUSTOMIZE_BTN_OPEN : CUSTOMIZE_BTN_CLOSED;
+    // No declared parameters → no button at all (matches the panel being hidden).
+    customizeBtn.classList.toggle('hidden', !state.hasParams);
+  };
+
+  paramsPanel = createParamsPanel({
+    onChange: (key, value) => {
+      currentParamValues = { ...currentParamValues, [key]: value };
+      runCode();
+    },
+    onReset: () => {
+      currentParamValues = {};
+      runCode();
+    },
+    onVisibilityChange: syncCustomizeBtn,
+  });
+  viewportPane.appendChild(paramsPanel.element);
+  // Sit the Customize pill with the other panel-toggling tools (Paint/Measure),
+  // just after the view-toggle divider — same grouping Paint/Annotate use, so it
+  // reads as a tool and stays clear of the top-left "Show code" button that the
+  // wrapping toolbar's leftmost item collides with.
+  const measureToggle = clipControls.querySelector('#measure-toggle');
+  if (measureToggle) clipControls.insertBefore(customizeBtn, measureToggle);
+  else clipControls.appendChild(customizeBtn);
+
   // Init measure tool
   initMeasureTool(getCanvas(), getCamera(), getMeshGroup(), viewportPane);
+
+  reliefStudio = mountReliefStudio(viewportPane, {
+    getLayerHeight: () => currentLayerHeight(),
+    setLayerHeight: (mm: number) => {
+      const sid = getState().session?.id ?? null;
+      if (sid) updateReliefSettings(sid, { layerHeight: mm });
+      refreshModelColors();
+      reliefStudio?.refresh();
+    },
+    getPreviewMode: () => ctlGetReliefPreviewMode(),
+    setPreviewMode: (mode: PreviewMode) => {
+      ctlSetReliefPreviewMode(mode);
+      const sid = getState().session?.id ?? null;
+      if (sid) updateReliefSettings(sid, { previewMode: mode });
+      refreshModelColors();
+    },
+    getSwapGuide: () => (currentMeshData ? getSwapGuideFor(currentMeshData, currentLayerHeight()) : null),
+    detectLevels: () => detectReliefLevels(),
+    onClose: () => closeReliefStudio(),
+  });
 
   // Init editor — only auto-run if auto-run is enabled. Auto-runs drive the
   // live preview but defer error surfacing (no panel/markers/log mid-keystroke);
@@ -2940,9 +3930,70 @@ async function main() {
   initDimensionsToggle(clipControls);
   initAnnotateUI(clipControls);
   initPaintUI(clipControls);
+  initVoxelPaintUI(clipControls, {
+    activate: async () => {
+      const code = getValue();
+      const err = voxelPaint.activate(code, {
+        onMeshUpdate: (mesh) => { updateMesh(mesh, { skipAutoFrame: true }); },
+        onLockChange: (locked) => { setReadOnlyReason('voxelPaint', locked); },
+      });
+      if (err) alert(`Voxel paint: ${err}`);
+      syncVoxelPaintUI();
+    },
+    deactivate: async () => {
+      voxelPaint.deactivate();
+      runCode(getValue());
+      syncVoxelPaintUI();
+    },
+    bake: async () => {
+      const result = await bakePaintedVoxelsAsVersion('painted');
+      if ('error' in result) alert(`Voxel paint: ${result.error}`);
+      syncVoxelPaintUI();
+    },
+  });
+  setVoxelPaintAvailable(getActiveLanguage() === 'voxel');
+
+  // Single source of truth for "commit the painted voxel grid as a new
+  // version" — called both from the UI Bake button and the partwright API.
+  // Centralising avoids the bake-with-empty-grid / no-session bugs that two
+  // separate implementations introduced.
+  async function bakePaintedVoxelsAsVersion(label: string): Promise<{ versionIndex: number | null; voxelCount: number } | { error: string }> {
+    if (!voxelPaint.isActive()) return { error: 'voxel paint is not active.' };
+    const count = voxelPaint.voxelCount();
+    if (count === 0) return { error: 'The painted grid is empty — paint or keep at least one voxel before baking.' };
+    const code = voxelPaint.bakeToCode('painted');
+    if (!code) return { error: 'voxel paint has no grid to bake.' };
+    voxelPaint.deactivate();
+    setValue(code);
+    await runCodeSync(code);
+    // Mirror the runAndSave auto-create pattern so callers don't have to wrap
+    // bake with a manual createSession.
+    if (!getState().session) {
+      await createSession(label, getActiveLanguage());
+    }
+    const thumbnail = await captureThumbnail();
+    const geometryData = enrichGeometryDataWithColors(getGeometryDataObj());
+    const v = await saveVersion(code, geometryData, thumbnail, label);
+    return { versionIndex: v?.index ?? null, voxelCount: count };
+  }
   initSimplifyUI(clipControls, simplifyHandlers);
   initMeasureToggle(clipControls);
   initOrbitLockToggle(clipControls);
+
+  // Relief / Edit colors toggle in the viewport overlay — paint/simplify are
+  // alongside this button so the colour palette is discoverable from the
+  // same place as the other model-editing tools (was previously in the top
+  // toolbar where it kept getting clipped behind Show Code).
+  const reliefViewportBtn = document.createElement('button');
+  reliefViewportBtn.id = 'relief-viewport-toggle';
+  reliefViewportBtn.className = 'px-2 py-1 rounded text-xs bg-zinc-800/80 backdrop-blur text-zinc-400 hover:text-zinc-200 hover:bg-zinc-700/80 transition-colors border border-zinc-600/50';
+  reliefViewportBtn.textContent = '✦ Relief';
+  reliefViewportBtn.title = 'Edit colors / make a tile or relief from an image';
+  reliefViewportBtn.addEventListener('click', () => toggleReliefStudio());
+  const paintBtnEl = clipControls.querySelector('#paint-toggle');
+  if (paintBtnEl) clipControls.insertBefore(reliefViewportBtn, paintBtnEl);
+  else clipControls.appendChild(reliefViewportBtn);
+
   initEscapeMenuClose();
 
   // Initialize editor lock
@@ -2991,10 +4042,7 @@ async function main() {
 
   // When a color region is painted, re-render the mesh with colors and sync lock
   setOnRegionPainted(() => {
-    if (currentMeshData) {
-      const colored = applyTriColorsIfVisible(currentMeshData);
-      updateMesh(colored, { skipAutoFrame: true });
-    }
+    scheduleColorRefresh();
     syncLockState();
   });
 
@@ -3008,23 +4056,32 @@ async function main() {
   // Toggling paint visibility re-renders the viewport so colors
   // disappear/reappear immediately. Exports remain colored regardless.
   onPaintVisibilityChange(() => {
-    if (!currentMeshData) return;
-    const colored = applyTriColorsIfVisible(currentMeshData);
-    updateMesh(colored, { skipAutoFrame: true });
+    scheduleColorRefresh();
   });
 
   editorReady = true;
   editorReadyResolve();
 
-  // Start guided tour on first visit (after editor fully renders)
-  if (!showLanding && !showHelpPage && !showCatalog && !showLegalPage && !show404) {
+  // Start guided tour on first visit (after editor fully renders) — but not over
+  // a shared preview, which is a read-only landing surface for an external link.
+  if (!showLanding && !showHelpPage && !showCatalog && !showLegalPage && !showWhatsNew && !show404 && !hasShareHash()) {
     maybeStartTour();
     maybeShowShortcutsHint();
   }
 
-  // If not on landing/help/catalog/404, load session or default code now
-  if (!showLanding && !showHelpPage && !showCatalog && !showLegalPage && !show404 && engineOk) {
-    await syncEditorFromURL();
+  // A `#share=…` link opens the read-only preview INSTEAD of the normal editor
+  // load. enterSharedFromHash must run before syncEditorFromURL so the latter
+  // never createSession()s + runs default code on this path; it strips the hash
+  // and degrades to a normal editable editor if the link is invalid. (The
+  // editor + engine are ready here, so its internal ensureEditorReady resolves
+  // immediately — no deadlock from awaiting it earlier in main().)
+  if (!showLanding && !showHelpPage && !showCatalog && !showLegalPage && !showWhatsNew && !show404 && engineOk) {
+    if (hasShareHash()) {
+      await enterSharedFromHash();
+    } else {
+      await syncEditorFromURL();
+      syncReliefStudioForSession();
+    }
   }
 
   // Keep this tab's session state in sync with peer tabs that mutate the same
@@ -3087,6 +4144,9 @@ async function main() {
           await syncRouteFromURL();
         },
         mountInto: appRow,
+        // Never auto-open the drawer when the app boots on the landing page —
+        // the remembered open state only applies once the user is in the editor.
+        suppressAutoOpen: shouldShowLanding(),
       });
       const cur = getState();
       await setAiActiveSession(cur.session?.id ?? null);
@@ -3117,7 +4177,7 @@ async function main() {
   }
 
   // Set initial editor title if we're on the editor page
-  if (!showLanding && !showHelpPage && !showCatalog && !showLegalPage && !show404) {
+  if (!showLanding && !showHelpPage && !showCatalog && !showLegalPage && !showWhatsNew && !show404) {
     updateDocumentTitle({ page: 'editor' });
   }
 
@@ -3154,6 +4214,7 @@ async function main() {
     setActiveLanguage(lang);
     setEditorLanguage(lang);
     setToolbarLanguage(lang);
+    setVoxelPaintAvailable(lang === 'voxel');
     syncEditorTitle(getState());
     const loadingLabel =
       lang === 'scad' ? 'Loading OpenSCAD...' :
@@ -3173,6 +4234,17 @@ async function main() {
 
   const DRAFT_STUB_JS = '// JavaScript\nconst { Manifold } = api;\nreturn Manifold.cube([10, 10, 10], true);';
   const DRAFT_STUB_SCAD = '// OpenSCAD\ncube([10, 10, 10], center=true);';
+  // Voxel — a small colored model so the first paint after switching shows
+  // the workflow (fillBox / set with hex or [r,g,b] colors) immediately.
+  const DRAFT_STUB_VOXEL =
+    '// Voxel — build with colored cubes on an integer grid (1 voxel = 1 unit).\n' +
+    'const { voxels } = api;\n' +
+    'const v = voxels();\n' +
+    "v.fillBox([-5, -5, 0], [4, 4, 0], '#6b8cff');   // a 10x10 base slab\n" +
+    "v.fillBox([-1, -1, 1], [1, 1, 6], '#ff8c42');   // a tower\n" +
+    "v.set(0, 0, 7, '#ff3b30');                       // a red cap\n" +
+    '// Tip: return v.smooth() for rounded edges (see /ai/voxel.md).\n' +
+    'return v;\n';
   // BREP / replicad — quick showcase of the headline features:
   //   - selective fillet (the inDirection-based workaround for box edges,
   //     called out in the gotchas cheat sheet at the top of replicad.md)
@@ -3232,6 +4304,7 @@ async function main() {
     if (nextCode === null) {
       nextCode = lang === 'scad' ? DRAFT_STUB_SCAD
         : lang === 'replicad' ? DRAFT_STUB_REPLICAD
+        : lang === 'voxel' ? DRAFT_STUB_VOXEL
         : DRAFT_STUB_JS;
     }
     setValue(nextCode);
@@ -3250,6 +4323,25 @@ async function main() {
   // during initial load don't hit a Temporal Dead Zone error.)
 
   async function executeIsolated(code: string, lang?: Language) {
+    // Hard refusal in a read-only shared preview. executeIsolated is the single
+    // funnel for every isolated run — runIsolated / runAndAssert / runDecompose
+    // (all AI-exposed tools), modify/test, and forkVersion — so guarding it here
+    // stops the sharer's untrusted code from reaching the `new Function` sandbox
+    // (and thus fetch / indexedDB) via any of them. Fork clears the flag before
+    // importing, so the consented run is unaffected.
+    if (isSharedPreview()) {
+      return {
+        geometryData: {
+          status: 'error' as const,
+          error: SHARED_PREVIEW_REFUSAL,
+          diagnostics: [] as SourceDiagnostic[],
+          executionTimeMs: 0,
+          codeHash: simpleHash(code),
+        },
+        meshData: null as MeshData | null,
+        manifold: null as unknown,
+      };
+    }
     const t0 = performance.now();
     const result = await executeCodeAsync(code, lang);
     const elapsed = Math.round(performance.now() - t0);
@@ -3312,6 +4404,37 @@ async function main() {
       setValue(code);
     },
 
+    /** Read the Customizer parameter schema the current model declared (via
+     *  `api.params({...})`) plus the resolved current value of each. Returns
+     *  `{ schema: [], values: {} }` when the model declares no parameters. Use
+     *  this to discover which knobs exist (and their ranges) before tweaking. */
+    getParams(): { schema: ParamSpec[]; values: Record<string, ParamValue> } {
+      if (!currentParamSchema) return { schema: [], values: {} };
+      return { schema: currentParamSchema, values: resolveParamValues(currentParamSchema, currentParamValues) };
+    },
+
+    /** Set one or more Customizer parameter overrides and re-run the model —
+     *  the language-based equivalent of dragging the panel's sliders. Unknown
+     *  keys are ignored and out-of-range / wrong-type values are clamped or
+     *  fall back to the declared default (never throws on a bad value). Returns
+     *  the updated geometry data plus the resolved parameter values, or
+     *  `{ error }` if the model declares no parameters. */
+    async setParams(values: Record<string, unknown>) {
+      const check = guard(() => { assertObject(values, 'setParams(values)'); return true; });
+      if (typeof check === 'object' && check !== null && 'error' in check) return check;
+      if (!currentParamSchema) {
+        return { error: 'The current model declares no parameters. Add an api.params({...}) call to the model code (and run it) first.' };
+      }
+      currentParamValues = { ...currentParamValues, ...(values as Record<string, ParamValue>) };
+      const applied = await runCodeSync(getValue());
+      if (!applied) return { status: 'error', error: 'Run was superseded by a concurrent execution — retry' };
+      const geometry = JSON.parse(geometryDataEl.textContent || '{}');
+      return {
+        geometry,
+        params: currentParamSchema ? resolveParamValues(currentParamSchema, currentParamValues) : {},
+      };
+    },
+
     /** Slice current manifold at Z height. Returns cross-section data. */
     sliceAtZ(z: number) {
       const check = guard(() => assertNumber(z, 'sliceAtZ(z)'));
@@ -3351,13 +4474,13 @@ async function main() {
     /** Export current model as OBJ download. Optional filename override. */
     exportOBJ(filename?: string) {
       assertString(filename, 'exportOBJ(filename)', { optional: true });
-      if (currentMeshData) exportOBJ(hasColorRegions() ? applyTriColors(currentMeshData) : currentMeshData, filename);
+      if (currentMeshData) exportOBJ((hasColorRegions() || hasModelColorRegions()) ? applyTriColors(currentMeshData) : currentMeshData, filename);
     },
 
     /** Export current model as 3MF download. Optional filename override. */
     export3MF(filename?: string) {
       assertString(filename, 'export3MF(filename)', { optional: true });
-      if (currentMeshData) export3MF(hasColorRegions() ? applyTriColors(currentMeshData) : currentMeshData, filename);
+      if (currentMeshData) export3MF((hasColorRegions() || hasModelColorRegions()) ? applyTriColors(currentMeshData) : currentMeshData, filename);
     },
 
     /** Export the most-recent BREP shape as a STEP file. Only meaningful in
@@ -3433,7 +4556,7 @@ async function main() {
     async exportOBJData(filename?: string) {
       assertString(filename, 'exportOBJData(filename)', { optional: true });
       if (!currentMeshData) return { error: 'No geometry loaded' };
-      const mesh = hasColorRegions() ? applyTriColors(currentMeshData) : currentMeshData;
+      const mesh = (hasColorRegions() || hasModelColorRegions()) ? applyTriColors(currentMeshData) : currentMeshData;
       const built = buildOBJ(mesh, filename);
       registerExportFromBuilt(built, 'OBJ');
       const isText = built.mimeType === 'text/plain';
@@ -3451,7 +4574,7 @@ async function main() {
     async export3MFData(filename?: string) {
       assertString(filename, 'export3MFData(filename)', { optional: true });
       if (!currentMeshData) return { error: 'No geometry loaded' };
-      const mesh = hasColorRegions() ? applyTriColors(currentMeshData) : currentMeshData;
+      const mesh = (hasColorRegions() || hasModelColorRegions()) ? applyTriColors(currentMeshData) : currentMeshData;
       const built = build3MF(mesh, filename);
       registerExportFromBuilt(built, '3MF');
       return {
@@ -3539,12 +4662,62 @@ async function main() {
     async importCodeData(code: string, language: Language, sessionName?: string) {
       const check = guard(() => {
         assertString(code, 'importCodeData(code)', { allowEmpty: false });
-        assertEnum(language, ['manifold-js', 'scad', 'replicad'], 'importCodeData(language)');
+        assertEnum(language, ['manifold-js', 'scad', 'replicad', 'voxel'], 'importCodeData(language)');
         assertString(sessionName, 'importCodeData(sessionName)', { optional: true, allowEmpty: false });
       });
       if (typeof check === 'object' && check !== null && 'error' in check) return check;
       const result = await importCodePayload(code, language, sessionName);
       return { sessionId: result.sessionId };
+    },
+
+    /** Import an image (a `data:` URL or a same-origin URL) as a colored voxel
+     *  model in a new voxel session — the programmatic equivalent of the
+     *  Import → image file flow. `mode: 'billboard'` (default) extrudes every
+     *  surviving pixel to a uniform `depth`; `mode: 'heightmap'` drives a
+     *  per-column height from pixel brightness (with an optional `baseThickness`
+     *  backing, and `invert` to raise dark areas). `colorMode` keeps the
+     *  original color, converts to `grayscale`, or paints a single `flatColor`.
+     *  Transparent pixels below `alphaThreshold` drop out. Returns
+     *  `{ sessionId, voxelCount }` or `{ error }`. */
+    async importImageAsVoxels(imageUrl: string, opts: ImageToVoxelOptions = {}) {
+      const check = guard(() => {
+        assertString(imageUrl, 'importImageAsVoxels(imageUrl)', { allowEmpty: false });
+        assertObject(opts, 'importImageAsVoxels(opts)', { optional: true });
+        if (opts.maxSize !== undefined) assertNumber(opts.maxSize, 'importImageAsVoxels(opts.maxSize)', { min: 1, integer: true });
+        if (opts.mode !== undefined) assertEnum(opts.mode, ['billboard', 'heightmap'], 'importImageAsVoxels(opts.mode)');
+        if (opts.depth !== undefined) assertNumber(opts.depth, 'importImageAsVoxels(opts.depth)', { min: 1, integer: true });
+        if (opts.maxHeight !== undefined) assertNumber(opts.maxHeight, 'importImageAsVoxels(opts.maxHeight)', { min: 1, integer: true });
+        if (opts.baseThickness !== undefined) assertNumber(opts.baseThickness, 'importImageAsVoxels(opts.baseThickness)', { min: 0, integer: true });
+        if (opts.invert !== undefined) assertBoolean(opts.invert, 'importImageAsVoxels(opts.invert)');
+        if (opts.alphaThreshold !== undefined) assertNumber(opts.alphaThreshold, 'importImageAsVoxels(opts.alphaThreshold)', { min: 0, max: 255, integer: true });
+        if (opts.colorMode !== undefined) assertEnum(opts.colorMode, ['original', 'grayscale', 'flat'], 'importImageAsVoxels(opts.colorMode)');
+        if (opts.flatColor !== undefined) {
+          const c = assertNumberTuple(opts.flatColor, 3, 'importImageAsVoxels(opts.flatColor)');
+          c.forEach((n, i) => assertNumber(n, `importImageAsVoxels(opts.flatColor[${i}])`, { min: 0, max: 255, integer: true }));
+        }
+        if (opts.gamma !== undefined) assertNumber(opts.gamma, 'importImageAsVoxels(opts.gamma)', { min: 0.01 });
+        if (opts.brightness !== undefined) assertNumber(opts.brightness, 'importImageAsVoxels(opts.brightness)', { min: -1, max: 1 });
+        if (opts.contrast !== undefined) assertNumber(opts.contrast, 'importImageAsVoxels(opts.contrast)', { min: -1, max: 1 });
+        if (opts.saturation !== undefined) assertNumber(opts.saturation, 'importImageAsVoxels(opts.saturation)', { min: -1, max: 1 });
+        if (opts.posterizeColors !== undefined) assertNumber(opts.posterizeColors, 'importImageAsVoxels(opts.posterizeColors)', { min: 0, integer: true });
+        if (opts.removeBackground !== undefined) assertBoolean(opts.removeBackground, 'importImageAsVoxels(opts.removeBackground)');
+        if (opts.backgroundColor !== undefined) {
+          const c = assertNumberTuple(opts.backgroundColor, 3, 'importImageAsVoxels(opts.backgroundColor)');
+          c.forEach((n, i) => assertNumber(n, `importImageAsVoxels(opts.backgroundColor[${i}])`, { min: 0, max: 255, integer: true }));
+        }
+      });
+      if (typeof check === 'object' && check !== null && 'error' in check) return check;
+      let imageData: ImageData;
+      try {
+        imageData = await decodeImageUrlToImageData(imageUrl);
+      } catch (e) {
+        return { error: `importImageAsVoxels: could not load/decode image — ${(e as Error).message}` };
+      }
+      const grid = imageDataToVoxelGrid(imageData, opts);
+      if (grid.size === 0) return { error: 'importImageAsVoxels: image produced no voxels (every sampled pixel was transparent).' };
+      const code = generateVoxelImportCode(grid, 'image');
+      const result = await importCodePayload(code, 'voxel', 'image-voxels');
+      return { sessionId: result.sessionId, voxelCount: grid.size };
     },
 
     // === Recent Exports inbox ===
@@ -3607,7 +4780,7 @@ async function main() {
         if (opts !== undefined) {
           const o = assertObject(opts, 'validate(code, opts)')!;
           assertNoUnknownKeys(o, ['language'], 'validate(opts)');
-          if (o.language !== undefined) assertEnum(o.language, ['manifold-js', 'scad', 'replicad'], 'validate(opts).language');
+          if (o.language !== undefined) assertEnum(o.language, ['manifold-js', 'scad', 'replicad', 'voxel'], 'validate(opts).language');
         }
         return true;
       });
@@ -3627,7 +4800,7 @@ async function main() {
      *  session are not touched — they keep the language they were authored in
      *  and re-load you into that engine when you navigate to them. */
     async setActiveLanguage(lang: Language): Promise<void> {
-      assertEnum(lang, ['manifold-js', 'scad', 'replicad'], 'setActiveLanguage(lang)');
+      assertEnum(lang, ['manifold-js', 'scad', 'replicad', 'voxel'], 'setActiveLanguage(lang)');
       await switchLanguageWithDrafts(lang);
     },
 
@@ -4054,6 +5227,69 @@ async function main() {
      *  strip; any other string is also valid. Multiple items may share a label.
      *  Replaces all currently attached images. If a session is active, also persists
      *  to IndexedDB. Returns the canonical list with assigned ids. */
+    /** Generate a colour tile / stepped-relief Part from an image (data: or http(s) URL). */
+    async importImageAsRelief(args: { src: string; mode?: ReliefImportMode; options?: Partial<ReliefCommonOptions>; quantized?: Record<string, unknown>; preprocess?: Record<string, unknown>; crop?: { left: number; top: number; right: number; bottom: number } }): Promise<{ sessionId: string } | { error: string }> {
+      if (!args || typeof args !== 'object') return { error: 'importImageAsRelief: expected an object { src, mode?, options?, quantized?, crop? }' };
+      const src = (args as { src?: unknown }).src;
+      if (typeof src !== 'string' || src.length === 0) return { error: 'importImageAsRelief: src must be a non-empty data: or http(s) URL string' };
+      try {
+        const image = await dataUrlToImageData(src);
+        const opts: ReliefOptions = structuredClone(DEFAULT_RELIEF_OPTIONS);
+        const mode = (args as { mode?: unknown }).mode;
+        if (mode === 'luminance' || mode === 'quantized' || mode === 'ai') opts.mode = mode;
+        const o = (args as { options?: unknown }).options;
+        if (o && typeof o === 'object') opts.common = { ...opts.common, ...(o as Partial<ReliefCommonOptions>) };
+        const q = (args as { quantized?: unknown }).quantized;
+        if (q && typeof q === 'object') opts.quantized = { ...opts.quantized, ...(q as Record<string, unknown>) } as typeof opts.quantized;
+        const pp = (args as { preprocess?: unknown }).preprocess;
+        if (pp && typeof pp === 'object') opts.preprocess = { ...opts.preprocess, ...(pp as Record<string, unknown>) } as typeof opts.preprocess;
+        const crop = (args as { crop?: unknown }).crop;
+        if (crop && typeof crop === 'object') opts.crop = crop as ReliefOptions['crop'];
+        return await createReliefFromImageData(image, opts, 'relief');
+      } catch (e) {
+        return { error: `importImageAsRelief failed: ${e instanceof Error ? e.message : String(e)}` };
+      }
+    },
+    /** Generate a multi-colour tile from raw SVG text. Each `<path fill>` becomes
+     *  one seed region with crisp boundaries (no clustering). */
+    async importSvgAsRelief(args: { svgText: string; options?: Partial<ReliefCommonOptions>; quantized?: Record<string, unknown>; preprocess?: Record<string, unknown> }): Promise<{ sessionId: string } | { error: string }> {
+      if (!args || typeof args !== 'object') return { error: 'importSvgAsRelief: expected an object { svgText, options?, quantized? }' };
+      const svgText = (args as { svgText?: unknown }).svgText;
+      if (typeof svgText !== 'string' || svgText.length === 0) return { error: 'importSvgAsRelief: svgText must be a non-empty SVG string' };
+      try {
+        const opts: ReliefOptions = structuredClone(DEFAULT_RELIEF_OPTIONS);
+        const o = (args as { options?: unknown }).options;
+        if (o && typeof o === 'object') opts.common = { ...opts.common, ...(o as Partial<ReliefCommonOptions>) };
+        const q = (args as { quantized?: unknown }).quantized;
+        if (q && typeof q === 'object') opts.quantized = { ...opts.quantized, ...(q as Record<string, unknown>) } as typeof opts.quantized;
+        const pp = (args as { preprocess?: unknown }).preprocess;
+        if (pp && typeof pp === 'object') opts.preprocess = { ...opts.preprocess, ...(pp as Record<string, unknown>) } as typeof opts.preprocess;
+        return await createReliefFromSvgText(svgText, opts, 'svg');
+      } catch (e) {
+        return { error: `importSvgAsRelief failed: ${e instanceof Error ? e.message : String(e)}` };
+      }
+    },
+    /** The advisory single-nozzle filament-swap guide for the current relief. */
+    getReliefSwapGuide(): unknown {
+      if (!currentMeshData) return { error: 'getReliefSwapGuide: no geometry loaded — create or load a relief first.' };
+      return getSwapGuideFor(currentMeshData, currentLayerHeight());
+    },
+    /** Switch the relief optical preview mode: 'flat' | 'ams' | 'single-nozzle'. */
+    setReliefPreviewMode(mode: PreviewMode): { ok: true } | { error: string } {
+      if (mode !== 'flat' && mode !== 'ams' && mode !== 'single-nozzle') return { error: "setReliefPreviewMode: mode must be 'flat', 'ams', or 'single-nozzle'" };
+      const sid = getState().session?.id ?? null;
+      // Guard the setter — without this an AI/console call into a non-relief
+      // session writes a previewMode record into ReliefSettings for that
+      // session and starts shading its mesh with relief-preview colours.
+      if (!sid || !isReliefSession(sid)) {
+        return { error: 'setReliefPreviewMode: no relief session active. Create one with importImageAsRelief first.' };
+      }
+      ctlSetReliefPreviewMode(mode);
+      updateReliefSettings(sid, { previewMode: mode });
+      refreshModelColors();
+      reliefStudio?.refresh();
+      return { ok: true };
+    },
     setImages(images: Array<{ src: string; id?: string; label?: string }>): AttachedImage[] {
       const arr = assertArray(images, 'setImages(images)') as Array<Record<string, unknown>>;
       const items: AttachedImage[] = [];
@@ -4320,6 +5556,9 @@ async function main() {
         await switchLanguage(versionLang);
       }
       setValue(version.code);
+      // Restore this version's Customizer overrides before the re-run so it
+      // renders with the values it was saved at (matches loadVersionIntoEditor).
+      currentParamValues = { ...(version.paramValues ?? {}) };
       await runCodeSync(version.code);
       rehydrateColorRegions(version.geometryData);
       applyVersionAnnotations(version);
@@ -4345,7 +5584,21 @@ async function main() {
       if (typeof check === 'object' && check !== null && 'error' in check) return check;
       const version = await navigateVersion(direction);
       if (version) {
+        // Each version remembers the language it was authored in (since schema
+        // 1.8). Swap the engine before re-running so a JS version stepped into
+        // while another engine is active doesn't run under the wrong sandbox —
+        // e.g. a manifold-js version under the voxel/replicad engine, whose
+        // `api` has no `params` (and voxel no `Manifold`), which surfaced as
+        // "api.params is not a function" / "reading 'cube' of undefined".
+        // Mirrors loadVersion()'s language handling.
+        const versionLang = effectiveVersionLanguage(version, getState().session);
+        if (versionLang !== getActiveLanguage()) {
+          await switchLanguage(versionLang);
+        }
         setValue(version.code);
+        // Restore this version's Customizer overrides before the re-run so it
+        // renders with the values it was saved at (matches loadVersion).
+        currentParamValues = { ...(version.paramValues ?? {}) };
         await runCodeSync(version.code);
         rehydrateColorRegions(version.geometryData);
         applyVersionAnnotations(version);
@@ -4395,7 +5648,7 @@ async function main() {
       }
 
       const thumbnail = await captureThumbnail();
-      const version = await saveVersion(code, enrichGeometryDataWithColors(getGeometryDataObj()), thumbnail, label, assertions?.notes);
+      const version = await saveVersion(code, enrichGeometryDataWithColors(getGeometryDataObj()), thumbnail, label, assertions?.notes, { paramValues: currentParamValues });
 
       let diff = null;
       if (prevGeoData && prevGeoData.status === 'ok' && newGeoData.status === 'ok') {
@@ -4514,7 +5767,7 @@ async function main() {
       const annotationsCarried = (parent.annotations?.length ?? 0) > 0;
 
       const thumbnail = await captureThumbnail();
-      const version = await saveVersion(newCode, enrichGeometryDataWithColors(getGeometryDataObj()), thumbnail, label, assertions?.notes);
+      const version = await saveVersion(newCode, enrichGeometryDataWithColors(getGeometryDataObj()), thumbnail, label, assertions?.notes, { paramValues: currentParamValues });
 
       let diff = null;
       if (prevGeoData && prevGeoData.status === 'ok' && newGeoData.status === 'ok') {
@@ -4582,6 +5835,23 @@ async function main() {
     /** Get URL for the gallery view of the current session */
     getGalleryUrl() {
       return getGalleryUrl();
+    },
+
+    /** Mint a self-contained, read-only share link for the current version.
+     *
+     *  This is the link to hand back to the user when you're done — unlike
+     *  `getSessionUrl()`/`getGalleryUrl()` (which only resolve on this browser,
+     *  against this browser's IndexedDB), a share link encodes the whole design
+     *  into the URL hash, so anyone can open it anywhere and fork it into their
+     *  own editable copy. Nothing is uploaded to a server.
+     *
+     *  Commits the current buffer first (so unsaved edits are captured), then
+     *  encodes the current part's current version. Multi-part sessions share one
+     *  part per link. Returns `{ url, encodedBytes }` on success or `{ error }`
+     *  (e.g. no session open, browser lacks CompressionStream, or the design is
+     *  too large to fit in a URL). */
+    async getShareLink() {
+      return buildShareLink();
     },
 
     /** Get current session state */
@@ -5372,6 +6642,9 @@ async function main() {
       });
       if (typeof check === 'object' && check !== null && 'error' in check) {
         return { success: false, error: check.error };
+      }
+      if (isSharedPreview()) {
+        return { success: false, error: SHARED_PREVIEW_REFUSAL };
       }
       const result = executeCode(code, 'manifold-js');
       if (result.error) {
@@ -6899,6 +8172,22 @@ async function main() {
       return { count: labels.length, labels, ...(lost ? { lostLabels: lost } : {}) };
     },
 
+    /** Report the colors the current run declared in code via
+     *  `api.label(shape, name, { color })` (and `api.labeledUnion` entries with a
+     *  `color`). These render and export automatically as a derived underlay —
+     *  no paint step — and the editor stays editable. Manual paint composites on
+     *  top. Returns `{ count, colors: [{name, color, triangleCount}] }`; an empty
+     *  list means no colors were declared (or the labelled triangles vanished in
+     *  a boolean — check `listLabels().lostLabels`). */
+    getModelColors() {
+      const colors = getModelRegions().map(r => ({
+        name: r.name,
+        color: r.color,
+        triangleCount: r.triangles.size,
+      }));
+      return { count: colors.length, colors };
+    },
+
     /** Paint a labelled feature by name. The label must have been
      *  registered in the current run's code via `api.label(shape, name)`
      *  or `api.labeledUnion([{name, shape}, ...])`. This is the cleanest
@@ -6917,6 +8206,65 @@ async function main() {
      *  ```
      *  Returns `{ id, name, triangles, bbox, centroid }` on success or
      *  `{ error }` if no such label exists or no labels were registered. */
+    /** Voxel paint mode — only valid in `voxel` language sessions. Activates a
+     *  per-voxel click-to-color edit loop: the current code is re-run locally
+     *  to capture the grid + per-triangle voxel provenance, the editor is
+     *  locked (read-only) so auto-run can't clobber edits, and clicks on the
+     *  3D model set or erase voxels in the live grid. Call
+     *  `bakeVoxelsToCode()` to commit; `deactivateVoxelPaint()` to cancel.
+     *  Returns `{ voxelCount }` or `{ error }`. */
+    activateVoxelPaint() {
+      if (getActiveLanguage() !== 'voxel') {
+        return { error: 'activateVoxelPaint is only available in voxel sessions — call setActiveLanguage("voxel") first.' };
+      }
+      const code = getValue();
+      const err = voxelPaint.activate(code, {
+        onMeshUpdate: (mesh) => { updateMesh(mesh, { skipAutoFrame: true }); },
+        onLockChange: (locked) => { setReadOnlyReason('voxelPaint', locked); },
+      });
+      if (err) return { error: `activateVoxelPaint: ${err}` };
+      syncVoxelPaintUI();
+      return { voxelCount: voxelPaint.voxelCount() };
+    },
+
+    /** Cancel voxel paint mode without committing — the editor unlocks and the
+     *  next auto-run / Run rebuilds the mesh from the (unchanged) code. */
+    deactivateVoxelPaint() {
+      if (!voxelPaint.isActive()) return { error: 'voxel paint is not active' };
+      voxelPaint.deactivate();
+      // Trigger a fresh render so the viewport returns to the code's output.
+      runCode(getValue());
+      syncVoxelPaintUI();
+      return { ok: true };
+    },
+
+    /** Click on a face during voxel paint: set the underlying voxel's color
+     *  (or remove it when `erase: true`). Use this instead of synthesising
+     *  pointer events. Returns whether the grid actually changed. */
+    paintVoxelFace(opts: { faceIndex: number; color?: [number, number, number] | string | number; erase?: boolean }) {
+      if (!voxelPaint.isActive()) return { error: 'voxel paint is not active — call activateVoxelPaint() first.' };
+      if (!opts || typeof opts !== 'object') return { error: 'paintVoxelFace requires { faceIndex, color? }' };
+      if (!Number.isInteger(opts.faceIndex) || opts.faceIndex < 0) return { error: 'paintVoxelFace.faceIndex must be a non-negative integer' };
+      voxelPaint.setEraser(!!opts.erase);
+      if (!opts.erase && opts.color !== undefined) {
+        try { voxelPaint.setColor(opts.color); }
+        catch (e) { return { error: (e as Error).message }; }
+      }
+      const changed = voxelPaint.paintTriangle(opts.faceIndex);
+      return { changed, voxelCount: voxelPaint.voxelCount() };
+    },
+
+    /** Bake the painted grid into `voxels.decode(...)` editor code, run it,
+     *  and save as a new version. Deactivates voxel paint mode after baking.
+     *  Auto-creates a session if none exists. Returns `{ versionIndex,
+     *  voxelCount }` or `{ error }`. */
+    async bakeVoxelsToCode(opts: { label?: string } = {}) {
+      const label = typeof opts.label === 'string' && opts.label ? opts.label : 'painted';
+      const result = await bakePaintedVoxelsAsVersion(label);
+      syncVoxelPaintUI();
+      return result;
+    },
+
     paintByLabel(opts: { label: string; color: [number, number, number]; name?: string; topOnly?: boolean; normalCone?: { axis: [number, number, number]; angleDeg: number } }) {
       if (!opts || typeof opts !== 'object') return { error: 'paintByLabel requires { label, color }' };
       if (typeof opts.label !== 'string' || opts.label.length === 0) return { error: 'paintByLabel.label must be a non-empty string' };
@@ -7217,7 +8565,8 @@ async function main() {
         'changePart':      { signature: 'await changePart(id) -- Switch active part (loads its latest version)', docs: '/ai.md#console-api--windowpartwright' },
         'renamePart':      { signature: 'await renamePart(id, name) -- Rename a part', docs: '/ai.md#console-api--windowpartwright' },
         'deletePart':      { signature: 'await deletePart(id) -- Delete a part and its versions', docs: '/ai.md#console-api--windowpartwright' },
-        'getGalleryUrl':   { signature: 'getGalleryUrl() -- URL for gallery view (human review)', docs: '/ai.md#console-api--windowpartwright' },
+        'getShareLink':    { signature: 'await getShareLink() -- Read-only share link for the current version -> {url, encodedBytes} or {error}; the link to hand the user when done', docs: '/ai.md#console-api--windowpartwright' },
+        'getGalleryUrl':   { signature: 'getGalleryUrl() -- URL for gallery view (local browser only)', docs: '/ai.md#console-api--windowpartwright' },
         // Notes
         'addSessionNote':  { signature: 'await addSessionNote(text) -- Add note with [PREFIX] tag', docs: '/ai.md#session-notes----tracking-design-context' },
         'listSessionNotes': { signature: 'await listSessionNotes() -- List all session notes', docs: '/ai.md#session-notes----tracking-design-context' },
@@ -7289,6 +8638,7 @@ async function main() {
         'listComponents':  { signature: 'listComponents() -> {count, components: [{index, centroid, boundingBox, volume, surfaceArea}]} -- Decompose the manifold into boolean-distinct parts. For "paint each feature" workflows (e.g. unioned head + eyes + mouth).', docs: '/ai/colors.md' },
         'paintComponent':  { signature: 'paintComponent({index, color, name?, topOnly?}) -- One-call shortcut: listComponents + paintInBox for the Nth piece.', docs: '/ai/colors.md' },
         'listLabels':      { signature: 'listLabels() -> {count, labels: [{name, triangleCount, bbox, centroid}]} -- Labels registered in the current run via api.label(shape, name). Survives boolean ops; the cleanest paint primitive on agent-authored geometry.', docs: '/ai/colors.md' },
+        'getModelColors':  { signature: 'getModelColors() -> {count, colors: [{name, color, triangleCount}]} -- Colors declared in code via api.label(shape, name, {color}). Render + export automatically; editor stays editable; manual paint overrides.', docs: '/ai/colors.md' },
         'paintByLabel':    { signature: 'paintByLabel({label, color, name?}) -- Paint a labelled feature by name. Pair with api.label/labeledUnion in your code. No coordinate guessing.', docs: '/ai/colors.md' },
         'paintByLabels':   { signature: 'paintByLabels([{label, color, name?}, ...]) -- Batch sibling. N features painted in one call -> {results, failed}. Use for any multi-feature paint job.', docs: '/ai/colors.md' },
         'paintConnected':  { signature: 'paintConnected({seed: {point, normal?}, maxDeviationDeg?, color, name?}) -- BFS-flood from a surface seed, gated by deviation from SEED normal (not adjacent). Pairs with probePixel for "paint everything contiguous and facing this way".', docs: '/ai/colors.md' },
@@ -7903,20 +9253,38 @@ async function main() {
   function geometryWarnings(geo: Record<string, unknown>): string[] {
     if (!geo || geo.status !== 'ok') return [];
     const warnings: string[] = [];
+    const isBrep = getActiveLanguage() === 'replicad';
     if (geo.isManifold === false) {
       warnings.push(
-        'isManifold: false — the mesh has non-manifold edges or gaps. ' +
-        'Export and slicing will fail with most tools. Fix the geometry ' +
-        'before finalizing: ensure boolean operands overlap by ≥ 0.5 units, ' +
+        'isManifold: false — the mesh has non-manifold edges or gaps, so it is ' +
+        'not a watertight solid and will fail to slice / 3D-print with most tools. ' +
+        'Fix before finalizing: ensure boolean operands overlap by ≥ 0.5 units, ' +
         'avoid zero-thickness walls, and check for duplicate faces.',
       );
     }
     if (typeof geo.componentCount === 'number' && geo.componentCount > 1) {
-      warnings.push(
-        `componentCount: ${geo.componentCount} — model has ${geo.componentCount} disconnected pieces. ` +
-        'If unintentional, check that boolean union shapes overlap by ≥ 0.5 units. ' +
-        'If intentional (separate printable parts), ignore this warning.',
-      );
+      const cc = geo.componentCount;
+      // Partwright exists to produce printable parts, so a multi-component
+      // result is almost always a failed union rather than a deliberate
+      // assembly. Frame it as a print defect and point at the exact tool that
+      // diagnoses it, instead of inviting the model to shrug it off.
+      let msg =
+        `componentCount: ${cc} — the model is ${cc} disconnected solids. ` +
+        `For 3D printing that means ${cc} separate pieces: any part not connected ` +
+        `to the main body floats free and will detach (or print in mid-air). ` +
+        `Unless you deliberately intend a multi-part assembly, the pieces must ` +
+        `volumetrically OVERLAP by ≥ 0.5 units to fuse into one solid — a shared ` +
+        `face or a point/edge touch is NOT enough.`;
+      msg += isBrep
+        ? ' In BREP this bites often: OCCT leaves non-overlapping or thinly-touching ' +
+          'shapes as a disconnected compound even after fuse / fuseAll (e.g. a thin ' +
+          'annular sliver of overlap frequently fails to bond). Call ' +
+          'runAndExplain(code) to list every component with a per-floater overlap ' +
+          'suggestion, then seat the piece a few units deeper into its neighbour and ' +
+          're-run until componentCount is 1.'
+        : ' Call runAndExplain(code) to see which pieces are disconnected and get a ' +
+          'concrete .translate() overlap suggestion for each floater.';
+      warnings.push(msg);
     }
     // Surface color regions that no longer resolve to any triangles on
     // the freshly-run mesh — descriptors are still serialized (so the
@@ -7980,13 +9348,13 @@ async function main() {
     paintRefreshPending = true;
     requestAnimationFrame(() => {
       paintRefreshPending = false;
-      if (!currentMeshData) return;
-      const colored = applyTriColorsIfVisible(currentMeshData);
-      updateMesh(colored, { skipAutoFrame: true });
+      refreshModelColors();
     });
   }
 
   function runCode(code?: string, opts: { surfaceErrors?: boolean } = {}) {
+    // Never execute the sharer's untrusted code in a read-only preview. Fork first.
+    if (isSharedPreview()) return;
     const src = code ?? getValue();
     setStatus(statusBar, 'running', 'Running...');
     clearEditorDiagnostics();
@@ -8002,6 +9370,11 @@ async function main() {
   }
 
   async function runCodeSync(src: string, opts: { surfaceErrors?: boolean } = {}): Promise<boolean> {
+    // Hard refusal in shared-preview mode: this is the single execution
+    // chokepoint that the console API (partwright.run / runAndSave) also routes
+    // through, so guarding it here keeps the sharer's untrusted code from ever
+    // reaching `new Function('api', code)` until the viewer forks.
+    if (isSharedPreview()) return false;
     // Manual runs (Run button, version load, partwright.run) surface errors
     // immediately; auto-runs defer to the idle/blur triggers so the editor
     // doesn't flicker an error on every keystroke.
@@ -8009,7 +9382,8 @@ async function main() {
     const myGen = ++_runGeneration;
     _running = true;
     const t0 = performance.now();
-    const result = await executeCodeAsync(src);
+    // Feed the Customizer's current overrides into the model's api.params(...).
+    const result = await executeCodeAsync(src, undefined, currentParamValues);
 
     // A newer runCodeSync was dispatched while we were awaiting the Worker.
     // Discard this result to prevent a stale version from overwriting the
@@ -8018,6 +9392,13 @@ async function main() {
 
     const elapsed = Math.round(performance.now() - t0);
     _running = false;
+
+    // Reconcile the Customizer with what the model declared this run. The
+    // schema rides on the result for both success and error, so the panel
+    // stays visible (and editable) even while the model is mid-error. Prune
+    // overrides to the keys the model still declares so values from a previous
+    // model don't linger, then reflect resolved values in the widgets.
+    syncParamsPanel(result.paramsSchema);
 
     if (result.error) {
       const diagnostics = result.diagnostics ?? [];
@@ -8070,6 +9451,10 @@ async function main() {
       // keep working without changes on the main thread.
       if (result.manifold) {
         currentManifold = result.manifold;
+      } else if (result.renderOnly) {
+        // Render-only output (api.renderMesh) is intentionally not a real
+        // Manifold; trying to ofMesh() it would throw "Not manifold".
+        currentManifold = null;
       } else {
         const mod = getModule();
         currentManifold = (mod && result.mesh) ? mod.Manifold.ofMesh(result.mesh) : null;
@@ -8080,6 +9465,22 @@ async function main() {
       currentLabelMap = result.labelMap ?? null;
       currentLostLabels = result.lostLabels ?? null;
       setPaintLabels(currentLabelMap);
+
+      // Model-declared colors (api.label(shape, name, { color })) become a
+      // derived underlay: resolve each labelled name's triangles from the fresh
+      // labelMap and hand them to the model-region layer. Rebuilt every run
+      // (so editing a color in code updates the render) and replaced wholesale
+      // — passing [] when nothing was declared clears any prior run's layer.
+      // This layer never locks the editor and is never serialized; the user's
+      // manual paint composites on top of it. See src/color/regions.ts.
+      const modelColorDecls: { name: string; color: [number, number, number]; triangles: Set<number> }[] = [];
+      if (result.labelColors && currentLabelMap) {
+        for (const [name, color] of result.labelColors) {
+          const triangles = currentLabelMap.get(name);
+          if (triangles && triangles.size > 0) modelColorDecls.push({ name, color, triangles });
+        }
+      }
+      setModelColorRegions(modelColorDecls);
 
       // Apply any existing color regions to the mesh. Refining regions —
       // smooth brush strokes AND smooth slab/box regions — subdivide the mesh:
@@ -8094,7 +9495,7 @@ async function main() {
       if (hasColorRegions() && hasRefineDescriptors()) {
         rebuildPaintedGeometry();
         lastStrokeList = strokeDescriptors();
-      } else if (hasColorRegions()) {
+      } else if (hasColorRegions() || hasModelColorRegions()) {
         // Re-resolve each non-refining region's triangles against the
         // freshly-run mesh. Without this, the in-memory `triangles` Set
         // still indexes the previous mesh — wrong colors when the

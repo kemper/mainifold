@@ -58,6 +58,7 @@ import {
   clearRegions,
   removeRegion,
   setRegionVisibility,
+  updateRegionColor,
   addRegion,
 } from './regions';
 import { getPaintLabels, onPaintLabelsChange, type LabelInfo } from './labels';
@@ -1273,7 +1274,19 @@ function updateLabelList(container: HTMLElement): void {
   }
 }
 
+// Triangle count of the *base* mesh the current label snapshot was built
+// against. The label rows are (re)built only when the labels snapshot changes
+// (a fresh run), at which point `getPaintMesh()` is that base mesh. Captured
+// here so the hover preview can detect later topology changes (subdivision)
+// that would make the snapshot's raw triangle ids stale. -1 = unknown.
+let labelBaseNumTri = -1;
+
 function createLabelRow(label: LabelInfo, alreadyPainted: boolean): HTMLElement {
+  // Rows are rebuilt on every labels-snapshot change, which coincides with the
+  // base mesh being the current paint mesh — record its triangle count so the
+  // hover handler can later tell whether the working mesh has been refined.
+  labelBaseNumTri = getPaintMesh()?.numTri ?? -1;
+
   const row = document.createElement('div');
   row.className = 'flex items-center gap-1.5 py-0.5 group rounded px-1 -mx-1 hover:bg-zinc-700/40 transition-colors cursor-pointer';
   row.dataset.labelName = label.name;
@@ -1284,15 +1297,25 @@ function createLabelRow(label: LabelInfo, alreadyPainted: boolean): HTMLElement 
   // Hover-to-highlight: render a 40%-opacity overlay over the label's
   // triangles in the current paint color so the user can preview which
   // region a click will paint. Skip the preview entirely when the active
-  // paint mesh has been refined past the label's index range — labels are
-  // built against the run's base mesh, and `paintByLabel`'s commit path
-  // remaps to refined ids via `parentToChildren`, but `previewTriangles`
-  // doesn't, so indexing raw base ids into a refined mesh would highlight
-  // the wrong triangles. Bounds-check via the pre-computed `maxTriId`.
+  // paint mesh is no longer the run's *base* mesh the label was built
+  // against — `paintByLabel`'s commit path remaps base ids to refined ids
+  // via `parentToChildren`, but `previewTriangles` doesn't, so indexing raw
+  // base ids into a refined mesh highlights the wrong triangles. A simple
+  // `maxTriId >= numTri` bound is NOT enough: smooth/slab/cylinder
+  // subdivision REBUILDS and RENUMBERS every triangle, usually producing
+  // *more* triangles, so the stale ids still fall inside the new range and
+  // pass that bound while pointing at unrelated triangles. Instead gate on
+  // the base-mesh triangle count captured when the labels were last built
+  // (see `labelBaseNumTri`): any change to the working mesh's topology means
+  // the label ids no longer line up, so the preview is suppressed.
   row.addEventListener('mouseenter', () => {
     if (label.triangles.size === 0) return;
     const mesh = getPaintMesh();
-    if (!mesh || label.maxTriId >= mesh.numTri) return;
+    if (!mesh) return;
+    // Topology changed since the labels were built (e.g. subdivision) — the
+    // label's triangle ids are stale, so don't preview against this mesh.
+    if (labelBaseNumTri < 0 || mesh.numTri !== labelBaseNumTri) return;
+    if (label.maxTriId >= mesh.numTri) return;
     releaseLabelHover();
     activeLabelHoverRelease = previewTriangles(label.triangles, getColor());
   });
@@ -1371,10 +1394,26 @@ function updateRegionList(container: HTMLElement): void {
       if (releaseHover) { releaseHover(); releaseHover = null; }
     });
 
-    const dot = document.createElement('span');
-    dot.className = 'w-3 h-3 rounded-sm shrink-0';
-    dot.style.backgroundColor = rgbToCSS(region.color);
+    // Color swatch doubles as an edit affordance: the dot IS the native
+    // <input type="color">, styled to read as a swatch. The OS picker pops up
+    // anchored to the swatch (no hidden offscreen input → no "picker closes
+    // when I move the mouse" surprise). `change` commits a single
+    // updateRegionColor on release, so the mesh reconciler only fires once
+    // per pick instead of on every channel drag.
+    const dot = document.createElement('input');
+    dot.type = 'color';
+    dot.value = rgbToHex(region.color);
+    dot.className = 'w-3.5 h-3.5 shrink-0 rounded-sm border border-zinc-500 hover:border-white/60 cursor-pointer bg-transparent p-0 [&::-webkit-color-swatch-wrapper]:p-0 [&::-webkit-color-swatch]:rounded-sm [&::-webkit-color-swatch]:border-0 [&::-moz-color-swatch]:rounded-sm [&::-moz-color-swatch]:border-0';
+    dot.title = `Click to change colour (${rgbToHex(region.color)})`;
     if (!region.visible) dot.classList.add('opacity-30');
+    dot.addEventListener('change', () => {
+      const hex = dot.value;
+      const r = parseInt(hex.slice(1, 3), 16) / 255;
+      const g = parseInt(hex.slice(3, 5), 16) / 255;
+      const b = parseInt(hex.slice(5, 7), 16) / 255;
+      updateRegionColor(region.id, [r, g, b]);
+    });
+    dot.addEventListener('click', (e) => e.stopPropagation());
 
     const label = document.createElement('span');
     label.className = `text-[11px] truncate flex-1 ${region.visible ? 'text-zinc-400' : 'text-zinc-600 line-through'}`;
