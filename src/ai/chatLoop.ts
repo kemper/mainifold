@@ -358,7 +358,14 @@ export async function runTurn(input: RunTurnInput, callbacks: RunTurnCallbacks =
     if (result.thinking && result.thinking.trim().length > 0) {
       assistantBlocks.push({ type: 'thinking', text: result.thinking });
     }
-    if (result.text.length > 0) assistantBlocks.push({ type: 'text', text: result.text });
+    if (result.text.length > 0) {
+      // Gemini binds a thought signature to a pure-text turn (see gemini.ts).
+      // Persist it on the text block so it replays on the next request and the
+      // model keeps its reasoning thread (otherwise it degrades into a tiny,
+      // premature end_turn). Other providers never set it.
+      const textSig = (result as { textThoughtSignature?: string }).textThoughtSignature;
+      assistantBlocks.push({ type: 'text', text: result.text, ...(textSig ? { thoughtSignature: textSig } : {}) });
+    }
 
     const assistantMsg: ChatMessage = {
       id: assistantId,

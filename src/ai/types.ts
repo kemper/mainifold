@@ -244,7 +244,14 @@ export interface ChatMessage {
 }
 
 export type ChatBlock =
-  | { type: 'text'; text: string }
+  /** A run of assistant or user text. `thoughtSignature` is a Gemini-3-only
+   *  carrier: Gemini attaches an opaque signature to the answer text part of a
+   *  thinking turn (in streaming it can arrive on a trailing empty-text part)
+   *  and expects it echoed back on the next request to preserve reasoning
+   *  continuity. We persist it on the block so it survives reload + resume and
+   *  replays in the exact part Gemini handed it to us. Other providers never
+   *  set it and ignore it; display reads only `text`. */
+  | { type: 'text'; text: string; thoughtSignature?: string }
   | { type: 'image'; source: ImageSource }
   /** The model's reasoning / thought summary for a turn (Gemini 3 thinking
    *  models' `thought` parts, or Anthropic extended-thinking text when the
@@ -253,8 +260,9 @@ export type ChatBlock =
    *  don't bury the reply. This block is display-only and is NEVER replayed
    *  as model text by any request builder: re-feeding the prose wastes tokens.
    *  Cross-turn continuity, where a provider needs it, rides on a separate
-   *  signed payload — `thoughtSignature` on the tool call for Gemini, and the
-   *  `ChatMessage.thinkingBlocks` array for Anthropic. */
+   *  signed payload — `thoughtSignature` on the tool call (or the answer-text
+   *  block) for Gemini, and the `ChatMessage.thinkingBlocks` array for
+   *  Anthropic. */
   | { type: 'thinking'; text: string }
   /** A review produced by an alternate provider via the Review feature.
    *  Rendered with a distinct bubble in the panel; serialized as plain
