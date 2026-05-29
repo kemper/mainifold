@@ -365,7 +365,7 @@ export function extractImagePalette(
 
 /** Above this many builder calls, `'calls'` codegen falls back to the compact
  *  `voxels.decode(...)` blob so the editor stays responsive. */
-const MAX_BUILDER_CALLS = 6000;
+export const MAX_BUILDER_CALLS = 6000;
 
 function hexOf(rgb: number): string {
   return '#' + (rgb & 0xffffff).toString(16).padStart(6, '0');
@@ -416,6 +416,15 @@ function gridToBuilderCalls(grid: VoxelGrid): string[] | null {
     }
   }
   return lines;
+}
+
+/** How many builder calls the `'calls'` codegen would emit for this grid (0 for
+ *  an empty grid). Lets the import modal show, before committing, whether the
+ *  editable-code style will be used or fall back to compact data at
+ *  {@link MAX_BUILDER_CALLS}. */
+export function countVoxelBuilderCalls(grid: VoxelGrid): number {
+  const calls = gridToBuilderCalls(grid);
+  return calls ? calls.length : 0;
 }
 
 /** Options for {@link generateVoxelImportCode}. */

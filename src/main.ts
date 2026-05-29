@@ -85,7 +85,7 @@ import {
 import { createThumbnailFromImageData } from './import/imageThumbnail';
 import { showImportPreview, summarizeSessionImport } from './ui/importPreview';
 import { showImportTargetModal } from './ui/importTargetModal';
-import { showImageVoxelImportModal } from './ui/imageVoxelImportModal';
+import { showImageVoxelImportModal, type ImageVoxelModalResult } from './ui/imageVoxelImportModal';
 import { showStepImportTargetModal } from './ui/stepImportTargetModal';
 import { showLanguageHelpModal } from './ui/languageHelpModal';
 import { showMergePartsModal } from './ui/mergePartsModal';
@@ -2166,6 +2166,33 @@ async function main() {
    *  sprites voxelize cleanly; opaque photos become a full extruded slab.
    *  The grid is embedded in the generated `voxels.decode(...)` code, so the
    *  session persists as code with no special schema. */
+  /** Shared tail of every image→voxel import (drag/drop, recent re-click, and
+   *  the modal-first menu): turn the modal result into a voxel session + a
+   *  Recent Imports entry. `fallbackFile` seeds the source blob when the result
+   *  didn't carry one (the picker flows always do). */
+  async function finishVoxelImport(result: ImageVoxelModalResult, fallbackFile?: File): Promise<boolean> {
+    const { options: opts, image: chosenImage, file: chosenFile, filename: chosenName } = result;
+    const sourceFile = chosenFile ?? fallbackFile ?? null;
+    const grid = imageDataToVoxelGrid(chosenImage, opts);
+    if (grid.size === 0) {
+      alert(`"${chosenName}" produced no voxels at the chosen settings. Try lowering the transparency cutoff.`);
+      return false;
+    }
+    const code = generateVoxelImportCode(grid, chosenName, { style: opts.codeStyle });
+    const sessionName = chosenName.replace(/\.(png|jpe?g|gif|webp|bmp)$/i, '');
+    await importCodePayload(code, 'voxel', sessionName);
+    // Register in Recent Imports tagged as a voxel import, with the chosen
+    // settings + a thumbnail, so re-clicking it reopens THIS modal (not relief)
+    // pre-loaded with these knobs. Needs the source blob to re-import later.
+    if (sourceFile) {
+      const meta: ImportMetadata = { importer: 'voxel', options: opts };
+      // chosenImage always originates from decodeImage*ToImageData (a real
+      // ImageData), so the ImageDataLike→ImageData narrowing is safe here.
+      registerImport(sourceFile, chosenName, 'IMAGE', meta, createThumbnailFromImageData(chosenImage as ImageData));
+    }
+    return true;
+  }
+
   async function handleImageImport(file: File, initialOptions?: ImageToVoxelOptions): Promise<boolean> {
     let imageData: ImageData;
     try {
@@ -2179,28 +2206,19 @@ async function main() {
     // pre-import confirm is skipped for images (see handleImportFile).
     // `initialOptions` pre-fills the controls when re-importing a past entry.
     // The user may also swap the source image inside the modal ("Choose a
-    // different image…"), so build everything below from the RESULT's image /
-    // file / name rather than the originally-picked one.
+    // different image…"), so build everything from the RESULT's image / file /
+    // name rather than the originally-picked one.
     const result = await showImageVoxelImportModal({ filename: file.name, image: imageData, file, initialOptions });
     if (!result) return false;
-    const { options: opts, image: chosenImage, file: chosenFile, filename: chosenName } = result;
-    const sourceFile = chosenFile ?? file;
-    const grid = imageDataToVoxelGrid(chosenImage, opts);
-    if (grid.size === 0) {
-      alert(`"${chosenName}" produced no voxels at the chosen settings. Try lowering the transparency cutoff.`);
-      return false;
-    }
-    const code = generateVoxelImportCode(grid, chosenName, { style: opts.codeStyle });
-    const sessionName = chosenName.replace(/\.(png|jpe?g|gif|webp|bmp)$/i, '');
-    await importCodePayload(code, 'voxel', sessionName);
-    // Register in Recent Imports tagged as a voxel import, with the chosen
-    // settings + a thumbnail, so re-clicking it reopens THIS modal (not relief)
-    // pre-loaded with these knobs. Use the swapped-in source when present.
-    const meta: ImportMetadata = { importer: 'voxel', options: opts };
-    // chosenImage always originates from decodeImage*ToImageData (a real
-    // ImageData), so the ImageDataLike→ImageData narrowing is safe here.
-    registerImport(sourceFile, chosenName, 'IMAGE', meta, createThumbnailFromImageData(chosenImage as ImageData));
-    return true;
+    return finishVoxelImport(result, file);
+  }
+
+  /** Modal-first entry for Import → "Image → voxel…": open the voxel modal with
+   *  no image and let the user pick one inside (mirrors the relief wizard). */
+  async function openVoxelImportFlow(): Promise<boolean> {
+    const result = await showImageVoxelImportModal({});
+    if (!result) return false;
+    return finishVoxelImport(result);
   }
 
   /** Import a MagicaVoxel `.vox` file as a voxel session. Mirrors the image
@@ -2930,6 +2948,7 @@ async function main() {
       if (sid && isReliefSession(sid)) void reopenReliefImport(sid);
       else openReliefImportFlow();
     },
+    onCreateVoxel: () => { void openVoxelImportFlow(); },
     onLanguageHelp: async () => { await showLanguageHelpModal(); },
     onToggleAi: () => { void toggleAiPanelFromToolbar(); },
     onLanguageSwitch: async (lang: 'manifold-js' | 'scad' | 'replicad' | 'voxel') => {

@@ -222,13 +222,15 @@ await partwright.bakeVoxelsToCode({ label: 'sad-cube' });   // commits + saves
 
 ## Image import
 
-Drag an image (`.png`, `.jpg`, `.gif`, `.webp`) onto the editor, or use
-Import → **Image → voxel…** (its own row in the import menu, below
-Image → keychain / tile / relief). A parameter modal opens with a live preview so
-you can dial in resolution, mode, depth/relief, transparency cutoff, and color
-before committing to a new voxel session. The image stands upright: image
-width → X, image height → Z, extruded along Y. Transparent pixels drop out (so
-logos and sprites voxelize cleanly).
+Use Import → **Image → voxel…** (its own row in the import menu, below
+Image → keychain / tile / relief), or drag an image (`.png`, `.jpg`, `.gif`,
+`.webp`) onto the editor. The parameter modal opens **first** (mirroring the
+relief wizard); its button reads **Choose image…** until you pick one, then
+**Choose a different image…** to swap. A live preview lets you dial in
+resolution, mode, depth/relief, transparency cutoff, and color before committing
+to a new voxel session. The image stands upright: image width → X, image
+height → Z, extruded along Y. Transparent pixels drop out (so logos and sprites
+voxelize cleanly).
 
 Two modes:
 
@@ -293,7 +295,9 @@ The in-app modal exposes all of these (image adjustments live under an
 the modal seeds an editable swatch list from the image (k-means), and you can
 recolor, add, or remove swatches or re-extract a different count; every pixel
 then snaps to the nearest swatch. The **Editor code** toggle picks between the
-compact data blob and editable builder calls. The Recent Imports list shows a
+compact data blob and editable builder calls, and shows live whether the current
+model fits in editable calls or will fall back to compact data (so the fallback
+is never a surprise). The Recent Imports list shows a
 thumbnail beside each image import and remembers whether it was a voxel or a
 relief import — re-clicking a voxel import reopens this modal pre-loaded with
 the settings you used.

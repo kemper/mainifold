@@ -4,6 +4,7 @@ import {
   computeImageVoxelLayout,
   generateVoxelImportCode,
   extractImagePalette,
+  countVoxelBuilderCalls,
   luminance,
   type ImageDataLike,
 } from '../../src/import/imageToVoxel';
@@ -334,6 +335,20 @@ describe('generateVoxelImportCode', () => {
     expect(code).toContain('voxels.decode(');
     expect(code).not.toContain('v.fillBox(');
     expect(gridsEqual(runVoxelCode(code), grid)).toBe(true);
+  });
+
+  it('countVoxelBuilderCalls counts merged boxes, not raw voxels', () => {
+    const solid = new VoxelGrid();
+    solid.fillBox([0, 0, 0], [3, 3, 3], '#abcdef'); // 64 voxels, one box
+    expect(countVoxelBuilderCalls(solid)).toBe(1);
+
+    const scattered = new VoxelGrid();
+    scattered.set(0, 0, 0, '#ff0000');
+    scattered.set(2, 0, 0, '#00ff00');
+    scattered.set(4, 0, 0, '#0000ff');
+    expect(countVoxelBuilderCalls(scattered)).toBe(3);
+
+    expect(countVoxelBuilderCalls(new VoxelGrid())).toBe(0);
   });
 
   it('round-trips a palette-limited image as editable calls', () => {

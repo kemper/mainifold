@@ -12,6 +12,9 @@ import { BUTTON_CANCEL, BUTTON_PRIMARY } from './styleConstants';
 import {
   computeImageVoxelLayout,
   extractImagePalette,
+  imageDataToVoxelGrid,
+  countVoxelBuilderCalls,
+  MAX_BUILDER_CALLS,
   type ImageDataLike,
   type ImageToVoxelOptions,
   type ImageVoxelMode,
@@ -19,8 +22,10 @@ import {
 } from '../import/imageToVoxel';
 
 export interface ImageVoxelModalOptions {
-  filename: string;
-  image: ImageDataLike;
+  filename?: string;
+  /** The image to import. Omit / null to open the modal **first** with no
+   *  image — the user then picks one inside via "Choose image…". */
+  image?: ImageDataLike | null;
   /** The File the image was decoded from, when available. Threaded back out so
    *  a "swap image" keeps the right blob for Recent Imports; null for sources
    *  that didn't come from a File (e.g. the console API's URL path). */
@@ -262,7 +267,7 @@ function PaletteEditor(props: {
 }
 
 function ImageVoxelBody(props: {
-  imageSig: Signal<ImageDataLike>;
+  imageSig: Signal<ImageDataLike | null>;
   filenameSig: Signal<string>;
   fileSig: Signal<File | null>;
   swapErrorSig: Signal<string | null>;
@@ -291,6 +296,7 @@ function ImageVoxelBody(props: {
       set('posterizeColors', opts.posterizeColors >= 2 ? opts.posterizeColors : DEFAULT_COLOR_COUNT);
       return;
     }
+    if (!image) return; // can't seed a palette without an image
     const k = opts.posterizeColors >= 2 ? opts.posterizeColors : DEFAULT_COLOR_COUNT;
     const colors = extractImagePalette(image, k, {
       maxSize: opts.maxSize,
@@ -318,7 +324,23 @@ function ImageVoxelBody(props: {
 
   // Recompute the voxel layout whenever a parameter changes. Cheap: it walks
   // the downsampled pixels once (≤ maxSize²) without allocating a grid.
-  const layout = useMemo(() => computeImageVoxelLayout(image, opts), [image, opts]);
+  const layout = useMemo(
+    () => (image
+      ? computeImageVoxelLayout(image, opts)
+      : { tw: 0, th: 0, columns: [], voxelCount: 0, dims: { x: 0, y: 0, z: 0 } }),
+    [image, opts],
+  );
+
+  // When "Editable code" is selected, work out up front whether the model fits
+  // in readable builder calls or will fall back to the compact blob — so the
+  // choice isn't a silent surprise at import time. Since calls ≤ voxelCount,
+  // only the ambiguous (> cap) case needs the pricier exact decomposition.
+  const callPlan = useMemo(() => {
+    if (opts.codeStyle !== 'calls' || !image || layout.voxelCount === 0) return null;
+    if (layout.voxelCount <= MAX_BUILDER_CALLS) return { fallback: false, count: null as number | null };
+    const count = countVoxelBuilderCalls(imageDataToVoxelGrid(image, opts));
+    return { fallback: count > MAX_BUILDER_CALLS, count };
+  }, [image, opts, layout.voxelCount]);
 
   // Draw the front-view preview. Heightmap mode shades each pixel by its
   // resulting column height so the relief reads at a glance.
@@ -348,6 +370,37 @@ function ImageVoxelBody(props: {
   const heavy = layout.voxelCount > HEAVY_VOXEL_COUNT;
   const empty = layout.voxelCount === 0;
 
+  // Modal-first: no image picked yet. Show just the "Choose image…" call to
+  // action; the controls + preview appear once an image is loaded.
+  if (!image) {
+    return (
+      <div class="flex flex-col items-center gap-3 py-8 text-center">
+        <p class="text-[12px] text-zinc-300 font-medium">Import an image as a voxel model</p>
+        <p class="text-[11px] text-zinc-500 max-w-[260px] leading-relaxed">
+          Pick a picture (PNG, JPG, GIF, WebP) — a logo, sprite, or small photo. You'll tune resolution, color, and depth next.
+        </p>
+        <input
+          ref={swapInputRef}
+          data-testid="voxel-image-input"
+          type="file"
+          accept="image/png,image/jpeg,image/gif,image/webp,image/bmp,image/*"
+          class="hidden"
+          onChange={e => {
+            const f = (e.target as HTMLInputElement).files?.[0];
+            if (f) void onSwapFile(f);
+            (e.target as HTMLInputElement).value = '';
+          }}
+        />
+        <button type="button" class={BUTTON_PRIMARY} onClick={() => swapInputRef.current?.click()}>
+          Choose image…
+        </button>
+        {swapErrorSig.value && (
+          <div class="text-[10px] text-rose-400 leading-snug max-w-[260px]">{swapErrorSig.value}</div>
+        )}
+      </div>
+    );
+  }
+
   return (
     <div class="flex flex-col gap-3">
       <p class="text-[11px] text-zinc-400 leading-relaxed">
@@ -376,6 +429,7 @@ function ImageVoxelBody(props: {
           {/* Swap the source image while keeping all tuned settings. */}
           <input
             ref={swapInputRef}
+            data-testid="voxel-image-input"
             type="file"
             accept="image/png,image/jpeg,image/gif,image/webp,image/bmp,image/*"
             class="hidden"
@@ -512,8 +566,18 @@ function ImageVoxelBody(props: {
             <div class="text-[10px] text-zinc-500 mt-0.5 leading-snug">
               {opts.codeStyle === 'decode'
                 ? 'A compact voxels.decode("…") blob — small and fast to load.'
-                : 'Readable v.fillBox(…) / v.set(…) you can hand-edit. Large or very colorful models fall back to compact data.'}
+                : 'Readable v.fillBox(…) / v.set(…) you can hand-edit.'}
             </div>
+            {callPlan && callPlan.fallback && (
+              <div class="text-[10px] text-amber-400 mt-0.5 leading-snug">
+                {callPlan.count!.toLocaleString()} blocks exceeds the {MAX_BUILDER_CALLS.toLocaleString()}-block limit, so this saves as compact data instead. Lower the resolution or use a Palette to keep it editable.
+              </div>
+            )}
+            {callPlan && !callPlan.fallback && (
+              <div class="text-[10px] text-emerald-400 mt-0.5 leading-snug">
+                {callPlan.count != null ? `≈ ${callPlan.count.toLocaleString()} editable calls.` : 'Editable builder calls ✓'}
+              </div>
+            )}
           </div>
 
           <details class="text-[11px]">
@@ -569,13 +633,15 @@ function emitOptions(o: Opts): ImageToVoxelOptions {
 }
 
 function ImageVoxelFooter(props: {
-  imageSig: Signal<ImageDataLike>;
+  imageSig: Signal<ImageDataLike | null>;
   state: Signal<Opts>;
   onImport: (opts: ImageToVoxelOptions) => void;
   onCancel: () => void;
 }) {
   const opts = props.state.value;
-  const empty = computeImageVoxelLayout(props.imageSig.value, opts).voxelCount === 0;
+  const image = props.imageSig.value;
+  // Disabled until an image is picked and it yields at least one voxel.
+  const empty = !image || computeImageVoxelLayout(image, opts).voxelCount === 0;
   return (
     <>
       <button type="button" class={BUTTON_CANCEL} onClick={props.onCancel}>Cancel</button>
@@ -596,11 +662,12 @@ export function showImageVoxelImportModal(opts: ImageVoxelModalOptions): Promise
   return new Promise(resolve => {
     let result: ImageVoxelModalResult | null = null;
     const state = signal<Opts>(seedOpts(opts.initialOptions));
-    // Image / file / name are reactive so "Choose a different image…" swaps the
-    // source in place without tearing down the modal or losing tuned knobs.
-    const imageSig = signal<ImageDataLike>(opts.image);
+    // Image / file / name are reactive so "Choose (a different) image…" swaps
+    // the source in place without tearing down the modal or losing tuned knobs.
+    // image starts null in the modal-first flow (no file picked yet).
+    const imageSig = signal<ImageDataLike | null>(opts.image ?? null);
     const fileSig = signal<File | null>(opts.file ?? null);
-    const filenameSig = signal<string>(opts.filename);
+    const filenameSig = signal<string>(opts.filename ?? '');
     const swapErrorSig = signal<string | null>(null);
     mountPreactModal(
       {
@@ -615,7 +682,8 @@ export function showImageVoxelImportModal(opts: ImageVoxelModalOptions): Promise
             imageSig={imageSig}
             state={state}
             onImport={o => {
-              result = { options: o, image: imageSig.value, file: fileSig.value, filename: filenameSig.value };
+              // Import is only enabled once an image is loaded, so this is set.
+              result = { options: o, image: imageSig.value!, file: fileSig.value, filename: filenameSig.value };
               close();
             }}
             onCancel={() => { result = null; close(); }}

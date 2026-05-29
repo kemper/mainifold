@@ -193,6 +193,39 @@ test.describe('voxel engine', () => {
     expect(result.geo.isManifold).toBe(true);
   });
 
+  test('Image → voxel menu is modal-first with a Choose image button', async ({ page }) => {
+    // A small solid PNG to pick inside the modal.
+    const dataUrl = await page.evaluate(() => {
+      const c = document.createElement('canvas');
+      c.width = 4; c.height = 4;
+      const x = c.getContext('2d')!;
+      x.fillStyle = '#33aaff'; x.fillRect(0, 0, 4, 4);
+      return c.toDataURL('image/png');
+    });
+    const buffer = Buffer.from(dataUrl.split(',')[1], 'base64');
+
+    // Click the menu row — the modal must open FIRST (no OS file picker).
+    await page.locator('#btn-import').click();
+    await page.getByText('Image → voxel…', { exact: true }).click();
+    await expect(page.getByText('Image → Voxel', { exact: true })).toBeVisible({ timeout: 5000 });
+
+    // No image yet: a "Choose image…" CTA, and Import disabled.
+    await expect(page.getByRole('button', { name: 'Choose image…', exact: true })).toBeVisible();
+    await expect(page.getByRole('button', { name: 'Import', exact: true })).toBeDisabled();
+
+    // Pick the image inside the modal.
+    await page.locator('[data-testid="voxel-image-input"]').setInputFiles({ name: 'dot.png', mimeType: 'image/png', buffer });
+
+    // Controls populate; the button now offers a swap; Import becomes enabled.
+    await expect(page.getByRole('button', { name: 'Choose a different image…', exact: true })).toBeVisible({ timeout: 5000 });
+    await expect(page.getByRole('button', { name: 'Import', exact: true })).toBeEnabled();
+
+    await page.getByRole('button', { name: 'Import', exact: true }).click();
+    await expect.poll(async () => page.evaluate(
+      () => (window as any).partwright.getActiveLanguage(), // eslint-disable-line @typescript-eslint/no-explicit-any
+    ), { timeout: 10_000 }).toBe('voxel');
+  });
+
   test("importImageAsVoxels codeStyle 'calls' writes editable builder code", async ({ page }) => {
     const result = await page.evaluate(async () => {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
