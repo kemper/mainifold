@@ -249,6 +249,7 @@ import {
   checkAssertions,
   type GeometryAssertions,
 } from './geometry/statsComputation';
+import { getConfig } from './config/appConfig';
 
 // Load examples as raw text — JS and SCAD
 const jsExampleModules = import.meta.glob('../examples/*.js', { query: '?raw', import: 'default' });
@@ -2726,7 +2727,7 @@ async function main() {
       : 0;
     const scaleTolerance = Math.max(diag * 5e-6, 1e-6);
 
-    const tolerances = [1e-5, 1e-4, 1e-3, scaleTolerance];
+    const tolerances = [getConfig().import.stlWeldTolerance, 1e-4, 1e-3, scaleTolerance];
     let bestMesh = probe;
     let maxTried = 0;
     let manifoldError: string | null = null;
