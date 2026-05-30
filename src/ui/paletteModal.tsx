@@ -11,6 +11,7 @@ import { mountPreactModal } from './preact/mount';
 import {
   loadPalette,
   savePalette,
+  resetPaletteToDefaults,
   makeFilamentColor,
   dedupeColors,
   clampMaxSimultaneous,
@@ -283,11 +284,19 @@ export function showPaletteModal(): void {
     close => ({
       body: <PaletteBody palette={palette} busy={busy} error={error} proposal={proposal} selected={selected} />,
       footer: (
-        <button
-          type="button"
-          class="px-3 py-1.5 rounded text-xs text-zinc-300 hover:bg-zinc-700"
-          onClick={close}
-        >Done</button>
+        <>
+          <button
+            type="button"
+            class="mr-auto px-3 py-1.5 rounded text-xs text-zinc-400 hover:text-zinc-200 hover:bg-zinc-700"
+            title="Restore the built-in 16-color default palette"
+            onClick={() => { palette.value = resetPaletteToDefaults(); }}
+          >Reset to defaults</button>
+          <button
+            type="button"
+            class="px-3 py-1.5 rounded text-xs text-zinc-300 hover:bg-zinc-700"
+            onClick={close}
+          >Done</button>
+        </>
       ),
     }),
   );

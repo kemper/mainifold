@@ -39,13 +39,8 @@ export const MIN_MAX_SIMULTANEOUS = 1;
 export const MAX_MAX_SIMULTANEOUS = 64;
 const DEFAULT_MAX_SIMULTANEOUS = 4; // a single typical AMS
 
-const DEFAULT_SETTINGS: ColorPaletteSettings = {
-  colors: [],
-  maxSimultaneous: DEFAULT_MAX_SIMULTANEOUS,
-  enforce: false,
-};
-
 let cached: ColorPaletteSettings | null = null;
+const listeners = new Set<(s: ColorPaletteSettings) => void>();
 
 /** Round + clamp an arbitrary value to a valid simultaneous-color count. */
 export function clampMaxSimultaneous(n: unknown): number {
@@ -55,6 +50,77 @@ export function clampMaxSimultaneous(n: unknown): number {
 
 function makeId(): string {
   return 'fc_' + Math.random().toString(36).slice(2, 10);
+}
+
+/** rgb (0..1) → '#rrggbb'. Clamps out-of-range channels. */
+export function rgbToHex(rgb: readonly [number, number, number]): string {
+  const h = (n: number) => Math.max(0, Math.min(255, Math.round(n * 255))).toString(16).padStart(2, '0');
+  return `#${h(rgb[0])}${h(rgb[1])}${h(rgb[2])}`;
+}
+
+/** '#rgb' / '#rrggbb' → rgb (0..1), or null when it isn't a valid hex. */
+export function hexToRgb(hex: unknown): [number, number, number] | null {
+  const norm = normalizeHexColor(hex);
+  if (!norm) return null;
+  return [
+    parseInt(norm.slice(1, 3), 16) / 255,
+    parseInt(norm.slice(3, 5), 16) / 255,
+    parseInt(norm.slice(5, 7), 16) / 255,
+  ];
+}
+
+/**
+ * The 16 named swatches historically hardcoded in the paint picker. Now the
+ * single source of truth for BOTH the paint picker grid and the first-run /
+ * reset-to-defaults filament palette, so the two always match (the user asked
+ * for the default palette to be exactly the colors the paint menu shows).
+ */
+export const DEFAULT_PAINT_PRESETS: ReadonlyArray<{ name: string; rgb: readonly [number, number, number] }> = [
+  { name: 'Red',        rgb: [0.92, 0.26, 0.21] },
+  { name: 'Orange',     rgb: [1.00, 0.60, 0.00] },
+  { name: 'Yellow',     rgb: [1.00, 0.76, 0.03] },
+  { name: 'Brown',      rgb: [0.55, 0.36, 0.22] },
+  { name: 'Lime',       rgb: [0.55, 0.85, 0.20] },
+  { name: 'Green',      rgb: [0.30, 0.69, 0.31] },
+  { name: 'Teal',       rgb: [0.00, 0.74, 0.83] },
+  { name: 'Blue',       rgb: [0.13, 0.59, 0.95] },
+  { name: 'Navy',       rgb: [0.10, 0.20, 0.55] },
+  { name: 'Purple',     rgb: [0.61, 0.15, 0.69] },
+  { name: 'Magenta',    rgb: [0.93, 0.05, 0.65] },
+  { name: 'Pink',       rgb: [0.91, 0.12, 0.39] },
+  { name: 'White',      rgb: [1.00, 1.00, 1.00] },
+  { name: 'Light gray', rgb: [0.75, 0.75, 0.75] },
+  { name: 'Dark gray',  rgb: [0.35, 0.35, 0.35] },
+  { name: 'Black',      rgb: [0.00, 0.00, 0.00] },
+];
+
+/** Fresh `FilamentColor[]` for the default palette (new ids each call). */
+function defaultPaletteColors(): FilamentColor[] {
+  return DEFAULT_PAINT_PRESETS.map(p => ({ id: makeId(), name: p.name, hex: rgbToHex(p.rgb) }));
+}
+
+/** Fresh default settings: the 16-color palette, default slot count, enforce off. */
+function defaultSettings(): ColorPaletteSettings {
+  return { colors: defaultPaletteColors(), maxSimultaneous: DEFAULT_MAX_SIMULTANEOUS, enforce: false };
+}
+
+/** The palette color closest to an rgb (0..1) by squared distance in sRGB —
+ *  good enough to snap a model color to the nearest filament. Null only when
+ *  the palette is empty. */
+export function nearestPaletteColor(
+  rgb: readonly [number, number, number],
+  colors: FilamentColor[],
+): FilamentColor | null {
+  let best: FilamentColor | null = null;
+  let bestD = Infinity;
+  for (const c of colors) {
+    const t = hexToRgb(c.hex);
+    if (!t) continue;
+    const dr = t[0] - rgb[0], dg = t[1] - rgb[1], db = t[2] - rgb[2];
+    const d = dr * dr + dg * dg + db * db;
+    if (d < bestD) { bestD = d; best = c; }
+  }
+  return best;
 }
 
 /** Build a `FilamentColor` from a name + hex-ish input, or null if the hex is
@@ -92,7 +158,7 @@ export function dedupeColors(colors: FilamentColor[]): FilamentColor[] {
 /** Normalize any partial/untrusted shape into valid settings — used on load
  *  (parsing localStorage) AND on save (so stored data is always clean). */
 export function mergeWithDefaults(partial: Partial<ColorPaletteSettings> | null | undefined): ColorPaletteSettings {
-  if (!partial || typeof partial !== 'object') return { ...DEFAULT_SETTINGS };
+  if (!partial || typeof partial !== 'object') return defaultSettings();
   // Don't dedupe here — this is the manual-edit persistence path, and silently
   // collapsing two rows the user is editing (e.g. a freshly-added entry still
   // on its default color) is worse than tolerating a transient duplicate.
@@ -112,7 +178,7 @@ export function loadPalette(): ColorPaletteSettings {
   if (cached) return cached;
   // localStorage is unavailable in the Worker / node tier; use defaults.
   if (typeof localStorage === 'undefined') {
-    cached = { ...DEFAULT_SETTINGS };
+    cached = defaultSettings();
     return cached;
   }
   try {
@@ -124,7 +190,7 @@ export function loadPalette(): ColorPaletteSettings {
   } catch {
     // Fall through to defaults on parse / storage error.
   }
-  cached = { ...DEFAULT_SETTINGS };
+  cached = defaultSettings();
   return cached;
 }
 
@@ -140,7 +206,21 @@ export function savePalette(next: ColorPaletteSettings): ColorPaletteSettings {
     // localStorage may be full or disabled (private browsing). Settings
     // remain applied for this session; we don't surface the failure.
   }
+  for (const fn of listeners) fn(sanitized);
   return sanitized;
+}
+
+/** Subscribe to palette changes — fired on every savePalette. The paint
+ *  picker uses this to live-refresh its swatches when the palette is edited. */
+export function onPaletteChange(fn: (s: ColorPaletteSettings) => void): () => void {
+  listeners.add(fn);
+  return () => { listeners.delete(fn); };
+}
+
+/** Restore the built-in 16-color default palette (slot count + enforce reset
+ *  too). Returns the stored value. */
+export function resetPaletteToDefaults(): ColorPaletteSettings {
+  return savePalette(defaultSettings());
 }
 
 /**

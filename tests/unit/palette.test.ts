@@ -6,6 +6,10 @@ import {
   mergeWithDefaults,
   parseFilamentColors,
   buildPaletteDirective,
+  rgbToHex,
+  hexToRgb,
+  nearestPaletteColor,
+  DEFAULT_PAINT_PRESETS,
   MIN_MAX_SIMULTANEOUS,
   MAX_MAX_SIMULTANEOUS,
   type ColorPaletteSettings,
@@ -58,9 +62,12 @@ describe('dedupeColors', () => {
 });
 
 describe('mergeWithDefaults', () => {
-  it('returns defaults for null / garbage input', () => {
-    expect(mergeWithDefaults(null)).toEqual({ colors: [], maxSimultaneous: 4, enforce: false });
-    expect(mergeWithDefaults(undefined)).toEqual({ colors: [], maxSimultaneous: 4, enforce: false });
+  it('returns the default 16-color palette for null / undefined input', () => {
+    const a = mergeWithDefaults(null);
+    expect(a.colors).toHaveLength(16);
+    expect(a.maxSimultaneous).toBe(4);
+    expect(a.enforce).toBe(false);
+    expect(mergeWithDefaults(undefined).colors).toHaveLength(16);
   });
   it('sanitizes colors, clamps max, and coerces enforce', () => {
     const merged = mergeWithDefaults({
@@ -140,5 +147,41 @@ describe('buildPaletteDirective', () => {
     const out = buildPaletteDirective(enforced([fc('#000000', 'Black')], 1))!;
     expect(out).toContain('at most 1 distinct color ');
     expect(out).toContain('1 color)');
+  });
+});
+
+describe('hex conversion', () => {
+  it('rgbToHex clamps and formats', () => {
+    expect(rgbToHex([1, 0, 0])).toBe('#ff0000');
+    expect(rgbToHex([0, 0, 0])).toBe('#000000');
+    expect(rgbToHex([2, -1, 0.5])).toBe('#ff0080'); // clamps out-of-range
+  });
+  it('hexToRgb round-trips and rejects bad input', () => {
+    expect(hexToRgb('#ff0000')).toEqual([1, 0, 0]);
+    expect(hexToRgb('#fff')).toEqual([1, 1, 1]);
+    expect(hexToRgb('nope')).toBeNull();
+    expect(hexToRgb(42)).toBeNull();
+  });
+});
+
+describe('DEFAULT_PAINT_PRESETS', () => {
+  it('is the 16 named paint-picker colors', () => {
+    expect(DEFAULT_PAINT_PRESETS).toHaveLength(16);
+    expect(DEFAULT_PAINT_PRESETS[0]).toMatchObject({ name: 'Red' });
+    expect(DEFAULT_PAINT_PRESETS[15]).toMatchObject({ name: 'Black' });
+    // The first-run / reset palette is built from exactly these.
+    expect(rgbToHex(DEFAULT_PAINT_PRESETS[15].rgb)).toBe('#000000');
+  });
+});
+
+describe('nearestPaletteColor', () => {
+  const palette = [fc('#000000', 'Black'), fc('#ffffff', 'White'), fc('#ff0000', 'Red')];
+  it('snaps an rgb to the closest palette entry', () => {
+    expect(nearestPaletteColor([0.05, 0.05, 0.05], palette)?.name).toBe('Black');
+    expect(nearestPaletteColor([0.9, 0.95, 0.92], palette)?.name).toBe('White');
+    expect(nearestPaletteColor([0.8, 0.1, 0.1], palette)?.name).toBe('Red');
+  });
+  it('returns null for an empty palette', () => {
+    expect(nearestPaletteColor([0.5, 0.5, 0.5], [])).toBeNull();
   });
 });
