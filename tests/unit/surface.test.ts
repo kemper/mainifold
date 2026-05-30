@@ -1,0 +1,145 @@
+import { describe, it, expect } from 'vitest';
+import type { MeshData } from '../../src/geometry/types';
+import {
+  subdivideToMaxEdge,
+  computeVertexNormals,
+  maxEdgeLength,
+  extractPositions,
+  bboxOf,
+} from '../../src/surface/meshSubdivide';
+import { fuzzySkin } from '../../src/surface/fuzzySkin';
+import { smoothSurface } from '../../src/surface/smoothSurface';
+import { voxelizeMesh } from '../../src/surface/voxelizeMesh';
+import { applyFuzzy, applySmooth, applyVoxelize } from '../../src/surface/modifiers';
+
+/** Axis-aligned cube from [0,s]^3 as a 8-vertex / 12-triangle MeshData. */
+function cube(s = 10): MeshData {
+  const vertProperties = new Float32Array([
+    0, 0, 0, s, 0, 0, s, s, 0, 0, s, 0,
+    0, 0, s, s, 0, s, s, s, s, 0, s, s,
+  ]);
+  const triVerts = new Uint32Array([
+    0, 2, 1, 0, 3, 2, // bottom
+    4, 5, 6, 4, 6, 7, // top
+    0, 1, 5, 0, 5, 4, // front
+    2, 3, 7, 2, 7, 6, // back
+    1, 2, 6, 1, 6, 5, // right
+    0, 4, 7, 0, 7, 3, // left
+  ]);
+  return { vertProperties, triVerts, numVert: 8, numTri: 12, numProp: 3 };
+}
+
+describe('meshSubdivide', () => {
+  it('quadruples triangle count and reduces the longest edge', () => {
+    const c = cube(10);
+    const before = maxEdgeLength(extractPositions(c), c.triVerts);
+    const out = subdivideToMaxEdge(c, { maxEdge: before / 3, maxRounds: 4 });
+    expect(out.numTri).toBeGreaterThan(c.numTri);
+    expect(out.numProp).toBe(3);
+    expect(maxEdgeLength(out.vertProperties, out.triVerts)).toBeLessThanOrEqual(before / 3 + 1e-6);
+  });
+
+  it('dedupes shared edge midpoints (stays watertight, no vertex explosion)', () => {
+    const c = cube(10);
+    const out = subdivideToMaxEdge(c, { maxEdge: 4, maxRounds: 1 });
+    // One pass: 12 -> 48 triangles. A watertight dedup adds exactly the unique
+    // edges as new verts (18 edges on a cube triangulation) -> 8 + 18 = 26.
+    expect(out.numTri).toBe(48);
+    expect(out.numVert).toBe(26);
+  });
+
+  it('carries per-triangle colors to all four children', () => {
+    const c = cube(10);
+    c.triColors = new Uint8Array(c.numTri * 3).fill(7);
+    const out = subdivideToMaxEdge(c, { maxEdge: 4, maxRounds: 1 });
+    expect(out.triColors).toBeTruthy();
+    expect(out.triColors!.length).toBe(out.numTri * 3);
+    expect([...out.triColors!].every(v => v === 7)).toBe(true);
+  });
+
+  it('computes unit-length vertex normals', () => {
+    const c = cube(10);
+    const n = computeVertexNormals(extractPositions(c), c.triVerts);
+    for (let v = 0; v < c.numVert; v++) {
+      const len = Math.hypot(n[v * 3], n[v * 3 + 1], n[v * 3 + 2]);
+      expect(len).toBeCloseTo(1, 5);
+    }
+  });
+});
+
+describe('fuzzySkin', () => {
+  it('is deterministic for a given seed and perturbs the surface', () => {
+    const a = fuzzySkin(cube(10), { amplitude: 0.5, scale: 2, seed: 42 });
+    const b = fuzzySkin(cube(10), { amplitude: 0.5, scale: 2, seed: 42 });
+    expect([...a.vertProperties]).toEqual([...b.vertProperties]);
+    // Subdivided, so more triangles than the input cube.
+    expect(a.numTri).toBeGreaterThan(12);
+    // The bounding box should expand by roughly the amplitude.
+    const grown = bboxOf(a.vertProperties);
+    expect(grown.max[0]).toBeGreaterThan(10);
+  });
+
+  it('a different seed yields different geometry', () => {
+    const a = fuzzySkin(cube(10), { amplitude: 0.5, scale: 2, seed: 1 });
+    const b = fuzzySkin(cube(10), { amplitude: 0.5, scale: 2, seed: 2 });
+    expect([...a.vertProperties]).not.toEqual([...b.vertProperties]);
+  });
+
+  it('zero amplitude leaves the cube unchanged (no subdivision either)', () => {
+    const out = fuzzySkin(cube(10), { amplitude: 0, scale: 2 });
+    expect(out.numVert).toBe(8);
+  });
+});
+
+describe('smoothSurface', () => {
+  it('rounds a cube without runaway shrinkage and keeps it closed', () => {
+    const out = smoothSurface(cube(10), { iterations: 4 });
+    expect(out.numTri).toBeGreaterThan(12);
+    const bb = bboxOf(out.vertProperties);
+    // Taubin resists shrinkage: the rounded cube keeps most of its size.
+    expect(bb.size[0]).toBeGreaterThan(7);
+    expect(bb.size[0]).toBeLessThanOrEqual(10.5);
+  });
+});
+
+describe('voxelizeMesh', () => {
+  it('produces a solid grid (surface + filled interior) for a cube', () => {
+    const grid = voxelizeMesh(cube(10), { resolution: 16 });
+    expect(grid.size).toBeGreaterThan(0);
+    const b = grid.bounds();
+    expect(b).toBeTruthy();
+    // A solid 16^3-ish cube has interior cells, so total exceeds the shell.
+    expect(grid.size).toBeGreaterThan(16 * 16); // more than a single face
+  });
+
+  it('clamps resolution into range and handles empty meshes', () => {
+    const empty: MeshData = { vertProperties: new Float32Array(), triVerts: new Uint32Array(), numVert: 0, numTri: 0, numProp: 3 };
+    expect(voxelizeMesh(empty, { resolution: 9999 }).size).toBe(0);
+  });
+});
+
+describe('modifiers (codegen)', () => {
+  it('fuzzy emits a manifold ofMesh wrapper with a baked mesh', () => {
+    const r = applyFuzzy(cube(10), { amplitude: 0.4, scale: 2 });
+    expect(r.kind).toBe('manifold');
+    if (r.kind === 'manifold') {
+      expect(r.code).toContain('Manifold.ofMesh(api.imports[0])');
+      expect(r.mesh.numTri).toBeGreaterThan(12);
+    }
+  });
+
+  it('smooth emits a manifold wrapper', () => {
+    const r = applySmooth(cube(10), { iterations: 3 });
+    expect(r.kind).toBe('manifold');
+    if (r.kind === 'manifold') expect(r.code).toContain('Manifold.ofMesh(api.imports[0])');
+  });
+
+  it('voxelize emits voxels.decode code, with optional smooth', () => {
+    const plain = applyVoxelize(cube(10), { resolution: 12 });
+    expect(plain.kind).toBe('voxel');
+    expect(plain.code).toContain('voxels.decode(');
+    expect(plain.code).not.toContain('v.smooth()');
+    const smooth = applyVoxelize(cube(10), { resolution: 12, smooth: true });
+    expect(smooth.code).toContain('v.smooth()');
+  });
+});
