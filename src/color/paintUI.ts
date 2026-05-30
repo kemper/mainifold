@@ -67,6 +67,7 @@ import { forceDeactivate as forceDeactivateAnnotateText } from '../annotations/t
 import { forceDeactivate as forceDeactivateAnnotateSelect } from '../annotations/selectMode';
 import { setBoxMode, getBoxMode, setBox, commitBox, onBoxChange, setShapeType, getShapeType, getShapeVisible, setShapeVisible, onShapeVisibilityChange, type BoxMode, type ShapeType } from './boxDrag';
 import { forceDeactivate as closeSimplifyMenu } from '../ui/simplifyUI';
+import { forceCloseColorRemap } from './colorRemapUI';
 import { loadPalette, hexToRgb, onPaletteChange, DEFAULT_PAINT_PRESETS } from './palette';
 
 // The picker's swatches come from the user's filament palette (src/color/
@@ -146,6 +147,7 @@ function togglePaintMode(): void {
     forceDeactivateAnnotateText();
     forceDeactivateAnnotateSelect();
     closeSimplifyMenu();
+    forceCloseColorRemap();
     activate();
     updateButtonState(true);
     pickerPanel?.classList.remove('hidden');
