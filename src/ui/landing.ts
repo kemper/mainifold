@@ -16,6 +16,7 @@ import { getSessionLatestVersion, getSessionVersionCount } from '../storage/db';
 import { partwrightMarkSvg } from './brand';
 import { languageBadge } from './languageBadge';
 import { getTheme, onThemeChange, toggleTheme } from './theme';
+import { canInstall, isAppInstalled, isInstallSupported, isIOSInstallable, onInstallStateChange, promptInstall } from './installPrompt';
 import type { ExportedSession } from '../storage/sessionManager';
 import type { CatalogManifestEntry } from './catalog';
 
@@ -197,6 +198,13 @@ function buildHero(callbacks: LandingCallbacks): HTMLElement {
   open.addEventListener('click', callbacks.onOpenEditor);
   ctas.appendChild(open);
 
+  // Install-as-app CTA — only visible on browsers that can install the PWA
+  // (Chrome/Edge/Android), or as a Share-sheet hint on iOS Safari. Hidden
+  // everywhere else, including when already installed. Self-syncs because the
+  // browser's `beforeinstallprompt` can arrive after this renders.
+  const install = buildInstallCta();
+  ctas.appendChild(install.button);
+
   const tour = document.createElement('button');
   tour.className = 'px-6 py-3 rounded-xl bg-white/5 hover:bg-white/10 text-zinc-100 text-sm font-semibold transition-colors border border-zinc-700';
   tour.textContent = 'Take the guided tour';
@@ -210,6 +218,8 @@ function buildHero(callbacks: LandingCallbacks): HTMLElement {
   ctas.appendChild(agent);
 
   left.appendChild(ctas);
+  left.appendChild(install.note);
+  left.appendChild(install.hint);
 
   // trust stats
   const trust = document.createElement('div');
@@ -234,6 +244,99 @@ function buildHero(callbacks: LandingCallbacks): HTMLElement {
 
   hero.appendChild(wrap);
   return hero;
+}
+
+/**
+ * Build the "Install app" CTA plus its supporting copy. Install is purely an
+ * optional convenience — Partwright runs fully in the browser without it — so
+ * the button carries a clarifying tooltip and a persistent "optional" note.
+ *
+ * The button is shown on EVERY load wherever install is possible (not just
+ * while a live `beforeinstallprompt` is held), so it remains a re-install entry
+ * point even after the native prompt has been dismissed:
+ *   - Chrome/Edge/Android with a live prompt -> click runs the native install
+ *     dialog (installs it as a Chrome/desktop app).
+ *   - Chrome/Edge/Android without a live prompt (dismissed, or not yet fired)
+ *     -> click reveals manual "address-bar icon / browser menu" instructions.
+ *   - iOS Safari -> click reveals the manual "Share -> Add to Home Screen" hint.
+ *   - Hidden only when already installed/standalone or on browsers with no
+ *     install path at all (e.g. desktop Firefox).
+ */
+function buildInstallCta(): { button: HTMLButtonElement; note: HTMLElement; hint: HTMLElement } {
+  const button = document.createElement('button');
+  button.className =
+    'px-6 py-3 rounded-xl bg-teal-500/10 hover:bg-teal-500/20 text-teal-200 text-sm font-semibold transition-colors border border-teal-500/40 hidden items-center gap-2';
+  button.title = 'Optional — install Partwright as an app for one-click launch. The app runs fully in your browser either way.';
+  button.innerHTML = '<span aria-hidden="true">⬇</span><span>Install as app</span>';
+
+  // Persistent note shown whenever the button is visible: make it unmistakable
+  // that installing is optional and the app needs no install to run.
+  const note = document.createElement('p');
+  note.className = 'hidden text-xs text-zinc-500 mt-4 max-w-md';
+  note.textContent =
+    'Optional — Partwright already runs fully in your browser. Installing just adds it as an app you can launch from your desktop, taskbar, or home screen.';
+
+  const hint = document.createElement('p');
+  hint.className = 'hidden text-xs text-zinc-400 mt-2 max-w-sm';
+
+  // Instruction text shown when we can't fire the native dialog (the prompt was
+  // already dismissed, or hasn't fired yet) — keyed by platform.
+  const IOS_HINT =
+    'To install on iPhone or iPad: tap the <span class="text-zinc-200 font-medium">Share</span> button, ' +
+    'then <span class="text-zinc-200 font-medium">&ldquo;Add to Home Screen.&rdquo;</span>';
+  const DESKTOP_HINT =
+    'To install: click the install icon ' +
+    '(<span class="text-zinc-200 font-medium">⊕</span> or a monitor-with-arrow) in your browser’s address bar, ' +
+    'or open the browser menu and choose <span class="text-zinc-200 font-medium">&ldquo;Install Partwright.&rdquo;</span>';
+
+  const sync = () => {
+    // Show the button on every load wherever install is possible — not only
+    // while we hold a live prompt — so it persists as a re-install entry point
+    // even after the native prompt has been dismissed.
+    const promptable = canInstall();
+    const ios = isIOSInstallable();
+    const chromium = isInstallSupported();
+    const show = !isAppInstalled() && (chromium || ios);
+    button.classList.toggle('hidden', !show);
+    button.classList.toggle('flex', show);
+    // The "optional" note rides with the button's visibility.
+    note.classList.toggle('hidden', !show);
+    // Click behavior: native dialog when we hold a live event, otherwise reveal
+    // the platform-appropriate manual instructions.
+    button.dataset.mode = promptable ? 'prompt' : ios ? 'ios' : 'manual';
+    // If a freshly-arrived prompt makes the native dialog available again, drop
+    // any stale manual instructions.
+    if (promptable) hint.classList.add('hidden');
+  };
+
+  button.addEventListener('click', async () => {
+    if (button.dataset.mode === 'prompt') {
+      // If the event was consumed between render and click, fall back to manual.
+      const outcome = await promptInstall();
+      if (outcome === 'unavailable') {
+        hint.innerHTML = isIOSInstallable() ? IOS_HINT : DESKTOP_HINT;
+        hint.classList.remove('hidden');
+      }
+      return;
+    }
+    // No live prompt — toggle the platform's manual instructions.
+    hint.innerHTML = button.dataset.mode === 'ios' ? IOS_HINT : DESKTOP_HINT;
+    hint.classList.toggle('hidden');
+  });
+
+  sync();
+  // Re-sync when install availability changes (the event can arrive after this
+  // renders). Self-unsubscribe once detached so re-rendered landing pages don't
+  // leak listeners.
+  const unsubscribe = onInstallStateChange(() => {
+    if (!document.body.contains(button)) {
+      unsubscribe();
+      return;
+    }
+    sync();
+  });
+
+  return { button, note, hint };
 }
 
 /**
