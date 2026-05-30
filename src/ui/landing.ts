@@ -15,7 +15,6 @@ import { listSessions, effectiveVersionLanguage, type Session, type Version } fr
 import { getSessionLatestVersion, getSessionVersionCount } from '../storage/db';
 import { partwrightMarkSvg } from './brand';
 import { languageBadge } from './languageBadge';
-import { showUninstallModal } from './uninstallModal';
 import { getTheme, onThemeChange, toggleTheme } from './theme';
 import type { ExportedSession } from '../storage/sessionManager';
 import type { CatalogManifestEntry } from './catalog';
@@ -24,6 +23,7 @@ export interface LandingCallbacks {
   onOpenEditor: () => void;
   onOpenHelp: () => void;
   onOpenCatalog: () => void;
+  onOpenIdeas: () => void;
   onOpenWhatsNew: () => void;
   /** Open the editor and launch the first-visit guided tour. */
   onTakeTour: () => void;
@@ -54,10 +54,10 @@ function shuffleArray<T>(arr: T[]): T[] {
   return copy;
 }
 
-export async function createLandingPage(
+export function createLandingPage(
   container: HTMLElement,
   callbacks: LandingCallbacks,
-): Promise<HTMLElement> {
+): HTMLElement {
   const page = document.createElement('div');
   page.id = 'landing-page';
   page.className = 'flex flex-col items-center w-full h-full overflow-auto bg-zinc-900 text-zinc-100 relative font-body';
@@ -65,9 +65,11 @@ export async function createLandingPage(
   page.appendChild(buildNav(callbacks));
   page.appendChild(buildHero(callbacks));
   page.appendChild(buildHowItWorks());
-  page.appendChild(await buildFeaturedCatalog(callbacks));
+  // Both builders return synchronously with skeleton placeholders and
+  // populate themselves in the background once data arrives.
+  page.appendChild(buildFeaturedCatalog(callbacks));
   page.appendChild(buildAgentSection());
-  page.appendChild(await buildRecentSessions(callbacks));
+  page.appendChild(buildRecentSessions(callbacks));
   page.appendChild(buildBuiltOn());
   page.appendChild(buildFooter());
 
@@ -112,6 +114,7 @@ function buildNav(callbacks: LandingCallbacks): HTMLElement {
   const links = document.createElement('nav');
   links.className = 'hidden md:flex items-center gap-7 text-sm text-zinc-400';
   const navItems: { label: string; onClick: () => void }[] = [
+    { label: 'Ideas', onClick: callbacks.onOpenIdeas },
     { label: 'Catalog', onClick: callbacks.onOpenCatalog },
     { label: 'How it works', onClick: callbacks.onOpenHelp },
     { label: 'For AI agents', onClick: scrollToAgentSection },
@@ -347,7 +350,7 @@ function buildHowItWorks(): HTMLElement {
 
 // ---------- 3. Featured catalog ----------
 
-async function buildFeaturedCatalog(callbacks: LandingCallbacks): Promise<HTMLElement> {
+function buildFeaturedCatalog(callbacks: LandingCallbacks): HTMLElement {
   const section = document.createElement('section');
   section.setAttribute('aria-labelledby', 'catalog-heading');
   section.className = 'w-full max-w-5xl px-6 py-12 border-t border-zinc-800';
@@ -374,19 +377,26 @@ async function buildFeaturedCatalog(callbacks: LandingCallbacks): Promise<HTMLEl
   grid.style.gridTemplateColumns = 'repeat(auto-fill, minmax(200px, 1fr))';
   section.appendChild(grid);
 
-  const entries = await loadFeaturedCatalogEntries();
-  if (entries.length === 0) {
-    const empty = document.createElement('div');
-    empty.className = 'text-sm text-zinc-500 text-center py-6';
-    empty.textContent = 'Catalog unavailable.';
-    section.appendChild(empty);
-    return section;
+  // Skeleton tiles fill the grid immediately while catalog data loads.
+  for (let i = 0; i < FEATURED_CATALOG_COUNT; i++) {
+    grid.appendChild(buildCatalogSkeleton());
   }
 
-  for (const entry of entries) {
-    grid.appendChild(buildCatalogTile(entry, () => { void loadFeaturedCatalogEntry(entry.manifest, callbacks); }));
-  }
-  return section;
+  void loadFeaturedCatalogEntries().then(entries => {
+    grid.innerHTML = '';
+    if (entries.length === 0) {
+      const empty = document.createElement('div');
+      empty.className = 'text-sm text-zinc-500 text-center py-6';
+      empty.textContent = 'Catalog unavailable.';
+      grid.appendChild(empty);
+      return;
+    }
+    for (const entry of entries) {
+      grid.appendChild(buildCatalogTile(entry, () => { void loadFeaturedCatalogEntry(entry.manifest, callbacks); }));
+    }
+  });
+
+  return section;  // skeletons already in grid; real tiles swap in when data arrives
 }
 
 /**
@@ -432,6 +442,42 @@ async function loadFeaturedCatalogEntries(): Promise<FeaturedCatalogEntry[]> {
   }
 }
 
+function buildCatalogSkeleton(): HTMLElement {
+  const tile = document.createElement('div');
+  tile.className = 'flex flex-col bg-zinc-800/60 rounded-lg border border-zinc-800 overflow-hidden';
+  const thumb = document.createElement('div');
+  thumb.className = 'w-full aspect-square bg-zinc-700/50 animate-pulse';
+  tile.appendChild(thumb);
+  const info = document.createElement('div');
+  info.className = 'px-3 py-2.5 space-y-1.5';
+  const title = document.createElement('div');
+  title.className = 'h-3.5 bg-zinc-700/50 animate-pulse rounded w-3/4';
+  const desc = document.createElement('div');
+  desc.className = 'h-2.5 bg-zinc-700/40 animate-pulse rounded w-1/2';
+  info.appendChild(title);
+  info.appendChild(desc);
+  tile.appendChild(info);
+  return tile;
+}
+
+function buildSessionSkeleton(): HTMLElement {
+  const tile = document.createElement('div');
+  tile.className = 'flex flex-col bg-zinc-800 rounded-lg border border-zinc-700 overflow-hidden';
+  const thumb = document.createElement('div');
+  thumb.className = 'w-full aspect-square bg-zinc-700/50 animate-pulse';
+  tile.appendChild(thumb);
+  const info = document.createElement('div');
+  info.className = 'px-3 py-2 space-y-1.5';
+  const name = document.createElement('div');
+  name.className = 'h-3 bg-zinc-700/50 animate-pulse rounded w-2/3';
+  const meta = document.createElement('div');
+  meta.className = 'h-2.5 bg-zinc-700/40 animate-pulse rounded w-1/3';
+  info.appendChild(name);
+  info.appendChild(meta);
+  tile.appendChild(info);
+  return tile;
+}
+
 function buildCatalogTile(entry: FeaturedCatalogEntry, onOpen: () => void): HTMLElement {
   const tile = document.createElement('button');
   tile.className = 'flex flex-col bg-zinc-800/60 rounded-lg border border-zinc-800 hover:border-zinc-600 transition-colors overflow-hidden text-left cursor-pointer';
@@ -462,7 +508,7 @@ function buildCatalogTile(entry: FeaturedCatalogEntry, onOpen: () => void): HTML
   info.appendChild(name);
   if (entry.manifest.description) {
     const desc = document.createElement('div');
-    desc.className = 'text-[11px] text-zinc-400 mt-0.5 line-clamp-2 leading-snug';
+    desc.className = 'text-[11px] text-zinc-400 mt-0.5 line-clamp-1 leading-snug';
     desc.textContent = entry.manifest.description;
     info.appendChild(desc);
   }
@@ -595,7 +641,7 @@ function scrollToAgentSection(): void {
 
 // ---------- 5. Recent sessions ----------
 
-async function buildRecentSessions(callbacks: LandingCallbacks): Promise<HTMLElement> {
+function buildRecentSessions(callbacks: LandingCallbacks): HTMLElement {
   const section = document.createElement('section');
   section.setAttribute('aria-labelledby', 'sessions-heading');
   section.className = 'w-full max-w-5xl px-6 py-12 border-t border-zinc-800';
@@ -606,34 +652,41 @@ async function buildRecentSessions(callbacks: LandingCallbacks): Promise<HTMLEle
   heading.textContent = 'Your recent sessions';
   section.appendChild(heading);
 
-  const sessions = await listSessions();
-  if (sessions.length === 0) {
-    const empty = document.createElement('div');
-    empty.className = 'text-sm text-zinc-500 py-4';
-    empty.textContent = 'No sessions yet. Open the editor and start building, or use an AI agent to create geometry.';
-    section.appendChild(empty);
-    return section;
-  }
-
   const grid = document.createElement('div');
   grid.className = 'grid gap-3';
   grid.style.gridTemplateColumns = 'repeat(auto-fill, minmax(220px, 1fr))';
 
-  const tileData = await Promise.all(
-    sessions.slice(0, 12).map(async (session) => {
-      const [latestVersion, versionCount] = await Promise.all([
-        getSessionLatestVersion(session.id),
-        getSessionVersionCount(session.id),
-      ]);
-      return { session, latestVersion, versionCount };
-    }),
-  );
-
-  for (const { session, latestVersion, versionCount } of tileData) {
-    grid.appendChild(createSessionTile(session, latestVersion, versionCount, callbacks.onOpenSession));
+  // Skeleton tiles while session data loads from IndexedDB.
+  for (let i = 0; i < 4; i++) {
+    grid.appendChild(buildSessionSkeleton());
   }
-
   section.appendChild(grid);
+
+  void listSessions().then(async (sessions) => {
+    grid.innerHTML = '';
+    if (sessions.length === 0) {
+      const empty = document.createElement('div');
+      empty.className = 'text-sm text-zinc-500 py-4';
+      empty.textContent = 'No sessions yet. Open the editor and start building, or use an AI agent to create geometry.';
+      section.appendChild(empty);
+      return;
+    }
+
+    const tileData = await Promise.all(
+      sessions.slice(0, 12).map(async (session) => {
+        const [latestVersion, versionCount] = await Promise.all([
+          getSessionLatestVersion(session.id),
+          getSessionVersionCount(session.id),
+        ]);
+        return { session, latestVersion, versionCount };
+      }),
+    );
+
+    for (const { session, latestVersion, versionCount } of tileData) {
+      grid.appendChild(createSessionTile(session, latestVersion, versionCount, callbacks.onOpenSession));
+    }
+  });
+
   return section;
 }
 
@@ -717,16 +770,6 @@ function buildFooter(): HTMLElement {
   const copyright = document.createElement('div');
   copyright.textContent = `© ${new Date().getFullYear()} Partwright Studio. Source-available · free for non-commercial use.`;
   footer.appendChild(copyright);
-
-  // Low-emphasis "start fresh" escape hatch — discoverable but well out of the
-  // primary click path. Opens a modal to delete chosen categories of local
-  // data (recovery valve for corruption / schema changes).
-  const reset = document.createElement('button');
-  reset.type = 'button';
-  reset.className = 'mt-2 text-zinc-700 hover:text-red-400 transition-colors';
-  reset.textContent = 'Uninstall / start fresh';
-  reset.addEventListener('click', () => { void showUninstallModal(); });
-  footer.appendChild(reset);
 
   return footer;
 }

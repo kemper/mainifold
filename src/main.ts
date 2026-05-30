@@ -39,7 +39,7 @@ import { registerCommands } from './ui/commandPalette';
 import { showQualitySettingsModal } from './ui/qualitySettingsModal';
 import { combo, MOD_LABEL, SHIFT_LABEL, ALT_LABEL } from './ui/shortcutDefs';
 import { showToast } from './ui/toast';
-import { initAiPanel, setActiveSession as setAiActiveSession, toggleAiPanel, toggleAiPanelFromToolbar } from './ui/aiPanel';
+import { initAiPanel, setActiveSession as setAiActiveSession, toggleAiPanel, toggleAiPanelFromToolbar, prefillAiInput } from './ui/aiPanel';
 import { getKey, mergeChatBucket } from './ai/db';
 import { requestPersistentStorage } from './storage/persist';
 import { aiConnectionMode, reloadSettingsFromStorage, getRenderBudget, getSpendingSummary, setSpendingMode as applyAiSpendingMode } from './ai/settings';
@@ -49,6 +49,8 @@ import { createLegalPage } from './ui/legal';
 import { showExportOptionsDialog } from './ui/exportOptionsDialog';
 import { showExportConfirm, hasExportWarning, type ExportWarningInfo } from './ui/exportConfirmModal';
 import { createCatalogPage, type CatalogManifestEntry } from './ui/catalog';
+import { createIdeasPage } from './ui/ideasPage';
+import type { Idea } from './ideas/ideas';
 import { createWhatsNewPage } from './ui/whatsNew';
 import { createNotFoundPage } from './ui/notFound';
 import { applyRouteMeta, routeTitle, type RouteName } from './seo/meta';
@@ -91,7 +93,6 @@ import {
   classifyRemoteResource,
   ensureExtensionForSource,
   MAX_REMOTE_BYTES,
-  REMOTE_FETCH_TIMEOUT_MS,
 } from './import/urlImport';
 import { showImportTargetModal } from './ui/importTargetModal';
 import { showImageVoxelImportModal, type ImageVoxelModalResult } from './ui/imageVoxelImportModal';
@@ -107,6 +108,9 @@ import { runVoxelForPaint } from './geometry/engines/voxel';
 import type { VoxelGrid } from './geometry/voxel/grid';
 import * as voxelPaint from './color/voxelPaint';
 import { setActiveImports, getActiveImports, type ImportedMesh } from './import/importedMesh';
+import { applyFuzzy, applySmooth, applyVoxelize, defaultFuzzyOptions, defaultSmoothOptions, type ModifierResult } from './surface/modifiers';
+import { nearestTriangleMap } from './surface/colorTransfer';
+import { initSurfaceUI } from './ui/surfaceModal';
 import { generateRelief, generateReliefFromSvg } from './relief/imageToRelief';
 import { DEFAULT_RELIEF_OPTIONS, type ReliefOptions, type ReliefImportMode, type ReliefCommonOptions, type SeedRegion, type PreviewMode, type GenerateReliefResult } from './relief/types';
 import { computeReliefTriColors, getSwapGuideFor, setPreviewMode as ctlSetReliefPreviewMode, getPreviewMode as ctlGetReliefPreviewMode, isPreviewActive as isReliefPreviewActive } from './relief/reliefController';
@@ -246,9 +250,11 @@ import {
   bboxFromMesh,
   computeGeometryStats,
   computeStatDiff,
+  computePrintability,
   checkAssertions,
   type GeometryAssertions,
 } from './geometry/statsComputation';
+import { getConfig } from './config/appConfig';
 
 // Load examples as raw text — JS and SCAD
 const jsExampleModules = import.meta.glob('../examples/*.js', { query: '?raw', import: 'default' });
@@ -364,6 +370,8 @@ let currentLostLabels: string[] | null = null;
 
 // #geometry-data element — always-updated machine-readable state
 let geometryDataEl: HTMLElement;
+// Viewport overlay pill — shows printability issues after each successful run.
+let printabilityIndicatorEl: HTMLElement | null = null;
 
 // === Shared-link preview mode ===
 //
@@ -419,7 +427,7 @@ export type CoverageMode = typeof COVERAGE_MODES[number];
 const BASE_TITLE = 'Partwright';
 let _expectedTitle = 'Partwright — AI-Driven Parametric CAD in Your Browser';
 
-function updateDocumentTitle(context?: { page?: 'landing' | 'editor' | 'help' | '404' | 'catalog' | 'legal' | 'whats-new'; sessionName?: string | null }) {
+function updateDocumentTitle(context?: { page?: 'landing' | 'editor' | 'help' | '404' | 'catalog' | 'ideas' | 'legal' | 'whats-new'; sessionName?: string | null }) {
   let route: RouteName;
   let titleOverride: string | undefined;
   if (context?.page === 'landing' || (context?.page === undefined && shouldShowLanding())) {
@@ -428,6 +436,8 @@ function updateDocumentTitle(context?: { page?: 'landing' | 'editor' | 'help' | 
     route = 'help';
   } else if (context?.page === 'catalog') {
     route = 'catalog';
+  } else if (context?.page === 'ideas') {
+    route = 'ideas';
   } else if (context?.page === 'legal') {
     route = 'legal';
   } else if (context?.page === 'whats-new') {
@@ -538,6 +548,15 @@ function updateGeometryData(executionTimeMs?: number, sourceCode?: string) {
   // can't form a watertight manifold). computeGeometryStats degrades gracefully.
   const data = withSessionContext(computeGeometryStats(currentManifold, currentMeshData, executionTimeMs, sourceCode));
   geometryDataEl.textContent = JSON.stringify(data, null, 2);
+  if (printabilityIndicatorEl) {
+    const { printable, issues } = computePrintability(data);
+    if (printable) {
+      printabilityIndicatorEl.style.display = 'none';
+    } else {
+      printabilityIndicatorEl.textContent = '⚠ ' + issues.join(' · ');
+      printabilityIndicatorEl.style.display = '';
+    }
+  }
 }
 
 /** How long to wait for `canvas.toBlob` before giving up on the thumbnail.
@@ -546,7 +565,6 @@ function updateGeometryData(executionTimeMs?: number, sourceCode?: string) {
  *  the GPU readback never settles the callback. A thumbnail is non-essential, so
  *  we cap the wait and let the save proceed without it rather than hang forever
  *  (which silently blocked saving a painted version). */
-const THUMBNAIL_TIMEOUT_MS = 4000;
 
 function captureThumbnail(mesh: MeshData | null = currentMeshData): Promise<Blob | null> {
   if (!mesh) return Promise.resolve(null);
@@ -570,7 +588,7 @@ function captureThumbnail(mesh: MeshData | null = currentMeshData): Promise<Blob
     };
     // Bound the wait: if toBlob never calls back, resolve null so the caller
     // (save / snapshot) still completes.
-    const timer = setTimeout(() => finish(null), THUMBNAIL_TIMEOUT_MS);
+    const timer = setTimeout(() => finish(null), getConfig().renderer.thumbnailTimeoutMs);
     try {
       canvas.toBlob(b => finish(b), 'image/png');
     } catch {
@@ -1509,6 +1527,10 @@ function shouldShowCatalog(): boolean {
   return window.location.pathname === '/catalog' && !hasShareHash();
 }
 
+function shouldShowIdeas(): boolean {
+  return window.location.pathname === '/ideas' && !hasShareHash();
+}
+
 function shouldShowWhatsNew(): boolean {
   return window.location.pathname === '/whats-new';
 }
@@ -1520,7 +1542,7 @@ function shouldShowLegal(): boolean {
 function shouldShow404(): boolean {
   if (hasShareHash()) return false;
   const path = window.location.pathname;
-  return path !== '/' && path !== '' && path !== '/help' && path !== '/editor' && path !== '/catalog' && path !== '/legal' && path !== '/whats-new';
+  return path !== '/' && path !== '' && path !== '/help' && path !== '/editor' && path !== '/catalog' && path !== '/ideas' && path !== '/legal' && path !== '/whats-new';
 }
 
 /** True when the editor view is the active page. Editor-scoped command-palette
@@ -1591,8 +1613,13 @@ async function main() {
     if (keyed.some(Boolean)) void requestPersistentStorage();
   })();
 
-  // Remove loading splash as soon as JS takes over
+  // Remove loading overlays as soon as JS takes over.
+  // landing-inline stays visible on the landing route until showLandingPage()
+  // replaces it with the JS-built version; remove it immediately on all other routes.
   document.getElementById('loading-splash')?.remove();
+  if (!shouldShowLanding()) {
+    document.getElementById('landing-inline')?.remove();
+  }
 
   const app = document.getElementById('app')!;
   geometryDataEl = createGeometryDataElement();
@@ -1609,7 +1636,7 @@ async function main() {
   // Wrapper for the main editor UI (toolbar + session bar + layout)
   const editorUI = document.createElement('div');
   editorUI.id = 'editor-ui';
-  editorUI.className = 'flex flex-col flex-1 min-h-0 w-full';
+  editorUI.className = 'flex flex-col flex-1 min-h-0 w-full hidden';
 
   let landingEl: HTMLElement | null = null;
   let helpEl: HTMLElement | null = null;
@@ -1888,6 +1915,8 @@ async function main() {
       paintingMode: q.paintingMode === 'multi-color' ? 'multi-color' : 'single-nozzle',
       invertHeights: !!q.invertHeights,
       manualBackground: q.manualBackground,
+      doubleSided: !!q.doubleSided,
+      backMirror: q.backMirror !== false,
     };
   }
 
@@ -1900,6 +1929,7 @@ async function main() {
       maxHeight: Math.max(0.1, Math.min(100, num(c.maxHeight, 3))),
       resolution: Math.max(8, Math.min(512, Math.floor(num(c.resolution, 200)))),
       smoothing: Math.max(0, Math.min(20, num(c.smoothing, 0))),
+      removeBackground: !!c.removeBackground,
     };
   }
 
@@ -2318,14 +2348,14 @@ async function main() {
    *  Throws a human-readable message on any failure. */
   async function importFromRemoteUrl(url: string): Promise<void> {
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), REMOTE_FETCH_TIMEOUT_MS);
+    const timer = setTimeout(() => controller.abort(), getConfig().import.remoteFetchTimeoutMs);
     let res: Response;
     try {
       res = await fetch(url, { signal: controller.signal, redirect: 'follow' });
     } catch (e) {
       clearTimeout(timer);
       if ((e as Error).name === 'AbortError') throw new Error('The request timed out.');
-      throw new Error('Could not fetch that URL (network error or blocked by the remote server).');
+      throw new Error('Could not fetch that URL. The server may block cross-origin requests, or the URL may point to a page rather than a direct file — try finding the direct file URL, or download and upload instead.');
     }
     if (!res.ok) {
       clearTimeout(timer);
@@ -2726,7 +2756,7 @@ async function main() {
       : 0;
     const scaleTolerance = Math.max(diag * 5e-6, 1e-6);
 
-    const tolerances = [1e-5, 1e-4, 1e-3, scaleTolerance];
+    const tolerances = [getConfig().import.stlWeldTolerance, 1e-4, 1e-3, scaleTolerance];
     let bestMesh = probe;
     let maxTried = 0;
     let manifoldError: string | null = null;
@@ -3624,6 +3654,14 @@ async function main() {
     onStartTour: () => { resetTour(); startTour(); },
   });
 
+  // Printability indicator pill — shown in the viewport overlay when the model
+  // has structural issues that would prevent 3D printing (non-manifold or
+  // disconnected components). Hidden when the model is printable.
+  printabilityIndicatorEl = document.createElement('span');
+  printabilityIndicatorEl.className = 'absolute top-8 left-2 z-20 text-xs text-amber-300 font-mono bg-zinc-900/80 px-2 py-0.5 rounded border border-amber-700/60 pointer-events-none';
+  printabilityIndicatorEl.style.display = 'none';
+  viewportPane.appendChild(printabilityIndicatorEl);
+
   // Parts rail — IDE-style list of the session's parts.
   createPartList(partsRail, {
     onSelectPart: async (partId: string) => {
@@ -3767,6 +3805,7 @@ async function main() {
     { id: 'toggle-ai', title: 'Toggle AI panel', hint: 'View', keywords: 'chat assistant drawer', run: () => toggleAiPanel() },
     { id: 'toggle-diagnostics', title: 'Toggle diagnostic log', hint: 'View', keywords: 'errors warnings console', run: () => toggleDiagnosticsPanel() },
     { id: 'open-catalog', title: 'Open catalog', hint: 'Navigate', keywords: 'examples premade browse', run: () => { void showCatalogPage(); } },
+    { id: 'open-ideas', title: 'Open ideas', hint: 'Navigate', keywords: 'prompts examples inspiration showcase what can i do', run: () => { showIdeasPage(); } },
     { id: 'open-help', title: 'Open help', hint: 'Navigate', keywords: 'docs documentation guide', run: () => showHelp() },
     { id: 'open-whats-new', title: "Open what's new", hint: 'Navigate', keywords: 'changelog recent features updates release notes', run: () => showWhatsNewPage() },
     { id: 'open-quality', title: 'Modeling quality settings', hint: 'Settings', keywords: 'resolution curve segments smoothness', run: () => showQualitySettingsModal() },
@@ -3872,6 +3911,8 @@ async function main() {
   let editorReadyResolve: (() => void) = () => {};
   const editorReadyPromise = new Promise<void>(resolve => { editorReadyResolve = resolve; });
   let engineOk = false;
+  let engineLoadPromise: Promise<void> | null = null;
+  let engineLoadingOverlay: HTMLElement | null = null;
   let helpHasAppBackTarget = false;
   let legalEl: HTMLElement | null = null;
   let legalHasAppBackTarget = false;
@@ -3908,9 +3949,11 @@ async function main() {
     showEditorUI(landingEl, helpEl, editorUI);
     if (notFoundEl) notFoundEl.classList.add('hidden');
     if (catalogEl) catalogEl.classList.add('hidden');
+    if (ideasEl) ideasEl.classList.add('hidden');
     if (legalEl) legalEl.classList.add('hidden');
     overlayContainer.classList.add('hidden');
     window.dispatchEvent(new Event('resize'));
+    void ensureEngineStarted();
   }
 
   async function loadVersionIntoEditor(version: Version) {
@@ -3958,6 +4001,8 @@ async function main() {
     transitionToEditor();
     await ensureEditorReady();
     if (window.location.pathname !== '/editor') return;
+    await ensureEngineStarted();
+    if (!engineOk) return;
     await createSession();
     updateDocumentTitle({ page: 'editor' });
     setStatus(statusBar, 'ready', 'Ready');
@@ -3968,6 +4013,8 @@ async function main() {
     updateAppHistory(`/editor?session=${sid}`, 'push');
     transitionToEditor();
     await ensureEditorReady();
+    await ensureEngineStarted();
+    if (!engineOk) return;
     if (getSessionIdFromURL() !== sid) return;
     const version = await openSession(sid);
     if (version) {
@@ -3990,6 +4037,7 @@ async function main() {
     updateAppHistory('/editor', 'push');
     transitionToEditor();
     await ensureEditorReady();
+    await ensureEngineStarted();
     if (!getState().session) {
       await createSession();
       runCode(defaultCode);
@@ -3998,12 +4046,13 @@ async function main() {
     startTour();
   }
 
-  async function ensureLandingPage() {
+  function ensureLandingPage() {
     if (!landingEl) {
-      landingEl = await createLandingPage(overlayContainer, {
+      landingEl = createLandingPage(overlayContainer, {
         onOpenEditor: openEditorFromLanding,
         onOpenHelp: () => showHelp(),
         onOpenCatalog: () => { void showCatalogPage(); },
+        onOpenIdeas: () => { showIdeasPage(); },
         onOpenWhatsNew: () => showWhatsNewPage(),
         onTakeTour: () => { void takeGuidedTour(); },
         onOpenSession: openSessionFromLanding,
@@ -4014,16 +4063,29 @@ async function main() {
   }
 
   async function showLandingPage() {
-    const page = await ensureLandingPage();
+    const page = ensureLandingPage();
     overlayContainer.classList.remove('hidden');
     editorUI.classList.add('hidden');
     helpEl?.classList.add('hidden');
     notFoundEl?.classList.add('hidden');
     catalogEl?.classList.add('hidden');
+    ideasEl?.classList.add('hidden');
     legalEl?.classList.add('hidden');
     whatsNewEl?.classList.add('hidden');
     page.classList.remove('hidden');
     updateDocumentTitle({ page: 'landing' });
+    // Build and render the JS page behind the static overlay, then remove the
+    // overlay only after fonts are settled — both pages then share the same
+    // metrics, making the swap invisible. Copy scroll position so the user's
+    // reading position is preserved if they scrolled before JS finished.
+    await document.fonts.ready;
+    requestAnimationFrame(() => {
+      const li = document.getElementById('landing-inline');
+      if (li) {
+        page.scrollTop = li.scrollTop;
+        li.remove();
+      }
+    });
   }
 
   function showNotFoundPage() {
@@ -4040,6 +4102,7 @@ async function main() {
     landingEl?.classList.add('hidden');
     helpEl?.classList.add('hidden');
     catalogEl?.classList.add('hidden');
+    ideasEl?.classList.add('hidden');
     legalEl?.classList.add('hidden');
     whatsNewEl?.classList.add('hidden');
     notFoundEl.classList.remove('hidden');
@@ -4071,6 +4134,7 @@ async function main() {
     if (landingEl) landingEl.classList.add('hidden');
     if (notFoundEl) notFoundEl.classList.add('hidden');
     if (catalogEl) catalogEl.classList.add('hidden');
+    if (ideasEl) ideasEl.classList.add('hidden');
     if (legalEl) legalEl.classList.add('hidden');
     if (whatsNewEl) whatsNewEl.classList.add('hidden');
     helpEl.classList.remove('hidden');
@@ -4101,6 +4165,7 @@ async function main() {
     if (landingEl) landingEl.classList.add('hidden');
     if (notFoundEl) notFoundEl.classList.add('hidden');
     if (catalogEl) catalogEl.classList.add('hidden');
+    if (ideasEl) ideasEl.classList.add('hidden');
     if (helpEl) helpEl.classList.add('hidden');
     legalEl.classList.remove('hidden');
     updateDocumentTitle({ page: 'legal' });
@@ -4125,6 +4190,7 @@ async function main() {
           }
         },
         onLoadEntry: handleCatalogEntryLoad,
+        onOpenIdeas: () => { showIdeasPage(); },
       });
     }
     overlayContainer.classList.remove('hidden');
@@ -4134,6 +4200,7 @@ async function main() {
     if (notFoundEl) notFoundEl.classList.add('hidden');
     if (legalEl) legalEl.classList.add('hidden');
     if (whatsNewEl) whatsNewEl.classList.add('hidden');
+    if (ideasEl) ideasEl.classList.add('hidden');
     catalogEl.classList.remove('hidden');
     updateDocumentTitle({ page: 'catalog' });
   }
@@ -4164,6 +4231,7 @@ async function main() {
     if (landingEl) landingEl.classList.add('hidden');
     if (helpEl) helpEl.classList.add('hidden');
     if (catalogEl) catalogEl.classList.add('hidden');
+    if (ideasEl) ideasEl.classList.add('hidden');
     if (notFoundEl) notFoundEl.classList.add('hidden');
     whatsNewEl.classList.remove('hidden');
     updateDocumentTitle({ page: 'whats-new' });
@@ -4179,8 +4247,88 @@ async function main() {
     updateAppHistory('/editor', 'push');
     transitionToEditor();
     await ensureEditorReady();
+    await ensureEngineStarted();
+    if (!engineOk) return;
     await importSessionPayload(payload);
     updateDocumentTitle({ page: 'editor' });
+  }
+
+  // === Ideas page handlers ===
+
+  /** Enter the editor with a live session, ready for a hand-off. Used by the
+   *  ideas-page actions: they all start by getting the user into the editor
+   *  (pushing the history entry BEFORE any session mutation, same reason as
+   *  handleCatalogEntryLoad). */
+  async function enterEditorForIdea(): Promise<void> {
+    updateAppHistory('/editor', 'push');
+    transitionToEditor();
+    await ensureEditorReady();
+  }
+
+  // A starter/technique idea — drop its prompt into the AI panel (don't send).
+  async function handleIdeaUsePrompt(idea: Idea): Promise<void> {
+    await enterEditorForIdea();
+    if (window.location.pathname !== '/editor') return;
+    if (!getState().session) {
+      await createSession();
+      setStatus(statusBar, 'ready', 'Ready');
+      runCode(defaultCode);
+    }
+    updateDocumentTitle({ page: 'editor' });
+    prefillAiInput(idea.prompt ?? '');
+  }
+
+  // An interactive idea: turn the user's photo into a colored voxel session
+  // (reuses the existing image→voxel import flow, modal and all).
+  async function handleIdeaPhotoToVoxel(file: File): Promise<void> {
+    await enterEditorForIdea();
+    if (window.location.pathname !== '/editor') return;
+    await handleImageImport(file);
+    updateDocumentTitle({ page: 'editor' });
+  }
+
+  // An interactive idea: emboss the user's photo as a smooth relief tile
+  // (reuses the existing Relief import wizard).
+  async function handleIdeaPhotoToRelief(file: File): Promise<void> {
+    await enterEditorForIdea();
+    if (window.location.pathname !== '/editor') return;
+    openReliefImportFlow(file);
+    updateDocumentTitle({ page: 'editor' });
+  }
+
+  let ideasEl: HTMLElement | null = null;
+  let ideasHasAppBackTarget = false;
+  function showIdeasPage(options: { history?: 'push' | 'replace' | 'none' } = {}) {
+    const historyMode = options.history ?? 'push';
+    if (historyMode !== 'none') {
+      ideasHasAppBackTarget = currentURLPathAndSearch() !== '/ideas';
+      updateAppHistory('/ideas', historyMode);
+    }
+    if (!ideasEl) {
+      ideasEl = createIdeasPage(overlayContainer, {
+        onBack: () => {
+          if (ideasHasAppBackTarget) {
+            window.history.back();
+          } else {
+            updateAppHistory('/', 'replace');
+            void syncRouteFromURL();
+          }
+        },
+        onUsePrompt: handleIdeaUsePrompt,
+        onPhotoToVoxel: handleIdeaPhotoToVoxel,
+        onPhotoToRelief: handleIdeaPhotoToRelief,
+      });
+    }
+    overlayContainer.classList.remove('hidden');
+    editorUI.classList.add('hidden');
+    if (landingEl) landingEl.classList.add('hidden');
+    if (helpEl) helpEl.classList.add('hidden');
+    if (notFoundEl) notFoundEl.classList.add('hidden');
+    if (legalEl) legalEl.classList.add('hidden');
+    if (catalogEl) catalogEl.classList.add('hidden');
+    if (whatsNewEl) whatsNewEl.classList.add('hidden');
+    ideasEl.classList.remove('hidden');
+    updateDocumentTitle({ page: 'ideas' });
   }
 
   // === Shared-link preview mode (read-only) ===
@@ -4265,6 +4413,7 @@ async function main() {
     switchTab('interactive', { history: 'none' });
     updateDocumentTitle({ page: 'editor' });
     await ensureEditorReady();
+    await ensureEngineStarted();
     if (!engineOk) return;
 
     // Decode + validate. ANY failure → graceful fallback to a blank editor.
@@ -4367,6 +4516,7 @@ async function main() {
     switchTab(tab, { history: 'none' });
     updateDocumentTitle({ page: 'editor' });
     await ensureEditorReady();
+    await ensureEngineStarted();
     if (!engineOk) return;
 
     const sessionId = getSessionIdFromURL();
@@ -4423,7 +4573,7 @@ async function main() {
     // Home — confusing because no editor / session is loaded to act on
     // it. /editor's own loader updates the AI session via onStateChange
     // when a session opens, so we don't need to set it explicitly here.
-    if (shouldShowLanding() || shouldShowHelp() || shouldShowCatalog() || shouldShowLegal() || shouldShowWhatsNew() || shouldShow404()) {
+    if (shouldShowLanding() || shouldShowHelp() || shouldShowCatalog() || shouldShowIdeas() || shouldShowLegal() || shouldShowWhatsNew() || shouldShow404()) {
       void setAiActiveSession(null);
     }
     // A share-link hash takes precedence over the normal editor sync on this
@@ -4432,11 +4582,13 @@ async function main() {
     if (hasShareHash()) {
       await enterSharedFromHash();
     } else if (shouldShowLanding()) {
-      await showLandingPage();
+      showLandingPage();
     } else if (shouldShowHelp()) {
       showHelp({ history: 'none' });
     } else if (shouldShowCatalog()) {
       await showCatalogPage({ history: 'none' });
+    } else if (shouldShowIdeas()) {
+      showIdeasPage({ history: 'none' });
     } else if (shouldShowLegal()) {
       showLegal({ history: 'none' });
     } else if (shouldShowWhatsNew()) {
@@ -4474,6 +4626,7 @@ async function main() {
   const showLanding = shouldShowLanding();
   const showHelpPage = shouldShowHelp();
   const showCatalog = shouldShowCatalog();
+  const showIdeas = shouldShowIdeas();
   const showLegalPage = shouldShowLegal();
   const showWhatsNew = shouldShowWhatsNew();
   const show404 = shouldShow404();
@@ -4484,6 +4637,8 @@ async function main() {
     showHelp({ history: 'none' });
   } else if (showCatalog) {
     await showCatalogPage({ history: 'none' });
+  } else if (showIdeas) {
+    showIdeasPage({ history: 'none' });
   } else if (showLegalPage) {
     showLegal({ history: 'none' });
   } else if (showWhatsNew) {
@@ -4492,60 +4647,86 @@ async function main() {
     showNotFoundPage();
   }
 
-  // Init geometry engine — wrapped in try/catch so editor/viewport still init
-  // on failure. The WASM engines need SharedArrayBuffer, which requires
-  // cross-origin isolation (COOP+COEP). The coi-serviceworker.js shim installs
-  // those headers and reloads ONCE on a first visit to gain isolation, so a
-  // transient non-isolated state on the very first load is expected and must
-  // NOT flash the scary message — we gate on the shim having had its reload.
+  // Geometry engine initialisation — deferred until the user first opens the
+  // editor. WASM is never loaded on landing / catalog / help page visits.
   const COI_MISSING_MSG =
-    'This browser tab is not cross-origin isolated, so the WASM engine (which needs SharedArrayBuffer) can’t start. ' +
-    'This usually fixes itself on reload; if it persists, the required COOP/COEP headers aren’t reaching the page ' +
+    "This browser tab is not cross-origin isolated, so the WASM engine (which needs SharedArrayBuffer) can't start. " +
+    "This usually fixes itself on reload; if it persists, the required COOP/COEP headers aren't reaching the page " +
     '(a proxy, extension, or unsupported browser can strip them).';
-  setStatus(statusBar, 'loading', 'Loading WASM...');
-  if (!isolationSupported()) {
-    // Has the COI shim already had a chance to reload this tab? It registers a
-    // service worker and reloads once; until a controller exists, that reload
-    // is still pending, so stay on the neutral "Loading…" message rather than
-    // alarming the user. We remember that we waited so a second non-isolated
-    // load (where the shim can't help) surfaces the explanation.
-    let coiReloadPending = false;
-    try {
-      const waited = sessionStorage.getItem('partwright-coi-waited') === '1';
-      const hasController = 'serviceWorker' in navigator && !!navigator.serviceWorker.controller;
-      coiReloadPending = !waited && !hasController && 'serviceWorker' in navigator;
-      if (coiReloadPending) sessionStorage.setItem('partwright-coi-waited', '1');
-    } catch {
-      // sessionStorage unavailable — treat as "no reload pending" and explain.
-      coiReloadPending = false;
+
+  function ensureEngineStarted(): Promise<void> {
+    if (engineLoadPromise) return engineLoadPromise;
+    setStatus(statusBar, 'loading', 'Loading WASM...');
+    engineLoadingOverlay?.classList.remove('hidden');
+    if (!isolationSupported()) {
+      // Has the COI shim already had a chance to reload this tab? It registers a
+      // service worker and reloads once; until a controller exists, that reload
+      // is still pending, so stay on the neutral "Loading…" message rather than
+      // alarming the user. We remember that we waited so a second non-isolated
+      // load (where the shim can't help) surfaces the explanation.
+      let coiReloadPending = false;
+      try {
+        const waited = sessionStorage.getItem('partwright-coi-waited') === '1';
+        const hasController = 'serviceWorker' in navigator && !!navigator.serviceWorker.controller;
+        coiReloadPending = !waited && !hasController && 'serviceWorker' in navigator;
+        if (coiReloadPending) sessionStorage.setItem('partwright-coi-waited', '1');
+      } catch {
+        coiReloadPending = false;
+      }
+      if (!coiReloadPending) {
+        setStatus(statusBar, 'error', 'WASM unavailable (not cross-origin isolated)');
+        errorLog.capture({ level: 'error', source: 'engine', message: COI_MISSING_MSG });
+        showToast(COI_MISSING_MSG, { variant: 'warn', durationMs: 9000 });
+      }
+      engineLoadingOverlay?.classList.add('hidden');
+      engineLoadPromise = Promise.resolve();
+    } else {
+      engineLoadPromise = (async () => {
+        try {
+          await initEngine();
+          engineOk = true;
+        } catch (e) {
+          console.error('WASM engine failed to load:', e);
+          const coiMissing = !isolationSupported();
+          setStatus(statusBar, 'error', coiMissing ? 'WASM unavailable (not cross-origin isolated)' : 'WASM failed');
+          errorLog.capture({
+            level: 'error',
+            source: 'engine',
+            message: coiMissing ? COI_MISSING_MSG : `WASM engine failed to load: ${e instanceof Error ? e.message : String(e)}`,
+          });
+        } finally {
+          engineLoadingOverlay?.classList.add('hidden');
+        }
+      })();
     }
-    if (!coiReloadPending) {
-      setStatus(statusBar, 'error', 'WASM unavailable (not cross-origin isolated)');
-      errorLog.capture({ level: 'error', source: 'engine', message: COI_MISSING_MSG });
-      showToast(COI_MISSING_MSG, { variant: 'warn', durationMs: 9000 });
-    }
-    // Either way, don't attempt initEngine — it would throw on the missing
-    // SharedArrayBuffer. engineOk stays false; the editor/viewport still init.
-  } else {
-    try {
-      await initEngine();
-      engineOk = true;
-    } catch (e) {
-      console.error('WASM engine failed to load:', e);
-      // Distinguish a genuine load failure from the COI-missing case (which we
-      // already handled above) so the message points at the right cause.
-      const coiMissing = !isolationSupported();
-      setStatus(statusBar, 'error', coiMissing ? 'WASM unavailable (not cross-origin isolated)' : 'WASM failed');
-      errorLog.capture({
-        level: 'error',
-        source: 'engine',
-        message: coiMissing ? COI_MISSING_MSG : `WASM engine failed to load: ${e instanceof Error ? e.message : String(e)}`,
-      });
-    }
+    return engineLoadPromise;
   }
 
   // Init viewport
   initViewport(viewportPane);
+
+  // Indeterminate progress bar shown over the viewport while WASM loads on
+  // first editor open. Hidden by ensureEngineStarted's finally block.
+  {
+    const style = document.createElement('style');
+    style.textContent = '@keyframes pw-bar{0%{left:0;width:30%}50%{left:35%;width:30%}100%{left:70%;width:30%}}';
+    document.head.appendChild(style);
+    engineLoadingOverlay = document.createElement('div');
+    engineLoadingOverlay.className = 'absolute inset-0 flex flex-col items-center justify-center z-10 pointer-events-none hidden';
+    const loadingText = document.createElement('div');
+    loadingText.className = 'text-xs text-zinc-400 mb-3 font-mono';
+    loadingText.textContent = 'Loading engine…';
+    const progressTrack = document.createElement('div');
+    progressTrack.className = 'relative w-48 h-1 bg-zinc-700 rounded-full overflow-hidden';
+    const progressBar = document.createElement('div');
+    progressBar.className = 'absolute h-full bg-blue-500 rounded-full';
+    progressBar.style.animation = 'pw-bar 1.5s ease-in-out infinite';
+    progressTrack.appendChild(progressBar);
+    engineLoadingOverlay.appendChild(loadingText);
+    engineLoadingOverlay.appendChild(progressTrack);
+    viewportPane.appendChild(engineLoadingOverlay);
+  }
+
   // Keep the live triangle-count readout (and high-complexity warning) in sync
   // with every displayed mesh — runs, paint strokes, simplify, clear.
   setOnMeshUpdate((mesh) => refreshTriangleCount(mesh.numTri));
@@ -5007,7 +5188,7 @@ async function main() {
 
   // Start guided tour on first visit (after editor fully renders) — but not over
   // a shared preview, which is a read-only landing surface for an external link.
-  if (!showLanding && !showHelpPage && !showCatalog && !showLegalPage && !showWhatsNew && !show404 && !hasShareHash()) {
+  if (!showLanding && !showHelpPage && !showCatalog && !showIdeas && !showLegalPage && !showWhatsNew && !show404 && !hasShareHash()) {
     maybeStartTour();
     maybeShowShortcutsHint();
     maybeShowLowMemoryNotice();
@@ -5017,9 +5198,8 @@ async function main() {
   // load. enterSharedFromHash must run before syncEditorFromURL so the latter
   // never createSession()s + runs default code on this path; it strips the hash
   // and degrades to a normal editable editor if the link is invalid. (The
-  // editor + engine are ready here, so its internal ensureEditorReady resolves
-  // immediately — no deadlock from awaiting it earlier in main().)
-  if (!showLanding && !showHelpPage && !showCatalog && !showLegalPage && !showWhatsNew && !show404 && engineOk) {
+  // editor is ready here; ensureEngineStarted is awaited inside each path.)
+  if (!showLanding && !showHelpPage && !showCatalog && !showIdeas && !showLegalPage && !showWhatsNew && !show404) {
     if (hasShareHash()) {
       await enterSharedFromHash();
     } else {
@@ -5134,7 +5314,7 @@ async function main() {
   }
 
   // Set initial editor title if we're on the editor page
-  if (!showLanding && !showHelpPage && !showCatalog && !showLegalPage && !showWhatsNew && !show404) {
+  if (!showLanding && !showHelpPage && !showCatalog && !showIdeas && !showLegalPage && !showWhatsNew && !show404) {
     updateDocumentTitle({ page: 'editor' });
   }
 
@@ -5334,8 +5514,226 @@ async function main() {
     };
   }
 
+  // === Surface modifiers (fuzzy skin / smooth / voxelize) ===
+  // Post-hoc operations on the current model that commit a new version, mirroring
+  // the STL-import path (applyImportWrapper): bake the result onto an imported
+  // mesh and emit a `Manifold.ofMesh(...)` wrapper (manifold modifiers), or emit a
+  // self-contained `voxels.decode(...)` program (voxelize). Then switch to the
+  // right engine, run, and save. Declared here as hoisted functions so the
+  // partwrightAPI methods below can call them.
+  function requireCurrentMeshForModifier(): MeshData {
+    if (!currentMeshData || currentMeshData.numTri === 0) {
+      throw new Error('No model to modify — run or open a model first.');
+    }
+    return currentMeshData;
+  }
+
+  /** The mesh a modifier should consume. When `preserveColor` is on and the
+   *  model is painted, bake the visible colors into `triColors` so a modifier
+   *  that resamples color (voxelize) inherits the paint; manifold modifiers
+   *  ignore `triColors` (they re-resolve paint regions after the run instead). */
+  function meshForModifier(preserveColor: boolean): MeshData {
+    const mesh = requireCurrentMeshForModifier();
+    if (preserveColor && (hasColorRegions() || hasModelColorRegions())) {
+      return applyTriColors(mesh);
+    }
+    return mesh;
+  }
+
+  /** True if the active model carries any paint (manual or model-declared). */
+  function modelHasColor(): boolean {
+    return hasColorRegions() || hasModelColorRegions();
+  }
+
+  // Non-destructive preview: swap the viewport mesh to the modifier's result
+  // WITHOUT running the engine or saving a version. Cleared by reverting to the
+  // current model's mesh (clearSurfacePreview). Mirrors the relief preview path.
+  // Colors are carried through subdivision in buildSurfaceModifier, so result.mesh
+  // already has the correct per-triangle colors — no post-hoc transfer needed.
+  function previewSurfaceModifier(result: ModifierResult, _preserveColor: boolean): void {
+    const previewMesh = result.kind === 'manifold' ? result.mesh : result.previewMesh;
+    if (previewMesh.numTri === 0) return;
+    updateMesh(previewMesh, { skipAutoFrame: true });
+  }
+
+  function clearSurfacePreview(): void {
+    if (!currentMeshData) return;
+    const restored = modelHasColor() ? applyTriColorsIfVisible(currentMeshData) : currentMeshData;
+    updateMesh(restored, { skipAutoFrame: true });
+  }
+
+  // Carry paint from the pre-modifier mesh onto a re-tessellated manifold result
+  // by nearest-triangle transfer. Region descriptors (coplanar/slab/…) re-resolve
+  // by geometry and collapse to nothing once fuzzy/smooth perturb the surface, so
+  // we instead snapshot the composited colors (paint + model colors, via
+  // buildTriColors) and map them onto the new mesh by centroid proximity, grouped
+  // into one `{ kind: 'triangles' }` region per distinct color. Those persist
+  // because the import→ofMesh pipeline is deterministic — the raw triangle ids
+  // stay valid across reloads. Returns the regions to rehydrate, or [] if nothing
+  // was painted. `transferredTris` reports coverage for the UI.
+  function buildCarriedColorRegions(
+    oldMesh: MeshData,
+    oldColors: Uint8Array,
+    newMesh: MeshData,
+  ): { regions: SerializedColorRegion[]; transferredTris: number } {
+    const painted = (oldColors as Uint8Array & { _painted?: Uint8Array })._painted;
+    const nearest = nearestTriangleMap(oldMesh, newMesh);
+    const groups = new Map<number, number[]>(); // packed rgb → new triangle ids
+    let transferredTris = 0;
+    for (let t = 0; t < newMesh.numTri; t++) {
+      const o = nearest[t];
+      if (o < 0) continue;
+      if (painted && !painted[o]) continue; // skip triangles that weren't painted
+      const r = oldColors[o * 3], g = oldColors[o * 3 + 1], b = oldColors[o * 3 + 2];
+      const rgb = (r << 16) | (g << 8) | b;
+      let arr = groups.get(rgb);
+      if (!arr) { arr = []; groups.set(rgb, arr); }
+      arr.push(t);
+      transferredTris++;
+    }
+    const regions: SerializedColorRegion[] = [];
+    let i = 0;
+    for (const [rgb, ids] of groups) {
+      regions.push({
+        name: `Surface color ${++i}`,
+        // ColorRegion.color is RGB in 0..1 (buildTriColors multiplies by 255);
+        // the packed rgb here is 0..255 bytes, so normalize each channel.
+        color: [((rgb >> 16) & 0xff) / 255, ((rgb >> 8) & 0xff) / 255, (rgb & 0xff) / 255],
+        source: 'face-pick',
+        descriptor: { kind: 'triangles', ids },
+        visible: true,
+      } as SerializedColorRegion);
+    }
+    return { regions, transferredTris };
+  }
+
+  async function commitSurfaceModifier(result: ModifierResult, preserveColor: boolean): Promise<Record<string, unknown>> {
+    // For manifold results the modifier already baked colors into its input and
+    // carried them through subdivision — result.mesh.triColors has the correct
+    // per-triangle paint (dense mesh, same shape as the engine output). We use
+    // that as the color source rather than the pre-modifier coarse mesh, which
+    // avoids the coarse→dense centroid-mapping errors that cause wrong colors.
+    const colorMesh = (preserveColor && result.kind === 'manifold' && result.mesh.triColors != null)
+      ? result.mesh : null;
+    cancelVoxelPaintIfActive();
+    dropPaintState();
+    if (result.kind === 'manifold') {
+      if (getActiveLanguage() !== 'manifold-js') await switchLanguage('manifold-js');
+      const comp: ImportedMesh = {
+        id: crypto.randomUUID(),
+        filename: result.label,
+        format: 'stl',
+        vertProperties: result.mesh.vertProperties,
+        triVerts: result.mesh.triVerts,
+        numVert: result.mesh.numVert,
+        numTri: result.mesh.numTri,
+        numProp: 3,
+      };
+      setActiveImports([comp]);
+      setValue(result.code);
+      const ok = await runCodeSync(result.code);
+      if (!ok) return { error: `Failed to apply ${result.label}` };
+      let geoData = getGeometryDataObj();
+      let carried = 0;
+      if (colorMesh && currentMeshData && geoData) {
+        const { regions, transferredTris } = buildCarriedColorRegions(colorMesh, colorMesh.triColors!, currentMeshData);
+        if (regions.length > 0) {
+          rehydrateColorRegions({ ...geoData, colorRegions: regions });
+          carried = transferredTris;
+          geoData = enrichGeometryDataWithColors(getGeometryDataObj());
+        }
+      }
+      const thumbnail = await captureThumbnail();
+      await saveVersion(result.code, geoData, thumbnail, result.label, undefined, {
+        force: true,
+        importedMeshes: [comp],
+      });
+      return { ok: true, label: result.label, geometry: getGeometryDataObj(), colorsCarried: carried };
+    }
+    // Voxel result: a self-contained `voxels.decode(...)` program, no imports.
+    // Color (when preserved) is baked into the grid at voxelize time, so it
+    // rides the emitted code — nothing extra to persist here.
+    if (getActiveLanguage() !== 'voxel') await switchLanguage('voxel');
+    setActiveImports([]);
+    setValue(result.code);
+    const ok = await runCodeSync(result.code);
+    if (!ok) return { error: `Failed to apply ${result.label}` };
+    const thumbnail = await captureThumbnail();
+    await saveVersion(result.code, getGeometryDataObj(), thumbnail, result.label, undefined, { force: true });
+    return { ok: true, label: result.label, geometry: getGeometryDataObj() };
+  }
+
+  // Build a modifier result from an id + options (shared by apply and preview).
+  // All three modifiers receive the color-baked mesh when preserveColor is on:
+  // fuzzy/smooth carry triColors (with _painted) through subdivision so the
+  // result already has correct per-triangle paint — no post-hoc transfer needed.
+  function buildSurfaceModifier(
+    id: 'fuzzy' | 'smooth' | 'voxelize',
+    opts: Record<string, unknown> | undefined,
+    preserveColor: boolean,
+  ): ModifierResult {
+    if (id === 'fuzzy') {
+      const mesh = meshForModifier(preserveColor);
+      const base = defaultFuzzyOptions(mesh);
+      return applyFuzzy(mesh, {
+        amplitude: (opts?.amplitude as number) ?? base.amplitude,
+        scale: (opts?.scale as number) ?? base.scale,
+        octaves: (opts?.octaves as number) ?? base.octaves,
+        seed: (opts?.seed as number) ?? base.seed,
+      });
+    }
+    if (id === 'smooth') {
+      const mesh = meshForModifier(preserveColor);
+      const base = defaultSmoothOptions();
+      return applySmooth(mesh, {
+        iterations: (opts?.iterations as number) ?? base.iterations,
+        subdivide: (opts?.subdivide as boolean) ?? base.subdivide,
+      });
+    }
+    // voxelize: feed the color-baked mesh when preserving so per-voxel color is sampled.
+    return applyVoxelize(meshForModifier(preserveColor), {
+      resolution: (opts?.resolution as number) ?? 32,
+      smooth: (opts?.smooth as boolean) ?? false,
+    });
+  }
+
   // === Expose window.partwright console API ===
   const partwrightAPI = {
+    /** Whether the current model carries paint (so the UI can warn before a
+     *  color-clearing modifier, or offer "preserve colors"). */
+    modelHasColor(): boolean { return modelHasColor(); },
+    /** Non-destructive viewport preview of a surface modifier (no version saved).
+     *  Call clearSurfacePreview() / re-run to restore. id: 'fuzzy'|'smooth'|'voxelize'. */
+    previewSurfaceModifier(id: 'fuzzy' | 'smooth' | 'voxelize', opts?: Record<string, unknown>, preserveColor = true): { ok: true } | { error: string } {
+      try {
+        previewSurfaceModifier(buildSurfaceModifier(id, opts, preserveColor), preserveColor);
+        return { ok: true };
+      } catch (e) { return { error: e instanceof Error ? e.message : String(e) }; }
+    },
+    /** Discard a live surface preview and restore the current model's mesh. */
+    clearSurfacePreview(): { ok: true } { clearSurfacePreview(); return { ok: true }; },
+    /** Apply a fuzzy-skin surface texture to the current model; saves a new version.
+     *  `preserveColor` (default true) re-resolves paint regions onto the new mesh. */
+    async applyFuzzySkin(opts?: { amplitude?: number; scale?: number; octaves?: number; seed?: number; preserveColor?: boolean }) {
+      try {
+        const preserve = opts?.preserveColor ?? true;
+        return await commitSurfaceModifier(buildSurfaceModifier('fuzzy', opts, preserve), preserve);
+      } catch (e) { return { error: e instanceof Error ? e.message : String(e) }; }
+    },
+    /** Smooth/round the current model (Taubin λ/μ); saves a new version. */
+    async smoothModel(opts?: { iterations?: number; subdivide?: boolean; preserveColor?: boolean }) {
+      try {
+        const preserve = opts?.preserveColor ?? true;
+        return await commitSurfaceModifier(buildSurfaceModifier('smooth', opts, preserve), preserve);
+      } catch (e) { return { error: e instanceof Error ? e.message : String(e) }; }
+    },
+    /** Voxelize the current model into the voxel engine; saves a new version. */
+    async voxelizeModel(opts?: { resolution?: number; smooth?: boolean; preserveColor?: boolean }) {
+      try {
+        const preserve = opts?.preserveColor ?? true;
+        return await commitSurfaceModifier(buildSurfaceModifier('voxelize', opts, preserve), preserve);
+      } catch (e) { return { error: e instanceof Error ? e.message : String(e) }; }
+    },
     /** Run code string and update all views. Returns geometry data object. */
     async run(code?: string): Promise<Record<string, unknown>> {
       assertString(code, 'run(code)', { optional: true, allowEmpty: false });
@@ -5345,14 +5743,24 @@ async function main() {
       if (!applied) {
         return { status: 'error', error: 'Run was superseded by a concurrent execution — retry' };
       }
-      return JSON.parse(geometryDataEl.textContent || '{}');
+      const geo = JSON.parse(geometryDataEl.textContent || '{}');
+      return { ...geo, printability: computePrintability(geo) };
     },
 
     /** Get current geometry stats without re-running */
     getGeometryData(): Record<string, unknown> {
-      const geo = JSON.parse(geometryDataEl.textContent || '{}');
+      const geo = JSON.parse(geometryDataEl.textContent || '{}') as Record<string, unknown>;
       const warnings = geometryWarnings(geo);
-      return warnings.length > 0 ? { ...geo, warnings } : geo;
+      // Flag stale results: setCode() doesn't re-run, so the cached geometry may
+      // reflect a previous version of the code. Callers should run or runAndSave
+      // before relying on component counts or other stats.
+      const stale = typeof geo.codeHash === 'string' && simpleHash(getValue()) !== geo.codeHash;
+      return {
+        ...geo,
+        printability: computePrintability(geo),
+        ...(stale ? { stale: true } : {}),
+        ...(warnings.length > 0 ? { warnings } : {}),
+      };
     },
 
     /** Get current editor code */
@@ -6667,9 +7075,11 @@ async function main() {
       const lostLabels = currentLostLabels && currentLostLabels.length > 0
         ? [...currentLostLabels]
         : undefined;
+      const printability = computePrintability(newGeoData);
       return {
         ...(assertions ? { passed: true } : {}),
         geometry: newGeoData,
+        printability,
         version: version ? { id: version.id, index: version.index, label: version.label } : null,
         diff,
         galleryUrl: getGalleryUrl(),
@@ -7291,8 +7701,13 @@ async function main() {
         } catch { /* ignore */ }
       }
 
-      // Include current stats for convenience
-      result.stats = JSON.parse(geometryDataEl.textContent || '{}');
+      // Include current stats for convenience, with a stale flag when the editor
+      // code doesn't match the last-executed code (setCode was called without run).
+      const rawStats = JSON.parse(geometryDataEl.textContent || '{}') as Record<string, unknown>;
+      const stale = typeof rawStats.codeHash === 'string' && simpleHash(getValue()) !== rawStats.codeHash;
+      if (stale) rawStats.stale = true;
+      result.stats = rawStats;
+      if (stale) result.stale = true;
 
       return result;
     },
@@ -9734,6 +10149,9 @@ async function main() {
   apiWindow.partwright = partwrightAPI;
   apiWindow.mainifold = partwrightAPI;
 
+  // Surface modifiers UI (viewport ✦ Surface button + command-palette entries).
+  initSurfaceUI(partwrightAPI as unknown as Parameters<typeof initSurfaceUI>[0]);
+
   // Log API availability for AI agents
   console.info('Partwright: AI agents should use window.partwright -- start with partwright.help(). window.mainifold remains as a legacy alias. See /llms.txt');
 
@@ -10277,27 +10695,41 @@ async function main() {
     }
     if (typeof geo.componentCount === 'number' && geo.componentCount > 1) {
       const cc = geo.componentCount;
-      // Partwright exists to produce printable parts, so a multi-component
-      // result is almost always a failed union rather than a deliberate
-      // assembly. Frame it as a print defect and point at the exact tool that
-      // diagnoses it, instead of inviting the model to shrug it off.
-      let msg =
-        `componentCount: ${cc} — the model is ${cc} disconnected solids. ` +
-        `For 3D printing that means ${cc} separate pieces: any part not connected ` +
-        `to the main body floats free and will detach (or print in mid-air). ` +
-        `Unless you deliberately intend a multi-part assembly, the pieces must ` +
-        `volumetrically OVERLAP by ≥ 0.5 units to fuse into one solid — a shared ` +
-        `face or a point/edge touch is NOT enough.`;
-      msg += isBrep
-        ? ' In BREP this bites often: OCCT leaves non-overlapping or thinly-touching ' +
-          'shapes as a disconnected compound even after fuse / fuseAll (e.g. a thin ' +
-          'annular sliver of overlap frequently fails to bond). Call ' +
-          'runAndExplain(code) to list every component with a per-floater overlap ' +
-          'suggestion, then seat the piece a few units deeper into its neighbour and ' +
-          're-run until componentCount is 1.'
-        : ' Call runAndExplain(code) to see which pieces are disconnected and get a ' +
-          'concrete .translate() overlap suggestion for each floater.';
-      warnings.push(msg);
+      const enclosed = typeof geo.containedComponents === 'number' ? geo.containedComponents : 0;
+      const floating = cc - enclosed;
+      // Only warn about true floaters — fully-enclosed interior components (e.g.
+      // sealed voids inside voxel shells) won't detach in print and shouldn't
+      // block a single-piece assertion.
+      if (floating > 1) {
+        // Partwright exists to produce printable parts, so a multi-component
+        // result is almost always a failed union rather than a deliberate
+        // assembly. Frame it as a print defect and point at the exact tool that
+        // diagnoses it, instead of inviting the model to shrug it off.
+        let msg =
+          `componentCount: ${cc}${enclosed > 0 ? ` (${enclosed} enclosed interior void${enclosed > 1 ? 's' : ''} excluded)` : ''} — ` +
+          `the model has ${floating} disconnected solid${floating > 1 ? 's' : ''}. ` +
+          `For 3D printing that means ${floating} separate piece${floating > 1 ? 's' : ''}: any part not connected ` +
+          `to the main body floats free and will detach (or print in mid-air). ` +
+          `Unless you deliberately intend a multi-part assembly, the pieces must ` +
+          `volumetrically OVERLAP by ≥ 0.5 units to fuse into one solid — a shared ` +
+          `face or a point/edge touch is NOT enough.`;
+        msg += isBrep
+          ? ' In BREP this bites often: OCCT leaves non-overlapping or thinly-touching ' +
+            'shapes as a disconnected compound even after fuse / fuseAll (e.g. a thin ' +
+            'annular sliver of overlap frequently fails to bond). Call ' +
+            'runAndExplain(code) to list every component with a per-floater overlap ' +
+            'suggestion, then seat the piece a few units deeper into its neighbour and ' +
+            're-run until componentCount is 1.'
+          : ' Call runAndExplain(code) to see which pieces are disconnected and get a ' +
+            'concrete .translate() overlap suggestion for each floater.';
+        warnings.push(msg);
+      } else if (enclosed > 0) {
+        // All extra components are sealed interior voids — informational only
+        warnings.push(
+          `componentCount: ${cc} — ${enclosed} component${enclosed > 1 ? 's are' : ' is'} a sealed interior void fully enclosed within another solid. ` +
+          `These won't detach in print. Call runAndExplain(code) to inspect each component individually.`,
+        );
+      }
     }
     // Surface color regions that no longer resolve to any triangles on
     // the freshly-run mesh — descriptors are still serialized (so the
@@ -10416,6 +10848,7 @@ async function main() {
     if (result.error) {
       const diagnostics = result.diagnostics ?? [];
       setStatus(statusBar, 'error', summarizeDiagnostics(result.error, diagnostics));
+      if (printabilityIndicatorEl) printabilityIndicatorEl.style.display = 'none';
       geometryDataEl.textContent = JSON.stringify({
         status: 'error',
         error: result.error,
