@@ -49,6 +49,7 @@ import { showExportOptionsDialog } from './ui/exportOptionsDialog';
 import { showExportConfirm, hasExportWarning, type ExportWarningInfo } from './ui/exportConfirmModal';
 import { createCatalogPage, type CatalogManifestEntry } from './ui/catalog';
 import { createWhatsNewPage } from './ui/whatsNew';
+import { initInstallPrompt } from './ui/installPrompt';
 import { createNotFoundPage } from './ui/notFound';
 import { applyRouteMeta, routeTitle, type RouteName } from './seo/meta';
 import { createSessionBar } from './ui/sessionBar';
@@ -1557,6 +1558,10 @@ async function main() {
   // Install global error/warning capture as early as possible so nothing
   // slips through before the rest of the app is ready.
   errorLog.install();
+
+  // Capture beforeinstallprompt as early as possible — it can fire before the
+  // landing page mounts, and the install CTA replays the stashed event.
+  initInstallPrompt();
 
   // Apply persisted theme before any UI renders
   initTheme();
