@@ -20,13 +20,35 @@ function formatTimestamp(ts: number | null): string {
   return d.toLocaleString();
 }
 
+/** Where a confirmed session import should land. `'cancel'` ⇒ dismissed. */
+export type ImportDestination = 'new-session' | 'merge' | 'cancel';
+
+export interface ImportPreviewOptions {
+  /** When set, offers a "Merge into current session" destination alongside the
+   *  default "Open as new session". The name is shown so the user knows what
+   *  they'd be merging into. Omit (or leave undefined) when no session is open. */
+  mergeTargetName?: string;
+}
+
 /**
- * Show a preview modal for a session import. Resolves true if the user
- * confirms, false if they cancel or dismiss.
+ * Show a preview modal for a session import. Resolves with the chosen
+ * destination — `'new-session'` (today's default), `'merge'` (only offered when
+ * `mergeTargetName` is set), or `'cancel'` when dismissed.
  */
-export function showImportPreview(filename: string, summary: SessionImportSummary): Promise<boolean> {
+export function showImportPreview(
+  filename: string,
+  summary: SessionImportSummary,
+  opts: ImportPreviewOptions = {},
+): Promise<ImportDestination> {
+  const canMerge = !!opts.mergeTargetName;
   return new Promise((resolve) => {
-    let result = false;
+    let result: ImportDestination = 'cancel';
+    // Default destination when merging is on offer: keep the historical
+    // behavior (a new session) as the pre-selected choice.
+    let destination: 'new-session' | 'merge' = 'new-session';
+    // Declared up front so updateNote() (which toggles its label) can close
+    // over it before the footer wiring runs.
+    const importBtn = document.createElement('button');
     const shell = createModalShell({
       title: 'Import session?',
       onClose: () => {
@@ -77,8 +99,61 @@ export function showImportPreview(filename: string, summary: SessionImportSummar
 
     const note = document.createElement('p');
     note.className = 'text-[11px] text-zinc-500 leading-relaxed';
-    note.textContent = 'Imports as a new session — your current session is kept.';
     shell.body.appendChild(note);
+
+    // Destination chooser — only when a session is open to merge into. The
+    // radios update both the live `destination` value and the helper note so
+    // the consequence of each choice stays visible.
+    if (canMerge) {
+      const fieldset = document.createElement('div');
+      fieldset.className = 'flex flex-col gap-1.5';
+
+      const makeChoice = (value: 'new-session' | 'merge', label: string, hint: string): void => {
+        const row = document.createElement('label');
+        row.className = 'flex items-start gap-2 cursor-pointer text-sm text-zinc-200';
+        const radio = document.createElement('input');
+        radio.type = 'radio';
+        radio.name = 'import-destination';
+        radio.value = value;
+        radio.className = 'mt-0.5 shrink-0';
+        radio.checked = value === destination;
+        radio.addEventListener('change', () => {
+          if (radio.checked) { destination = value; updateNote(); }
+        });
+        const text = document.createElement('div');
+        const title = document.createElement('div');
+        title.textContent = label;
+        const sub = document.createElement('div');
+        sub.className = 'text-[11px] text-zinc-500 leading-snug';
+        sub.textContent = hint;
+        text.appendChild(title);
+        text.appendChild(sub);
+        row.appendChild(radio);
+        row.appendChild(text);
+        fieldset.appendChild(row);
+      };
+
+      makeChoice(
+        'new-session',
+        'Open as new session',
+        'Imports into a brand-new session. Your current session is kept.',
+      );
+      makeChoice(
+        'merge',
+        'Merge into current session',
+        `Append the imported parts to "${opts.mergeTargetName}" — no parts are replaced.`,
+      );
+      shell.body.appendChild(fieldset);
+    }
+
+    function updateNote(): void {
+      if (canMerge && destination === 'merge') {
+        note.textContent = `Appends the imported parts to "${opts.mergeTargetName}". Existing parts are untouched.`;
+      } else {
+        note.textContent = 'Imports as a new session — your current session is kept.';
+      }
+      importBtn.textContent = canMerge && destination === 'merge' ? 'Merge' : 'Import';
+    }
 
     // Code-execution warning. Importing a session runs each version's code in
     // your browser (to regenerate thumbnails), so a malicious file could
@@ -93,19 +168,27 @@ export function showImportPreview(filename: string, summary: SessionImportSummar
     const cancelBtn = document.createElement('button');
     cancelBtn.className = BUTTON_CANCEL;
     cancelBtn.textContent = 'Cancel';
-    cancelBtn.addEventListener('click', () => { result = false; shell.close(); });
+    cancelBtn.addEventListener('click', () => { result = 'cancel'; shell.close(); });
     shell.footer.appendChild(cancelBtn);
 
-    const importBtn = document.createElement('button');
     importBtn.className = BUTTON_PRIMARY;
     importBtn.textContent = 'Import';
-    importBtn.addEventListener('click', () => { result = true; shell.close(); });
+    importBtn.addEventListener('click', confirmImport);
     shell.footer.appendChild(importBtn);
+
+    function confirmImport(): void {
+      result = canMerge ? destination : 'new-session';
+      shell.close();
+    }
+
+    // Now that the button exists, sync its label + the helper note to the
+    // initial destination (and reflect any later radio changes).
+    updateNote();
 
     // Modal shell handles Escape; we add an extra Enter-to-confirm shortcut
     // so the keyboard flow matches the previous standalone implementation.
     function onEnter(e: KeyboardEvent) {
-      if (e.key === 'Enter') { e.preventDefault(); result = true; shell.close(); }
+      if (e.key === 'Enter') { e.preventDefault(); confirmImport(); }
     }
     document.addEventListener('keydown', onEnter);
 

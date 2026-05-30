@@ -84,6 +84,14 @@ import {
 } from './import/importInbox';
 import { createThumbnailFromImageData } from './import/imageThumbnail';
 import { showImportPreview, summarizeSessionImport } from './ui/importPreview';
+import { showImportUrlModal } from './ui/importUrlModal';
+import {
+  filenameFromUrl,
+  classifyRemoteResource,
+  ensureExtensionForSource,
+  MAX_REMOTE_BYTES,
+  REMOTE_FETCH_TIMEOUT_MS,
+} from './import/urlImport';
 import { showImportTargetModal } from './ui/importTargetModal';
 import { showImageVoxelImportModal } from './ui/imageVoxelImportModal';
 import { showStepImportTargetModal } from './ui/stepImportTargetModal';
@@ -194,6 +202,7 @@ import {
   getGalleryUrl,
   exportSession,
   importSession,
+  importSessionPartsIntoActive,
   clearAllSessions,
   saveImages as persistImages,
   getImagesFromSession,
@@ -2079,11 +2088,15 @@ async function main() {
       alert(`"${filename}" doesn't look like a Partwright session file.`);
       return false;
     }
-    const summary = summarizeSessionImport(data);
-    const ok = await showImportPreview(filename, summary);
-    if (!ok) return false;
-    await importSessionPayload(data);
-    return true;
+    // Show the destination chooser (new session vs merge) and import. The merge
+    // option is only offered when a session is open (gated inside
+    // importValidatedSession). A failure surfaces as a toast and returns false.
+    try {
+      return await importValidatedSession(data, filename);
+    } catch (e) {
+      showToast(`Import failed: ${(e as Error).message}`, { variant: 'warn' });
+      return false;
+    }
   }
 
   // Import a .partwright.json session, a raw .js / .scad file, or an .stl mesh
@@ -2152,6 +2165,164 @@ async function main() {
       alert(`Failed to import "${file.name}": ${(e as Error).message}`);
       return false;
     }
+  }
+
+  // === Import from URL ===
+
+  /** Decode + import a Partwright share link or raw `#share=…` hash WITHOUT any
+   *  network. Mirrors the decode+validate chain in enterSharedFromHash/onFork:
+   *  decodeShare → validateSessionPayload → validateSharePayloadShape, then runs
+   *  it through the same new-session / merge destination chooser as a file
+   *  import. Throws a human-readable message on any failure (the modal surfaces
+   *  it inline). */
+  async function importFromShareHash(hash: string): Promise<void> {
+    let payload: ExportedSession;
+    try {
+      const parsed = await decodeShare(hash);
+      const branded = validateSessionPayload(parsed);
+      if (!branded) throw new Error('not a Partwright payload');
+      payload = validateSharePayloadShape(branded);
+    } catch (e) {
+      if (e instanceof ShareUnsupportedError) {
+        throw new Error('That share link was made by a newer version of Partwright.');
+      }
+      throw new Error('That share link is invalid or corrupted.');
+    }
+    await importValidatedSession(payload, 'shared link');
+  }
+
+  /** Show the destination chooser (new session vs merge, the latter only when a
+   *  session is open) for an already-validated session payload, then import.
+   *  Returns whether the import committed (false when the user cancelled). */
+  async function importValidatedSession(data: ExportedSession, filename: string): Promise<boolean> {
+    const summary = summarizeSessionImport(data);
+    const cur = getState();
+    const mergeTargetName = cur.session
+      ? (cur.session.name?.trim() || 'current session')
+      : undefined;
+    const choice = await showImportPreview(filename, summary, { mergeTargetName });
+    if (choice === 'cancel') return false;
+    if (choice === 'merge') {
+      const result = await importSessionPartsIntoActive(data, async (code) => {
+        await runCodeSync(code);
+        return captureThumbnail();
+      });
+      if (result) {
+        const partWord = result.addedParts.length === 1 ? 'part' : 'parts';
+        showToast(`Merged ${result.addedParts.length} ${partWord} into this session.`, { variant: 'success' });
+        return true;
+      }
+    }
+    await importSessionPayload(data);
+    return true;
+  }
+
+  /** Fetch a remote http(s) file with a timeout + size cap, wrap it in a File,
+   *  and route it through the existing import pipeline (handleImportFile, which
+   *  itself routes JSON → the session-import path). Never evals fetched content.
+   *  Throws a human-readable message on any failure. */
+  async function importFromRemoteUrl(url: string): Promise<void> {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), REMOTE_FETCH_TIMEOUT_MS);
+    let res: Response;
+    try {
+      res = await fetch(url, { signal: controller.signal, redirect: 'follow' });
+    } catch (e) {
+      clearTimeout(timer);
+      if ((e as Error).name === 'AbortError') throw new Error('The request timed out.');
+      throw new Error('Could not fetch that URL (network error or blocked by the remote server).');
+    }
+    if (!res.ok) {
+      clearTimeout(timer);
+      throw new Error(`The server responded ${res.status} ${res.statusText}.`);
+    }
+
+    // Up-front size guard from Content-Length when present.
+    const declared = Number(res.headers.get('content-length'));
+    if (Number.isFinite(declared) && declared > MAX_REMOTE_BYTES) {
+      clearTimeout(timer);
+      controller.abort();
+      throw new Error(`That file is too large (${(declared / 1048576).toFixed(1)} MB; limit 25 MB).`);
+    }
+
+    const contentType = res.headers.get('content-type');
+    const filename = filenameFromUrl(url);
+
+    // Classify before buffering so we can reject unsupported types early. The
+    // filename extension is authoritative; fall back to Content-Type.
+    const source = classifyRemoteResource(filename, contentType);
+    if (!source) {
+      clearTimeout(timer);
+      controller.abort();
+      throw new Error('Unsupported file type. Supported: .partwright.json, .stl, .step / .stp, .svg, .vox, or an image.');
+    }
+
+    // Stream the body with a hard byte cap as a backstop for servers that omit
+    // or under-report Content-Length.
+    let bytes: Uint8Array;
+    try {
+      bytes = await readBodyCapped(res, MAX_REMOTE_BYTES, controller);
+    } catch (e) {
+      clearTimeout(timer);
+      if ((e as Error).name === 'AbortError') throw new Error('The request timed out.');
+      throw e;
+    }
+    clearTimeout(timer);
+
+    const safeName = ensureExtensionForSource(filename, source);
+    const file = new File([bytes], safeName, { type: contentType ?? '' });
+    const ok = await handleImportFile(file);
+    if (!ok) {
+      // handleImportFile surfaces its own alert on hard failure; a soft "false"
+      // (e.g. user cancelled a sub-modal) shouldn't be reported as an error.
+      throw new Error('Import was cancelled or the file could not be read.');
+    }
+  }
+
+  /** Read a fetch Response body into a Uint8Array, aborting once the streamed
+   *  total exceeds `cap`. Falls back to a plain arrayBuffer() read (still cap-
+   *  checked) when the body isn't a readable stream. */
+  async function readBodyCapped(res: Response, cap: number, controller: AbortController): Promise<Uint8Array> {
+    const body = res.body;
+    if (!body || typeof body.getReader !== 'function') {
+      const buf = new Uint8Array(await res.arrayBuffer());
+      if (buf.byteLength > cap) throw new Error(`That file is too large (limit 25 MB).`);
+      return buf;
+    }
+    const reader = body.getReader();
+    const chunks: Uint8Array[] = [];
+    let total = 0;
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (value) {
+        total += value.byteLength;
+        if (total > cap) {
+          controller.abort();
+          try { await reader.cancel(); } catch { /* ignore */ }
+          throw new Error('That file is too large (limit 25 MB).');
+        }
+        chunks.push(value);
+      }
+    }
+    const out = new Uint8Array(total);
+    let offset = 0;
+    for (const c of chunks) { out.set(c, offset); offset += c.byteLength; }
+    return out;
+  }
+
+  /** Open the "Import from URL…" modal and route the user's input to either the
+   *  local share decode or the size-capped remote fetch. */
+  function openImportFromUrl(): void {
+    showImportUrlModal({
+      onSubmit: async (parsed) => {
+        if (parsed.kind === 'share') {
+          await importFromShareHash(parsed.hash);
+        } else {
+          await importFromRemoteUrl(parsed.url);
+        }
+      },
+    });
   }
 
   /** Decode an image File/Blob into ImageData via an offscreen canvas. */
@@ -3044,6 +3215,7 @@ async function main() {
       exportRawCode(getValue(), getActiveLanguage());
     },
     onImportFile: async (file) => { await handleImportFile(file); },
+    onImportFromURL: () => { openImportFromUrl(); },
     onImportInboxEntry: handleReimportInboxEntry,
     onCreateRelief: () => {
       // If the active session is itself a relief, reopen the wizard pre-loaded
