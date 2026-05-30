@@ -15,15 +15,22 @@ async function openEditor(page: Page) {
   );
 }
 
+type ExportedVersion = { code: string; thumbnail?: string; part?: number };
+type ExportedPart = { name: string; order: number };
+type ExportedData = { versions: ExportedVersion[]; parts?: ExportedPart[] };
+
 type PW = {
   createSession: (n?: string) => Promise<unknown>;
   runAndSave: (c: string, l?: string) => Promise<unknown>;
-  exportSessionData: (id?: string) => Promise<{ data: unknown }>;
+  exportSessionData: (
+    id?: string,
+    opts?: { includeThumbnails?: boolean },
+  ) => Promise<{ data: ExportedData }>;
   listParts: () => { id: string; name: string }[];
 };
 
 test.describe('Import: merge + from-URL', () => {
-  test('JSON import offers "Merge into current session" and appends the parts', async ({ page }) => {
+  test('JSON import defaults to "Add as new part(s)" and appends the parts', async ({ page }) => {
     await openEditor(page);
 
     // Build an exported session payload from a throwaway session.
@@ -53,11 +60,13 @@ test.describe('Import: merge + from-URL', () => {
 
     const dialog = page.locator('[role="dialog"]');
     await expect(dialog).toBeVisible({ timeout: 6000 });
-    // The merge destination choice is offered because a session is open.
-    await expect(dialog).toContainText('Merge into current session');
-    await dialog.getByText('Merge into current session').click();
-    // The primary button relabels to "Merge".
-    const mergeBtn = dialog.getByRole('button', { name: 'Merge' });
+    // The merge destination choice is offered because a session is open, AND it
+    // is the pre-selected default — so the primary button already reads
+    // "Add parts" without the user touching the radios.
+    await expect(dialog).toContainText('Add as new part(s) to current project');
+    const mergeRadio = dialog.locator('input[type="radio"][value="merge"]');
+    await expect(mergeRadio).toBeChecked();
+    const mergeBtn = dialog.getByRole('button', { name: 'Add parts' });
     await expect(mergeBtn).toBeVisible();
     await mergeBtn.click();
     await expect(dialog).toBeHidden({ timeout: 10_000 });
@@ -71,6 +80,113 @@ test.describe('Import: merge + from-URL', () => {
     const sessionName = await page.evaluate(() =>
       new URLSearchParams(window.location.search).get('session'));
     expect(sessionName).toBeTruthy();
+  });
+
+  test('merging an imported-mesh part regenerates its OWN thumbnail (not the host part\'s)', async ({ page }) => {
+    await openEditor(page);
+
+    // Author an exported session whose only version renders an imported mesh
+    // (`Manifold.ofMesh(api.imports[0])`) and carries NO embedded thumbnail, so
+    // the merge MUST regenerate one by running that code. The bug under test:
+    // if the active-imports register isn't seeded with THIS version's mesh
+    // before the run, the capture reflects the host (previously selected) part
+    // instead — a stale thumbnail. The imported mesh here is a single triangle,
+    // visually distinct from the host part's sphere.
+    const json = await page.evaluate(() => {
+      // A closed tetrahedron — a valid watertight mesh so `Manifold.ofMesh`
+      // produces real geometry (a flat triangle would be non-manifold and the
+      // run would yield no mesh, leaving the thumbnail stale for the wrong
+      // reason). Large enough to fill the iso thumbnail frame.
+      const verts = new Float32Array([
+        0, 0, 0,
+        30, 0, 0,
+        0, 30, 0,
+        0, 0, 30,
+      ]);
+      // Outward-facing winding for the four faces.
+      const tris = new Uint32Array([
+        0, 2, 1,
+        0, 1, 3,
+        0, 3, 2,
+        1, 2, 3,
+      ]);
+      const toB64 = (arr: Float32Array | Uint32Array): string => {
+        const bytes = new Uint8Array(arr.buffer, arr.byteOffset, arr.byteLength);
+        let bin = '';
+        for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
+        return btoa(bin);
+      };
+      const payload = {
+        partwright: '1.9',
+        session: { name: 'imported-source', created: Date.now(), updated: Date.now() },
+        parts: [{ name: 'Imported', order: 0 }],
+        versions: [{
+          index: 1,
+          part: 0,
+          // Mirrors the real import codegen wrapper: reads the imported mesh out
+          // of the sandbox's `api.imports[0]`. With the stale-capture bug, the
+          // register isn't seeded with THIS mesh before the run, so the code
+          // either errors (host has no imports) or renders the host part — and
+          // the captured thumbnail is wrong.
+          code: 'const { Manifold } = api;\nreturn Manifold.ofMesh(api.imports[0]);',
+          label: 'imported',
+          timestamp: Date.now(),
+          // No `thumbnail` field → forces regeneration on import/merge.
+          importedMeshes: [{
+            id: 'm1',
+            filename: 'tetra.stl',
+            format: 'stl',
+            numVert: 4,
+            numTri: 4,
+            numProp: 3,
+            vertProperties: toB64(verts),
+            triVerts: toB64(tris),
+          }],
+        }],
+      };
+      return JSON.stringify(payload);
+    });
+
+    // Host session: a sphere, with its own (regenerated) thumbnail.
+    await page.evaluate(async () => {
+      const pw = (window as unknown as { partwright: PW }).partwright;
+      await pw.createSession('host-session');
+      await pw.runAndSave('const { Manifold } = api; return Manifold.sphere(8);', 'v1');
+    });
+
+    // Import → the chooser defaults to merge → confirm with "Add parts".
+    await page.locator('#import-wrapper input[type="file"]').setInputFiles({
+      name: 'imported.partwright.json',
+      mimeType: 'application/json',
+      buffer: Buffer.from(json, 'utf8'),
+    });
+    const dialog = page.locator('[role="dialog"]');
+    await expect(dialog).toBeVisible({ timeout: 6000 });
+    await dialog.getByRole('button', { name: 'Add parts' }).click();
+    await expect(dialog).toBeHidden({ timeout: 10_000 });
+
+    await expect.poll(async () =>
+      page.evaluate(() => (window as unknown as { partwright: PW }).partwright.listParts().length),
+    ).toBe(2);
+
+    // Export the host session (with thumbnails) and inspect the two parts'
+    // thumbnails. The merged (imported) part is order 1; the host sphere is
+    // order 0. `exportSession` omits the `part` field when the order is 0.
+    const thumbs = await page.evaluate(async () => {
+      const pw = (window as unknown as { partwright: PW }).partwright;
+      const { data } = await pw.exportSessionData(undefined, { includeThumbnails: true });
+      const byPart = (order: number): string | undefined =>
+        data.versions.find((v) => (v.part ?? 0) === order)?.thumbnail;
+      return { host: byPart(0), imported: byPart(1) };
+    });
+
+    // The merged part carries a freshly regenerated, non-trivial PNG thumbnail…
+    expect(thumbs.imported).toBeTruthy();
+    expect(thumbs.imported!.startsWith('data:image/png')).toBe(true);
+    expect(thumbs.imported!.length).toBeGreaterThan(256);
+    // …and it is NOT a copy of the host sphere's thumbnail (the stale-capture
+    // bug produced an identical image because both runs read the host's mesh).
+    expect(thumbs.imported).not.toBe(thumbs.host);
   });
 
   test('"Import from URL…" rejects an unsupported scheme inline', async ({ page }) => {

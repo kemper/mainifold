@@ -1630,7 +1630,14 @@ async function main() {
   // Import an already-parsed session payload. Used by both file import and the
   // window.partwright.importSessionData() API so AI agents can bypass the file picker.
   async function importSessionPayload(data: ExportedSession): Promise<{ sessionId: string }> {
-    const session = await importSession(data, async (code) => {
+    // Seed the active-imports register with each version's own meshes before
+    // running its code: `Manifold.ofMesh(api.imports[0])` only reproduces this
+    // version's geometry (and thus a correct thumbnail) if the register holds
+    // these meshes — otherwise the run captures a stale, previously-loaded part.
+    // importSession resets the register to the latest version's imports when it
+    // finishes, so no manual restore is needed here.
+    const session = await importSession(data, async (code, importedMeshes) => {
+      setActiveImports(importedMeshes ?? []);
       await runCodeSync(code);
       return captureThumbnail();
     });
@@ -2203,10 +2210,19 @@ async function main() {
     const choice = await showImportPreview(filename, summary, { mergeTargetName });
     if (choice === 'cancel') return false;
     if (choice === 'merge') {
-      const result = await importSessionPartsIntoActive(data, async (code) => {
+      // The regen callback runs each imported version's code to snapshot a
+      // thumbnail. Code like `Manifold.ofMesh(api.imports[0])` reads the active-
+      // imports register, so we must seed it with *that* version's meshes
+      // before running — otherwise the run produces the host (previously
+      // selected) part's geometry and the captured thumbnail is stale. Restore
+      // the host's own imports afterwards so the closing re-render is correct.
+      const hostImports = getActiveImports();
+      const result = await importSessionPartsIntoActive(data, async (code, importedMeshes) => {
+        setActiveImports(importedMeshes ?? []);
         await runCodeSync(code);
         return captureThumbnail();
       });
+      setActiveImports(hostImports);
       if (result) {
         // Merging an imported version with no embedded thumbnail runs that
         // version's code through runCodeSync to capture one — which leaves the
@@ -3547,7 +3563,10 @@ async function main() {
       setValue(code);
       runCode(code);
     },
-    async (code: string) => {
+    async (code: string, importedMeshes) => {
+      // Seed this version's imported meshes so `api.imports[0]` resolves to its
+      // own geometry when the thumbnail is regenerated (else a stale capture).
+      setActiveImports(importedMeshes ?? []);
       await runCodeSync(code);
       return captureThumbnail();
     },
@@ -6669,7 +6688,10 @@ async function main() {
       let warning: string | null = null;
       const session = await importSession(
         data,
-        async (code: string) => {
+        async (code: string, importedMeshes) => {
+          // Seed this version's imported meshes so `api.imports[0]` resolves to
+          // its own geometry when regenerating the thumbnail (else a stale part).
+          setActiveImports(importedMeshes ?? []);
           await runCodeSync(code);
           return captureThumbnail();
         },

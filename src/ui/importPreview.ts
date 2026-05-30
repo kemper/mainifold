@@ -43,9 +43,11 @@ export function showImportPreview(
   const canMerge = !!opts.mergeTargetName;
   return new Promise((resolve) => {
     let result: ImportDestination = 'cancel';
-    // Default destination when merging is on offer: keep the historical
-    // behavior (a new session) as the pre-selected choice.
-    let destination: 'new-session' | 'merge' = 'new-session';
+    // Default destination when merging is on offer: add the imported parts to
+    // the current project. Importing as a new part is the common intent and
+    // never clobbers existing work, so it's the pre-selected choice. (When no
+    // session is open, `canMerge` is false and a new session is the only path.)
+    let destination: 'new-session' | 'merge' = canMerge ? 'merge' : 'new-session';
     // Declared up front so updateNote() (which toggles its label) can close
     // over it before the footer wiring runs.
     const importBtn = document.createElement('button');
@@ -133,26 +135,28 @@ export function showImportPreview(
         fieldset.appendChild(row);
       };
 
+      // Order: the default (add as new part(s)) is listed first so it reads as
+      // the recommended choice.
+      makeChoice(
+        'merge',
+        'Add as new part(s) to current project',
+        `Adds the imported parts to "${opts.mergeTargetName}" — nothing is replaced.`,
+      );
       makeChoice(
         'new-session',
         'Open as new session',
         'Imports into a brand-new session. Your current session is kept.',
-      );
-      makeChoice(
-        'merge',
-        'Merge into current session',
-        `Append the imported parts to "${opts.mergeTargetName}" — no parts are replaced.`,
       );
       shell.body.appendChild(fieldset);
     }
 
     function updateNote(): void {
       if (canMerge && destination === 'merge') {
-        note.textContent = `Appends the imported parts to "${opts.mergeTargetName}". Existing parts are untouched.`;
+        note.textContent = `Adds the imported parts to "${opts.mergeTargetName}" as new part(s). Existing parts are untouched.`;
       } else {
         note.textContent = 'Imports as a new session — your current session is kept.';
       }
-      importBtn.textContent = canMerge && destination === 'merge' ? 'Merge' : 'Import';
+      importBtn.textContent = canMerge && destination === 'merge' ? 'Add parts' : 'Import';
     }
 
     // Code-execution warning. Importing a session runs each version's code in

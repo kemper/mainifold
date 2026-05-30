@@ -1529,7 +1529,10 @@ export async function exportSession(
 
 export async function importSession(
   data: ExportedSession,
-  regenerateThumbnail?: (code: string) => Promise<Blob | null>,
+  regenerateThumbnail?: (
+    code: string,
+    importedMeshes: ImportedMesh[] | undefined,
+  ) => Promise<Blob | null>,
   onWarning?: (message: string) => void,
 ): Promise<Session> {
   const warning = getSchemaCompatibilityWarning(data);
@@ -1613,13 +1616,21 @@ export async function importSession(
         geometryData = { ...(geometryData ?? {}), colorRegions: regions };
       }
 
+      // This version's imported meshes (base64 buffers → ImportedMesh). Needed
+      // both for persistence below AND for the regenerate path: code like
+      // `Manifold.ofMesh(api.imports[0])` only reproduces this version's
+      // geometry if the active-imports register holds these meshes when the
+      // callback runs it — otherwise the run (and its captured thumbnail)
+      // reflects whatever was last in the register (a stale, wrong part).
+      const importedMeshes = deserializeImportedMeshes(v.importedMeshes);
+
       // Prefer an embedded thumbnail (schema 1.3+) — avoids re-running WASM
       // and gives us the exact image the exporter saw. Fall back to
       // regenerating from code when the field is absent.
       let thumbnail: Blob | null = null;
       if (v.thumbnail) thumbnail = dataURLToBlob(v.thumbnail);
       if (!thumbnail && regenerateThumbnail) {
-        thumbnail = await regenerateThumbnail(v.code);
+        thumbnail = await regenerateThumbnail(v.code, importedMeshes);
       }
 
       // Annotations: prefer the per-version field (1.3+). Fall back to the
@@ -1639,7 +1650,7 @@ export async function importSession(
         v.notes,
         v.timestamp,
         versionAnnotations,
-        deserializeImportedMeshes(v.importedMeshes),
+        importedMeshes,
         // Per-version language (schema 1.8+). Pre-1.8 files omit it; the
         // read path falls back to session-level via effectiveVersionLanguage.
         // Run unknown values through `asLanguage` so a malformed export
@@ -1728,7 +1739,10 @@ export interface MergePartsResult {
  */
 export async function importSessionPartsIntoActive(
   data: ExportedSession,
-  regenerateThumbnail?: (code: string) => Promise<Blob | null>,
+  regenerateThumbnail?: (
+    code: string,
+    importedMeshes: ImportedMesh[] | undefined,
+  ) => Promise<Blob | null>,
 ): Promise<MergePartsResult | null> {
   if (!currentState.session) return null;
   if (!data.session || typeof data.session !== 'object') {
@@ -1792,10 +1806,19 @@ export async function importSessionPartsIntoActive(
         geometryData = { ...(geometryData ?? {}), colorRegions: regions };
       }
 
+      // The imported meshes for this version (base64 buffers → ImportedMesh).
+      // Needed both for persistence AND for the regenerate path: code like
+      // `Manifold.ofMesh(api.imports[0])` only reproduces this version's
+      // geometry if the active-imports register holds *this* version's meshes
+      // when the regen callback runs it. Without them the callback would run
+      // against whatever was last in the register (the host/previous part), so
+      // the captured thumbnail would show the wrong — stale — geometry.
+      const importedMeshes = deserializeImportedMeshes(v.importedMeshes);
+
       // Prefer the embedded thumbnail (1.3+); fall back to regenerating.
       let thumbnail: Blob | null = null;
       if (v.thumbnail) thumbnail = dataURLToBlob(v.thumbnail);
-      if (!thumbnail && regenerateThumbnail) thumbnail = await regenerateThumbnail(v.code);
+      if (!thumbnail && regenerateThumbnail) thumbnail = await regenerateThumbnail(v.code, importedMeshes);
 
       // Annotations: per-version (1.3+) preferred; else top-level (1.2) on the
       // latest exported version only.
@@ -1816,7 +1839,7 @@ export async function importSessionPartsIntoActive(
         v.notes,
         v.timestamp,
         versionAnnotations,
-        deserializeImportedMeshes(v.importedMeshes),
+        importedMeshes,
         asLanguage(v.language),
         v.paramValues && typeof v.paramValues === 'object' ? v.paramValues : undefined,
       );
