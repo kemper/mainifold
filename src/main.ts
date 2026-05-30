@@ -2387,6 +2387,15 @@ async function main() {
       if (!(await pushBrepShape())) return false;
       const part = await createPart(baseName);
       if (!part) return false;
+      // Wipe the outgoing part's paint state (color regions, model-color
+      // underlay, annotations) BEFORE running/saving the new part — otherwise
+      // the leftover regions are re-resolved onto the imported mesh and
+      // serialized into the new part's version, so it "inherits" the previous
+      // part's colors. (The mesh path does this via applyImportWrapper; the
+      // voxel path via applyCodeToCurrentPart — this hand-written BREP branch
+      // was the one path that missed it.)
+      cancelVoxelPaintIfActive();
+      dropPaintState();
       setValue(starter);
       await runCodeSync(starter);
       const thumbnail = await captureThumbnail();
