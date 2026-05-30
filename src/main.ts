@@ -2208,6 +2208,13 @@ async function main() {
         return captureThumbnail();
       });
       if (result) {
+        // Merging an imported version with no embedded thumbnail runs that
+        // version's code through runCodeSync to capture one — which leaves the
+        // viewport showing the last imported geometry while the editor still
+        // shows the active version's code. Re-render the active version so the
+        // editor text and viewport agree again.
+        const st = getState();
+        if (st.currentVersion) await runCodeSync(st.currentVersion.code);
         const partWord = result.addedParts.length === 1 ? 'part' : 'parts';
         showToast(`Merged ${result.addedParts.length} ${partWord} into this session.`, { variant: 'success' });
         return true;
@@ -2235,6 +2242,26 @@ async function main() {
     if (!res.ok) {
       clearTimeout(timer);
       throw new Error(`The server responded ${res.status} ${res.statusText}.`);
+    }
+
+    // Defense-in-depth: parseImportUrlInput only vetted the *initial* URL's
+    // scheme. With redirect: 'follow', the final URL could in theory be a
+    // non-http(s) scheme; browsers already block http(s)→file:/data: redirects,
+    // but re-check the resolved URL before touching the body just in case.
+    if (res.url) {
+      let finalProtocol: string;
+      try {
+        finalProtocol = new URL(res.url).protocol;
+      } catch {
+        clearTimeout(timer);
+        controller.abort();
+        throw new Error('The remote server redirected to an invalid URL.');
+      }
+      if (finalProtocol !== 'http:' && finalProtocol !== 'https:') {
+        clearTimeout(timer);
+        controller.abort();
+        throw new Error(`The remote server redirected to an unsupported URL (got "${finalProtocol}").`);
+      }
     }
 
     // Up-front size guard from Content-Length when present.
