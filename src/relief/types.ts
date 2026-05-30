@@ -203,6 +203,9 @@ export interface HeightGrid {
   height: number;
   heights: Float32Array;
   colors?: Uint8Array;
+  /** Per-cell mask (1=keep, 0=background) detected from pre-quantization RGB.
+   *  Only set when removeBackground is enabled on a quantized-mode grid. */
+  bgMask?: Uint8Array;
 }
 
 /** A generated relief: a watertight (when possible) mesh plus the grid it came
