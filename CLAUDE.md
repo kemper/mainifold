@@ -168,7 +168,7 @@ After any changes that touch routing, Vite config, index.html, or initialization
 12. **Color export**: With color regions painted, export GLB — the file should carry vertex colors. Export 3MF — the file should include `<basematerials>` and per-triangle `pid` attributes.
 13. **Annotations are per-version**: Annotate v1, save v2 (annotations persist into v2). Clear annotations, draw a different one, save v3. Navigating v1↔v2↔v3 should swap annotations to match each version (v1 empty, v2 first set, v3 second set). Importing a schema-1.2 file (top-level `annotations`) should attach those annotations to the latest version on import.
 14. **Local model picker**: Click the `✦ Connect AI` (or `✦ AI`) chip → in the modal, follow "Run a local model in your browser". A second modal lists Small / Medium / Large / Vision options with download sizes. The WebGPU banner shows green on Chrome/Edge/Safari 26+ and red elsewhere. The "Use this model" / "Download X GB" button only triggers a network request the first time; cached models show a "Downloaded" pill and skip straight to GPU load. Closing the tab during a download cancels it cleanly.
-15. **STL import**: Click Import → "Choose file…" → pick an `.stl`. With no session open, a new session is created named after the file. Whenever a session is open, an **import-target modal** appears first so the current part is never wiped without consent: choose **New part** (adds a separate part to the session), **Add to / Use for current part** (seeds an empty/starter part, or composes the mesh into the current part's geometry via `Manifold.compose` — works for both imported-mesh and hand-coded parts), or **New session**. A fresh `/editor` (still showing the starter) recommends "Use for current part"; a part with real work recommends "New part" and the part's unsaved code is saved first. In all cases the editor shows a short `return Manifold.ofMesh(api.imports[0])` wrapper (or a `Manifold.compose([...])` form when combined), the mesh renders, and the version label is "imported". Editing the wrapper (e.g. adding `.subtract(Manifold.cube([5,5,5], true))`) re-renders correctly. Closing and reopening the session must restore the imported mesh from IndexedDB.
+15. **STL import**: Click Import → "Choose file…" → pick an `.stl`. With no session open — **or when the only open part is an expendable starter** (a fresh `/editor` still showing the default code with no saved version) — the import lands directly as a new session named after the file, with **no modal** (there's no real work to protect). The **import-target modal** appears only when a session has real work to protect (a non-expendable part): choose **New part** (adds a separate part to the session — the default), **Add to / Use for current part** (composes the mesh into the current part's geometry via `Manifold.compose` — works for both imported-mesh and hand-coded parts), or **New session**. "New part" is the recommended default so an import never silently overwrites the current part; the part's unsaved code is saved first. In all cases the editor shows a short `return Manifold.ofMesh(api.imports[0])` wrapper (or a `Manifold.compose([...])` form when combined), the mesh renders, and the version label is "imported". Editing the wrapper (e.g. adding `.subtract(Manifold.cube([5,5,5], true))`) re-renders correctly. Closing and reopening the session must restore the imported mesh from IndexedDB.
 16. **Merge parts**: In the Parts rail, check two or more parts (the multi-select checkboxes used for bulk delete). The bulk-action bar gains a **Merge N** button beside Delete. Clicking it opens a modal to either **combine into a new part** (keeps the originals) or **merge into one part** (replaces the selected parts with the combination). Each selected part's latest version is baked to geometry and composed — so it works for hand-coded parts, not just imported ones (the case that used to fail with "No geometry data") — producing a new "merged" version that holds the inputs as separate compose components. The current part's unsaved edits are saved first, so no manual Save is needed before merging.
 
 ## AI Agent Workflow & API Reference
@@ -356,6 +356,32 @@ Every URL parameter the app writes must also be read back correctly everywhere:
 
 Always await `txn.oncomplete` before returning from functions that modify IndexedDB data. Awaiting individual request promises within a transaction is not sufficient — the transaction can still fail to commit after those promises resolve. Follow the pattern in `clearAllData()`.
 
+**Never `await` between a `get` and the `put`/`delete` that depends on it inside one readwrite transaction.** Awaiting yields the microtask queue and lets IndexedDB auto-commit the (now request-less) transaction before the write is queued — a `TransactionInactiveError`, and across two tabs a lost update. Issue the dependent write from inside the `get`'s `onsuccess` callback (chain further requests from *their* callbacks too), then await `txn.oncomplete` once. See `recordUsage`, `updateSession`, and `putAttachment` for the pattern.
+
+### Cross-Tab Isolation — No Data Bleed Between Windows
+
+The app runs in multiple browser windows/tabs at once, often each driving a **different session** (and a different AI provider). Tabs share one origin, so they share IndexedDB *and* localStorage; separate windows do **not** share JS module memory. The rule:
+
+> State must not bleed or cause side effects from one tab into another. The only times state should cross tabs are the **explicit** transitions: opening a session (incl. a previously-closed one) in a tab, or **taking control** of a session in another tab. Anything else changing in tab B must not silently alter tab A.
+
+Concretely, when adding a feature:
+
+- **Don't put session-scoped or task-scoped state in a single shared localStorage blob.** AI provider/model/toggles are **per-tab** working state (each window drives its own session) and are persisted **per-session** on the session record (`session.aiPreference`) so they carry over only on open / take-control — see `applySessionAiPreference` / `recordSessionAiPreference` in `aiPanel.ts` and `setSessionAiPreference` in `sessionManager.ts`. The live AI settings (`reloadSettingsFromStorage` in `ai/settings.ts`) deliberately **preserve this tab's `toggles`/`preset`** when a peer tab writes the shared blob — it adopts only genuinely-global, additive prefs (custom models, system-prompt overrides, panel width). Blindly adopting a peer's blob via the `storage` event was the cross-window provider-leak bug.
+- **App-level preferences that used to be one shared localStorage key should be per-tab** (units, render quality, editor auto-format). Use `readPerTabPref`/`writePerTabPref` (`src/storage/perTabPref.ts`): the live value is per-tab (sessionStorage) with a localStorage seed so a *fresh* tab still inherits the last choice, but already-open tabs never adopt a peer's change. Don't attach a `storage` listener that live-mirrors them.
+- **`storage`-event and `BroadcastChannel` handlers must scope to the receiving tab's own session** before acting — gate on `msg.sessionId === currentState.session?.id` (see `tabSync.ts` consumers and `sessionLock.ts`, which guards on its own session's leader-token key). Never adopt a peer's provider/model/toggles live.
+- **Truly-global state is the exception, and must be additive, not last-write-wins.** Custom local models and system-prompt overrides are shared across tabs on purpose; keep such writes merge-friendly so a peer tab's blob write can't clobber another tab's addition.
+
+### Numeric Constants and App Config
+
+Never hardcode numeric tuning constants — timeouts, limits, thresholds, budgets, quality knobs — directly in source files. Instead:
+
+1. **Add the constant to `src/config/appConfig.ts`** — pick the right section (`ai`, `renderer`, `import`, or `ui`), add a typed field to `AppConfig`, a default in `APP_CONFIG_DEFAULTS`, and a JSDoc comment explaining what it controls.
+2. **Read it with `getConfig().<section>.<field>`** at the call site rather than storing it in a module-level `const`. This lets the user's saved override take effect immediately.
+3. **Expose it in `src/ui/advancedSettingsModal.tsx`** — add a `<Field>` inside the matching `<Section>` with `label`, `hint`, `defaultValue`, `min`, `max`, and an `onChange` that calls `set(section, key, v)`.
+4. **Worker context**: `getConfig()` in a Worker returns static defaults (no `localStorage`). If the value must be live for a Worker, thread it through the relevant message (e.g. `toolCallTimeoutMs` is passed via the `run_turn` message in `agentWorkerClient.ts`).
+
+The only exceptions are values that are truly structural constants (array indices, enum values, magic bytes) rather than tunable knobs.
+
 ### Dead Code
 
 Don't export functions unless they're imported elsewhere. When removing usage of an exported function, delete the export too. Periodically grep for exported symbols to verify they have importers.
@@ -403,6 +429,15 @@ Subject is imperative and lowercase after the prefix: `feat: add light/dark mode
 - `ignore-for-release` — suppress from release notes (use for `chore:`/`refactor:` housekeeping that shouldn't appear in user-facing notes)
 
 Anything unlabeled lands in "Other Changes." That's fine for occasional internal cleanup, but features and fixes should always be labeled.
+
+### Agent working discipline (git, PRs, tool output)
+
+Guardrails for automated work, learned the hard way:
+
+- **Irreversible GitHub actions stand alone, after an explicit decision.** Closing or merging a PR, deleting a branch, or force-pushing is outward-facing and hard to undo. Never batch such a call in the same tool block as other work (a sibling call fires even if the call meant to gate it errored or was never answered), and never infer the go-ahead — issue it as its own step only when the user explicitly asked for it. A PR close/merge is never a default or a guess. (A `PreToolUse` hook in `.claude/settings.json` also pauses for confirmation before `merge_pull_request` and a `state: closed` `update_pull_request`, as a backstop.)
+- **A failed or unreadable tool result is not a success.** If a call errors (e.g. an `AskUserQuestion` that didn't validate) or its output comes back garbled / empty / out-of-order, re-run or re-verify state before proceeding — never act on an answer you didn't actually receive, and never treat a laggy/garbled shell as ground truth.
+- **Git is single-writer.** The working tree and index are shared mutable state. Don't run git mutations while a subagent is also touching the same checkout. Resolve merges/rebases inline yourself; if you must delegate git work to a subagent, give it an isolated worktree (`isolation: "worktree"`).
+- **Verify state between destructive git steps.** After a merge / rebase / reset, confirm `git status` and HEAD, and that local HEAD matches what you pushed, before moving on.
 
 ### After Opening a PR
 
