@@ -89,6 +89,9 @@ test.describe('voxel engine', () => {
     // The voxel modal (not the relief wizard) opens; commit it.
     await expect(page.getByText('Image → Voxel', { exact: true })).toBeVisible({ timeout: 5000 });
     await page.getByRole('button', { name: 'Import', exact: true }).click();
+    // The fresh editor is an expendable starter part, so the import-target modal
+    // appears next; choose to use the voxels as the current part.
+    await page.getByRole('dialog').locator('[data-target="current-part"]').click();
     await expect.poll(async () => page.evaluate(
       () => (window as any).partwright.getActiveLanguage(), // eslint-disable-line @typescript-eslint/no-explicit-any
     ), { timeout: 10_000 }).toBe('voxel');
@@ -117,6 +120,10 @@ test.describe('voxel engine', () => {
     await page.locator('#import-wrapper input[type="file"]').first()
       .setInputFiles({ name: 'cube.vox', mimeType: 'application/octet-stream', buffer: buildVoxBlob() });
 
+    // The fresh editor is an expendable starter part, so the import-target modal
+    // appears; choose to use the voxels as the current part.
+    await page.getByRole('dialog').locator('[data-target="current-part"]').click();
+
     // It lands as a voxel session whose code rebuilds the grid via voxels.decode(...).
     // Poll on the code (not the language): importCodePayload flips the engine
     // language before it sets the editor buffer, so the code is the reliable
@@ -137,6 +144,11 @@ test.describe('voxel engine', () => {
     await expect(recent).toBeVisible();
     await expect(recent.getByText('VOX', { exact: true })).toBeVisible();
     await recent.click();
+
+    // A version is now saved in the current part, so the import-target modal
+    // offers new-part / current-part / new-session — pick a fresh voxel part so
+    // the re-import lands as clean voxel code (not composed into the prior part).
+    await page.getByRole('dialog').locator('[data-target="new-part"]').click();
 
     // The regression: it switches BACK to the voxel language and rebuilds the grid
     // via voxels.decode(...). Before the fix it stayed on manifold-js with the raw

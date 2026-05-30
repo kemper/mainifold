@@ -2218,7 +2218,17 @@ async function main() {
     }
     const code = generateVoxelImportCode(grid, chosenName);
     const sessionName = chosenName.replace(/\.[^.]+$/, '');
-    await importCodePayload(code, 'voxel', sessionName);
+    // With a session open, let the user pick new-part / current-part /
+    // new-session (default new-part). With none open, force a fresh session.
+    const placed = await placeImportedCode({
+      code,
+      language: 'voxel',
+      sessionName,
+      filename: chosenName,
+      title: 'Import voxels',
+      composable: true,
+    });
+    if (!placed) return false;
     // Register in Recent Imports tagged as a voxel import, with the chosen
     // settings + a thumbnail, so re-clicking it reopens THIS modal (not relief)
     // pre-loaded with these knobs. Use the swapped-in source when present.
@@ -2249,8 +2259,16 @@ async function main() {
     }
     const code = generateVoxelImportCode(grid, file.name);
     const sessionName = file.name.replace(/\.vox$/i, '');
-    await importCodePayload(code, 'voxel', sessionName);
-    return true;
+    // With a session open, let the user pick new-part / current-part /
+    // new-session (default new-part). With none open, force a fresh session.
+    return placeImportedCode({
+      code,
+      language: 'voxel',
+      sessionName,
+      filename: file.name,
+      title: 'Import voxels',
+      composable: true,
+    });
   }
 
   interface ParsedSTL {
@@ -2274,32 +2292,67 @@ async function main() {
 
     const baseName = file.name.replace(/\.(step|stp)$/i, '');
     if (target === 'brep') {
-      // Switch the editor to the BREP language and open a fresh session named
-      // after the file FIRST, so the session-change listener's
-      // clearBrepImports/clearBrepShape fires (and is enqueued on the worker)
-      // before we push this file's shape — otherwise it would wipe the
-      // just-imported shape. switchLanguage resets the editor to a stub
-      // starter; we overwrite that below.
-      if (getActiveLanguage() !== 'replicad') await switchLanguage('replicad');
-      await createSession(baseName, 'replicad');
-      // Lazy-loads OCCT on the first call; subsequent imports are instant.
-      try {
-        // Drop any previously-imported BREP shapes first — otherwise the
-        // worker's pending-imports list accumulates and the seeded
-        // `return api.imports[0]` would render the *first* file, not this one.
-        // (Belt-and-suspenders with the session-change clear above, and the
-        // sole guard when the import doesn't change the active session.)
-        await clearBrepImports();
-        await importSTEPToBrep(file, file.name);
-      } catch (e) {
-        alert(`Failed to parse STEP file: ${(e as Error).message}`);
-        return false;
-      }
-      // Seed the editor with the canonical "return the import" form so the
-      // user can iterate immediately.
+      // The canonical "return the import" starter so the user can iterate
+      // immediately.
       const starter = `// Imported from ${file.name}\n// api.imports[0] is the BREP shape parsed from the STEP file.\nconst { BREP } = api;\nreturn api.imports[0];\n`;
+      // Push this file's shape into the worker's pending-imports list. Drop any
+      // previously-imported BREP shapes first — otherwise the list accumulates
+      // and the seeded `return api.imports[0]` would render the *first* file.
+      // (Belt-and-suspenders with the session-change clear when a new session
+      // is created; the sole guard when importing into the active session.)
+      const pushBrepShape = async (): Promise<boolean> => {
+        try {
+          await clearBrepImports();
+          await importSTEPToBrep(file, file.name);
+          return true;
+        } catch (e) {
+          alert(`Failed to parse STEP file: ${(e as Error).message}`);
+          return false;
+        }
+      };
+
+      // No session open (or the user picks "new session"): open a fresh BREP
+      // session named after the file. Switch the editor to the BREP language
+      // FIRST so the session-change listener's clearBrepImports/clearBrepShape
+      // fires (and is enqueued on the worker) before we push this file's shape —
+      // otherwise it would wipe the just-imported shape. switchLanguage resets
+      // the editor to a stub starter; we overwrite that below.
+      const openInNewSession = async (): Promise<boolean> => {
+        if (getActiveLanguage() !== 'replicad') await switchLanguage('replicad');
+        await createSession(baseName, 'replicad');
+        if (!(await pushBrepShape())) return false;
+        setValue(starter);
+        runCode(starter);
+        return true;
+      };
+
+      if (!state.session) return openInNewSession();
+
+      // A session is open: offer new-part / new-session (current-part is out of
+      // scope — composing an exact BREP shape into a mesh part isn't supported).
+      const choice = await showImportTargetModal({
+        title: 'Import STEP (BREP)',
+        filename: file.name,
+        currentPartName: state.currentPart?.name ?? null,
+        canAddToCurrent: false,
+        addDisabledReason: 'A BREP shape can’t be combined into an existing part — choose a new part or session.',
+        recommend: 'new-part',
+      });
+      if (!choice) return false;
+      if (choice === 'new-session') return openInNewSession();
+
+      // new-part: add a BREP part to the current session, seed the starter, run
+      // it, and save v1 tagged `replicad`. preserveCurrentEditsIfNeeded first so
+      // the current part's unsaved work isn't lost.
+      await preserveCurrentEditsIfNeeded();
+      if (getActiveLanguage() !== 'replicad') await switchLanguage('replicad');
+      const part = await createPart(baseName);
+      if (!part) return false;
+      if (!(await pushBrepShape())) return false;
       setValue(starter);
-      runCode(starter);
+      await runCodeSync(starter);
+      const thumbnail = await captureThumbnail();
+      await saveVersion(starter, getGeometryDataObj(), thumbnail, 'imported', undefined, { force: true });
       return true;
     }
 
@@ -2523,6 +2576,118 @@ async function main() {
     await applyImportWrapper([mesh], manifold);
   }
 
+  /** Run `code` under `language` in the current part and save it as a version.
+   *  The language is switched BEFORE running and saving so the engine runs the
+   *  right kernel and saveVersion (which snapshots getActiveLanguage()) tags the
+   *  version correctly — a voxel part must read back as `voxel`, a BREP part as
+   *  `replicad` (per-version language). */
+  async function applyCodeToCurrentPart(code: string, language: Language): Promise<void> {
+    // An import replaces the part's geometry, so the previous part's regions /
+    // live paint can't survive — clear them before running, or runCodeSync
+    // re-resolves stale regions onto the new mesh and locks the editor.
+    cancelVoxelPaintIfActive();
+    dropPaintState();
+    if (getActiveLanguage() !== language) await switchLanguage(language);
+    setValue(code);
+    await runCodeSync(code);
+    const thumbnail = await captureThumbnail();
+    const geometryData = getGeometryDataObj();
+    await saveVersion(code, geometryData, thumbnail, 'imported', undefined, { force: true });
+  }
+
+  /** Add code (voxel / BREP starter) as a brand-new part's first version.
+   *  Mirrors seedNewPartWithMesh but for editor code + a language tag instead
+   *  of a parsed mesh. */
+  async function seedNewPartWithCode(code: string, name: string, language: Language): Promise<void> {
+    const part = await createPart(name);
+    if (!part) return;
+    await applyCodeToCurrentPart(code, language);
+  }
+
+  /** Run `code` under `language` off-editor and capture its geometry as a single
+   *  compose component, so a code-based import (voxel) can be composed into a
+   *  mesh part. Returns null when the code produced no usable mesh. */
+  async function bakeCodeComponent(code: string, language: Language, label: string): Promise<ImportedMesh[] | null> {
+    const saved = getActiveImports();
+    try {
+      setActiveImports([]);
+      const result = await executeCodeAsync(code, language);
+      if (result.error || !result.mesh) return null;
+      return [toImportedMesh(label, result.mesh)];
+    } finally {
+      setActiveImports(saved);
+    }
+  }
+
+  /** Decide where freshly-generated import code (voxel today, BREP starter)
+   *  lands. With no session open it creates one (legacy behavior); otherwise the
+   *  import-target modal lets the user pick a new part, the current part, or a
+   *  new session. `composable` controls whether the current-part choice can
+   *  compose into an existing mesh part (voxel: yes via bake; BREP: no). */
+  async function placeImportedCode(opts: {
+    code: string;
+    language: Language;
+    sessionName: string;
+    filename: string;
+    title: string;
+    composable: boolean;
+    composeDisabledReason?: string;
+  }): Promise<boolean> {
+    const { code, language, sessionName, filename, title } = opts;
+    const state = getState();
+    if (!state.session) {
+      await importCodePayload(code, language, sessionName);
+      return true;
+    }
+
+    const expendable = currentPartIsExpendable();
+    // A non-empty mesh part can only receive a compose when the import is
+    // composable (voxel bakes to a mesh; a BREP starter can't compose into a
+    // mesh part). An expendable starter is always replaceable.
+    const canAddToCurrent = !!state.currentPart && (expendable || opts.composable);
+    const target = await showImportTargetModal({
+      title,
+      filename,
+      currentPartName: state.currentPart?.name ?? null,
+      canAddToCurrent,
+      addDisabledReason: !expendable && !opts.composable ? opts.composeDisabledReason : undefined,
+      recommend: 'new-part',
+      addReplacesStarter: expendable,
+    });
+    if (!target) return false;
+
+    if (target === 'new-session') {
+      await importCodePayload(code, language, sessionName);
+      return true;
+    }
+    if (target === 'new-part') {
+      await preserveCurrentEditsIfNeeded();
+      await seedNewPartWithCode(code, sessionName, language);
+      return true;
+    }
+    // current-part: seed an expendable starter directly, else compose the
+    // import's baked mesh into the existing part (composable imports only).
+    if (expendable) {
+      await applyCodeToCurrentPart(code, language);
+      return true;
+    }
+    await preserveCurrentEditsIfNeeded();
+    const baked = await bakeCodeComponent(code, language, sessionName);
+    if (!baked) {
+      showToast('Couldn’t read the imported geometry to combine.', { variant: 'warn' });
+      return false;
+    }
+    const cur = getState().currentPart;
+    if (!cur) return false;
+    const curBaked = await bakePartComponents(cur.id, cur.name);
+    if (!curBaked) {
+      showToast('Couldn’t read the current part’s geometry to combine.', { variant: 'warn' });
+      return false;
+    }
+    await applyImportWrapper([...curBaked, ...baked], true);
+    return true;
+  }
+
   /** Compose the imported mesh with the current part's existing geometry. */
   async function composeMeshIntoCurrentPart(mesh: ImportedMesh): Promise<boolean> {
     const cur = getState().currentPart;
@@ -2563,7 +2728,11 @@ async function main() {
       addDisabledReason: !parsed.isManifold
         ? 'Render-only meshes can’t be combined into an existing part.'
         : undefined,
-      recommend: expendable ? 'current-part' : 'new-part',
+      // Default to a new part for every import type so an import never
+      // silently overwrites the current part. The current-part button still
+      // reads "Use for current part" when the part is an empty starter
+      // (addReplacesStarter), but it's no longer the pre-selected default.
+      recommend: 'new-part',
       addReplacesStarter: expendable,
     });
     if (!target) return false;
@@ -2698,15 +2867,9 @@ async function main() {
       // same handler as a fresh import. The .vox blob is binary, so the code
       // fall-through below (which reads it as text and opens it as manifold-js)
       // dumped garbage into the editor and never switched to the voxel language.
+      // handleVoxImport now shows the import-target modal (new part / current
+      // part / new session) when a session is open, so no separate confirm here.
       if (entry.source === 'VOX') {
-        const cur = getState();
-        if (cur.session && cur.versionCount > 0) {
-          const ok = await showInlineConfirm(
-            editorUI,
-            `Re-import "${entry.filename}" as a new session? Your current session will be kept.`,
-          );
-          if (!ok) return;
-        }
         const file = new File([entry.blob], entry.filename, { type: entry.blob.type });
         await handleVoxImport(file);
         return;
