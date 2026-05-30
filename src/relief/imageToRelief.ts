@@ -244,7 +244,21 @@ export function sampleImageToGrid(image: ImageData, opts: ReliefOptions): Height
   const count = w * h;
 
   if (opts.mode === 'quantized') {
-    return sampleQuantized(rgb, w, h, opts);
+    const grid = sampleQuantized(rgb, w, h, opts);
+    if (opts.common.removeBackground) {
+      // Detect background from pre-quantization RGB so exact-color matching in
+      // detectBackgroundMask doesn't hit subject pixels that share a cluster
+      // centroid with the background (the bug when using grid.colors, which
+      // collapses many colors to k representatives).
+      const colorsU8 = new Uint8Array(count * 3);
+      for (let i = 0; i < count * 3; i++) colorsU8[i] = clamp255(rgb[i]);
+      const bgMask = pickBackgroundMask(colorsU8, image, w, h, cropToPixels(image, opts.crop) ?? undefined);
+      grid.bgMask = bgMask;
+      for (let i = 0; i < count; i++) {
+        if (bgMask[i] === 0) grid.heights[i] = 0;
+      }
+    }
+    return grid;
   }
 
   // Luminance (and AI) mode.
@@ -685,16 +699,6 @@ export function generateRelief(image: ImageData, opts: ReliefOptions = DEFAULT_R
     return buildQuantizedTile(grid, opts, image);
   }
 
-  // For stepped relief with removeBackground, zero out height for background
-  // cells so they print as the base only (no raised colour terrace).
-  if (opts.common.removeBackground && opts.mode === 'quantized' && grid.colors) {
-    const cropPx = cropToPixels(image, opts.crop) ?? undefined;
-    const bgMask = pickBackgroundMask(grid.colors, image, grid.width, grid.height, cropPx);
-    for (let i = 0; i < grid.heights.length; i++) {
-      if (bgMask[i] === 0) grid.heights[i] = 0;
-    }
-  }
-
   // Stepped relief (both painting modes) uses the continuous height-grid mesh.
   // It is a closed 2-manifold (verified by isEdgeManifold inside
   // buildReliefMesh) so it slices and prints; an earlier experiment that built
@@ -743,9 +747,11 @@ function buildQuantizedTile(grid: HeightGrid, opts: ReliefOptions, sourceImage?:
 
   // When removeBackground is on for a non-silhouette tile, detect the
   // background and intersect it with the existing shape mask so background
-  // pixels are cut out of even rect/rounded/circle tiles.
+  // pixels are cut out of even rect/rounded/circle tiles. Prefer the pre-
+  // quantization bgMask (set by sampleImageToGrid) to avoid matching subject
+  // pixels that share a cluster centroid with the background color.
   if (opts.common.removeBackground && opts.quantized.output !== 'silhouette') {
-    const fgMask = pickBackgroundMask(colors, sourceImage ?? null, W, H);
+    const fgMask = grid.bgMask ?? pickBackgroundMask(colors, sourceImage ?? null, W, H);
     const shapeMask = buildCellMask(W, H, tileOpts, shape);
     const combined = new Uint8Array(W * H);
     for (let i = 0; i < W * H; i++) combined[i] = shapeMask[i] & fgMask[i];
