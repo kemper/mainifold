@@ -1600,8 +1600,13 @@ async function main() {
     if (keyed.some(Boolean)) void requestPersistentStorage();
   })();
 
-  // Remove loading splash as soon as JS takes over
+  // Remove loading overlays as soon as JS takes over.
+  // landing-inline stays visible on the landing route until showLandingPage()
+  // replaces it with the JS-built version; remove it immediately on all other routes.
   document.getElementById('loading-splash')?.remove();
+  if (!shouldShowLanding()) {
+    document.getElementById('landing-inline')?.remove();
+  }
 
   const app = document.getElementById('app')!;
   geometryDataEl = createGeometryDataElement();
@@ -4034,6 +4039,8 @@ async function main() {
   }
 
   function showLandingPage() {
+    // Remove the inline static landing page now that the JS version is ready.
+    document.getElementById('landing-inline')?.remove();
     const page = ensureLandingPage();
     overlayContainer.classList.remove('hidden');
     editorUI.classList.add('hidden');
