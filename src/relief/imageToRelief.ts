@@ -265,7 +265,7 @@ export function sampleImageToGrid(image: ImageData, opts: ReliefOptions): Height
   if (opts.common.removeBackground) {
     const colorsU8 = new Uint8Array(count * 3);
     for (let i = 0; i < count * 3; i++) colorsU8[i] = clamp255(rgb[i]);
-    const bgMask = detectBackgroundMask(colorsU8, w, h);
+    const bgMask = pickBackgroundMask(colorsU8, image, w, h, cropToPixels(image, opts.crop) ?? undefined);
     for (let i = 0; i < count; i++) {
       if (bgMask[i] === 0) heights[i] = 0;
     }
@@ -682,13 +682,14 @@ export function generateRelief(image: ImageData, opts: ReliefOptions = DEFAULT_R
   // its top face — the keychain workflow. Only applies to quantized mode
   // (luminance is always a heightmap).
   if (opts.mode === 'quantized' && grid.colors && opts.quantized.output !== 'relief') {
-    return buildQuantizedTile(grid, opts);
+    return buildQuantizedTile(grid, opts, image);
   }
 
   // For stepped relief with removeBackground, zero out height for background
   // cells so they print as the base only (no raised colour terrace).
   if (opts.common.removeBackground && opts.mode === 'quantized' && grid.colors) {
-    const bgMask = detectBackgroundMask(grid.colors, grid.width, grid.height);
+    const cropPx = cropToPixels(image, opts.crop) ?? undefined;
+    const bgMask = pickBackgroundMask(grid.colors, image, grid.width, grid.height, cropPx);
     for (let i = 0; i < grid.heights.length; i++) {
       if (bgMask[i] === 0) grid.heights[i] = 0;
     }
@@ -716,7 +717,7 @@ export function generateRelief(image: ImageData, opts: ReliefOptions = DEFAULT_R
 }
 
 /** Build the flat colour-tile result for quantized mode with output !== 'relief'. */
-function buildQuantizedTile(grid: HeightGrid, opts: ReliefOptions): GenerateReliefResult {
+function buildQuantizedTile(grid: HeightGrid, opts: ReliefOptions, sourceImage?: ImageData): GenerateReliefResult {
   const colors = grid.colors!;
   const W = grid.width, H = grid.height;
   const tileOpts: TileOptions = {
@@ -744,7 +745,7 @@ function buildQuantizedTile(grid: HeightGrid, opts: ReliefOptions): GenerateReli
   // background and intersect it with the existing shape mask so background
   // pixels are cut out of even rect/rounded/circle tiles.
   if (opts.common.removeBackground && opts.quantized.output !== 'silhouette') {
-    const fgMask = detectBackgroundMask(colors, W, H);
+    const fgMask = pickBackgroundMask(colors, sourceImage ?? null, W, H);
     const shapeMask = buildCellMask(W, H, tileOpts, shape);
     const combined = new Uint8Array(W * H);
     for (let i = 0; i < W * H; i++) combined[i] = shapeMask[i] & fgMask[i];
@@ -857,6 +858,77 @@ function mapBucketsToRegions(byColor: Map<number, { color: [number, number, numb
     seedRegions.push({ color: bucket.color, triangleIds: bucket.triangleIds, name: `Region ${++i}` });
   }
   return seedRegions;
+}
+
+/**
+ * Downsample the alpha channel of an ImageData to (targetW × targetH) using
+ * the same box-average + Y-flip as downsample() so the result aligns with the
+ * colour grid. Returns null when the image is fully opaque (no cell has mean
+ * alpha < 128), signalling that colour-based detection should be used instead.
+ * Otherwise returns a 0/1 mask: 1 = foreground (alpha ≥ 128), 0 = background.
+ */
+function tryAlphaBasedMask(
+  image: ImageData,
+  targetW: number,
+  targetH: number,
+  cropPx?: { left: number; top: number; right: number; bottom: number },
+): Uint8Array | null {
+  const imgW = image.width, imgH = image.height;
+  const cl = cropPx ? Math.max(0, Math.floor(cropPx.left)) : 0;
+  const ct = cropPx ? Math.max(0, Math.floor(cropPx.top)) : 0;
+  const cr = cropPx ? Math.min(imgW, Math.floor(cropPx.right)) : imgW;
+  const cb = cropPx ? Math.min(imgH, Math.floor(cropPx.bottom)) : imgH;
+  const srcW = Math.max(1, cr - cl), srcH = Math.max(1, cb - ct);
+  const src = image.data;
+  const count = targetW * targetH;
+  const avgAlpha = new Float32Array(count);
+
+  for (let cy = 0; cy < targetH; cy++) {
+    const fcy = targetH - 1 - cy; // Y-flip: grid row 0 = image bottom
+    const y0 = ct + Math.floor((fcy * srcH) / targetH);
+    const y1 = Math.max(y0 + 1, ct + Math.floor(((fcy + 1) * srcH) / targetH));
+    for (let cx = 0; cx < targetW; cx++) {
+      const x0 = cl + Math.floor((cx * srcW) / targetW);
+      const x1 = Math.max(x0 + 1, cl + Math.floor(((cx + 1) * srcW) / targetW));
+      let sum = 0, n = 0;
+      for (let sy = y0; sy < y1; sy++) {
+        for (let sx = x0; sx < x1; sx++) {
+          sum += src[(sy * imgW + sx) * 4 + 3];
+          n++;
+        }
+      }
+      avgAlpha[cy * targetW + cx] = n > 0 ? sum / n : 255;
+    }
+  }
+
+  // Return null (fall through to colour detection) if the image is fully opaque.
+  let hasTransparent = false;
+  for (let i = 0; i < count; i++) {
+    if (avgAlpha[i] < 128) { hasTransparent = true; break; }
+  }
+  if (!hasTransparent) return null;
+
+  const mask = new Uint8Array(count);
+  for (let i = 0; i < count; i++) mask[i] = avgAlpha[i] >= 128 ? 1 : 0;
+  return mask;
+}
+
+/**
+ * Pick the best available background mask: alpha channel (if the image has
+ * transparency), otherwise border-colour detection on the downsampled RGB.
+ */
+function pickBackgroundMask(
+  colors: Uint8Array,
+  image: ImageData | null,
+  w: number,
+  h: number,
+  cropPx?: { left: number; top: number; right: number; bottom: number },
+): Uint8Array {
+  if (image) {
+    const alphaMask = tryAlphaBasedMask(image, w, h, cropPx);
+    if (alphaMask) return alphaMask;
+  }
+  return detectBackgroundMask(colors, w, h);
 }
 
 /** Approximate background detection: the dominant exact colour on the image
