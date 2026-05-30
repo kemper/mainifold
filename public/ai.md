@@ -20,6 +20,7 @@ Partwright is a browser-based parametric CAD tool with four modeling engines: **
 - [Common gotchas](#common-gotchas)
 - [Iteration workflow](#iteration-workflow)
 - [Stat-based verification](#stat-based-verification)
+- [Printability](#printability)
 - [Visual verification](#visual-verification)
 - [Spending mode](#spending-mode)
 
@@ -284,7 +285,7 @@ partwright.listAnnotations() / addTextAnnotation({anchor, text}) / clearAnnotati
 // create/open/list/clear console methods below are for the browser console and
 // the external Claude Code agent only.
 await partwright.createSession(name?)    // -> {id, url, galleryUrl}
-await partwright.runAndSave(code, label?, assertions?) // Assert+save in one call -> {passed?, geometry, version, diff, galleryUrl}
+await partwright.runAndSave(code, label?, assertions?) // Assert+save in one call -> {passed?, geometry, printability, version, diff, galleryUrl}
 await partwright.createSessionWithVersions(name, [{code, label},...]) // Batch create
 await partwright.saveVersion(label?)     // Save current state as version
 await partwright.listVersions()          // -> [{id, index, label, timestamp, status}]
@@ -381,6 +382,8 @@ Extra fields that appear conditionally:
 - **`warnings: string[]`** — present when the geometry has printability issues (non-manifold, free-floating components, etc.).
 
 On error: `{"status":"error","error":"...","executionTimeMs":2,"codeHash":"..."}`
+
+`partwright.run()` and `partwright.getGeometryData()` also include a `printability` field — see [Printability](#printability).
 
 ### Common errors
 - `Code must return a Manifold object` -- forgot `return` statement
@@ -631,6 +634,33 @@ These are engine-agnostic — call them after a SCAD render to debug cavities, f
 
 `readDoc({name: "gotchas"})` — boolean overlap requirements, disconnected components, `paintRegion` bimodal on smooth surfaces, trusting `probeRay` normals, `rotate` direction convention, painting locking the editor, and `runAndSave` vs `runIsolated`.
 
+## Printability
+
+Every `runAndSave`, `run`, and `getGeometryData` response now includes:
+
+```json
+"printability": { "printable": true, "issues": [] }
+```
+
+`printable` is `false` when either condition holds:
+- `isManifold: false` — mesh has gaps or non-manifold edges (not watertight, slicer will reject or produce holes)
+- `componentCount > 1` — model has disconnected solids; floaters print as separate pieces or fail support generation
+
+**Always check `printability.printable` after `runAndSave`.** If it is `false`:
+1. Read `printability.issues` for the specific problems.
+2. For disconnected components, call `runAndExplain(code)` to see which pieces are floating and get overlap suggestions.
+3. Fix the geometry and re-save. Do not leave a saved version with `printable: false` as the final result of a build task — the user intends to print it.
+
+Voxel models are especially prone to `componentCount > 1` because every isolated island of voxels becomes its own component. After building a voxel scene, always verify `printability.printable`. If components > 1, either bridge the floating islands with connecting voxels, or confirm with the user that the separate pieces are intentional.
+
+```js
+const r = await partwright.runAndSave(code, 'v1');
+if (!r.printability.printable) {
+  // r.printability.issues: e.g. ["3 disconnected components"]
+  // fix the code, then re-save
+}
+```
+
 ## Print-safe geometry
 
 For 3D-printable output (FDM/FFF), features thinner than the nozzle's extrusion width are silently dropped by the slicer even though `geometry-data` (volume, `componentCount`, `genus`, `isManifold`) looks correct. The classic trap is `scaleTop` near zero tapering to sub-extrusion-width layers near `zMax`.
@@ -660,6 +690,193 @@ The user can attach reference photos via `partwright.setImages([...])`; they app
 ## Iteration workflow
 
 `readDoc({name: "iteration-workflow"})` — `runAndSave`, `runIsolated`, `runAndAssert`, `modifyAndTest`, `forkVersion`, `createSessionWithVersions`, `copyColorsFromVersion`, session notes (with prefix conventions), resuming a session with `getSessionContext()`, and the recommended step-by-step pattern.
+
+### Assert + save in one call
+
+`runAndSave` accepts optional assertions. If provided, validates in isolation first -- fails fast
+without saving if assertions don't pass. On success, saves the version and returns stat diff:
+```js
+const r = await partwright.runAndSave(code, "v2 - added towers", {
+  isManifold: true, maxComponents: 1
+});
+// If assertions fail: r.passed = false, r.failures = [...], version NOT saved
+// If assertions pass (or no assertions given):
+// r.passed         = true (only present when assertions provided)
+// r.geometry       = full geometry stats
+// r.printability   = { printable: true/false, issues: [] }   ← check this always
+// r.version        = { id, index, label }
+// r.diff           = { volume: { from, to, delta }, componentCount: ..., ... }
+// r.galleryUrl     = gallery URL for human review
+```
+
+### Forking a prior version
+
+When iterating on a design, the common flow is *load a previous version, tweak it, save as a new version*.
+Doing that across separate `loadVersion` -> `getCode` -> modify -> `runAndSave` calls is fragile: if any
+step fails silently (wrong arg type, a client-side content filter on `getCode`, etc.) you can end up saving
+a regression without noticing. `forkVersion` collapses the whole chain into one server-side call:
+
+```js
+const r = await partwright.forkVersion(
+  { index: 11 },                       // or { id: "Kx3Pq9mA2wEr" } from listVersions()
+  code => code.replace('towerH = 28', 'towerH = 35'),
+  "v11a - taller towers",              // label for the new version
+  { isManifold: true, maxComponents: 1 }, // optional assertions (validated before saving)
+  true                                  // carryColors (default true) — re-apply parent colors
+);
+// On success:
+//   r.passed       = true (only when assertions provided)
+//   r.parent       = { id, index, label } of the version you forked from
+//   r.geometry     = full geometry stats
+//   r.version      = { id, index, label } of the newly saved version
+//   r.diff         = stat diff vs. the previous current version
+//   r.codeDiff     = { changed, added, removed, diff } — what actually changed in the SOURCE.
+//                    Verify your transform landed here: changed:false means the code is
+//                    byte-identical to the parent (your edit was a no-op).
+//   r.colors       = { carried: [names], dropped: [names] } when the parent had colors
+//   r.galleryUrl   = gallery URL for human review
+// On failure:
+//   r.error        = "No version found with index ..." / "transformFn threw: ..." / etc.
+//   r.passed=false + r.failures=[...] if assertions didn't pass (nothing saved)
+```
+
+`target` is an object with exactly one of `{ index }` (numeric, 1-based) or `{ id }` (string from
+`listVersions()[].id`). The two are never mixed, so there's no ambiguity about which field is being
+looked up. This is the recommended way to build parallel branches (v11a, v11b, ...) off a shared
+parent without a load/read/modify/save round-trip chain.
+
+**Color carry-over.** If the parent version has color regions, `forkVersion` re-applies them to the
+forked geometry automatically — each region's geometry-relative descriptor (box / slab / `byLabel` /
+coplanar / connected-from-seed) is re-resolved against the new mesh, so a dimension tweak does **not**
+force you to repaint. Regions whose descriptor no longer matches (a label the new code dropped, raw
+triangle ids on changed topology) are skipped and reported in `r.colors.dropped`. Pass `carryColors:
+false` for an intentionally uncolored fork.
+
+> When the AI tool form is used, pass `patches: [{find, replace}, ...]` instead of a `transformFn`.
+> Each `find` must occur **exactly once** in the parent code — a find that matches zero or multiple
+> times is rejected with an error rather than silently saving the parent unchanged, so copy the exact
+> text (whitespace included) from `getCode()`/`loadVersion()`.
+
+### Copying colors onto a rebuilt version
+
+When you rebuild geometry from scratch with `runAndSave` (rather than forking) but it matches an
+earlier *painted* version, transfer the colors in one call instead of repainting region by region:
+
+```js
+const r = await partwright.copyColorsFromVersion({ index: 7 }); // the painted version
+// r.source  = { index, label }
+// r.carried = [names] re-resolved onto the current mesh
+// r.dropped = [names] whose descriptor no longer matches — repaint those
+```
+
+This is in-memory like any paint op — your next `runAndSave` serializes the current regions, so they
+persist with it. (You don't need this after `forkVersion`, which already carries colors.)
+
+### Modify and test
+
+Modify current editor code with a transform function and test the result without committing:
+```js
+const r = await partwright.modifyAndTest(
+  code => code.replace('towerH = 28', 'towerH = 35'),
+  { isManifold: true, maxComponents: 1 }
+);
+// r.modifiedCode = the transformed code string
+// r.codeDiff     = { changed, added, removed, diff } — confirm the tweak landed.
+//                  changed:false means your transform matched nothing (a no-op);
+//                  the stats below would then describe the UNCHANGED code.
+// r.stats        = geometry stats of the modified code
+// r.passed       = true/false (only if assertions given)
+// r.failures     = [...] (only if failed)
+```
+
+> Prefer the AI tool's `find`/`replace` (or `patches`) form over a bare `code => code.replace(...)`
+> transform: a string `replace` whose needle is absent returns the code **unchanged with no error**,
+> so the tweak silently no-ops. The `find`/`replace` form is rejected when the needle doesn't match
+> exactly once. Either way, check `codeDiff.changed` before trusting the result.
+
+### Multi-query current geometry
+
+Query multiple properties of the already-computed geometry in a single call:
+```js
+const r = partwright.query({
+  sliceAt: [5, 10, 15, 20],  // cross-sections at these Z heights
+  decompose: true,             // component breakdown
+  boundingBox: true,           // bounding box
+});
+// r.slices     = { z5: {area, contours, ...}, z10: {...}, ... }
+// r.components = [{ index, volume, centroid, boundingBox }, ...]
+// r.boundingBox = { min: [...], max: [...] }
+// r.stats      = current geometry-data stats
+```
+
+### Batch session creation
+
+Create a complete session with multiple versions in one call:
+```js
+const r = await partwright.createSessionWithVersions("Castle", [
+  { code: v1Code, label: "v1 - walls" },
+  { code: v2Code, label: "v2 - towers" },
+  { code: v3Code, label: "v3 - gate" },
+]);
+// r.session = {id, name}
+// r.versions = [{version, geometry}, ...]
+// r.galleryUrl = "/editor?session=abc&gallery"
+```
+
+### Session notes -- tracking design context
+
+Use session notes to build a persistent record of the design story. This enables any agent (or human) resuming the session later to understand what happened and why.
+
+**When to log notes:**
+- Before first version: log the user's requirements and constraints
+- On each version: include rationale in the label and optional `notes` field
+- When the user gives feedback: log it as a note, then save the next version
+- On key decisions: log dimensions, materials, constraints, tradeoffs
+- On failed attempts: log what didn't work and why
+
+**Prefix conventions** (so notes are scannable):
+```js
+await partwright.addSessionNote("[REQUIREMENT] 5.5x5.5x36in boards, snap-on C-channel, screw holes");
+await partwright.addSessionNote("[FEEDBACK] User: groove looks too shallow, wants full tongue insertion");
+await partwright.addSessionNote("[DECISION] Omitted right wall on end pieces for clearance");
+await partwright.addSessionNote("[MEASUREMENT] Tongue width = outerW - 2*wallT = 133.7mm");
+await partwright.addSessionNote("[ATTEMPT] v2 tried 3mm walls but too flimsy. Increased to 5mm in v3");
+await partwright.addSessionNote("[TODO] Add chamfer to bottom edge for easier print removal");
+```
+
+Version-level notes go in the `runAndSave` assertions object:
+```js
+await partwright.runAndSave(code, "v2 - widened tongue per feedback", {
+  isManifold: true,
+  notes: "Changed tabW from 20mm to outerW - 2*wallT per user request"
+});
+```
+
+### Resuming a session
+
+When opening a session you haven't worked on (or returning after time away), **always call `getSessionContext()` first**:
+```js
+await partwright.openSession(sessionId);
+const ctx = await partwright.getSessionContext();
+// ctx.session    -- {id, name, created, updated}
+// ctx.versions   -- [{index, label, timestamp, notes?, geometrySummary: {volume, boundingBox, ...}}]
+// ctx.notes      -- [{id, text, timestamp}]  (all session notes)
+// ctx.currentVersion -- {index, label}
+// ctx.versionCount
+// ctx.agentHints -- {apiDocsUrl, recommendedEntrypoint, codeMustReturnManifold, recentErrors, spending}
+//   recentErrors: last 5 validation errors from this page session (helps avoid repeating mistakes)
+```
+
+Read the notes and version history before making changes. The notes tell you:
+- What the user originally asked for (`[REQUIREMENT]` notes)
+- What was tried and why (`[DECISION]` and `[ATTEMPT]` notes)
+- What feedback the user gave (`[FEEDBACK]` notes)
+- What measurements or constraints matter (`[MEASUREMENT]` notes)
+- What still needs to be done (`[TODO]` notes)
+
+### Recommended iteration pattern
+
+1. Write initial code, assert+save in one call: `runAndSave(code, "v1 - base", {isManifold: true, maxComponents: 1})`
 
 ## Visual verification
 

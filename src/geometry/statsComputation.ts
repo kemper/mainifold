@@ -183,6 +183,23 @@ export function computeGeometryStats(
   };
 }
 
+/** Synthesise a printability verdict from existing geometry stats.
+ *  A model is printable when it is a single watertight solid (isManifold + one floating component).
+ *  Fully-enclosed interior components (containedComponents) are excluded — they are sealed voids
+ *  that won't detach in print, matching the logic in geometryWarnings().
+ *  Returns a short structured result the AI agent can check without parsing warning strings. */
+export function computePrintability(geo: Record<string, unknown>): { printable: boolean; issues: string[] } {
+  if (!geo || geo.status !== 'ok') return { printable: false, issues: ['no geometry'] };
+  const issues: string[] = [];
+  if (geo.isManifold === false) issues.push('non-manifold mesh (not watertight)');
+  if (typeof geo.componentCount === 'number' && geo.componentCount > 1) {
+    const enclosed = typeof geo.containedComponents === 'number' ? geo.containedComponents : 0;
+    const floating = geo.componentCount - enclosed;
+    if (floating > 1) issues.push(`${floating} disconnected components`);
+  }
+  return { printable: issues.length === 0, issues };
+}
+
 export function computeStatDiff(prev: Record<string, unknown>, next: Record<string, unknown>): Record<string, unknown> {
   const diff: Record<string, unknown> = {};
 
