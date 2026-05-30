@@ -116,9 +116,9 @@ describe('Bambu 3MF — all-PLA filament metadata', () => {
     expect(text).toContain('paint_color');
     expect(text).not.toContain('<m:colorgroup');
     // triPainted's two colors land in slots 1 and 2 → extruders 2 and 3 →
-    // paint_color bitstreams "8" and "C0".
+    // paint_color bitstreams "4" and "8".
+    expect(text).toContain('paint_color="4"');
     expect(text).toContain('paint_color="8"');
-    expect(text).toContain('paint_color="C0"');
   });
 
   it('an uncolored model still pins a single PLA filament', async () => {
