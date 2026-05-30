@@ -85,6 +85,14 @@ import {
 } from './import/importInbox';
 import { createThumbnailFromImageData } from './import/imageThumbnail';
 import { showImportPreview, summarizeSessionImport } from './ui/importPreview';
+import { showImportUrlModal } from './ui/importUrlModal';
+import {
+  filenameFromUrl,
+  classifyRemoteResource,
+  ensureExtensionForSource,
+  MAX_REMOTE_BYTES,
+  REMOTE_FETCH_TIMEOUT_MS,
+} from './import/urlImport';
 import { showImportTargetModal } from './ui/importTargetModal';
 import { showImageVoxelImportModal, type ImageVoxelModalResult } from './ui/imageVoxelImportModal';
 import { showStepImportTargetModal } from './ui/stepImportTargetModal';
@@ -195,6 +203,7 @@ import {
   getGalleryUrl,
   exportSession,
   importSession,
+  importSessionPartsIntoActive,
   clearAllSessions,
   saveImages as persistImages,
   getImagesFromSession,
@@ -1634,7 +1643,14 @@ async function main() {
   // Import an already-parsed session payload. Used by both file import and the
   // window.partwright.importSessionData() API so AI agents can bypass the file picker.
   async function importSessionPayload(data: ExportedSession): Promise<{ sessionId: string }> {
-    const session = await importSession(data, async (code) => {
+    // Seed the active-imports register with each version's own meshes before
+    // running its code: `Manifold.ofMesh(api.imports[0])` only reproduces this
+    // version's geometry (and thus a correct thumbnail) if the register holds
+    // these meshes — otherwise the run captures a stale, previously-loaded part.
+    // importSession resets the register to the latest version's imports when it
+    // finishes, so no manual restore is needed here.
+    const session = await importSession(data, async (code, importedMeshes) => {
+      setActiveImports(importedMeshes ?? []);
       await runCodeSync(code);
       return captureThumbnail();
     });
@@ -2092,11 +2108,15 @@ async function main() {
       alert(`"${filename}" doesn't look like a Partwright session file.`);
       return false;
     }
-    const summary = summarizeSessionImport(data);
-    const ok = await showImportPreview(filename, summary);
-    if (!ok) return false;
-    await importSessionPayload(data);
-    return true;
+    // Show the destination chooser (new session vs merge) and import. The merge
+    // option is only offered when a session is open (gated inside
+    // importValidatedSession). A failure surfaces as a toast and returns false.
+    try {
+      return await importValidatedSession(data, filename);
+    } catch (e) {
+      showToast(`Import failed: ${(e as Error).message}`, { variant: 'warn' });
+      return false;
+    }
   }
 
   // Import a .partwright.json session, a raw .js / .scad file, or an .stl mesh
@@ -2165,6 +2185,200 @@ async function main() {
       alert(`Failed to import "${file.name}": ${(e as Error).message}`);
       return false;
     }
+  }
+
+  // === Import from URL ===
+
+  /** Decode + import a Partwright share link or raw `#share=…` hash WITHOUT any
+   *  network. Mirrors the decode+validate chain in enterSharedFromHash/onFork:
+   *  decodeShare → validateSessionPayload → validateSharePayloadShape, then runs
+   *  it through the same new-session / merge destination chooser as a file
+   *  import. Throws a human-readable message on any failure (the modal surfaces
+   *  it inline). */
+  async function importFromShareHash(hash: string): Promise<void> {
+    let payload: ExportedSession;
+    try {
+      const parsed = await decodeShare(hash);
+      const branded = validateSessionPayload(parsed);
+      if (!branded) throw new Error('not a Partwright payload');
+      payload = validateSharePayloadShape(branded);
+    } catch (e) {
+      if (e instanceof ShareUnsupportedError) {
+        throw new Error('That share link was made by a newer version of Partwright.');
+      }
+      throw new Error('That share link is invalid or corrupted.');
+    }
+    await importValidatedSession(payload, 'shared link');
+  }
+
+  /** Show the destination chooser (new session vs merge, the latter only when a
+   *  session is open) for an already-validated session payload, then import.
+   *  Returns whether the import committed (false when the user cancelled). */
+  async function importValidatedSession(data: ExportedSession, filename: string): Promise<boolean> {
+    const summary = summarizeSessionImport(data);
+    const cur = getState();
+    const mergeTargetName = cur.session
+      ? (cur.session.name?.trim() || 'current session')
+      : undefined;
+    const choice = await showImportPreview(filename, summary, { mergeTargetName });
+    if (choice === 'cancel') return false;
+    if (choice === 'merge') {
+      // The regen callback runs each imported version's code to snapshot a
+      // thumbnail. Code like `Manifold.ofMesh(api.imports[0])` reads the active-
+      // imports register, so we must seed it with *that* version's meshes
+      // before running — otherwise the run produces the host (previously
+      // selected) part's geometry and the captured thumbnail is stale. Restore
+      // the host's own imports afterwards so the closing re-render is correct.
+      const hostImports = getActiveImports();
+      const result = await importSessionPartsIntoActive(data, async (code, importedMeshes) => {
+        setActiveImports(importedMeshes ?? []);
+        await runCodeSync(code);
+        return captureThumbnail();
+      });
+      setActiveImports(hostImports);
+      if (result) {
+        // Merging an imported version with no embedded thumbnail runs that
+        // version's code through runCodeSync to capture one — which leaves the
+        // viewport showing the last imported geometry while the editor still
+        // shows the active version's code. Re-render the active version so the
+        // editor text and viewport agree again.
+        const st = getState();
+        if (st.currentVersion) await runCodeSync(st.currentVersion.code);
+        const partWord = result.addedParts.length === 1 ? 'part' : 'parts';
+        showToast(`Merged ${result.addedParts.length} ${partWord} into this session.`, { variant: 'success' });
+        return true;
+      }
+    }
+    await importSessionPayload(data);
+    return true;
+  }
+
+  /** Fetch a remote http(s) file with a timeout + size cap, wrap it in a File,
+   *  and route it through the existing import pipeline (handleImportFile, which
+   *  itself routes JSON → the session-import path). Never evals fetched content.
+   *  Throws a human-readable message on any failure. */
+  async function importFromRemoteUrl(url: string): Promise<void> {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), REMOTE_FETCH_TIMEOUT_MS);
+    let res: Response;
+    try {
+      res = await fetch(url, { signal: controller.signal, redirect: 'follow' });
+    } catch (e) {
+      clearTimeout(timer);
+      if ((e as Error).name === 'AbortError') throw new Error('The request timed out.');
+      throw new Error('Could not fetch that URL (network error or blocked by the remote server).');
+    }
+    if (!res.ok) {
+      clearTimeout(timer);
+      throw new Error(`The server responded ${res.status} ${res.statusText}.`);
+    }
+
+    // Defense-in-depth: parseImportUrlInput only vetted the *initial* URL's
+    // scheme. With redirect: 'follow', the final URL could in theory be a
+    // non-http(s) scheme; browsers already block http(s)→file:/data: redirects,
+    // but re-check the resolved URL before touching the body just in case.
+    if (res.url) {
+      let finalProtocol: string;
+      try {
+        finalProtocol = new URL(res.url).protocol;
+      } catch {
+        clearTimeout(timer);
+        controller.abort();
+        throw new Error('The remote server redirected to an invalid URL.');
+      }
+      if (finalProtocol !== 'http:' && finalProtocol !== 'https:') {
+        clearTimeout(timer);
+        controller.abort();
+        throw new Error(`The remote server redirected to an unsupported URL (got "${finalProtocol}").`);
+      }
+    }
+
+    // Up-front size guard from Content-Length when present.
+    const declared = Number(res.headers.get('content-length'));
+    if (Number.isFinite(declared) && declared > MAX_REMOTE_BYTES) {
+      clearTimeout(timer);
+      controller.abort();
+      throw new Error(`That file is too large (${(declared / 1048576).toFixed(1)} MB; limit 25 MB).`);
+    }
+
+    const contentType = res.headers.get('content-type');
+    const filename = filenameFromUrl(url);
+
+    // Classify before buffering so we can reject unsupported types early. The
+    // filename extension is authoritative; fall back to Content-Type.
+    const source = classifyRemoteResource(filename, contentType);
+    if (!source) {
+      clearTimeout(timer);
+      controller.abort();
+      throw new Error('Unsupported file type. Supported: .partwright.json, .stl, .step / .stp, .svg, .vox, or an image.');
+    }
+
+    // Stream the body with a hard byte cap as a backstop for servers that omit
+    // or under-report Content-Length.
+    let bytes: Uint8Array;
+    try {
+      bytes = await readBodyCapped(res, MAX_REMOTE_BYTES, controller);
+    } catch (e) {
+      clearTimeout(timer);
+      if ((e as Error).name === 'AbortError') throw new Error('The request timed out.');
+      throw e;
+    }
+    clearTimeout(timer);
+
+    const safeName = ensureExtensionForSource(filename, source);
+    const file = new File([bytes], safeName, { type: contentType ?? '' });
+    const ok = await handleImportFile(file);
+    if (!ok) {
+      // handleImportFile surfaces its own alert on hard failure; a soft "false"
+      // (e.g. user cancelled a sub-modal) shouldn't be reported as an error.
+      throw new Error('Import was cancelled or the file could not be read.');
+    }
+  }
+
+  /** Read a fetch Response body into a Uint8Array, aborting once the streamed
+   *  total exceeds `cap`. Falls back to a plain arrayBuffer() read (still cap-
+   *  checked) when the body isn't a readable stream. */
+  async function readBodyCapped(res: Response, cap: number, controller: AbortController): Promise<Uint8Array> {
+    const body = res.body;
+    if (!body || typeof body.getReader !== 'function') {
+      const buf = new Uint8Array(await res.arrayBuffer());
+      if (buf.byteLength > cap) throw new Error(`That file is too large (limit 25 MB).`);
+      return buf;
+    }
+    const reader = body.getReader();
+    const chunks: Uint8Array[] = [];
+    let total = 0;
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (value) {
+        total += value.byteLength;
+        if (total > cap) {
+          controller.abort();
+          try { await reader.cancel(); } catch { /* ignore */ }
+          throw new Error('That file is too large (limit 25 MB).');
+        }
+        chunks.push(value);
+      }
+    }
+    const out = new Uint8Array(total);
+    let offset = 0;
+    for (const c of chunks) { out.set(c, offset); offset += c.byteLength; }
+    return out;
+  }
+
+  /** Open the "Import from URL…" modal and route the user's input to either the
+   *  local share decode or the size-capped remote fetch. */
+  function openImportFromUrl(): void {
+    showImportUrlModal({
+      onSubmit: async (parsed) => {
+        if (parsed.kind === 'share') {
+          await importFromShareHash(parsed.hash);
+        } else {
+          await importFromRemoteUrl(parsed.url);
+        }
+      },
+    });
   }
 
   /** Decode an image File/Blob into ImageData via an offscreen canvas. */
@@ -3075,6 +3289,7 @@ async function main() {
       exportRawCode(getValue(), getActiveLanguage());
     },
     onImportFile: async (file) => { await handleImportFile(file); },
+    onImportFromURL: () => { openImportFromUrl(); },
     onImportInboxEntry: handleReimportInboxEntry,
     onCreateRelief: () => {
       // If the active session is itself a relief, reopen the wizard pre-loaded
@@ -3123,10 +3338,20 @@ async function main() {
 
   // Load a part's active version into the editor, or reset to a blank part when
   // the part has no saved versions yet.
+  //
+  // A saved version carries its own language and `loadVersionIntoEditor` swaps
+  // the engine to match. A version-less part falls back to the manifold-js
+  // starter, so the engine MUST be on manifold-js before we seed + run it —
+  // otherwise the starter's `Manifold.cube(...)` runs under whatever engine the
+  // previously-active part left behind (e.g. voxel, where `api.Manifold` is
+  // undefined) and throws "Cannot read properties of undefined (reading
+  // 'cube')". This is the mixed-language case a JSON merge creates: a voxel
+  // Part 2 alongside the default unsaved manifold-js Part 1.
   async function loadPartIntoEditor(version: Version | null) {
     if (version) {
       await loadVersionIntoEditor(version);
     } else {
+      if (getActiveLanguage() !== 'manifold-js') await switchLanguage('manifold-js');
       startNewPartInEditor();
     }
   }
@@ -3380,7 +3605,10 @@ async function main() {
       setValue(code);
       runCode(code);
     },
-    async (code: string) => {
+    async (code: string, importedMeshes) => {
+      // Seed this version's imported meshes so `api.imports[0]` resolves to its
+      // own geometry when the thumbnail is regenerated (else a stale capture).
+      setActiveImports(importedMeshes ?? []);
       await runCodeSync(code);
       return captureThumbnail();
     },
@@ -6513,7 +6741,10 @@ async function main() {
       let warning: string | null = null;
       const session = await importSession(
         data,
-        async (code: string) => {
+        async (code: string, importedMeshes) => {
+          // Seed this version's imported meshes so `api.imports[0]` resolves to
+          // its own geometry when regenerating the thumbnail (else a stale part).
+          setActiveImports(importedMeshes ?? []);
           await runCodeSync(code);
           return captureThumbnail();
         },
