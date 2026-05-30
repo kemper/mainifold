@@ -88,7 +88,7 @@ export function applyVoxelize(mesh: MeshData, opts: VoxelizeModifierOptions): Mo
   const encoded = encodeGrid(grid);
   const smoothCall = opts.smooth ? `\nv.smooth();` : '';
   const code = `// Voxelized from the current model on ${today()} (resolution ${opts.resolution ?? 32}).
-// Edit below — e.g. add v.smooth() for rounded voxels, or v.fillBox(...) to extend.
+// Edit below — toggle "Smooth voxels" for rounded corners, or v.fillBox(...) to extend.
 const { voxels } = api;
 const v = voxels.decode(${JSON.stringify(encoded)});${smoothCall}
 return v;

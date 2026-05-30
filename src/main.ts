@@ -97,6 +97,8 @@ import { runVoxelForPaint } from './geometry/engines/voxel';
 import type { VoxelGrid } from './geometry/voxel/grid';
 import * as voxelPaint from './color/voxelPaint';
 import { setActiveImports, getActiveImports, type ImportedMesh } from './import/importedMesh';
+import { applyFuzzy, applySmooth, applyVoxelize, defaultFuzzyOptions, defaultSmoothOptions, type ModifierResult } from './surface/modifiers';
+import { initSurfaceUI } from './ui/surfaceModal';
 import { generateRelief, generateReliefFromSvg } from './relief/imageToRelief';
 import { DEFAULT_RELIEF_OPTIONS, type ReliefOptions, type ReliefImportMode, type ReliefCommonOptions, type SeedRegion, type PreviewMode, type GenerateReliefResult } from './relief/types';
 import { computeReliefTriColors, getSwapGuideFor, setPreviewMode as ctlSetReliefPreviewMode, getPreviewMode as ctlGetReliefPreviewMode, isPreviewActive as isReliefPreviewActive } from './relief/reliefController';
@@ -4837,8 +4839,93 @@ async function main() {
     };
   }
 
+  // === Surface modifiers (fuzzy skin / smooth / voxelize) ===
+  // Post-hoc operations on the current model that commit a new version, mirroring
+  // the STL-import path (applyImportWrapper): bake the result onto an imported
+  // mesh and emit a `Manifold.ofMesh(...)` wrapper (manifold modifiers), or emit a
+  // self-contained `voxels.decode(...)` program (voxelize). Then switch to the
+  // right engine, run, and save. Declared here as hoisted functions so the
+  // partwrightAPI methods below can call them.
+  function requireCurrentMeshForModifier(): MeshData {
+    if (!currentMeshData || currentMeshData.numTri === 0) {
+      throw new Error('No model to modify — run or open a model first.');
+    }
+    return currentMeshData;
+  }
+
+  async function commitSurfaceModifier(result: ModifierResult): Promise<Record<string, unknown>> {
+    cancelVoxelPaintIfActive();
+    dropPaintState();
+    if (result.kind === 'manifold') {
+      if (getActiveLanguage() !== 'manifold-js') await switchLanguage('manifold-js');
+      const comp: ImportedMesh = {
+        id: crypto.randomUUID(),
+        filename: result.label,
+        format: 'stl',
+        vertProperties: result.mesh.vertProperties,
+        triVerts: result.mesh.triVerts,
+        numVert: result.mesh.numVert,
+        numTri: result.mesh.numTri,
+        numProp: 3,
+      };
+      setActiveImports([comp]);
+      setValue(result.code);
+      const ok = await runCodeSync(result.code);
+      if (!ok) return { error: `Failed to apply ${result.label}` };
+      const thumbnail = await captureThumbnail();
+      await saveVersion(result.code, getGeometryDataObj(), thumbnail, result.label, undefined, {
+        force: true,
+        importedMeshes: [comp],
+      });
+      return { ok: true, label: result.label, geometry: getGeometryDataObj() };
+    }
+    // Voxel result: a self-contained `voxels.decode(...)` program, no imports.
+    if (getActiveLanguage() !== 'voxel') await switchLanguage('voxel');
+    setActiveImports([]);
+    setValue(result.code);
+    const ok = await runCodeSync(result.code);
+    if (!ok) return { error: `Failed to apply ${result.label}` };
+    const thumbnail = await captureThumbnail();
+    await saveVersion(result.code, getGeometryDataObj(), thumbnail, result.label, undefined, { force: true });
+    return { ok: true, label: result.label, geometry: getGeometryDataObj() };
+  }
+
   // === Expose window.partwright console API ===
   const partwrightAPI = {
+    /** Apply a fuzzy-skin surface texture to the current model; saves a new version. */
+    async applyFuzzySkin(opts?: { amplitude?: number; scale?: number; octaves?: number; seed?: number }) {
+      try {
+        const mesh = requireCurrentMeshForModifier();
+        const base = defaultFuzzyOptions(mesh);
+        return await commitSurfaceModifier(applyFuzzy(mesh, {
+          amplitude: opts?.amplitude ?? base.amplitude,
+          scale: opts?.scale ?? base.scale,
+          octaves: opts?.octaves ?? base.octaves,
+          seed: opts?.seed ?? base.seed,
+        }));
+      } catch (e) { return { error: e instanceof Error ? e.message : String(e) }; }
+    },
+    /** Smooth/round the current model (Taubin λ/μ); saves a new version. */
+    async smoothModel(opts?: { iterations?: number; subdivide?: boolean }) {
+      try {
+        const mesh = requireCurrentMeshForModifier();
+        const base = defaultSmoothOptions();
+        return await commitSurfaceModifier(applySmooth(mesh, {
+          iterations: opts?.iterations ?? base.iterations,
+          subdivide: opts?.subdivide ?? base.subdivide,
+        }));
+      } catch (e) { return { error: e instanceof Error ? e.message : String(e) }; }
+    },
+    /** Voxelize the current model into the voxel engine; saves a new version. */
+    async voxelizeModel(opts?: { resolution?: number; smooth?: boolean }) {
+      try {
+        const mesh = requireCurrentMeshForModifier();
+        return await commitSurfaceModifier(applyVoxelize(mesh, {
+          resolution: opts?.resolution ?? 32,
+          smooth: opts?.smooth ?? false,
+        }));
+      } catch (e) { return { error: e instanceof Error ? e.message : String(e) }; }
+    },
     /** Run code string and update all views. Returns geometry data object. */
     async run(code?: string): Promise<Record<string, unknown>> {
       assertString(code, 'run(code)', { optional: true, allowEmpty: false });
@@ -9222,6 +9309,9 @@ async function main() {
   const apiWindow = window as unknown as Record<string, unknown>;
   apiWindow.partwright = partwrightAPI;
   apiWindow.mainifold = partwrightAPI;
+
+  // Surface modifiers UI (viewport ✦ Surface button + command-palette entries).
+  initSurfaceUI(partwrightAPI as unknown as Parameters<typeof initSurfaceUI>[0]);
 
   // Log API availability for AI agents
   console.info('Partwright: AI agents should use window.partwright -- start with partwright.help(). window.mainifold remains as a legacy alias. See /llms.txt');
