@@ -139,6 +139,11 @@ export function stampImageOntoMesh(
     const cy = (y0 + y1 + y2) / 3;
     const cz = (z0 + z1 + z2) / 3;
 
+    // Depth slab: skip triangles whose centroid is more than halfSize behind the
+    // hit surface. Guards against painting through thin walls when the far face's
+    // normal happens to match hitNormal (face-normal check alone isn't sufficient).
+    if ((cx - hpX) * nx + (cy - hpY) * ny + (cz - hpZ) * nz < -halfSize) continue;
+
     // Project centroid and all three vertices onto the rotated tangent frame,
     // normalised to [-1, 1]. The triangle is included if ANY of the four
     // sample points lands inside the stamp square — this handles coarse meshes

@@ -5198,53 +5198,76 @@ async function main() {
   setSmoothStampCallback((imageData, stampOpts, maxEdge) => {
     if (!currentMeshData) return null;
 
-    // Build the rotated tangent frame to identify which triangles overlap the stamp footprint.
-    const { hitPoint: [hpX, hpY, hpZ], hitNormal, size, rotationDeg } = stampOpts;
+    const { hitPoint: [hpX, hpY, hpZ], hitNormal: [nx, ny, nz], size, rotationDeg } = stampOpts;
     const halfSize = size / 2;
-    const { tr: [trX, trY, trZ], br: [brX, brY, brZ] } = buildTangentFrame(hitNormal, rotationDeg);
+    const { tr: [trX, trY, trZ], br: [brX, brY, brZ] } = buildTangentFrame(stampOpts.hitNormal, rotationDeg);
+    const { numProp, vertProperties, triVerts } = currentMeshData;
 
-    // Step 1: Find all triangles that overlap the stamp footprint (with a small
-    // margin so triangles straddling the stamp edge are included).
-    const { numTri, numProp, vertProperties, triVerts } = currentMeshData;
+    // Build adjacency once — used for the BFS footprint walk and the region remap.
+    const adjacency = buildAdjacency(currentMeshData);
+
+    // Find the mesh triangle the user clicked as the BFS seed.
+    const { triIndex: startTri } = findNearestTriangle([hpX, hpY, hpZ], currentMeshData, adjacency);
+    if (startTri < 0) return null;
+
+    // Footprint test: UV square (with margin) AND depth slab so we don't cross
+    // through the model to the far side.
     const MARGIN = 0.15;
     const lo = -(1 + MARGIN), hi = 1 + MARGIN;
     const inFootprint = (px: number, py: number, pz: number) => {
       const dx = px - hpX, dy = py - hpY, dz = pz - hpZ;
+      if (dx * nx + dy * ny + dz * nz < -halfSize) return false; // depth slab
       const u = (dx * trX + dy * trY + dz * trZ) / halfSize;
       const v = (dx * brX + dy * brY + dz * brZ) / halfSize;
       return u >= lo && u <= hi && v >= lo && v <= hi;
     };
+
+    // Step 1: BFS from the hit triangle — walk across shared mesh edges, only
+    // continuing through forward-facing triangles. This mirrors the paint brush's
+    // geodesic approach: paint stays on the reachable surface, never bleeds
+    // through the model to the far side.
     const footprintTris = new Set<number>();
-    for (let t = 0; t < numTri; t++) {
+    const visited = new Set<number>([startTri]);
+    const queue: number[] = [startTri];
+
+    while (queue.length > 0) {
+      const t = queue.shift()!;
       const v0 = triVerts[t * 3], v1 = triVerts[t * 3 + 1], v2 = triVerts[t * 3 + 2];
       const x0 = vertProperties[v0 * numProp], y0 = vertProperties[v0 * numProp + 1], z0 = vertProperties[v0 * numProp + 2];
       const x1 = vertProperties[v1 * numProp], y1 = vertProperties[v1 * numProp + 1], z1 = vertProperties[v1 * numProp + 2];
       const x2 = vertProperties[v2 * numProp], y2 = vertProperties[v2 * numProp + 1], z2 = vertProperties[v2 * numProp + 2];
+
+      // Stop propagating at back-facing triangles (they form the geometric horizon).
+      const ex = x1 - x0, ey = y1 - y0, ez = z1 - z0;
+      const fx = x2 - x0, fy = y2 - y0, fz = z2 - z0;
+      if ((ey * fz - ez * fy) * nx + (ez * fx - ex * fz) * ny + (ex * fy - ey * fx) * nz <= 0) continue;
+
       const cx = (x0 + x1 + x2) / 3, cy = (y0 + y1 + y2) / 3, cz = (z0 + z1 + z2) / 3;
       if (inFootprint(cx, cy, cz) || inFootprint(x0, y0, z0) || inFootprint(x1, y1, z1) || inFootprint(x2, y2, z2)) {
         footprintTris.add(t);
+        for (const n of adjacency.neighbors[t]) {
+          if (!visited.has(n)) { visited.add(n); queue.push(n); }
+        }
       }
     }
 
     if (footprintTris.size === 0) return null;
 
-    // Step 2: Expand by one neighbor ring so the boundary has fine tessellation
-    // on both sides of the stamp edge.
-    const adjacency = buildAdjacency(currentMeshData);
+    // Step 2: Expand by one neighbor ring for fine tessellation on both sides
+    // of the stamp boundary.
     const toSubdivide = new Set<number>(footprintTris);
     for (const t of footprintTris) {
       for (const n of adjacency.neighbors[t]) toSubdivide.add(n);
     }
 
-    // Step 3: Subdivide all footprint + ring triangles until edges ≤ maxEdge.
-    // This works even on 2-triangle models — the large triangles get subdivided
-    // to thousands of small ones before the stamp is applied.
+    // Step 3: Subdivide footprint + ring to maxEdge. Works on 2-triangle models —
+    // the large triangles are tessellated to thousands before the stamp is applied.
     const { mesh, childToParent } = buildRefinedMeshFromSet(currentMeshData, toSubdivide, maxEdge);
     const parentToChildren = childrenByParent(childToParent);
     currentMeshData = mesh;
     updatePaintMesh(mesh);
 
-    // Step 4: Remap existing paint regions onto the subdivided mesh
+    // Step 4: Remap existing paint regions onto the subdivided mesh.
     let regionAdjacency: AdjacencyGraph | null = null;
     for (const region of getRegions()) {
       const d = region.descriptor;
@@ -5258,7 +5281,7 @@ async function main() {
     }
     paintedColorRefresh();
 
-    // Step 5: Stamp on the now-fine mesh for crisp image edges
+    // Step 5: Stamp on the now-fine mesh for crisp image edges.
     const finalResult = stampImageOntoMesh(mesh, imageData, stampOpts);
     return { result: finalResult, parentToChildren };
   });
