@@ -88,28 +88,54 @@ export function openSurfaceModal(api: SurfaceApi, initialTab: Tab = 'fuzzy'): vo
   const span = modelSpan(api);
   const painted = (() => { try { return api.modelHasColor(); } catch { return false; } })();
 
-  // Right-aligned, matching the Paint / Relief panels (which dock to the right
-  // edge) rather than floating dead-center over the viewport.
+  // Right-aligned, matching the Paint / Relief panels. The panel is draggable
+  // via the title bar — pointer capture keeps the drag smooth even if the cursor
+  // moves off the panel or over the viewport canvas.
   const backdrop = el('div', 'fixed inset-0 z-[60] bg-black/60 flex items-center justify-end p-3');
   const panel = el('div', 'bg-zinc-900 text-zinc-100 rounded-lg border border-zinc-700 shadow-xl w-[min(94vw,440px)] max-h-[90vh] overflow-auto p-5');
   backdrop.append(panel);
 
-  const titleRow = el('div', 'flex items-center justify-between mb-1');
+  // --- Drag state ---
+  let dragActive = false;
+  let dragStartX = 0, dragStartY = 0, offsetX = 0, offsetY = 0;
+
+  const titleRow = el('div', 'flex items-center justify-between mb-1 select-none');
+  titleRow.style.cursor = 'grab';
   titleRow.append(el('h2', 'text-sm font-semibold', 'Surface modifiers'));
   const closeBtn = el('button', 'text-zinc-400 hover:text-zinc-100 text-lg leading-none', '×');
   titleRow.append(closeBtn);
+
+  titleRow.addEventListener('pointerdown', e => {
+    if ((e.target as HTMLElement).closest('button')) return;
+    dragActive = true;
+    dragStartX = e.clientX - offsetX;
+    dragStartY = e.clientY - offsetY;
+    titleRow.style.cursor = 'grabbing';
+    titleRow.setPointerCapture(e.pointerId);
+  });
+  titleRow.addEventListener('pointermove', e => {
+    if (!dragActive) return;
+    offsetX = e.clientX - dragStartX;
+    offsetY = e.clientY - dragStartY;
+    panel.style.transform = `translate(${offsetX}px, ${offsetY}px)`;
+  });
+  titleRow.addEventListener('pointerup', () => {
+    dragActive = false;
+    titleRow.style.cursor = 'grab';
+  });
+
   panel.append(titleRow);
   panel.append(el('p', 'text-[11px] text-zinc-500 mb-3', 'Previews live in the viewport; Apply saves a new version (undo via version history).'));
 
-  // Tab strip.
-  const tabRow = el('div', 'flex gap-1 mb-4');
+  // Tab strip — wraps to a second line when there are too many to fit on one row.
+  const tabRow = el('div', 'flex flex-wrap gap-1 mb-4');
   const body = el('div', '');
   const tabs: { id: Tab; label: string }[] = [
-    { id: 'fuzzy', label: 'Fuzzy skin' },
+    { id: 'fuzzy', label: 'Fuzzy' },
     { id: 'knit', label: 'Knit' },
-    { id: 'cable', label: 'Cable knit' },
+    { id: 'cable', label: 'Cable' },
     { id: 'waffle', label: 'Waffle' },
-    { id: 'fur', label: 'Fur / velvet' },
+    { id: 'fur', label: 'Fur' },
     { id: 'woven', label: 'Woven' },
     { id: 'smooth', label: 'Smooth' },
     { id: 'voxelize', label: 'Voxelize' },
@@ -224,7 +250,7 @@ export function openSurfaceModal(api: SurfaceApi, initialTab: Tab = 'fuzzy'): vo
       const ts = slider('Thread spacing', span * 0.005, span * 0.2, span * 0.04, span * 0.002, n => n.toFixed(3), schedulePreview);
       const tw = slider('Thread width (fraction)', 0.1, 0.9, 0.4, 0.05, n => n.toFixed(2), schedulePreview);
       const amp = slider('Amplitude (thread height)', 0, span * 0.06, span * 0.02, span * 0.001, n => n.toFixed(3), schedulePreview);
-      const ud = slider('Under-thread depth', 0, 1, 0.3, 0.05, n => n.toFixed(2), schedulePreview);
+      const ud = slider('Under-thread depth', 0, 1, 0.5, 0.05, n => n.toFixed(2), schedulePreview);
       const grain = slider('Grain angle (°)', 0, 180, 0, 5, n => String(n) + '°', schedulePreview);
       body.append(ts.wrap, tw.wrap, amp.wrap, ud.wrap, grain.wrap);
       body.append(el('p', 'text-[11px] text-zinc-500', 'Plain-weave interlacing: warp and weft threads alternate over/under. Thread width 0.4=open weave, 0.7=tight. Under-depth 0=flat valleys, 1=deep recess.'));

@@ -93,7 +93,7 @@ export function furVelvet(mesh: MeshData, opts: FurVelvetOptions): MeshData {
   if (opts.subdivide !== false && amplitude > 0) {
     const diag = Math.hypot(...bboxOf(extractPositions(mesh)).size);
     const targetEdge = Math.max(fiberSpacing / 3, diag / 400);
-    base = subdivideToMaxEdge(mesh, { maxEdge: targetEdge, maxRounds: 4 });
+    base = subdivideToMaxEdge(mesh, { maxEdge: targetEdge, maxRounds: 6 });
   }
 
   const positions = base.numProp === 3

@@ -87,7 +87,7 @@ export function knitTexture(mesh: MeshData, opts: KnitTextureOptions): MeshData 
   if (opts.subdivide !== false && amplitude > 0) {
     const diag = Math.hypot(...bboxOf(extractPositions(mesh)).size);
     const targetEdge = Math.max(Math.min(stitchW, stitchH) / 4, diag / 400);
-    base = subdivideToMaxEdge(mesh, { maxEdge: targetEdge, maxRounds: 4 });
+    base = subdivideToMaxEdge(mesh, { maxEdge: targetEdge, maxRounds: 6 });
   }
 
   const positions = base.numProp === 3
@@ -122,19 +122,21 @@ export function knitTexture(mesh: MeshData, opts: KnitTextureOptions): MeshData 
     const colInt = Math.floor(colShifted);
     const stitchScale = 1 + variation * (hash2(colInt, rowInt, seed) * 2 - 1);
 
-    // Column shape: peaks at uf = 0 and 1 (column edges = "legs" of the V),
-    // trough at uf = 0.5 (center of the stitch valley).
-    const uShape = (1 + Math.cos(uf * TAU)) / 2;  // 1 at edges, 0 at center
+    // Column wave: +1 at column edges (uf=0,1) where the stitch "legs" are,
+    // -1 at column center (uf=0.5) which is the stitch valley between V's.
+    // Bipolar range lets the center actually recess inward — giving the visible
+    // depth contrast that makes the V pattern readable rather than just bumps.
+    const uWave = Math.cos(uf * TAU);  // +1 at edges, -1 at center
 
-    // Row shape: bell per stitch height, peak at row boundaries (vf = 0, 1)
-    // where the stitch "head" crosses into the next row.
-    const vShape = (1 + Math.cos(vf * TAU)) / 2;  // 1 at 0 and 1, 0 at 0.5
+    // Row modulation: 1 at row boundaries (vf=0,1 = stitch head crossings),
+    // 0 at row centre (vf=0.5 = middle of the V-leg). Using half-cosine so the
+    // modulation is always non-negative and only amplifies, never flips sign.
+    const vShape = (1 + Math.cos(vf * TAU)) / 2;  // 1 at boundaries, 0 at center
 
-    // Blend from pure column ridges (roundness=0) to round bumps (roundness=1).
-    // At roundness=0, every point on a column edge is equally raised (vertical
-    // ridges). At roundness=1, only the intersections of column edges with row
-    // boundaries are raised (round bumps at stitch corners).
-    const d = amplitude * stitchScale * uShape * (1 - roundness + roundness * vShape);
+    // roundness=0 → pure bipolar column ridges (stitch legs run full height).
+    // roundness=1 → ridges concentrated at row boundaries (stitch head bumps).
+    // Mixed roundness gives the classic stockinette V: clear legs with raised heads.
+    const d = amplitude * stitchScale * uWave * (1 - roundness + roundness * vShape);
 
     const nx = normals[v * 3], ny = normals[v * 3 + 1], nz = normals[v * 3 + 2];
     positions[v * 3]     = px + nx * d;

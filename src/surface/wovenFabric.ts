@@ -67,7 +67,7 @@ export function wovenFabric(mesh: MeshData, opts: WovenFabricOptions): MeshData 
   if (opts.subdivide !== false && amplitude > 0) {
     const diag = Math.hypot(...bboxOf(extractPositions(mesh)).size);
     const targetEdge = Math.max(spacing / 4, diag / 400);
-    base = subdivideToMaxEdge(mesh, { maxEdge: targetEdge, maxRounds: 4 });
+    base = subdivideToMaxEdge(mesh, { maxEdge: targetEdge, maxRounds: 6 });
   }
 
   const positions = base.numProp === 3
