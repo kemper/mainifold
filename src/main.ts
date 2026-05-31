@@ -5128,10 +5128,9 @@ async function main() {
           savedOriginal = !!(await saveVersion(originalCode, original.geometryData, original.thumbnail));
         }
 
-        const label = reduced.numTri < baseline.numTri
-          ? `simplified-${reduced.numTri}tri`
-          : `enhanced-${reduced.numTri}tri`;
-        const baked = toImportedMesh(label, reduced);
+        const versionLabel = reduced.numTri < baseline.numTri ? 'simplified' : 'enhanced';
+        const importFilename = `${versionLabel}-${reduced.numTri}tri`;
+        const baked = toImportedMesh(importFilename, reduced);
         const code = generateImportCode([baked], { manifold: true });
         setActiveImports([baked]);
         setValue(code);
@@ -5149,7 +5148,7 @@ async function main() {
           }
         }
         const thumbnail = await captureThumbnail();
-        await saveVersion(code, geoData, thumbnail, label, undefined, {
+        await saveVersion(code, geoData, thumbnail, versionLabel, undefined, {
           force: true,
           importedMeshes: [baked],
         });
