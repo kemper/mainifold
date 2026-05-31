@@ -93,11 +93,13 @@ const pendingStepExports = new Map<string, { resolve: (blob: Blob | null) => voi
 const pendingStepBrepImports = new Map<string, { resolve: (filename: string) => void; reject: (e: Error) => void }>();
 const pendingStepMeshImports = new Map<string, { resolve: (mesh: MeshData) => void; reject: (e: Error) => void }>();
 const pendingClearBrepImports = new Map<string, { resolve: () => void; reject: (e: Error) => void }>();
+const pendingClearBrepShapes = new Map<string, { resolve: () => void; reject: (e: Error) => void }>();
 const pendingSimplifies  = new Map<string, {
   resolve: (r: SimplifyWorkerResult | null) => void;
   reject: (e: Error) => void;
   onProgress: (fraction: number) => void;
 }>();
+const pendingCuts = new Map<string, { resolve: (r: CutWorkerResult | null) => void; reject: (e: Error) => void }>();
 
 // Per-language hard-timeout for a single execute/validate call. The Worker
 // posts no result back if its WASM hangs, so without this the promise (and
@@ -126,14 +128,18 @@ function rejectAllPending(err: Error): void {
   for (const p of pendingStepBrepImports.values()) p.reject(err);
   for (const p of pendingStepMeshImports.values()) p.reject(err);
   for (const p of pendingClearBrepImports.values()) p.reject(err);
+  for (const p of pendingClearBrepShapes.values()) p.reject(err);
   for (const p of pendingSimplifies.values()) p.reject(err);
+  for (const p of pendingCuts.values()) p.reject(err);
   pendingExecutions.clear();
   pendingValidations.clear();
   pendingStepExports.clear();
   pendingStepBrepImports.clear();
   pendingStepMeshImports.clear();
   pendingClearBrepImports.clear();
+  pendingClearBrepShapes.clear();
   pendingSimplifies.clear();
+  pendingCuts.clear();
 }
 
 /** Terminate an unresponsive Worker and reject everything in flight so the next
@@ -304,6 +310,20 @@ function handleEngineWorkerMessage(event: MessageEvent): void {
     return;
   }
 
+  if (msg.type === 'cut_result') {
+    const callId = msg.callId as string;
+    const pending = pendingCuts.get(callId);
+    if (!pending) return;
+    pendingCuts.delete(callId);
+    const error = msg.error as string | null;
+    if (error) { pending.reject(new Error(error)); return; }
+    const mesh = msg.mesh as MeshData | null;
+    if (!mesh) { pending.resolve(null); return; }
+    const triColors = msg.triColors as Uint8Array | null;
+    pending.resolve({ mesh, triColors: triColors ?? undefined });
+    return;
+  }
+
   if (msg.type === 'error') {
     const callId = msg.callId as string | null;
     const err = new Error(msg.message as string);
@@ -320,8 +340,12 @@ function handleEngineWorkerMessage(event: MessageEvent): void {
       pendingStepMeshImports.delete(callId ?? '');
       pendingClearBrepImports.get(callId)?.reject(err);
       pendingClearBrepImports.delete(callId ?? '');
+      pendingClearBrepShapes.get(callId)?.reject(err);
+      pendingClearBrepShapes.delete(callId ?? '');
       pendingSimplifies.get(callId)?.reject(err);
       pendingSimplifies.delete(callId ?? '');
+      pendingCuts.get(callId)?.reject(err);
+      pendingCuts.delete(callId ?? '');
     }
   }
 }
@@ -593,6 +617,56 @@ export async function simplifyInWorker(
     const transfer: Transferable[] = [meshCopy.vertProperties.buffer, meshCopy.triVerts.buffer];
     engineWorker!.postMessage(
       { type: 'simplify', callId, mesh: meshCopy, targetTriangles, maxTolerance },
+      transfer,
+    );
+  });
+}
+
+// ── Cut Worker client ──────────────────────────────────────────────────────────
+
+export interface CutWorkerResult {
+  mesh: MeshData;
+  triColors?: Uint8Array;
+}
+
+/** Run a boolean cut inside the geometry Worker. The mesh is copied (zero-copy
+ *  transfer) so the main thread retains its own copy. Resolves to null when the
+ *  cutter doesn't intersect the model (empty result); rejects on a worker fault. */
+export async function cutInWorker(
+  mesh: MeshData,
+  shape: 'plane' | 'box' | 'sphere' | 'cylinder',
+  keepSide: 'outside' | 'inside',
+  mat4x3: number[],
+  scale: [number, number, number],
+  triColors?: Uint8Array,
+): Promise<CutWorkerResult | null> {
+  initEngineWorker();
+  await workerReady;
+  const callId = `cut-${++callIdCounter}`;
+  const timeoutMs = EXECUTE_TIMEOUT_MS['manifold-js'];
+
+  return new Promise<CutWorkerResult | null>((resolve, reject) => {
+    const timer = setTimeout(() => {
+      if (pendingCuts.has(callId)) {
+        restartEngineWorker(`Cut timed out after ${timeoutMs / 1000}s`);
+      }
+    }, timeoutMs);
+    pendingCuts.set(callId, {
+      resolve: (r) => { clearTimeout(timer); resolve(r); },
+      reject:  (e) => { clearTimeout(timer); reject(e); },
+    });
+    const meshCopy: MeshData = {
+      vertProperties: mesh.vertProperties.slice(),
+      triVerts: mesh.triVerts.slice(),
+      numVert: mesh.numVert,
+      numTri: mesh.numTri,
+      numProp: mesh.numProp,
+    };
+    const transfer: Transferable[] = [meshCopy.vertProperties.buffer, meshCopy.triVerts.buffer];
+    const colorsCopy = triColors ? triColors.slice() : undefined;
+    if (colorsCopy) transfer.push(colorsCopy.buffer);
+    engineWorker!.postMessage(
+      { type: 'cut', callId, mesh: meshCopy, shape, keepSide, mat4x3, scale, triColors: colorsCopy },
       transfer,
     );
   });
