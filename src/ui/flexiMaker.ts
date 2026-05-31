@@ -19,15 +19,11 @@ export interface FlexiMakerHandle {
   dispose(): void;
 }
 
-type ConnectorType = 'ball-socket' | 'pin' | 'key-slot' | 'hinge';
-
 interface FlexiState {
   cutOffset: number;
   tiltX: number;
   tiltY: number;
-  connectorType: ConnectorType;
-  connectorRadius: number;
-  connectorDepth: number;
+  ringSize: number;
   tolerance: number;
   connectorCount: number;
 }
@@ -97,27 +93,29 @@ function generateFlexiCode(
   state: FlexiState,
   bounds: { min: [number, number, number]; max: [number, number, number] },
 ): string {
-  const { cutOffset: h, tiltX: rx, tiltY: ry, connectorType: type } = state;
-  const { connectorRadius: r, connectorDepth: depth, tolerance: tol, connectorCount: count } = state;
+  const { cutOffset: h, tiltX: rx, tiltY: ry, ringSize: size, tolerance: tol, connectorCount: count } = state;
   const cx = (bounds.min[0] + bounds.max[0]) / 2;
   const cy = (bounds.min[1] + bounds.max[1]) / 2;
   const f = (n: number) => n.toFixed(4);
 
-  // Connector positions spread radially around (cx, cy) at the cut height
-  const positions: [number, number][] = count === 1
-    ? [[cx, cy]]
-    : Array.from({ length: count }, (_, i) => {
-        const angle = (2 * Math.PI * i) / count;
-        const spread = r * 3;
-        return [
-          parseFloat((cx + Math.cos(angle) * spread).toFixed(4)),
-          parseFloat((cy + Math.sin(angle) * spread).toFixed(4)),
-        ];
-      });
+  // Ring geometry: two perpendicular tori (chain-link style).
+  // Ring A (XZ plane, hole faces Y) attaches to bottom half.
+  // Ring B (YZ plane, hole faces X) attaches to top half.
+  // They're topologically linked with a tol-wide print gap.
+  const R = Math.max(1.5, size * 0.38);   // torus center radius
+  const r = Math.max(0.5, size * 0.12);   // tube radius
+  const offset = r + tol / 2;             // axial offset: gives min surface gap = tol
+  const clearR = R + r * 2.2;             // clearance cylinder radius
+  const clearH = 2 * (offset + R + r);    // clearance cylinder height (spans both rings)
 
-  // The two half-space cutters use a large box rotated about the cut-plane center.
-  // Rotation is around (cx, cy, h): shift to origin, rotate, shift back.
-  const cutSetup = `const { Manifold, CrossSection } = api;
+  // Space connectors evenly along X (non-overlapping clearance zones)
+  const spacing = 2 * clearR + size * 0.15;
+  const positions: [number, number][] = Array.from({ length: count }, (_, i) => {
+    const xOff = (i - (count - 1) / 2) * spacing;
+    return [parseFloat((cx + xOff).toFixed(4)), parseFloat(cy.toFixed(4))];
+  });
+
+  return `const { Manifold, CrossSection } = api;
 
 const _orig = (() => {
 ${originalCode}
@@ -131,14 +129,14 @@ const _S = 10000;
 const _cx = ${f(cx)};
 const _cy = ${f(cy)};
 
-// Upper half-space (everything above the tilted cut plane)
+// Upper half-space (above the tilted cut plane)
 const _up = Manifold.cube([_S, _S, _S], true)
   .translate([0, 0, _S / 2 + _h])
   .translate([-_cx, -_cy, -_h])
   .rotate([${f(rx)}, ${f(ry)}, 0])
   .translate([_cx, _cy, _h]);
 
-// Lower half-space (everything below the tilted cut plane)
+// Lower half-space (below the tilted cut plane)
 const _dn = Manifold.cube([_S, _S, _S], true)
   .translate([0, 0, -_S / 2 + _h])
   .translate([-_cx, -_cy, -_h])
@@ -146,90 +144,36 @@ const _dn = Manifold.cube([_S, _S, _S], true)
   .translate([_cx, _cy, _h]);
 
 let _top = _orig.intersect(_up);
-let _bot = _orig.intersect(_dn);`;
+let _bot = _orig.intersect(_dn);
 
-  if (type === 'ball-socket') {
-    const ballCenterZ = f(h - r * 0.5);
-    return `${cutSetup}
+// Interlocked ring connectors — print in place as one piece.
+// Two perpendicular tori interlock like chain links so the halves articulate
+// but can't separate. Minimum print gap between them: ${f(tol)} mm.
+const _R = ${f(R)};
+const _r = ${f(r)};
+const _off = ${f(offset)};
 
-// Ball on top piece protrudes into socket cavity in bottom piece
-for (const [bx, by] of ${JSON.stringify(positions)}) {
-  const _ball = Manifold.sphere(${f(r)}, 32).translate([bx, by, ${ballCenterZ}]);
-  _top = _top.add(_ball);
-  const _sock = Manifold.sphere(${f(r + tol)}, 32).translate([bx, by, ${ballCenterZ}]);
-  _bot = _bot.subtract(_sock);
-}
+// Base torus in XY plane (revolve around Z). Rotate to get the two perpendicular rings.
+const _tube = CrossSection.circle(_r, 24).translate([_R, 0]);
+const _torusBase = Manifold.revolve(_tube, 48);
+const _ringAbase = _torusBase.rotate([90, 0, 0]); // XZ plane — hole faces Y
+const _ringBbase = _torusBase.rotate([0, 90, 0]); // YZ plane — hole faces X
 
-const _bb = _top.boundingBox();
-const _xOff = (_bb.max[0] - _bb.min[0]) + 8;
-return Manifold.compose([_top, _bot.translate([_xOff, 0, 0])]);
-`;
-  }
-
-  if (type === 'pin') {
-    return `${cutSetup}
-
-// Cylinder pin on top piece fits into hole in bottom piece
 for (const [px, py] of ${JSON.stringify(positions)}) {
-  const _pin = Manifold.cylinder(${f(depth)}, ${f(r)}, ${f(r)}, 24)
-    .translate([px, py, ${f(h - depth)}]);
-  _top = _top.add(_pin);
-  const _hole = Manifold.cylinder(${f(depth + 2)}, ${f(r + tol)}, ${f(r + tol)}, 24)
-    .translate([px, py, ${f(h - depth - 0.5)}]);
-  _bot = _bot.subtract(_hole);
+  // Hollow out a cylinder through both halves so the ring arms have room to flex.
+  const _cyl = Manifold.cylinder(${f(clearH)}, ${f(clearR)}, ${f(clearR)}, 48, true)
+    .translate([px, py, _h]);
+  _top = _top.subtract(_cyl);
+  _bot = _bot.subtract(_cyl);
+
+  // Ring A attaches to bottom half, arms protrude into the cleared top zone.
+  _bot = _bot.add(_ringAbase.translate([px, py, _h - _off]));
+  // Ring B attaches to top half, arms protrude into the cleared bottom zone.
+  _top = _top.add(_ringBbase.translate([px, py, _h + _off]));
 }
 
-const _bb = _top.boundingBox();
-const _xOff = (_bb.max[0] - _bb.min[0]) + 8;
-return Manifold.compose([_top, _bot.translate([_xOff, 0, 0])]);
-`;
-  }
-
-  if (type === 'key-slot') {
-    const keyW = f((bounds.max[0] - bounds.min[0]) * 0.6);
-    const keyD = f(depth * 0.8);
-    return `${cutSetup}
-
-// Rectangular key on top piece slides into slot in bottom piece
-{
-  const _kw = ${keyW};
-  const _kd = ${keyD};
-  const _kh = ${f(depth)};
-  const _t = ${f(tol)};
-  const _key = Manifold.cube([_kw, _kd, _kh])
-    .translate([${f(cx)} - _kw / 2, ${f(cy)} - _kd / 2, ${f(h - depth)}]);
-  _top = _top.add(_key);
-  const _slot = Manifold.cube([_kw + _t * 2, _kd + _t * 2, _kh + _t * 2])
-    .translate([${f(cx)} - (_kw + _t * 2) / 2, ${f(cy)} - (_kd + _t * 2) / 2, ${f(h - depth)} - _t]);
-  _bot = _bot.subtract(_slot);
-}
-
-const _bb = _top.boundingBox();
-const _xOff = (_bb.max[0] - _bb.min[0]) + 8;
-return Manifold.compose([_top, _bot.translate([_xOff, 0, 0])]);
-`;
-  }
-
-  // Living-hinge bridge: thin slab straddling the cut plane connects both halves.
-  // The bridge overlaps both _top (z > h) and _bot (z < h) by half its thickness,
-  // so the final union produces a single connected printable piece that folds at the hinge.
-  const bridgeW = f((bounds.max[0] - bounds.min[0]) * 0.6);
-  const bridgeL = f(r * 3.5);
-  const bridgeT = f(Math.max(0.8, r * 0.22));
-  return `${cutSetup}
-
-// Thin bridge straddling cut plane — print as one piece, fold along the hinge
-{
-  const _bw = ${bridgeW};
-  const _bl = ${bridgeL};
-  const _bt = ${bridgeT};
-  // Bridge centered at cut height, at the Y-min edge of the model
-  const _bridge = Manifold.cube([_bw, _bl, _bt], true)
-    .translate([${f(cx)}, ${f(bounds.min[1])} + _bl / 2, ${f(h)}]);
-  _top = _top.add(_bridge);
-}
-
-return _top.add(_bot);
+// Return both halves as a single multi-component manifold — print in place.
+return Manifold.compose([_bot, _top]);
 `;
 }
 
@@ -238,7 +182,6 @@ return _top.add(_bot);
 export function mountFlexiMaker(host: HTMLElement, deps: FlexiMakerDeps): FlexiMakerHandle {
   let previewActive = false;
 
-  // Build initial state from model bounds; refreshed on show()
   function makeDefaultState(): FlexiState {
     const b = deps.getModelBounds();
     const modelSize = b
@@ -248,10 +191,8 @@ export function mountFlexiMaker(host: HTMLElement, deps: FlexiMakerDeps): FlexiM
       cutOffset: b ? (b.min[2] + b.max[2]) / 2 : 0,
       tiltX: 0,
       tiltY: 0,
-      connectorType: 'ball-socket',
-      connectorRadius: Math.round(Math.max(2.5, modelSize * 0.05) * 10) / 10,
-      connectorDepth: Math.round(Math.max(4, modelSize * 0.08) * 10) / 10,
-      tolerance: 0.25,
+      ringSize: Math.round(Math.max(4, modelSize * 0.12) * 10) / 10,
+      tolerance: 0.3,
       connectorCount: 1,
     };
   }
@@ -314,6 +255,13 @@ export function mountFlexiMaker(host: HTMLElement, deps: FlexiMakerDeps): FlexiM
   // === Scrollable body ===
   const body = document.createElement('div');
   body.className = 'flex flex-col gap-3 px-3 py-3 overflow-y-auto min-h-0';
+
+  // Description
+  const desc = document.createElement('p');
+  desc.className = 'text-[10px] text-zinc-500 leading-snug';
+  desc.textContent =
+    'Splits the model with interlocked ring joints — two perpendicular tori that interlock like chain links so the halves articulate after printing.';
+  body.appendChild(desc);
 
   function sectionLbl(text: string): HTMLElement {
     const el = document.createElement('div');
@@ -389,65 +337,22 @@ export function mountFlexiMaker(host: HTMLElement, deps: FlexiMakerDeps): FlexiM
   cutSection.appendChild(tiltYSlider.el);
   body.appendChild(cutSection);
 
-  // --- Connector Type ---
-  const typeSection = document.createElement('div');
-  typeSection.className = 'flex flex-col gap-2';
-  typeSection.appendChild(sectionLbl('Connector Type'));
+  // --- Ring Joint ---
+  const ringSection = document.createElement('div');
+  ringSection.className = 'flex flex-col gap-2';
+  ringSection.appendChild(sectionLbl('Ring Joint'));
 
-  const TYPES: { id: ConnectorType; label: string; hint: string }[] = [
-    { id: 'ball-socket', label: 'Ball-socket', hint: 'Flex in any direction — snakes, dragons' },
-    { id: 'pin', label: 'Pin-hole', hint: 'Hinge motion — arms, legs, panels' },
-    { id: 'key-slot', label: 'Key-slot', hint: 'Slide-fit halves — boxes, enclosures' },
-    { id: 'hinge', label: 'Bridge hinge', hint: 'One-piece print — fold along edge' },
-  ];
-
-  const typeGrid = document.createElement('div');
-  typeGrid.className = 'grid grid-cols-2 gap-1';
-
-  const activeTypeCls = 'p-1.5 rounded text-left transition-colors bg-cyan-500/20 border border-cyan-500/50 text-cyan-200 cursor-pointer';
-  const inactiveTypeCls = 'p-1.5 rounded text-left transition-colors bg-zinc-700/50 border border-zinc-600/50 text-zinc-400 hover:text-zinc-200 hover:bg-zinc-700 cursor-pointer';
-
-  const typeBtns = new Map<ConnectorType, HTMLButtonElement>();
-
-  for (const t of TYPES) {
-    const btn = document.createElement('button');
-    btn.type = 'button';
-    btn.className = state.connectorType === t.id ? activeTypeCls : inactiveTypeCls;
-    btn.title = t.hint;
-    btn.innerHTML = `<div class="text-[10px] font-medium leading-tight">${t.label}</div><div class="text-[9px] text-zinc-500 leading-tight mt-0.5">${t.hint}</div>`;
-    btn.addEventListener('click', () => {
-      state.connectorType = t.id;
-      typeBtns.forEach((b, id) => { b.className = id === t.id ? activeTypeCls : inactiveTypeCls; });
-      syncCountVisibility();
-      onStateChange();
-    });
-    typeBtns.set(t.id, btn);
-    typeGrid.appendChild(btn);
-  }
-
-  typeSection.appendChild(typeGrid);
-  body.appendChild(typeSection);
-
-  // --- Parameters ---
-  const paramSection = document.createElement('div');
-  paramSection.className = 'flex flex-col gap-2';
-  paramSection.appendChild(sectionLbl('Parameters'));
-
-  const radiusSlider = makeSlider('Connector size', 1, 15, 0.5, state.connectorRadius, ' mm', (v) => {
-    state.connectorRadius = v; onStateChange();
+  const sizeSlider = makeSlider('Ring size', 2, 20, 0.5, state.ringSize, ' mm', (v) => {
+    state.ringSize = v; onStateChange();
   });
-  const depthSlider = makeSlider('Depth', 2, 20, 0.5, state.connectorDepth, ' mm', (v) => {
-    state.connectorDepth = v; onStateChange();
-  });
-  const tolSlider = makeSlider('Fit tolerance', 0.05, 1, 0.05, state.tolerance, ' mm', (v) => {
+  const tolSlider = makeSlider('Print tolerance', 0.1, 0.8, 0.05, state.tolerance, ' mm', (v) => {
     state.tolerance = v;
   });
 
-  paramSection.appendChild(radiusSlider.el);
-  paramSection.appendChild(depthSlider.el);
-  paramSection.appendChild(tolSlider.el);
+  ringSection.appendChild(sizeSlider.el);
+  ringSection.appendChild(tolSlider.el);
 
-  // Count buttons (hidden for key-slot and hinge)
+  // Count buttons
   const countWrap = document.createElement('div');
   countWrap.className = 'flex flex-col gap-0.5';
 
@@ -481,14 +386,9 @@ export function mountFlexiMaker(host: HTMLElement, deps: FlexiMakerDeps): FlexiM
   countTopRow.appendChild(countLblEl);
   countTopRow.appendChild(countBtnRow);
   countWrap.appendChild(countTopRow);
-  paramSection.appendChild(countWrap);
+  ringSection.appendChild(countWrap);
 
-  body.appendChild(paramSection);
-
-  function syncCountVisibility(): void {
-    countWrap.style.display = (state.connectorType === 'key-slot' || state.connectorType === 'hinge') ? 'none' : '';
-  }
-  syncCountVisibility();
+  body.appendChild(ringSection);
 
   // === Status / footer ===
   const statusEl = document.createElement('div');
@@ -589,9 +489,8 @@ export function mountFlexiMaker(host: HTMLElement, deps: FlexiMakerDeps): FlexiM
     applyBtn.disabled = true;
     previewBtn.disabled = true;
 
-    const label = `flexi-${state.connectorType}`;
     try {
-      const res = await deps.applyCode(generateFlexiCode(deps.getCurrentCode(), state, b), label);
+      const res = await deps.applyCode(generateFlexiCode(deps.getCurrentCode(), state, b), 'flexi-rings');
       if (res && 'error' in res) {
         setStatus('error', res.error.slice(0, 150));
       } else {
@@ -612,7 +511,6 @@ export function mountFlexiMaker(host: HTMLElement, deps: FlexiMakerDeps): FlexiM
     show() {
       if (handle.isOpen()) return;
       panel.classList.remove('hidden');
-      // Re-sync height range with current model
       const b = deps.getModelBounds();
       if (b) {
         const mid = (b.min[2] + b.max[2]) / 2;
