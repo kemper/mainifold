@@ -3612,15 +3612,16 @@ async function main() {
   // Load a part's active version into the editor, or reset to a blank part when
   // the part has no saved versions yet. A saved version carries its own language
   // and `loadVersionIntoEditor` swaps the engine to match. A version-less part
-  // uses the session's language as its baseline — so switching back to an unsaved
-  // manifold-js part from a voxel part correctly resets to manifold-js, while an
-  // unsaved part in a SCAD/voxel/replicad session stays on that language.
+  // falls back to the manifold-js starter: the engine MUST be on manifold-js
+  // before we seed + run it — otherwise the starter's `Manifold.cube(...)` runs
+  // under whatever engine the previously-active part left behind (e.g. voxel,
+  // where `api.Manifold` is undefined). This is the mixed-language case a JSON
+  // merge creates: a voxel Part 2 alongside an unsaved manifold-js Part 1.
   async function loadPartIntoEditor(version: Version | null) {
     if (version) {
       await loadVersionIntoEditor(version);
     } else {
-      const sessionLang = getState().session?.language ?? 'manifold-js';
-      if (getActiveLanguage() !== sessionLang) await switchLanguage(sessionLang);
+      if (getActiveLanguage() !== 'manifold-js') await switchLanguage('manifold-js');
       startNewPartInEditor();
     }
   }
