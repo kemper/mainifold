@@ -4,11 +4,12 @@
 // from main.ts.
 //
 // The panel lets the user:
-//   1. Choose a cut shape (plane/box/sphere/cylinder) and gizmo mode.
+//   1. Choose a cut shape (plane/box/sphere/cylinder) and gizmo mode (T/R/S keys).
 //   2. Choose which side to keep (outside/inside).
-//   3. Optionally preserve triangle colors after the cut.
-//   4. Apply the cut (runs in the geometry Worker via cutInWorker).
-//   5. Save the result as a new session version.
+//   3. Position the cutter via XYZ inputs or snap to 25/50/75% along an axis.
+//   4. Optionally preserve triangle colors after the cut.
+//   5. Apply the cut (runs in the geometry Worker via cutInWorker).
+//   6. Save the result as a new session version.
 
 import {
   activate as activateGizmo,
@@ -30,7 +31,7 @@ import {
   type CutGizmoParams,
 } from '../cut/cutGizmo';
 import type { MeshData } from '../geometry/types';
-import { showToast } from '../ui/toast';
+import { showToast } from './toast';
 import { meshBounds } from '../color/slabPaint';
 
 export type { CutGizmoParams };
@@ -74,11 +75,15 @@ let saveBtn: HTMLButtonElement | null = null;
 let applying = false;
 
 let preserveColors = true;
+let showHandles = true;
 
+// XYZ position inputs — kept in module scope so the gizmo-change listener can update them
 let posXInput: HTMLInputElement | null = null;
 let posYInput: HTMLInputElement | null = null;
 let posZInput: HTMLInputElement | null = null;
-let updatingInputs = false;
+let updatingInputs = false; // prevents feedback loops when setting inputs programmatically
+
+// Keyboard shortcut listener — added when panel opens, removed when it closes
 let keydownListener: ((e: KeyboardEvent) => void) | null = null;
 
 /** Initialize the Cut UI — adds the toolbar button and builds the floating panel. */
@@ -116,13 +121,6 @@ function toggle(): void {
   else openPanel();
 }
 
-// External reference for mode buttons so keydown handler can update them
-let _updateModeButtons: (() => void) | null = null;
-
-function updateModeButtonsExternal(): void {
-  if (_updateModeButtons) _updateModeButtons();
-}
-
 function openPanel(): void {
   if (!handlers || !panel) return;
   const res = handlers.open(true);
@@ -135,22 +133,17 @@ function openPanel(): void {
   // Activate the 3-D gizmo.
   const mesh = handlers.getMesh();
   if (mesh) activateGizmo(mesh);
-
-  // Keyboard shortcuts: t/r/s for translate/rotate/scale mode
+  // Keyboard shortcuts: T = translate, R = rotate, S = scale
+  // triggerMode is defined inside buildPanel and stored as _triggerMode on the element.
   keydownListener = (e: KeyboardEvent) => {
-    const target = e.target as HTMLElement;
-    if (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA') return;
-    const key = e.key.toLowerCase();
-    if (key === 't') {
-      setCutMode('translate');
-      updateModeButtonsExternal();
-    } else if (key === 'r') {
-      setCutMode('rotate');
-      updateModeButtonsExternal();
-    } else if (key === 's') {
-      setCutMode('scale');
-      updateModeButtonsExternal();
-    }
+    const tag = (e.target as HTMLElement)?.tagName;
+    if (tag === 'INPUT' || tag === 'TEXTAREA') return;
+    const k = e.key.toLowerCase();
+    const tm = panel && (panel as HTMLElement & { _triggerMode?: (m: CutMode) => void })._triggerMode;
+    if (!tm) return;
+    if (k === 't') tm('translate');
+    else if (k === 'r') tm('rotate');
+    else if (k === 's') tm('scale');
   };
   document.addEventListener('keydown', keydownListener);
 }
@@ -159,7 +152,6 @@ function closePanel(): void {
   panel?.classList.add('hidden');
   if (cutBtn) cutBtn.className = BTN_INACTIVE;
   deactivateGizmo();
-
   if (keydownListener) {
     document.removeEventListener('keydown', keydownListener);
     keydownListener = null;
@@ -171,7 +163,8 @@ function closePanel(): void {
 function buildPanel(): HTMLElement {
   const p = document.createElement('div');
   p.id = 'cut-panel';
-  // Responsive: full-width bottom sheet on mobile, floating sidebar on desktop.
+  // Fixed width, viewport-capped height. `vh` is always relative to the viewport
+  // so calc(100vh-4rem) works correctly regardless of parent container size.
   p.className = [
     'hidden absolute top-10 right-0 z-20 flex flex-col',
     'bg-zinc-800/95 backdrop-blur border border-zinc-600/60 shadow-xl rounded-lg',
@@ -230,25 +223,23 @@ function buildPanel(): HTMLElement {
     shapeButtons.set(shape, btn);
     shapeRow.appendChild(btn);
   }
-  // Sync shape buttons when the gizmo notifies us (e.g. after onMeshChanged rebuilds).
-  onGizmoChange(() => {
-    for (const [s, b] of shapeButtons) b.className = toggleBtnClass(s === getCutShape());
-    // Update position inputs from gizmo
-    const pos = getProxyPosition();
-    if (pos && !updatingInputs) {
-      updatingInputs = true;
-      if (posXInput) posXInput.value = pos[0].toFixed(2);
-      if (posYInput) posYInput.value = pos[1].toFixed(2);
-      if (posZInput) posZInput.value = pos[2].toFixed(2);
-      updatingInputs = false;
-    }
-  });
   content.appendChild(shapeRow);
 
   // === Gizmo mode ===
-  appendSectionLabel(content, 'Gizmo Mode');
+  const modeLabelRow = document.createElement('div');
+  modeLabelRow.className = 'flex items-center justify-between mt-1';
+  const modeLabel = document.createElement('div');
+  modeLabel.className = 'text-[10px] text-zinc-500 uppercase tracking-wider font-medium';
+  modeLabel.textContent = 'Gizmo Mode';
+  modeLabelRow.appendChild(modeLabel);
+  const modeHint = document.createElement('div');
+  modeHint.className = 'text-[10px] text-zinc-600';
+  modeHint.textContent = 'T · R · S';
+  modeLabelRow.appendChild(modeHint);
+  content.appendChild(modeLabelRow);
+
   const modeRow = document.createElement('div');
-  modeRow.className = 'grid grid-cols-3 gap-1 mt-1';
+  modeRow.className = 'grid grid-cols-3 gap-1';
   const modes: [CutMode, string][] = [
     ['translate', 'Move'],
     ['rotate',    'Rotate'],
@@ -265,23 +256,29 @@ function buildPanel(): HTMLElement {
     }
   }
 
-  // Expose to the keydown handler
-  _updateModeButtons = updateModeButtons;
+  function triggerMode(m: CutMode): void {
+    setCutMode(m);
+    updateModeButtons();
+  }
+  // Expose triggerMode so the keydown listener can call it
+  (p as HTMLElement & { _triggerMode?: (m: CutMode) => void })._triggerMode = triggerMode;
 
   for (const [mode, label] of modes) {
     const btn = document.createElement('button');
     btn.className = modeBtnClass(mode === getCutMode(), false);
     btn.textContent = label;
-    btn.addEventListener('click', () => {
-      setCutMode(mode);
-      for (const [m, b] of modeButtons) {
-        b.className = modeBtnClass(m === mode, false);
-      }
-    });
+    btn.addEventListener('click', () => triggerMode(mode));
     modeButtons.set(mode, btn);
     modeRow.appendChild(btn);
   }
   content.appendChild(modeRow);
+
+  // Sync shape/mode buttons on gizmo changes
+  onGizmoChange(() => {
+    for (const [s, b] of shapeButtons) b.className = toggleBtnClass(s === getCutShape());
+    updateModeButtons();
+    syncPositionInputs();
+  });
 
   // === Keep side ===
   appendSectionLabel(content, 'Keep Side');
@@ -303,90 +300,79 @@ function buildPanel(): HTMLElement {
   }
   content.appendChild(sideRow);
 
-  // === Position ===
+  // === Position (XYZ inputs) ===
   appendSectionLabel(content, 'Position');
   const posRow = document.createElement('div');
-  posRow.className = 'flex items-center gap-1 mt-1';
+  posRow.className = 'grid grid-cols-3 gap-1 mt-1';
 
-  const axisLabels = ['X', 'Y', 'Z'];
-  const posInputs: HTMLInputElement[] = [];
-  for (let i = 0; i < 3; i++) {
-    const wrapper = document.createElement('div');
-    wrapper.className = 'flex items-center gap-0.5 flex-1';
-
-    const axisLabel = document.createElement('span');
-    axisLabel.className = 'text-[10px] text-zinc-500 w-3 shrink-0';
-    axisLabel.textContent = axisLabels[i];
-    wrapper.appendChild(axisLabel);
-
+  function makeAxisInput(axis: string): HTMLInputElement {
+    const wrap = document.createElement('div');
+    wrap.className = 'flex flex-col items-center gap-0.5';
+    const lbl = document.createElement('div');
+    lbl.className = 'text-[9px] text-zinc-500 font-medium';
+    lbl.textContent = axis;
     const inp = document.createElement('input');
     inp.type = 'number';
     inp.step = '0.1';
-    inp.value = '0.00';
-    inp.className = 'w-16 px-1 py-0.5 rounded text-[10px] bg-zinc-700/60 text-zinc-200 border border-zinc-600/50 focus:border-blue-500/60 focus:outline-none min-w-0';
+    inp.value = '0';
+    inp.className = 'w-full text-[10px] text-zinc-200 bg-zinc-700/60 border border-zinc-600/50 rounded px-1 py-0.5 text-center tabular-nums';
     inp.addEventListener('change', () => {
       if (updatingInputs) return;
-      const x = parseFloat(posInputs[0].value) || 0;
-      const y = parseFloat(posInputs[1].value) || 0;
-      const z = parseFloat(posInputs[2].value) || 0;
+      const x = parseFloat(posXInput?.value ?? '0') || 0;
+      const y = parseFloat(posYInput?.value ?? '0') || 0;
+      const z = parseFloat(posZInput?.value ?? '0') || 0;
       setProxyPosition(x, y, z);
     });
-    posInputs.push(inp);
-    wrapper.appendChild(inp);
-    posRow.appendChild(wrapper);
+    wrap.appendChild(lbl);
+    wrap.appendChild(inp);
+    posRow.appendChild(wrap);
+    return inp;
   }
-  posXInput = posInputs[0];
-  posYInput = posInputs[1];
-  posZInput = posInputs[2];
+
+  posXInput = makeAxisInput('X');
+  posYInput = makeAxisInput('Y');
+  posZInput = makeAxisInput('Z');
   content.appendChild(posRow);
 
   // === Snap presets ===
-  appendSectionLabel(content, 'Snap');
-  const snapAxes: Array<{ axis: string; idx: 0 | 1 | 2 }> = [
-    { axis: 'X', idx: 0 },
-    { axis: 'Y', idx: 1 },
-    { axis: 'Z', idx: 2 },
-  ];
-  const snapPercentages = [0.25, 0.5, 0.75];
-  const snapLabels = ['25%', '50%', '75%'];
+  appendSectionLabel(content, 'Snap to Axis %');
+  const snapGrid = document.createElement('div');
+  snapGrid.className = 'grid gap-1 mt-1';
+  snapGrid.style.gridTemplateColumns = 'auto 1fr 1fr 1fr';
 
-  for (const { axis, idx } of snapAxes) {
-    const snapRow = document.createElement('div');
-    snapRow.className = 'flex items-center gap-1 mt-1';
+  const percentages: [number, string][] = [[0.25, '25%'], [0.5, '50%'], [0.75, '75%']];
+  for (const axis of ['X', 'Y', 'Z'] as const) {
+    const axisLbl = document.createElement('div');
+    axisLbl.className = 'text-[10px] text-zinc-500 font-medium self-center';
+    axisLbl.textContent = axis;
+    snapGrid.appendChild(axisLbl);
 
-    const snapAxisLabel = document.createElement('span');
-    snapAxisLabel.className = 'text-[10px] text-zinc-500 w-4 shrink-0';
-    snapAxisLabel.textContent = axis;
-    snapRow.appendChild(snapAxisLabel);
-
-    for (let pi = 0; pi < snapPercentages.length; pi++) {
-      const pct = snapPercentages[pi];
+    for (const [pct, label] of percentages) {
       const btn = document.createElement('button');
-      btn.className = 'flex-1 px-1 py-0.5 rounded text-[10px] bg-zinc-700/40 text-zinc-300 hover:bg-zinc-600/60 border border-transparent transition-colors text-center';
-      btn.textContent = snapLabels[pi];
+      btn.className = 'px-1 py-0.5 rounded text-[10px] bg-zinc-700/40 text-zinc-300 hover:bg-zinc-600/60 border border-transparent transition-colors text-center';
+      btn.textContent = label;
       btn.addEventListener('click', () => {
-        if (!handlers) return;
-        const mesh = handlers.getMesh();
+        const mesh = handlers?.getMesh();
         const pos = getProxyPosition();
         if (!mesh || !pos) return;
         const bb = meshBounds(mesh);
-        const val = bb.min[idx] + (bb.max[idx] - bb.min[idx]) * pct;
-        const newPos: [number, number, number] = [pos[0], pos[1], pos[2]];
-        newPos[idx] = val;
-        setProxyPosition(newPos[0], newPos[1], newPos[2]);
-        // Update the corresponding input immediately
-        updatingInputs = true;
-        if (posXInput) posXInput.value = newPos[0].toFixed(2);
-        if (posYInput) posYInput.value = newPos[1].toFixed(2);
-        if (posZInput) posZInput.value = newPos[2].toFixed(2);
-        updatingInputs = false;
+        const axisIdx = axis === 'X' ? 0 : axis === 'Y' ? 1 : 2;
+        const val = bb.min[axisIdx] + (bb.max[axisIdx] - bb.min[axisIdx]) * pct;
+        const nx = axis === 'X' ? val : pos[0];
+        const ny = axis === 'Y' ? val : pos[1];
+        const nz = axis === 'Z' ? val : pos[2];
+        setProxyPosition(nx, ny, nz);
+        syncPositionInputs();
       });
-      snapRow.appendChild(btn);
+      snapGrid.appendChild(btn);
     }
-    content.appendChild(snapRow);
   }
+  content.appendChild(snapGrid);
 
-  // === Preserve colors ===
+  // === Options (preserve colors + show handles) ===
+  const optionsRow = document.createElement('div');
+  optionsRow.className = 'flex flex-col gap-1.5';
+
   const colorsLabel = document.createElement('label');
   colorsLabel.className = 'flex items-center gap-2 text-[11px] text-zinc-300 cursor-pointer';
   const colorsCheck = document.createElement('input');
@@ -396,19 +382,23 @@ function buildPanel(): HTMLElement {
   colorsCheck.addEventListener('change', () => { preserveColors = colorsCheck.checked; });
   colorsLabel.appendChild(colorsCheck);
   colorsLabel.appendChild(document.createTextNode('Preserve colors'));
-  content.appendChild(colorsLabel);
+  optionsRow.appendChild(colorsLabel);
 
-  // === Show handles ===
   const handlesLabel = document.createElement('label');
   handlesLabel.className = 'flex items-center gap-2 text-[11px] text-zinc-300 cursor-pointer';
   const handlesCheck = document.createElement('input');
   handlesCheck.type = 'checkbox';
-  handlesCheck.checked = true;
+  handlesCheck.checked = showHandles;
   handlesCheck.className = 'w-3.5 h-3.5 rounded accent-blue-500';
-  handlesCheck.addEventListener('change', () => { setGizmoHandlesVisible(handlesCheck.checked); });
+  handlesCheck.addEventListener('change', () => {
+    showHandles = handlesCheck.checked;
+    setGizmoHandlesVisible(showHandles);
+  });
   handlesLabel.appendChild(handlesCheck);
-  handlesLabel.appendChild(document.createTextNode('Show handles'));
-  content.appendChild(handlesLabel);
+  handlesLabel.appendChild(document.createTextNode('Show gizmo handles'));
+  optionsRow.appendChild(handlesLabel);
+
+  content.appendChild(optionsRow);
 
   // === Status line ===
   statusEl = document.createElement('div');
@@ -439,6 +429,16 @@ function buildPanel(): HTMLElement {
 
   p.appendChild(footer);
   return p;
+}
+
+function syncPositionInputs(): void {
+  const pos = getProxyPosition();
+  if (!pos || !posXInput || !posYInput || !posZInput) return;
+  updatingInputs = true;
+  posXInput.value = pos[0].toFixed(2);
+  posYInput.value = pos[1].toFixed(2);
+  posZInput.value = pos[2].toFixed(2);
+  updatingInputs = false;
 }
 
 // ── Actions ────────────────────────────────────────────────────────────────────
