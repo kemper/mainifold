@@ -28,7 +28,11 @@ const fontCache = new Map<FontVariant, Font>();
 let loadPromise: Promise<void> | null = null;
 
 export function sourceUsesManifoldText(code: string): boolean {
-  return /\bapi\.text\s*\(/.test(code) || /\bapi\.textSection\s*\(/.test(code);
+  // Match api.text(, api.textSection(, api.Curves.text(, api.Curves.textSection(
+  return /\bapi\.(?:Curves\.)?textSection\s*\(/.test(code) ||
+         /\bapi\.(?:Curves\.)?text\s*\(/.test(code) ||
+         /\bCurves\.textSection\s*\(/.test(code) ||
+         /\bCurves\.text\s*\(/.test(code);
 }
 
 export async function preloadTextFonts(): Promise<void> {
@@ -79,7 +83,12 @@ export function textToContours(text: string, opts: TextOptions = {}): Vec2[][] {
 
   const font = fontCache.get(variant);
   if (!font) {
-    throw new Error('api.text: fonts not loaded — this should not happen in a manifold-js session. File a bug.');
+    throw new Error(
+      'api.text: Liberation Sans fonts are not yet loaded. ' +
+      'This usually means the text-detection heuristic did not fire before this run. ' +
+      'Use `api.text(...)` or `api.Curves.text(...)` directly (not a destructured alias) ' +
+      'so the engine can pre-load the fonts. The next run will work once fonts are cached.',
+    );
   }
 
   if (spacing === 1.0) {
