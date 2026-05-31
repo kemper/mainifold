@@ -1731,6 +1731,9 @@ async function main() {
     // colors bleeding onto image→voxel art — and the editor opens locked.
     cancelVoxelPaintIfActive();
     dropPaintState();
+    // Clear stale params panel immediately so old controls don't linger while
+    // the new model is loading — syncParamsPanel runs again after the run.
+    syncParamsPanel(undefined);
     setValue(code);
     await runCodeSync(code);
     return { sessionId: session.id };
@@ -2198,27 +2201,11 @@ async function main() {
   // Import a .partwright.json session, a raw .js / .scad file, or an .stl mesh
   // into a new session. Returns whether the import committed (so callers know
   // if the inbox should be updated).
-  async function handleImportFile(file: File, options: { skipPreActiveConfirm?: boolean } = {}): Promise<boolean> {
+  async function handleImportFile(file: File): Promise<boolean> {
     const source = classifyImportSource(file.name);
     if (!source) {
       alert(`Unsupported file type: ${file.name}\n\nSupported: .partwright.json, .js, .scad, .stl, .step / .stp, .vox, .svg, .png / .jpg / .gif / .webp / .avif`);
       return false;
-    }
-
-    // Raw code imports don't get a preview modal of their own — confirm before clobber.
-    // JSON imports skip this confirm because the preview modal already serves as
-    // confirmation; STL and STEP imports skip it because their target modals let
-    // the user choose where the import should go; IMAGE imports skip it because
-    // the image→voxel parameter modal (with its own Cancel) serves the same role.
-    if (!options.skipPreActiveConfirm && source !== 'JSON' && source !== 'STL' && source !== 'STEP' && source !== 'IMAGE' && source !== 'SVG') {
-      const cur = getState();
-      if (cur.session && cur.versionCount > 0) {
-        const ok = await showInlineConfirm(
-          editorUI,
-          `Open "${file.name}" as a new session? Your current session will be kept.`,
-        );
-        if (!ok) return false;
-      }
     }
 
     try {
@@ -2229,9 +2216,7 @@ async function main() {
       } else if (source === 'JS' || source === 'SCAD') {
         const code = await file.text();
         const lang: Language = source === 'SCAD' ? 'scad' : 'manifold-js';
-        const sessionName = file.name.replace(/\.(js|scad)$/i, '');
-        await importCodePayload(code, lang, sessionName);
-        committed = true;
+        committed = await placeImportedCodeFile(code, lang, file.name);
       } else if (source === 'STL') {
         const parsed = await parseSTLFile(file);
         if (parsed) {
@@ -2942,6 +2927,9 @@ async function main() {
     cancelVoxelPaintIfActive();
     dropPaintState();
     if (getActiveLanguage() !== language) await switchLanguage(language);
+    // Clear stale params panel immediately so old controls don't linger while
+    // the new model is loading.
+    syncParamsPanel(undefined);
     setValue(code);
     await runCodeSync(code);
     const thumbnail = await captureThumbnail();
@@ -3104,6 +3092,41 @@ async function main() {
     return composeMeshIntoCurrentPart(parsed.mesh);
   }
 
+  /** Place an imported code file (JS / SCAD) into the session, showing a target
+   *  modal when there is real existing work. Options: new part, replace current
+   *  part, or new session. Distinct from placeImportedCode (which handles
+   *  generated code / voxel / BREP with a compose-into current-part path). */
+  async function placeImportedCodeFile(code: string, lang: Language, filename: string): Promise<boolean> {
+    const sessionName = filename.replace(/\.(js|scad)$/i, '');
+    const state = getState();
+    if (!state.session || currentPartIsExpendable()) {
+      await importCodePayload(code, lang, sessionName);
+      return true;
+    }
+    const partLabel = state.currentPart?.name ? `"${state.currentPart.name}"` : 'the current part';
+    const target = await showImportTargetModal({
+      filename,
+      title: 'Import code',
+      currentPartName: state.currentPart?.name ?? null,
+      canAddToCurrent: true,
+      currentPartTitle: `Replace current part — ${partLabel}`,
+      currentPartDesc: "Replace this part's code with the imported file. The current code is saved as a version first.",
+      recommend: 'new-part',
+    });
+    if (!target) return false;
+    if (target === 'new-session') {
+      await importCodePayload(code, lang, sessionName);
+    } else if (target === 'new-part') {
+      await preserveCurrentEditsIfNeeded();
+      await seedNewPartWithCode(code, sessionName, lang);
+    } else {
+      // current-part: replace current part's code with the imported file.
+      await preserveCurrentEditsIfNeeded();
+      await applyCodeToCurrentPart(code, lang);
+    }
+    return true;
+  }
+
   function mergedPartName(names: string[]): string {
     const joined = names.join(' + ');
     return joined.length <= 40 ? joined : `Merged (${names.length} parts)`;
@@ -3231,20 +3254,11 @@ async function main() {
         await handleStepImport(file);
         return;
       }
-      // Remaining sources are raw code (JS / SCAD): read the blob as text and
-      // open it as a new session in the matching language.
-      const cur = getState();
-      if (cur.session && cur.versionCount > 0) {
-        const ok = await showInlineConfirm(
-          editorUI,
-          `Re-import "${entry.filename}" as a new session? Your current session will be kept.`,
-        );
-        if (!ok) return;
-      }
+      // Remaining sources are raw code (JS / SCAD): show the target modal so
+      // the user can choose new part, replace current, or new session.
       const code = await entry.blob.text();
       const lang: Language = entry.source === 'SCAD' ? 'scad' : 'manifold-js';
-      const sessionName = entry.filename.replace(/\.(js|scad)$/i, '');
-      await importCodePayload(code, lang, sessionName);
+      await placeImportedCodeFile(code, lang, entry.filename);
     } catch (e) {
       alert(`Failed to re-import "${entry.filename}": ${(e as Error).message}`);
     }
@@ -10826,6 +10840,11 @@ async function main() {
     const surfaceErrors = opts.surfaceErrors ?? true;
     const myGen = ++_runGeneration;
     _running = true;
+    // Ensure status shows "Running..." regardless of how this run was triggered
+    // (runCode sets it before the RAF; import paths call runCodeSync directly).
+    setStatus(statusBar, 'running', 'Running...');
+    clearEditorDiagnostics();
+    clearEditorErrorPanel(editorErrorPanel);
     const t0 = performance.now();
     // Feed the Customizer's current overrides into the model's api.params(...).
     const result = await executeCodeAsync(src, undefined, currentParamValues);
