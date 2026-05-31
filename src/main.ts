@@ -137,6 +137,8 @@ import { initTooltips } from './ui/tooltip';
 import { initTheme, getTheme, setTheme } from './ui/theme';
 import type { Theme } from './ui/theme';
 import { initPaintUI, isPaintOpen, forceDeactivate as closePaintMenu } from './color/paintUI';
+import { initImagePaintUI } from './color/imagePaintUI';
+import { entriesToPerTriColors, remapPerTriColors } from './color/imagePaint';
 import { initVoxelPaintUI, setVoxelPaintAvailable, syncActiveState as syncVoxelPaintUI } from './color/voxelPaintUI';
 import { initSimplifyUI, isSimplifyOpen, refreshSimplifyIfOpen, forceDeactivate as closeSimplifyMenu, type SimplifyHandlers } from './ui/simplifyUI';
 import { updatePaintMesh, setOnRegionPainted } from './color/paintMode';
@@ -721,39 +723,45 @@ function remapTriangleIds(ids: Iterable<number>, parentToChildren: Map<number, n
   return out;
 }
 
+interface ResolveResult {
+  triangles: Set<number>;
+  perTriColors?: Map<number, [number, number, number]>;
+}
+
 /** Resolve a single region descriptor to a triangle set on `mesh`. Shared by
  *  rehydration (loading a saved version) and the live rebuild after a smooth
- *  brush stroke changes the working mesh. */
+ *  brush stroke changes the working mesh. Returns perTriColors for imagePaint
+ *  descriptors (per-triangle color map rebuilt from stored entries). */
 function resolveDescriptorTriangles(
   descriptor: RegionDescriptor,
   mesh: MeshData,
   adjacency: AdjacencyGraph | null,
   parentToChildren: Map<number, number[]> | null,
-): Set<number> {
+): ResolveResult {
   switch (descriptor.kind) {
     case 'coplanar': {
-      if (!adjacency) return new Set<number>();
+      if (!adjacency) return { triangles: new Set<number>() };
       const { seedPoint, seedNormal, normalTolerance } = descriptor;
       const seedTri = resolveSeed(seedPoint, seedNormal, mesh, adjacency, normalTolerance);
-      return seedTri >= 0 ? findCoplanarRegion(seedTri, adjacency, normalTolerance) : new Set<number>();
+      return { triangles: seedTri >= 0 ? findCoplanarRegion(seedTri, adjacency, normalTolerance) : new Set<number>() };
     }
     case 'triangles':
       // Raw ids index the base tessellation; carry them across any subdivision.
-      return remapTriangleIds(descriptor.ids, parentToChildren);
+      return { triangles: remapTriangleIds(descriptor.ids, parentToChildren) };
     case 'slab': {
       const { normal, offset, thickness } = descriptor;
-      return findSlabTriangles(mesh, normal, offset, thickness);
+      return { triangles: findSlabTriangles(mesh, normal, offset, thickness) };
     }
     case 'box': {
       const { center, size, quaternion, shape } = descriptor;
-      return findShapeTriangles(mesh, shape ?? 'box', { center, size, quaternion });
+      return { triangles: findShapeTriangles(mesh, shape ?? 'box', { center, size, quaternion }) };
     }
     case 'cylinder': {
       // Same triangle collector `paintInCylinder` uses for the live call —
       // re-resolves the shell against the (possibly subdivided) current mesh
       // so smoothing-driven refinement carries forward across re-runs.
       const { center, rMin, rMax, zMin, zMax, normalCone, coverageMode, maxTriangleArea } = descriptor;
-      return findCylinderTriangles(mesh, center, rMin, rMax, zMin, zMax, normalCone, coverageMode ?? 'centroid', maxTriangleArea);
+      return { triangles: findCylinderTriangles(mesh, center, rMin, rMax, zMin, zMax, normalCone, coverageMode ?? 'centroid', maxTriangleArea) };
     }
     case 'byLabel': {
       // Labels are runtime state — manifold-3d assigns fresh originalIDs on
@@ -761,16 +769,16 @@ function resolveDescriptorTriangles(
       // built (it indexes the base mesh, hence the remap). Missing label →
       // empty set → region drops silently.
       const ids = currentLabelMap?.get(descriptor.label);
-      return ids ? remapTriangleIds(ids, parentToChildren) : new Set<number>();
+      return { triangles: ids ? remapTriangleIds(ids, parentToChildren) : new Set<number>() };
     }
     case 'connectedFromSeed': {
-      if (!adjacency) return new Set<number>();
+      if (!adjacency) return { triangles: new Set<number>() };
       const { seedPoint, seedNormal, maxDeviationDeg, clampMin, clampMax } = descriptor;
       // Find the closest triangle to the seed point — robust across re-runs
       // because triangle indices are unstable but world-space points are not.
       // Then BFS-flood gated by deviation from the stored seed normal.
       const nearest = findNearestTriangle(seedPoint, mesh, adjacency);
-      if (nearest.triIndex < 0) return new Set<number>();
+      if (nearest.triIndex < 0) return { triangles: new Set<number>() };
       const cos = Math.cos(maxDeviationDeg * Math.PI / 180);
       // Restore the original clamp predicate so re-resolution after a
       // geometry edit walks the same bounded region the user painted.
@@ -795,10 +803,14 @@ function resolveDescriptorTriangles(
         }
         triangles = filtered;
       }
-      return triangles;
+      return { triangles };
     }
     case 'brushStroke':
-      return strokeFootprintTriangles(mesh, descriptorToStroke(descriptor));
+      return { triangles: strokeFootprintTriangles(mesh, descriptorToStroke(descriptor)) };
+    case 'imagePaint':
+      // Re-expand the stored [triIdx,r,g,b,…] entries through the subdivision
+      // map (children inherit their parent's projected color).
+      return entriesToPerTriColors(descriptor.entries, parentToChildren);
   }
 }
 
@@ -895,9 +907,9 @@ function rehydrateColorRegions(geometryData: Record<string, unknown> | null): { 
   // reconcile (we've already built the mesh here).
   suspendReconcile = true;
   for (const region of regions) {
-    const triangles = resolveDescriptorTriangles(region.descriptor, mesh, adjacency, parentToChildren);
+    const { triangles, perTriColors } = resolveDescriptorTriangles(region.descriptor, mesh, adjacency, parentToChildren);
     if (triangles.size > 0) {
-      addRegion(region.name, region.color, region.source, region.descriptor, triangles, region.visible !== false);
+      addRegion(region.name, region.color, region.source, region.descriptor, triangles, region.visible !== false, perTriColors);
       report.carried.push(region.name);
     } else {
       report.dropped.push(region.name);
@@ -947,7 +959,8 @@ function rebuildPaintedGeometry(): void {
   updatePaintMesh(mesh);
   const adjacency = buildAdjacency(mesh);
   for (const region of getRegions()) {
-    setRegionTriangles(region.id, resolveDescriptorTriangles(region.descriptor, mesh, adjacency, parentToChildren));
+    const { triangles, perTriColors } = resolveDescriptorTriangles(region.descriptor, mesh, adjacency, parentToChildren);
+    setRegionTriangles(region.id, triangles, perTriColors);
   }
   paintedColorRefresh();
   syncLockState();
@@ -987,10 +1000,11 @@ function appendStrokeRefine(descriptor: Extract<RegionDescriptor, { kind: 'brush
   for (const region of getRegions()) {
     const d = region.descriptor;
     if (d.kind === 'triangles' || d.kind === 'byLabel' || !overlapsSplit(region)) {
-      setRegionTriangles(region.id, remapTriangleIds(region.triangles, parentToChildren));
+      setRegionTriangles(region.id, remapTriangleIds(region.triangles, parentToChildren), remapPerTriColors(region.perTriColors, parentToChildren));
     } else {
       if (!adjacency && (d.kind === 'coplanar' || d.kind === 'connectedFromSeed')) adjacency = buildAdjacency(mesh);
-      setRegionTriangles(region.id, resolveDescriptorTriangles(d, mesh, adjacency, parentToChildren));
+      const { triangles, perTriColors } = resolveDescriptorTriangles(d, mesh, adjacency, parentToChildren);
+      setRegionTriangles(region.id, triangles, perTriColors);
     }
   }
   paintedColorRefresh();
@@ -1229,10 +1243,11 @@ async function appendStrokeRefineAsync(
       if (d === descriptor) {
         setRegionTriangles(region.id, newTris ? new Set(newTris) : new Set<number>());
       } else if (d.kind === 'triangles' || d.kind === 'byLabel' || !overlapsSplit(region)) {
-        setRegionTriangles(region.id, remapTriangleIds(region.triangles, parentToChildren));
+        setRegionTriangles(region.id, remapTriangleIds(region.triangles, parentToChildren), remapPerTriColors(region.perTriColors, parentToChildren));
       } else {
         if (!adjacency && (d.kind === 'coplanar' || d.kind === 'connectedFromSeed')) adjacency = buildAdjacency(mesh);
-        setRegionTriangles(region.id, resolveDescriptorTriangles(d, mesh, adjacency, parentToChildren));
+        const { triangles, perTriColors } = resolveDescriptorTriangles(d, mesh, adjacency, parentToChildren);
+        setRegionTriangles(region.id, triangles, perTriColors);
       }
     }
     paintedColorRefresh();
@@ -1292,7 +1307,8 @@ async function rebuildPaintedGeometryAsync(): Promise<void> {
       if (workerTris) {
         setRegionTriangles(region.id, new Set(workerTris));
       } else {
-        setRegionTriangles(region.id, resolveDescriptorTriangles(d, mesh, adjacency, parentToChildren));
+        const { triangles, perTriColors } = resolveDescriptorTriangles(d, mesh, adjacency, parentToChildren);
+        setRegionTriangles(region.id, triangles, perTriColors);
       }
     }
     paintedColorRefresh();
@@ -5054,6 +5070,7 @@ async function main() {
   initDimensionsToggle(clipControls);
   initAnnotateUI(clipControls);
   initPaintUI(clipControls);
+  initImagePaintUI(clipControls);
   initVoxelPaintUI(clipControls, {
     activate: async () => {
       const code = getValue();
@@ -10966,7 +10983,8 @@ async function main() {
           if (!adjacency && (d.kind === 'coplanar' || d.kind === 'connectedFromSeed')) {
             adjacency = buildAdjacency(mesh);
           }
-          setRegionTriangles(region.id, resolveDescriptorTriangles(d, mesh, adjacency, null));
+          const { triangles, perTriColors } = resolveDescriptorTriangles(d, mesh, adjacency, null);
+          setRegionTriangles(region.id, triangles, perTriColors);
         }
         const displayMesh = applyTriColorsIfVisible(mesh);
         updateMesh(displayMesh);
