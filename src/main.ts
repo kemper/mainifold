@@ -31,7 +31,8 @@ import { initViewport, updateMesh, clearMesh, setOnMeshUpdate, setOnContextLost,
 import { renderCompositeCanvas, renderSingleView, renderSingleViewCanvas, renderSliceSVG, setImages as _setImages, clearImages as _clearImages, getImages as _getImages, buildViewCamera, RENDER_VIEW_MODES, EDGE_MODES, STANDARD_VIEWS, type AttachedImage, type RenderViewMode, type EdgeMode } from './renderer/multiview';
 import { generateId, getLatestVersion } from './storage/db';
 import { setPhantom, clearPhantom, hasPhantom, type PhantomOptions } from './renderer/phantomGeometry';
-import { initEditor, setValue, getValue, setLanguage as setEditorLanguage, setEditorDiagnostics, clearEditorDiagnostics, revealFirstDiagnostic, formatCode, openFindReplace, getAutoFormat, setAutoFormat, editorContentDiffersFrom } from './editor/codeEditor';
+import { initEditor, setValue, getValue, setLanguage as setEditorLanguage, setEditorDiagnostics, clearEditorDiagnostics, revealFirstDiagnostic, formatCode, openFindReplace, getAutoFormat, setAutoFormat, editorContentDiffersFrom, createCompanionEditor, setCompanionEditorContent } from './editor/codeEditor';
+import type { EditorView as CMEditorView } from '@codemirror/view';
 import { createLayout, type TabName } from './ui/layout';
 import { createToolbar, isAutoRun, setAutoRun, setToolbarLanguage, setAiToolbarState, setRunState } from './ui/toolbar';
 import { installKeyboardShortcuts } from './ui/keyboardShortcuts';
@@ -95,6 +96,7 @@ import {
   MAX_REMOTE_BYTES,
 } from './import/urlImport';
 import { showImportTargetModal } from './ui/importTargetModal';
+import { showScadCompanionModal } from './ui/scadCompanionModal';
 import { showImageVoxelImportModal, type ImageVoxelModalResult } from './ui/imageVoxelImportModal';
 import { showImageImportKindModal } from './ui/imageImportKindModal';
 import { showStepImportTargetModal } from './ui/stepImportTargetModal';
@@ -108,6 +110,7 @@ import { runVoxelForPaint } from './geometry/engines/voxel';
 import type { VoxelGrid } from './geometry/voxel/grid';
 import * as voxelPaint from './color/voxelPaint';
 import { setActiveImports, getActiveImports, type ImportedMesh } from './import/importedMesh';
+import { getCompanionFiles, setCompanionFiles, addCompanionFile as addCompanionFileToRegistry, removeCompanionFile as removeCompanionFileFromRegistry, updateCompanionFile, detectMissingIncludes } from './import/companionFiles';
 import { applyFuzzy, applySmooth, applyVoxelize, applyScale, defaultFuzzyOptions, defaultSmoothOptions, type ModifierResult } from './surface/modifiers';
 import { nearestTriangleMap } from './surface/colorTransfer';
 import { initSurfaceUI } from './ui/surfaceModal';
@@ -1436,7 +1439,7 @@ async function saveCurrentVersion(label?: string): Promise<
     return { error: 'This session is open and being edited in another tab. Use "Take over" in the viewer banner to edit here.' };
   }
   const thumbnail = await captureThumbnail();
-  const version = await saveVersion(getValue(), enrichGeometryDataWithColors(getGeometryDataObj()), thumbnail, label, undefined, { paramValues: currentParamValues });
+  const version = await saveVersion(getValue(), enrichGeometryDataWithColors(getGeometryDataObj()), thumbnail, label, undefined, { paramValues: currentParamValues, companionFiles: getCompanionFiles() });
   if (version) return { id: version.id, index: version.index, label: version.label };
   return {
     skipped: true as const,
@@ -2210,15 +2213,42 @@ async function main() {
       return false;
     }
 
+    // For SCAD files, detect missing includes before showing the placement modal
+    // so the companion modal can run first (it acts as the user's intent signal).
+    let scadCode: string | undefined;
+    let scadCompanions: Record<string, string> | undefined;
+    if (source === 'SCAD') {
+      scadCode = await file.text();
+      const missing = detectMissingIncludes(scadCode);
+      if (missing.length > 0) {
+        const result = await showScadCompanionModal({
+          filename: file.name,
+          missingIncludes: missing,
+        });
+        if (result === null) return false; // user cancelled
+        scadCompanions = result;
+      }
+    }
+
+
     try {
       let committed = false;
       if (source === 'JSON') {
         const text = await file.text();
         committed = await importJSONFromText(file.name, text);
       } else if (source === 'JS' || source === 'SCAD') {
-        const code = await file.text();
+        const code = scadCode ?? await file.text();
         const lang: Language = source === 'SCAD' ? 'scad' : 'manifold-js';
         committed = await placeImportedCodeFile(code, lang, file.name);
+        // Register any companion files supplied through the modal, re-run with
+        // them in place, then save so the first DB version already carries them.
+        if (committed && scadCompanions !== undefined && Object.keys(scadCompanions).length > 0) {
+          for (const [path, content] of Object.entries(scadCompanions)) {
+            addCompanionFileToRegistry(path, content);
+          }
+          await runCodeSync(getValue());
+          await saveCurrentVersion();
+        }
       } else if (source === 'STL') {
         const parsed = await parseSTLFile(file);
         if (parsed) {
@@ -3287,9 +3317,58 @@ async function main() {
   document.addEventListener('drop', async (e) => {
     const files = e.dataTransfer?.files;
     if (!files || files.length === 0) return;
-    const first = Array.from(files).find(isImportableFile);
-    if (!first) return;
+    const all = Array.from(files).filter(isImportableFile);
+    if (all.length === 0) return;
     e.preventDefault();
+
+    // When multiple SCAD files are dropped at once, detect if one is a "main"
+    // file (has top-level geometry) and the rest are companions.
+    const scadFiles = all.filter(f => /\.scad$/i.test(f.name));
+    if (scadFiles.length > 1) {
+      // Read all SCAD files in parallel.
+      const contents = await Promise.all(scadFiles.map(async f => ({ f, code: await f.text() })));
+      // A file that's referenced by another is a companion candidate.
+      const mainCandidates = contents.filter(({ f, code }) => {
+        const needed = detectMissingIncludes(code);
+        // A main file either imports others in the batch, or has none of the
+        // others importing it.
+        const otherNames = contents.filter(c => c.f !== f).map(c => c.f.name);
+        const importsOthers = needed.some(p => otherNames.some(n => n === p || n === p.split('/').pop()));
+        return importsOthers;
+      });
+
+      if (mainCandidates.length === 1) {
+        // One file imports the others — treat the rest as companions.
+        const { f: mainFile, code: mainCode } = mainCandidates[0];
+        const companionContents = contents.filter(c => c.f !== mainFile);
+        const sessionName = mainFile.name.replace(/\.scad$/i, '');
+        await importCodePayload(mainCode, 'scad', sessionName);
+
+        // Detect needed include paths and match to dropped files.
+        const missing = detectMissingIncludes(mainCode);
+        for (const { f: cf, code: cfCode } of companionContents) {
+          const matchedPath = missing.find(p => p === cf.name || p.endsWith(`/${cf.name}`)) ?? cf.name;
+          addCompanionFileToRegistry(matchedPath, cfCode);
+        }
+        renderCompanionFilesBar();
+        // Re-run with companions now in place, then save so the first DB
+        // version already carries the companions (not save-on-reload-loss).
+        await runCodeSync(getValue());
+        await saveCurrentVersion();
+        // Warn about any still-missing includes.
+        const stillMissing = missing.filter(p => getCompanionFiles()[p] === undefined);
+        if (stillMissing.length > 0) {
+          showToast(
+            `Still missing companion files: ${stillMissing.join(', ')}. Use the "+" tab to add them.`,
+            { variant: 'warn', durationMs: 8000 },
+          );
+        }
+        return;
+      }
+    }
+
+    // Default: import the first importable file.
+    const first = all[0];
     await handleImportFile(first);
   });
 
@@ -3671,7 +3750,7 @@ async function main() {
   });
 
   // Create layout
-  const { editorContainer, editorErrorPanel, viewportPane, galleryContainer, versionsContainer, imagesContainer, diffContainer, notesContainer, dataContainer, statusBar, clipControls, findReplaceBtn, formatBtn, autoFormatToggle, switchTab, partsRail, togglePartsRail, collapseEditor, expandEditor } = createLayout(editorUI, {
+  const { editorContainer, companionFilesBar, editorErrorPanel, viewportPane, galleryContainer, versionsContainer, imagesContainer, diffContainer, notesContainer, dataContainer, statusBar, clipControls, findReplaceBtn, formatBtn, autoFormatToggle, switchTab, partsRail, togglePartsRail, collapseEditor, expandEditor } = createLayout(editorUI, {
     onToggleAi: () => { void toggleAiPanelFromToolbar(); },
     onOpenCatalog: () => { void showCatalogPage(); },
     onToggleDiagnostics: () => { toggleDiagnosticsPanel(); },
@@ -4920,6 +4999,189 @@ async function main() {
     if (document.hidden) autosaveDraft();
   });
 
+  // ── Companion SCAD files ────────────────────────────────────────────────────
+  // Secondary tab strip shown in SCAD mode. Each session can have companion
+  // files (e.g. models.scad) that are written to OpenSCAD's MEMFS before every
+  // compile. Tabs let the user view and edit them; "+" adds a new one; "×"
+  // removes one. The companion editor panel (a styled textarea) replaces the
+  // main CodeMirror view while a companion tab is active.
+
+  let _companionActiveTab: string | null = null; // null = main tab
+  let _lastSyncedVersionId: string | undefined;
+  const companionEditorPanel = document.getElementById('companion-editor-panel') as HTMLElement;
+
+  // CodeMirror editor for companion SCAD files — created once, content swapped
+  // when switching between companion tabs.
+  let _companionEditor: CMEditorView | null = null;
+  function ensureCompanionEditor(): CMEditorView {
+    if (_companionEditor) return _companionEditor;
+    _companionEditor = createCompanionEditor(companionEditorPanel, (content) => {
+      if (_companionActiveTab === null) return;
+      updateCompanionFile(_companionActiveTab, content);
+      runCode(getValue(), { surfaceErrors: false });
+    });
+    return _companionEditor;
+  }
+
+  function renderCompanionFilesBar(): void {
+    const lang = getActiveLanguage();
+    if (lang !== 'scad') {
+      companionFilesBar.classList.add('hidden');
+      // Ensure main editor is visible when not in SCAD mode.
+      editorContainer.classList.remove('hidden');
+      companionEditorPanel.classList.add('hidden');
+      _companionActiveTab = null;
+      return;
+    }
+    companionFilesBar.classList.remove('hidden');
+    companionFilesBar.className = [
+      'flex items-center gap-0 px-2 py-0.5 bg-zinc-850 border-b border-zinc-700',
+      'overflow-x-auto [scrollbar-width:thin] shrink-0',
+    ].join(' ');
+    companionFilesBar.innerHTML = '';
+
+    const companions = getCompanionFiles();
+    const paths = Object.keys(companions);
+
+    // "Main" tab
+    const mainTab = buildTab('main', _companionActiveTab === null, () => switchToMainTab());
+    companionFilesBar.appendChild(mainTab);
+
+    // One tab per companion file
+    for (const path of paths) {
+      const tab = buildTab(
+        path,
+        _companionActiveTab === path,
+        () => switchToCompanionTab(path),
+        () => confirmRemoveCompanion(path),
+      );
+      companionFilesBar.appendChild(tab);
+    }
+
+    // "+" add button
+    const addBtn = document.createElement('button');
+    addBtn.className = [
+      'shrink-0 ml-1 px-2 py-0.5 rounded text-zinc-500 hover:text-zinc-200',
+      'hover:bg-zinc-700 text-xs leading-none border border-transparent',
+      'hover:border-zinc-600 transition-colors',
+    ].join(' ');
+    addBtn.textContent = '+';
+    addBtn.title = 'Add a new companion SCAD file';
+    addBtn.addEventListener('click', () => { void promptAddCompanion(); });
+    companionFilesBar.appendChild(addBtn);
+  }
+
+  function buildTab(
+    label: string,
+    active: boolean,
+    onClick: () => void,
+    onRemove?: () => void,
+  ): HTMLElement {
+    const tab = document.createElement('div');
+    tab.className = [
+      'flex items-center gap-1 px-2 py-1 text-xs font-mono rounded-sm cursor-pointer shrink-0',
+      'border border-transparent transition-colors select-none',
+      active
+        ? 'bg-zinc-700 text-zinc-100 border-zinc-600'
+        : 'text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800',
+    ].join(' ');
+
+    const name = document.createElement('span');
+    name.textContent = label === 'main' ? 'main.scad' : label;
+    name.addEventListener('click', onClick);
+    tab.appendChild(name);
+
+    if (onRemove) {
+      const x = document.createElement('button');
+      x.className = 'ml-0.5 w-3.5 h-3.5 flex items-center justify-center rounded hover:bg-red-800/60 hover:text-red-300 text-zinc-500 leading-none';
+      x.textContent = '×';
+      x.title = `Remove ${label}`;
+      x.addEventListener('click', (e) => { e.stopPropagation(); onRemove(); });
+      tab.appendChild(x);
+    }
+
+    return tab;
+  }
+
+  function switchToMainTab(): void {
+    _companionActiveTab = null;
+    editorContainer.classList.remove('hidden');
+    companionEditorPanel.classList.add('hidden');
+    renderCompanionFilesBar();
+  }
+
+  function switchToCompanionTab(path: string): void {
+    _companionActiveTab = path;
+    editorContainer.classList.add('hidden');
+    companionEditorPanel.classList.remove('hidden');
+    const companions = getCompanionFiles();
+    const editor = ensureCompanionEditor();
+    setCompanionEditorContent(editor, companions[path] ?? '');
+    editor.focus();
+    renderCompanionFilesBar();
+  }
+
+  async function promptAddCompanion(): Promise<void> {
+    const filename = window.prompt('Companion file name (e.g. models or lib/utils):');
+    if (!filename || !filename.trim()) return;
+    let path = filename.trim().startsWith('./') ? filename.trim().slice(2) : filename.trim();
+    if (!path.endsWith('.scad')) path += '.scad';
+    if (getCompanionFiles()[path] !== undefined) {
+      showToast(`${path} is already a companion file.`, { variant: 'warn' });
+      return;
+    }
+    addCompanionFileToRegistry(path, '');
+    renderCompanionFilesBar();
+    switchToCompanionTab(path);
+  }
+
+  function confirmRemoveCompanion(path: string): void {
+    if (!window.confirm(`Remove companion file "${path}"?\n\nThis removes it from the session. The next run will no longer include it.`)) return;
+    removeCompanionFileFromRegistry(path);
+    if (_companionActiveTab === path) switchToMainTab();
+    else renderCompanionFilesBar();
+    // Re-run main code without this companion, then persist the removal so
+    // it survives a page reload (registry-only removal is lost on refresh).
+    runCode(getValue(), { surfaceErrors: false });
+    void saveCurrentVersion();
+  }
+
+  // Re-render companion tab bar when language or session state changes.
+  // Also syncs the in-memory registry from the DB-stored version whenever the
+  // version ID changes (session open, version navigation, post-save). Gating
+  // on the version ID prevents overwriting in-progress unsaved edits — the ID
+  // only changes on explicit state transitions, not on keystrokes.
+  onStateChange(() => {
+    const versionId = getState().currentVersion?.id;
+    if (versionId !== _lastSyncedVersionId) {
+      _lastSyncedVersionId = versionId;
+      setCompanionFiles(getState().currentVersion?.companionFiles ?? {});
+    }
+
+    if (_companionActiveTab !== null) {
+      // Keep the companion tab active unless the companion is no longer present
+      // (e.g. navigated to a version that doesn't have it). Staying on the
+      // companion tab after a plain save is correct UX — the user was editing
+      // a companion file and shouldn't be yanked back to main.scad on save.
+      if (getCompanionFiles()[_companionActiveTab] === undefined) {
+        switchToMainTab();
+      } else {
+        // Refresh editor content in case version navigation changed what's in
+        // this companion file (the registry was updated but the CodeMirror view
+        // still shows the old content).
+        if (_companionEditor !== null) {
+          setCompanionEditorContent(_companionEditor, getCompanionFiles()[_companionActiveTab] ?? '');
+        }
+        renderCompanionFilesBar();
+      }
+    } else {
+      renderCompanionFilesBar();
+    }
+  });
+
+  // Initial render (will be hidden since we start in manifold-js mode).
+  renderCompanionFilesBar();
+
   // One-time low-memory heads-up. On devices reporting <= 4 GB RAM
   // (navigator.deviceMemory), the WASM engines + Three.js can get sluggish or
   // OOM on heavy models. Shown as a DISMISSIBLE banner (not a toast — a toast
@@ -5535,6 +5797,7 @@ async function main() {
     // by the next replicad run).
     if (getActiveLanguage() === 'replicad') void clearBrepShape().catch(() => {});
     setActiveLanguage(lang);
+    renderCompanionFilesBar();
     setEditorLanguage(lang);
     setToolbarLanguage(lang);
     setVoxelPaintAvailable(lang === 'voxel');
@@ -7268,7 +7531,7 @@ async function main() {
       }
 
       const thumbnail = await captureThumbnail();
-      const version = await saveVersion(code, enrichGeometryDataWithColors(getGeometryDataObj()), thumbnail, label, assertions?.notes, { paramValues: currentParamValues });
+      const version = await saveVersion(code, enrichGeometryDataWithColors(getGeometryDataObj()), thumbnail, label, assertions?.notes, { paramValues: currentParamValues, companionFiles: getCompanionFiles() });
 
       let diff = null;
       if (prevGeoData && prevGeoData.status === 'ok' && newGeoData.status === 'ok') {
@@ -7389,7 +7652,7 @@ async function main() {
       const annotationsCarried = (parent.annotations?.length ?? 0) > 0;
 
       const thumbnail = await captureThumbnail();
-      const version = await saveVersion(newCode, enrichGeometryDataWithColors(getGeometryDataObj()), thumbnail, label, assertions?.notes, { paramValues: currentParamValues });
+      const version = await saveVersion(newCode, enrichGeometryDataWithColors(getGeometryDataObj()), thumbnail, label, assertions?.notes, { paramValues: currentParamValues, companionFiles: getCompanionFiles() });
 
       let diff = null;
       if (prevGeoData && prevGeoData.status === 'ok' && newGeoData.status === 'ok') {
