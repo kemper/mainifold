@@ -4912,8 +4912,29 @@ async function main() {
   // Baseline mesh with triColors baked in (set when the panel opens with paint
   // active). Used as the color source for all carry operations in this session.
   let simplifyBaselineColoredMesh: MeshData | null = null;
-  // Serialized paint regions from the baseline — restored when the user resets.
+  // Serialized paint (user) regions from the baseline — restored when the user resets.
   let simplifyBaselineRegions: SerializedColorRegion[] | null = null;
+  // Model color region snapshot — these come from code declarations, not user paint,
+  // so they aren't captured by serializeRegions(). Captured separately at open time.
+  let simplifyBaselineModelRegions: Array<{ name: string; color: [number, number, number]; triangles: Set<number> }> | null = null;
+
+  // Restore the baseline mesh and all its color state (user regions + model regions).
+  // Used by simplify/enhance's "already at full detail" early-out and by Reset.
+  function restoreBaselineColors(baseline: MeshData): void {
+    if (simplifyBaselineColoredMesh) {
+      resetPaintWorkerState();
+      clearRegions();
+      clearModelColorRegions();
+      applyLiveGeometry(baseline);
+      if (simplifyBaselineModelRegions && simplifyBaselineModelRegions.length > 0) {
+        setModelColorRegions(simplifyBaselineModelRegions);
+      }
+      rehydrateColorRegions({ colorRegions: simplifyBaselineRegions ?? [] });
+      updateMesh(applyTriColorsIfVisible(baseline), { skipAutoFrame: true });
+    } else {
+      applyLiveGeometryWithColor(baseline);
+    }
+  }
 
   // Replace the live geometry with `mesh`: rebuild the queryable Manifold and
   // refresh the viewport, paint-adjacency map, stats, and clip bounds. Mirrors
@@ -4984,6 +5005,9 @@ async function main() {
         if (modelHasColor()) {
           simplifyBaselineColoredMesh = applyTriColors(currentMeshData);
           simplifyBaselineRegions = serializeRegions();
+          simplifyBaselineModelRegions = getModelRegions().map(r => ({
+            name: r.name, color: [...r.color] as [number, number, number], triangles: new Set(r.triangles),
+          }));
         }
       }
       return {
@@ -5003,16 +5027,7 @@ async function main() {
 
       // Dragging the target back to (or above) full detail is just a restore.
       if (targetTriangles >= baseline.numTri) {
-        if (simplifyBaselineRegions) {
-          resetPaintWorkerState();
-          clearRegions();
-          clearModelColorRegions();
-          applyLiveGeometry(baseline);
-          rehydrateColorRegions({ colorRegions: simplifyBaselineRegions });
-          updateMesh(applyTriColorsIfVisible(baseline), { skipAutoFrame: true });
-        } else {
-          applyLiveGeometryWithColor(baseline);
-        }
+        restoreBaselineColors(baseline);
         await onProgress(1);
         return { triangleCount: baseline.numTri };
       }
@@ -5051,16 +5066,7 @@ async function main() {
       const coloredBaseline = preserveColor ? simplifyBaselineColoredMesh : null;
 
       if (targetTriangles <= baseline.numTri) {
-        if (simplifyBaselineRegions) {
-          resetPaintWorkerState();
-          clearRegions();
-          clearModelColorRegions();
-          applyLiveGeometry(baseline);
-          rehydrateColorRegions({ colorRegions: simplifyBaselineRegions });
-          updateMesh(applyTriColorsIfVisible(baseline), { skipAutoFrame: true });
-        } else {
-          applyLiveGeometryWithColor(baseline);
-        }
+        restoreBaselineColors(baseline);
         await onProgress(1);
         return { triangleCount: baseline.numTri };
       }
@@ -5095,16 +5101,7 @@ async function main() {
 
     reset() {
       if (!simplifyBaselineMesh) return;
-      if (simplifyBaselineRegions) {
-        resetPaintWorkerState();
-        clearRegions();
-        clearModelColorRegions();
-        applyLiveGeometry(simplifyBaselineMesh);
-        rehydrateColorRegions({ colorRegions: simplifyBaselineRegions });
-        updateMesh(applyTriColorsIfVisible(simplifyBaselineMesh), { skipAutoFrame: true });
-      } else {
-        applyLiveGeometryWithColor(simplifyBaselineMesh);
-      }
+      restoreBaselineColors(simplifyBaselineMesh);
     },
 
     async save() {
@@ -11100,6 +11097,7 @@ async function main() {
       simplifyBaselineMesh = null;
       simplifyBaselineColoredMesh = null;
       simplifyBaselineRegions = null;
+      simplifyBaselineModelRegions = null;
       refreshSimplifyIfOpen();
       setStatus(statusBar, 'ready', 'Ready');
     }
