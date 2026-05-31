@@ -22,7 +22,7 @@ export const STANDARD_VIEWS = {
   front: { label: 'Front', elevation: 0,  azimuth: 0,   ortho: true  },
   right: { label: 'Right', elevation: 0,  azimuth: 90,  ortho: true  },
   top:   { label: 'Top',   elevation: 90, azimuth: 0,   ortho: true  },
-  iso:   { label: 'Iso',   elevation: 35, azimuth: 45,  ortho: false },
+  iso:   { label: 'Iso',   elevation: 35, azimuth: 135, ortho: false },
 } as const;
 export type StandardViewAngle = typeof STANDARD_VIEWS[keyof typeof STANDARD_VIEWS];
 
