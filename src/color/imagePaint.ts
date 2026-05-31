@@ -1,16 +1,18 @@
-// Image projection onto mesh triangles — planar projection from a chosen axis.
-// The image is preprocessed (brightness/contrast/saturation/levels) and
-// optionally background-masked before sampling. Returns per-triangle colors
-// as a Map and a compact serializable entry array for the descriptor.
+// Image stamp onto mesh triangles — click-to-stamp using a tangent-frame UV
+// projection centred on a hit point. The image is preprocessed
+// (brightness/contrast/saturation/levels) and optionally background-masked
+// before sampling. Returns per-triangle colors as a Map and a compact
+// serializable entry array for the descriptor.
 
 import type { MeshData } from '../geometry/types';
 import type { PreprocessOptions } from '../relief/types';
 import { preprocessRgb, detectBackgroundMask, bgMaskFromColor } from '../relief/imageToRelief';
 
-export type ProjectionAxis = 'top' | 'bottom' | 'front' | 'back' | 'right' | 'left';
-
-export interface ImagePaintOptions {
-  axis: ProjectionAxis;
+export interface StampImageOptions {
+  hitPoint: [number, number, number];
+  hitNormal: [number, number, number];
+  size: number;        // stamp diameter in world units
+  rotationDeg: number; // around hit normal, degrees
   preprocess: PreprocessOptions;
   removeBackground: boolean;
   manualBgColor?: [number, number, number]; // 0-255
@@ -26,16 +28,19 @@ export interface ImagePaintResult {
   entries: number[];
 }
 
-/** Project an image onto the mesh from `opts.axis` direction.
- *  Only front-facing triangles (facing toward the projection source) are painted.
- *  Returns per-triangle colors sampled from the preprocessed + masked image. */
-export function projectImageOntoMesh(
+/** Stamp an image onto the mesh, centred on `opts.hitPoint` and oriented
+ *  according to `opts.hitNormal`. Only triangles whose face normal has a
+ *  positive dot-product with hitNormal are painted. The stamp covers a square
+ *  region of side `opts.size` world units, rotated by `opts.rotationDeg`
+ *  around the normal axis. Returns per-triangle colors sampled from the
+ *  preprocessed + masked image. */
+export function stampImageOntoMesh(
   mesh: MeshData,
   imageData: ImageData,
-  opts: ImagePaintOptions,
+  opts: StampImageOptions,
 ): ImagePaintResult {
   const { numTri, numProp, vertProperties, triVerts } = mesh;
-  const { axis, preprocess, removeBackground, manualBgColor, bgTolerance } = opts;
+  const { hitPoint, hitNormal, size, rotationDeg, preprocess, removeBackground, manualBgColor, bgTolerance } = opts;
 
   const imgW = imageData.width;
   const imgH = imageData.height;
@@ -61,8 +66,40 @@ export function projectImageOntoMesh(
       : detectBackgroundMask(colorsU8, imgW, imgH);
   }
 
-  // Mesh bounding box for UV normalization
-  const bounds = computeBounds(mesh);
+  // Build orthogonal tangent frame from hitNormal [nx, ny, nz]
+  const [nx, ny, nz] = hitNormal;
+  // ref = [1,0,0] if |nx| < 0.9, else [0,1,0]
+  const refX = Math.abs(nx) < 0.9 ? 1 : 0;
+  const refY = Math.abs(nx) < 0.9 ? 0 : 1;
+  const refZ = 0;
+
+  // T = normalize(ref × N)
+  let tX = refY * nz - refZ * ny;
+  let tY = refZ * nx - refX * nz;
+  let tZ = refX * ny - refY * nx;
+  const tLen = Math.sqrt(tX * tX + tY * tY + tZ * tZ);
+  if (tLen > 0) { tX /= tLen; tY /= tLen; tZ /= tLen; }
+
+  // B = N × T
+  const bX = ny * tZ - nz * tY;
+  const bY = nz * tX - nx * tZ;
+  const bZ = nx * tY - ny * tX;
+
+  // Apply rotation θ around hit normal
+  const θ = (rotationDeg * Math.PI) / 180;
+  const cosθ = Math.cos(θ);
+  const sinθ = Math.sin(θ);
+  // Tr = T*cosθ - B*sinθ
+  const trX = tX * cosθ - bX * sinθ;
+  const trY = tY * cosθ - bY * sinθ;
+  const trZ = tZ * cosθ - bZ * sinθ;
+  // Br = T*sinθ + B*cosθ
+  const brX = tX * sinθ + bX * cosθ;
+  const brY = tY * sinθ + bY * cosθ;
+  const brZ = tZ * sinθ + bZ * cosθ;
+
+  const halfSize = size / 2;
+  const [hpX, hpY, hpZ] = hitPoint;
 
   const perTriColors = new Map<number, [number, number, number]>();
   const entries: number[] = [];
@@ -77,24 +114,37 @@ export function projectImageOntoMesh(
     const x1 = vertProperties[v1 * numProp], y1 = vertProperties[v1 * numProp + 1], z1 = vertProperties[v1 * numProp + 2];
     const x2 = vertProperties[v2 * numProp], y2 = vertProperties[v2 * numProp + 1], z2 = vertProperties[v2 * numProp + 2];
 
-    // Skip back-facing triangles (dot product of face normal with projection direction ≤ 0)
+    // Skip back-facing triangles (dot of face normal with hitNormal ≤ 0)
     const ex = x1 - x0, ey = y1 - y0, ez = z1 - z0;
     const fx = x2 - x0, fy = y2 - y0, fz = z2 - z0;
-    const nx = ey * fz - ez * fy;
-    const ny = ez * fx - ex * fz;
-    const nz = ex * fy - ey * fx;
-    if (faceNormalDot(nx, ny, nz, axis) <= 0) continue;
+    const fnX = ey * fz - ez * fy;
+    const fnY = ez * fx - ex * fz;
+    const fnZ = ex * fy - ey * fx;
+    if (fnX * nx + fnY * ny + fnZ * nz <= 0) continue;
 
-    // Triangle centroid → UV
+    // Triangle centroid
     const cx = (x0 + x1 + x2) / 3;
     const cy = (y0 + y1 + y2) / 3;
     const cz = (z0 + z1 + z2) / 3;
-    const [u, v] = projectToUV(cx, cy, cz, axis, bounds);
-    if (u < 0 || u > 1 || v < 0 || v > 1) continue;
 
-    // Nearest-neighbor sample: image V is canvas-top-down, world V is bottom-up
-    const px = Math.max(0, Math.min(imgW - 1, Math.floor(u * imgW)));
-    const py = Math.max(0, Math.min(imgH - 1, Math.floor((1 - v) * imgH)));
+    // Delta from hit point to centroid
+    const dx = cx - hpX;
+    const dy = cy - hpY;
+    const dz = cz - hpZ;
+
+    // Project onto rotated tangent frame, normalised to [-1, 1]
+    const u = (dx * trX + dy * trY + dz * trZ) / halfSize;
+    const v = (dx * brX + dy * brY + dz * brZ) / halfSize;
+
+    if (u < -1 || u > 1 || v < -1 || v > 1) continue;
+
+    // Map to image coordinates (image is top-down, v flipped)
+    const imgU = (u + 1) / 2;
+    const imgV = (1 - v) / 2;
+
+    // Nearest-neighbor sample
+    const px = Math.max(0, Math.min(imgW - 1, Math.floor(imgU * imgW)));
+    const py = Math.max(0, Math.min(imgH - 1, Math.floor(imgV * imgH)));
     const pidx = py * imgW + px;
 
     if (bgMask && bgMask[pidx] === 0) continue;
@@ -118,7 +168,7 @@ export function projectImageOntoMesh(
 }
 
 /** Reconstruct perTriColors from a stored entries array, expanding via
- *  parentToChildren if the mesh was subdivided since projection. */
+ *  parentToChildren if the mesh was subdivided since stamping. */
 export function entriesToPerTriColors(
   entries: number[],
   parentToChildren: Map<number, number[]> | null,
@@ -219,63 +269,6 @@ export function defaultPreprocess(): PreprocessOptions {
 }
 
 // ─── Internal helpers ─────────────────────────────────────────────────────────
-
-interface Bounds {
-  minX: number; maxX: number;
-  minY: number; maxY: number;
-  minZ: number; maxZ: number;
-}
-
-function computeBounds(mesh: MeshData): Bounds {
-  const { numVert, numProp, vertProperties } = mesh;
-  let minX = Infinity, maxX = -Infinity;
-  let minY = Infinity, maxY = -Infinity;
-  let minZ = Infinity, maxZ = -Infinity;
-  for (let v = 0; v < numVert; v++) {
-    const x = vertProperties[v * numProp];
-    const y = vertProperties[v * numProp + 1];
-    const z = vertProperties[v * numProp + 2];
-    if (x < minX) minX = x; if (x > maxX) maxX = x;
-    if (y < minY) minY = y; if (y > maxY) maxY = y;
-    if (z < minZ) minZ = z; if (z > maxZ) maxZ = z;
-  }
-  return { minX, maxX, minY, maxY, minZ, maxZ };
-}
-
-function normalize(v: number, lo: number, hi: number): number {
-  return hi > lo ? (v - lo) / (hi - lo) : 0.5;
-}
-
-/** Map a world-space centroid to UV [0,1]×[0,1] for the given projection axis.
- *  The image is stretched to fill the model's bounding box in the two axes
- *  that are perpendicular to the projection direction. */
-function projectToUV(
-  cx: number, cy: number, cz: number,
-  axis: ProjectionAxis,
-  b: Bounds,
-): [number, number] {
-  switch (axis) {
-    case 'top':    return [normalize(cx, b.minX, b.maxX), normalize(cy, b.minY, b.maxY)];
-    case 'bottom': return [normalize(b.maxX - cx + b.minX, b.minX, b.maxX), normalize(cy, b.minY, b.maxY)];
-    case 'front':  return [normalize(cx, b.minX, b.maxX), normalize(cz, b.minZ, b.maxZ)];
-    case 'back':   return [normalize(b.maxX - cx + b.minX, b.minX, b.maxX), normalize(cz, b.minZ, b.maxZ)];
-    case 'right':  return [normalize(b.maxY - cy + b.minY, b.minY, b.maxY), normalize(cz, b.minZ, b.maxZ)];
-    case 'left':   return [normalize(cy, b.minY, b.maxY), normalize(cz, b.minZ, b.maxZ)];
-  }
-}
-
-/** Dot product of the face normal with the incoming projection ray.
- *  Positive ⟹ the face is visible from the projection source. */
-function faceNormalDot(nx: number, ny: number, nz: number, axis: ProjectionAxis): number {
-  switch (axis) {
-    case 'top':    return nz;
-    case 'bottom': return -nz;
-    case 'front':  return -ny;
-    case 'back':   return ny;
-    case 'right':  return nx;
-    case 'left':   return -nx;
-  }
-}
 
 function clamp255(v: number): number {
   const r = Math.round(v);

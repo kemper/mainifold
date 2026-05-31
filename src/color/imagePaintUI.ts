@@ -1,14 +1,13 @@
-// Image Paint UI — toggle button + floating draggable panel for projecting an
-// image onto the model surface as a color region. Follows the paintUI pattern:
+// Image Paint UI — toggle button + floating draggable panel for stamping an
+// image onto the model surface by clicking. Follows the paintUI pattern:
 // the panel is right-docked by default, draggable via its header.
 
 import {
-  projectImageOntoMesh,
+  stampImageOntoMesh,
   loadImageDataFromUrl,
   resizeImageData,
   defaultPreprocess,
-  type ProjectionAxis,
-  type ImagePaintOptions,
+  type StampImageOptions,
 } from './imagePaint';
 import {
   addRegion,
@@ -23,6 +22,8 @@ import {
   onClearSnapshotChange,
   removeRegion,
   setRegionVisibility,
+  canRedoRegion,
+  redoLastRegion,
 } from './regions';
 import { getCurrentMesh as getPaintMesh } from './paintMode';
 import { forceDeactivate as closePaintMenu } from './paintUI';
@@ -30,6 +31,8 @@ import { forceDeactivate as closeSimplifyMenu } from '../ui/simplifyUI';
 import { forceDeactivate as closeAnnotate } from '../annotations/annotateUI';
 import { forceDeactivate as closeAnnotateText } from '../annotations/textMode';
 import { forceDeactivate as closeAnnotateSelect } from '../annotations/selectMode';
+import { pickFace } from './facePicker';
+import { getRenderer, addPointerSuppressor, isPointerOverModel } from '../renderer/viewport';
 import type { PreprocessOptions } from '../relief/types';
 
 // Thumbnail of the picked source image, 256px max (kept for display only)
@@ -56,16 +59,26 @@ let opts: {
   preprocess: PreprocessOptions;
   removeBackground: boolean;
   manualBgColor?: [number, number, number];
-  axis: ProjectionAxis;
 } = {
   preprocess: defaultPreprocess(),
   removeBackground: false,
-  axis: 'top',
 };
 
+// Stamp settings
+let stampSize = 20;        // world units
+let stampRotation = 0;     // degrees
+
+// Stamp mode (active when panel is open and image is loaded)
+let stampModeActive = false;
+let removeSuppressor: (() => void) | null = null;
+let stampCounter = 0;
+
+// Hint element for stamp instructions
+let stampHintEl: HTMLElement | null = null;
+
 // Footer button refs for enable/disable sync
-let applyBtn: HTMLButtonElement | null = null;
 let undoBtn: HTMLButtonElement | null = null;
+let redoBtn: HTMLButtonElement | null = null;
 let undoClearBtn: HTMLButtonElement | null = null;
 let visibilityBtn: HTMLButtonElement | null = null;
 
@@ -76,7 +89,7 @@ export function initImagePaintUI(controlsContainer: HTMLElement): void {
   imagePaintBtn = document.createElement('button');
   imagePaintBtn.id = 'image-paint-toggle';
   imagePaintBtn.className = btnClass(false);
-  imagePaintBtn.title = 'Project an image onto the model surface as a color region';
+  imagePaintBtn.title = 'Stamp an image onto the model surface as a color region';
   imagePaintBtn.textContent = '🖼️ Image';
 
   countBadge = document.createElement('span');
@@ -126,12 +139,14 @@ function openPanel(): void {
   isOpen = true;
   imagePaintBtn!.className = btnClass(true);
   panel?.classList.remove('hidden');
+  updateStampMode();
 }
 
 function closePanel(): void {
   isOpen = false;
   imagePaintBtn!.className = btnClass(false);
   panel?.classList.add('hidden');
+  updateStampMode();
 }
 
 export function forceDeactivate(): void {
@@ -140,6 +155,82 @@ export function forceDeactivate(): void {
 
 export function isImagePaintOpen(): boolean {
   return isOpen;
+}
+
+// ─── Stamp mode ───────────────────────────────────────────────────────────────
+
+function updateStampMode(): void {
+  const shouldBeActive = isOpen && pickedImageData !== null;
+  if (shouldBeActive === stampModeActive) return;
+  if (shouldBeActive) {
+    activateStampMode();
+  } else {
+    deactivateStampMode();
+  }
+  // Update hint text
+  if (stampHintEl) {
+    stampHintEl.textContent = pickedImageData !== null
+      ? 'Click on model to stamp'
+      : 'Load an image to start stamping';
+  }
+}
+
+function activateStampMode(): void {
+  stampModeActive = true;
+  const canvas = getRenderer().domElement;
+  const container = canvas.parentElement ?? canvas;
+  container.addEventListener('pointerdown', onStampPointerDown, { capture: true });
+  removeSuppressor = addPointerSuppressor((event) => event.button === 0 && isPointerOverModel(event));
+  (container as HTMLElement).style.cursor = 'crosshair';
+}
+
+function deactivateStampMode(): void {
+  if (!stampModeActive) return;
+  stampModeActive = false;
+  const canvas = getRenderer().domElement;
+  const container = canvas.parentElement ?? canvas;
+  container.removeEventListener('pointerdown', onStampPointerDown, { capture: true });
+  if (removeSuppressor) { removeSuppressor(); removeSuppressor = null; }
+  (container as HTMLElement).style.cursor = '';
+}
+
+function onStampPointerDown(event: PointerEvent): void {
+  if (event.button !== 0) return;
+  const hit = pickFace(event as unknown as MouseEvent);
+  if (!hit) return;
+  executeStamp(hit.point, hit.normal);
+}
+
+function executeStamp(hitPoint: [number, number, number], hitNormal: [number, number, number]): void {
+  if (!pickedImageData) return;
+  const mesh = getPaintMesh();
+  if (!mesh) return;
+
+  const stampOpts: StampImageOptions = {
+    hitPoint,
+    hitNormal,
+    size: stampSize,
+    rotationDeg: stampRotation,
+    preprocess: { ...opts.preprocess },
+    removeBackground: opts.removeBackground,
+    manualBgColor: opts.manualBgColor ? [...opts.manualBgColor] as [number, number, number] : undefined,
+    bgTolerance: 36 * 36 * 3,
+  };
+
+  const result = stampImageOntoMesh(mesh, pickedImageData, stampOpts);
+  if (result.entries.length === 0) return;
+
+  stampCounter++;
+  const triangles = new Set(result.perTriColors.keys());
+  addRegion(
+    `Stamp ${stampCounter}`,
+    result.avgColor,
+    'imagePaint',
+    { kind: 'imagePaint', entries: result.entries, avgColor: result.avgColor },
+    triangles,
+    true,
+    result.perTriColors,
+  );
 }
 
 // ─── Panel construction ───────────────────────────────────────────────────────
@@ -212,17 +303,15 @@ function buildPanel(): HTMLElement {
   content.appendChild(buildAdjustmentsSection());
   // Background removal
   content.appendChild(buildBackgroundSection());
-  // Projection axis
-  content.appendChild(buildProjectionSection());
+  // Stamp settings (size + rotation)
+  content.appendChild(buildStampSettingsSection());
 
-  // Apply button
-  applyBtn = document.createElement('button');
-  applyBtn.className = 'w-full px-3 py-1.5 rounded text-[11px] font-medium bg-blue-500/30 text-blue-200 border border-blue-500/50 hover:bg-blue-500/50 transition-colors disabled:opacity-40 disabled:cursor-not-allowed';
-  applyBtn.textContent = 'Apply image';
-  applyBtn.title = 'Project image onto front-facing triangles from the chosen direction';
-  applyBtn.disabled = true;
-  applyBtn.addEventListener('click', applyImagePaint);
-  content.appendChild(applyBtn);
+  // Stamp hint
+  stampHintEl = document.createElement('div');
+  stampHintEl.className = 'text-[11px] text-zinc-400 text-center py-1';
+  stampHintEl.setAttribute('data-stamp-hint', '');
+  stampHintEl.textContent = 'Load an image to start stamping';
+  content.appendChild(stampHintEl);
 
   // Region list
   const regionListWrap = document.createElement('div');
@@ -246,9 +335,16 @@ function buildPanel(): HTMLElement {
   undoBtn = document.createElement('button');
   undoBtn.className = footerBtnClass();
   undoBtn.textContent = 'Undo';
-  undoBtn.title = 'Remove the most recently applied image paint region';
+  undoBtn.title = 'Remove the most recently stamped image region';
   undoBtn.addEventListener('click', removeLastRegion);
   footer.appendChild(undoBtn);
+
+  redoBtn = document.createElement('button');
+  redoBtn.className = footerBtnClass();
+  redoBtn.textContent = 'Redo';
+  redoBtn.title = 'Re-apply the last removed stamp region';
+  redoBtn.addEventListener('click', redoLastRegion);
+  footer.appendChild(redoBtn);
 
   undoClearBtn = document.createElement('button');
   undoClearBtn.className = footerBtnClass();
@@ -325,7 +421,7 @@ function buildImageSection(): HTMLElement {
       pickedImageData = resizeImageData(imageData, THUMB_MAX);
       if (sourceLabel) sourceLabel.textContent = file.name;
       renderPreview();
-      if (applyBtn) applyBtn.disabled = !getPaintMesh();
+      updateStampMode();
     } catch {
       if (sourceLabel) sourceLabel.textContent = 'Failed to load image';
     }
@@ -337,7 +433,6 @@ function buildImageSection(): HTMLElement {
     e.preventDefault();
     const file = e.dataTransfer?.files?.[0];
     if (!file || !file.type.startsWith('image/')) return;
-    fileInput.files; // reset
     try {
       const objectUrl = URL.createObjectURL(file);
       const imageData = await loadImageDataFromUrl(objectUrl);
@@ -345,7 +440,7 @@ function buildImageSection(): HTMLElement {
       pickedImageData = resizeImageData(imageData, THUMB_MAX);
       if (sourceLabel) sourceLabel.textContent = file.name;
       renderPreview();
-      if (applyBtn) applyBtn.disabled = !getPaintMesh();
+      updateStampMode();
     } catch {
       if (sourceLabel) sourceLabel.textContent = 'Failed to load image';
     }
@@ -460,46 +555,24 @@ function buildBackgroundSection(): HTMLElement {
   return section;
 }
 
-function buildProjectionSection(): HTMLElement {
+function buildStampSettingsSection(): HTMLElement {
   const section = document.createElement('div');
-  section.appendChild(sectionLabel('Projection direction'));
+  section.appendChild(sectionLabel('Stamp settings'));
 
-  const hint = document.createElement('div');
-  hint.className = 'text-[10px] text-zinc-500 mb-1.5 leading-snug';
-  hint.textContent = 'Paints triangles facing toward the chosen direction.';
-  section.appendChild(hint);
+  const grid = document.createElement('div');
+  grid.className = 'flex flex-col gap-1.5';
 
-  const axes: { axis: ProjectionAxis; label: string; tip: string }[] = [
-    { axis: 'top',    label: 'Top (+Z)',    tip: 'Project downward onto the top of the model' },
-    { axis: 'bottom', label: 'Bottom (−Z)', tip: 'Project upward onto the bottom of the model' },
-    { axis: 'front',  label: 'Front (−Y)', tip: 'Project from the front (−Y direction)' },
-    { axis: 'back',   label: 'Back (+Y)',   tip: 'Project from the back (+Y direction)' },
-    { axis: 'right',  label: 'Right (+X)', tip: 'Project from the right (+X direction)' },
-    { axis: 'left',   label: 'Left (−X)',  tip: 'Project from the left (−X direction)' },
-  ];
+  addSlider(grid, 'Size (units)', 1, 200, 1, 20,
+    () => stampSize,
+    v => { stampSize = v; },
+    true);
 
-  const btnGrid = document.createElement('div');
-  btnGrid.className = 'grid grid-cols-2 gap-1';
+  addSlider(grid, 'Rotation (°)', 0, 359, 1, 0,
+    () => stampRotation,
+    v => { stampRotation = v; },
+    true);
 
-  const axisBtns: Partial<Record<ProjectionAxis, HTMLButtonElement>> = {};
-
-  const syncAxisBtns = (): void => {
-    for (const [a, b] of Object.entries(axisBtns)) {
-      if (b) b.className = axisButtonClass(a === opts.axis);
-    }
-  };
-
-  for (const { axis, label, tip } of axes) {
-    const btn = document.createElement('button');
-    btn.textContent = label;
-    btn.title = tip;
-    btn.className = axisButtonClass(axis === opts.axis);
-    btn.addEventListener('click', () => { opts.axis = axis; syncAxisBtns(); });
-    btnGrid.appendChild(btn);
-    axisBtns[axis] = btn;
-  }
-
-  section.appendChild(btnGrid);
+  section.appendChild(grid);
   return section;
 }
 
@@ -579,53 +652,6 @@ function applyAdjustmentsToCanvas(imgData: ImageData): void {
   }
 }
 
-// ─── Apply ────────────────────────────────────────────────────────────────────
-
-function applyImagePaint(): void {
-  if (!pickedImageData) return;
-  const mesh = getPaintMesh();
-  if (!mesh) return;
-
-  const paintOpts: ImagePaintOptions = {
-    axis: opts.axis,
-    preprocess: { ...opts.preprocess },
-    removeBackground: opts.removeBackground,
-    manualBgColor: opts.manualBgColor ? [...opts.manualBgColor] as [number, number, number] : undefined,
-    bgTolerance: 36 * 36 * 3,
-  };
-
-  // Project using the full-resolution picked image if we have it, else thumbnail
-  const result = projectImageOntoMesh(mesh, pickedImageData, paintOpts);
-
-  if (result.entries.length === 0) {
-    // Feedback: no triangles painted
-    if (applyBtn) {
-      const prev = applyBtn.textContent;
-      applyBtn.textContent = 'No triangles painted';
-      window.setTimeout(() => { if (applyBtn) applyBtn.textContent = prev; }, 1500);
-    }
-    return;
-  }
-
-  const triangles = new Set(result.perTriColors.keys());
-  const name = `Image (${opts.axis})`;
-  addRegion(
-    name,
-    result.avgColor,
-    'imagePaint',
-    { kind: 'imagePaint', entries: result.entries, avgColor: result.avgColor, axis: opts.axis },
-    triangles,
-    true,
-    result.perTriColors,
-  );
-
-  if (applyBtn) {
-    const prev = applyBtn.textContent;
-    applyBtn.textContent = `✓ Applied (${triangles.size} tris)`;
-    window.setTimeout(() => { if (applyBtn) applyBtn.textContent = prev ?? 'Apply image'; }, 1800);
-  }
-}
-
 // ─── Region list ─────────────────────────────────────────────────────────────
 
 function updateRegionList(container: HTMLElement): void {
@@ -635,7 +661,7 @@ function updateRegionList(container: HTMLElement): void {
   if (imagePaintRegions.length === 0) {
     const empty = document.createElement('div');
     empty.className = 'text-[10px] text-zinc-500 leading-snug';
-    empty.textContent = 'No image paint regions yet. Pick an image and click Apply.';
+    empty.textContent = 'No stamps yet. Click on the model to stamp.';
     container.appendChild(empty);
     return;
   }
@@ -644,7 +670,7 @@ function updateRegionList(container: HTMLElement): void {
   header.className = 'flex items-center justify-between mb-1';
   const lbl = document.createElement('div');
   lbl.className = 'text-[10px] text-zinc-500 uppercase tracking-wider font-medium';
-  lbl.textContent = 'Applied regions';
+  lbl.textContent = 'Applied stamps';
   const cnt = document.createElement('span');
   cnt.className = 'text-[10px] text-zinc-600 tabular-nums';
   cnt.textContent = String(imagePaintRegions.length);
@@ -681,7 +707,7 @@ function updateRegionList(container: HTMLElement): void {
 
     const trashBtn = document.createElement('button');
     trashBtn.className = 'shrink-0 w-4 h-4 flex items-center justify-center text-zinc-500 hover:text-red-400 transition-colors';
-    trashBtn.title = 'Delete region';
+    trashBtn.title = 'Delete stamp region';
     trashBtn.innerHTML = trashSVG();
     trashBtn.addEventListener('click', (e) => {
       e.stopPropagation();
@@ -718,6 +744,13 @@ function updateFooterButtons(): void {
     undoBtn.disabled = !canUndo;
     undoBtn.classList.toggle('opacity-40', !canUndo);
     undoBtn.classList.toggle('cursor-not-allowed', !canUndo);
+  }
+
+  const canRedo = canRedoRegion();
+  if (redoBtn) {
+    redoBtn.disabled = !canRedo;
+    redoBtn.classList.toggle('opacity-40', !canRedo);
+    redoBtn.classList.toggle('cursor-not-allowed', !canRedo);
   }
 
   const canUndoC = canUndoClear();
@@ -812,13 +845,6 @@ function btnClass(active: boolean): string {
     return 'px-2 py-1 rounded text-xs bg-blue-500/30 backdrop-blur text-blue-300 border border-blue-500/50 transition-colors';
   }
   return 'px-2 py-1 rounded text-xs bg-zinc-800/80 backdrop-blur text-zinc-400 hover:text-zinc-200 hover:bg-zinc-700/80 transition-colors border border-zinc-600/50';
-}
-
-function axisButtonClass(active: boolean): string {
-  if (active) {
-    return 'px-1.5 py-1 rounded text-[10px] bg-blue-500/30 text-blue-200 border border-blue-500/50 transition-colors text-center';
-  }
-  return 'px-1.5 py-1 rounded text-[10px] bg-zinc-700/40 text-zinc-300 hover:bg-zinc-600/60 border border-transparent transition-colors text-center';
 }
 
 function footerBtnClass(): string {

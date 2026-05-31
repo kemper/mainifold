@@ -68,7 +68,7 @@ export type RegionDescriptor =
   // survives serialization and re-resolves correctly after mesh subdivision via
   // the parentToChildren map. `avgColor` (0–1) is the mean of all painted
   // triangles — used as the `color` field for the region list swatch.
-  | { kind: 'imagePaint'; entries: number[]; avgColor: [number, number, number]; axis: string };
+  | { kind: 'imagePaint'; entries: number[]; avgColor: [number, number, number]; axis?: string };
 
 export interface SerializedColorRegion {
   id: number;
