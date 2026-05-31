@@ -22,7 +22,7 @@
 import './style.css';
 import { errorLog } from './diagnostics/errorLog';
 import { initDiagnosticsPanel, toggleDiagnosticsPanel } from './ui/diagnosticsPanel';
-import { initEngine, executeCode, executeCodeAsync, validateCodeAsync, ensureEngineReady, getModule, getActiveLanguage, setActiveLanguage, exportLastBrepAsSTEP, importSTEPToBrep, importSTEPToMesh, clearBrepImports, clearBrepShape, simplifyInWorker, type Language } from './geometry/engine';
+import { initEngine, executeCode, executeCodeAsync, validateCodeAsync, ensureEngineReady, getModule, getActiveLanguage, setActiveLanguage, exportLastBrepAsSTEP, importSTEPToBrep, importSTEPToMesh, clearBrepImports, clearBrepShape, simplifyInWorker, cutInWorker, type Language } from './geometry/engine';
 import { onQualitySettingsChange } from './geometry/qualitySettings';
 import { resolveParamValues, pruneParamValues, type ParamSpec, type ParamValue } from './geometry/params';
 import { createParamsPanel, type ParamsPanelController } from './ui/paramsPanel';
@@ -139,6 +139,8 @@ import type { Theme } from './ui/theme';
 import { initPaintUI, isPaintOpen, forceDeactivate as closePaintMenu } from './color/paintUI';
 import { initVoxelPaintUI, setVoxelPaintAvailable, syncActiveState as syncVoxelPaintUI } from './color/voxelPaintUI';
 import { initSimplifyUI, isSimplifyOpen, refreshSimplifyIfOpen, forceDeactivate as closeSimplifyMenu, type SimplifyHandlers } from './ui/simplifyUI';
+import { initCutUI, isCutOpen, forceDeactivate as closeCutMenu, type CutHandlers } from './ui/cutUI';
+import { onMeshChanged as onCutMeshChanged } from './cut/cutGizmo';
 import { updatePaintMesh, setOnRegionPainted } from './color/paintMode';
 import { initAnnotateUI, isAnnotateOpen, closeMenu as closeAnnotateMenu } from './annotations/annotateUI';
 import { isActive as isSelectActive, getSelectedId as getSelectedAnnotationId } from './annotations/selectMode';
@@ -4910,6 +4912,11 @@ async function main() {
   // is cleared whenever a code run replaces the geometry.
   let simplifyBaselineMesh: MeshData | null = null;
 
+  // The cut panel booleans the live mesh via the Worker. We keep the pre-cut
+  // baseline so "Reset" and "Save" both have access to the original mesh.
+  let cutBaseMesh: MeshData | null = null;
+  let cutResultMesh: MeshData | null = null;
+
   // Replace the live geometry with `mesh`: rebuild the queryable Manifold and
   // refresh the viewport, paint-adjacency map, stats, and clip bounds. Mirrors
   // the tail of runCodeSync so exports / slicing / measurements stay correct.
@@ -4927,6 +4934,7 @@ async function main() {
     currentManifold = mod && mesh ? mod.Manifold.ofMesh(mesh) : null;
     updateMesh(mesh);
     updatePaintMesh(mesh);
+    onCutMeshChanged(mesh);
     updateGeometryData();
     syncClipSliderBounds();
   }
@@ -4934,13 +4942,14 @@ async function main() {
   const simplifyHandlers: SimplifyHandlers = {
     open(userInitiated) {
       if (userInitiated) {
-        // Don't let two overlay panels share the top-right slot.
+        // Don’t let two overlay panels share the top-right slot.
         if (isPaintOpen()) closePaintMenu();
         if (isAnnotateOpen()) closeAnnotateMenu();
+        if (isCutOpen()) closeCutMenu();
         closeMeasureIfActive();
       }
       if (!currentMeshData) {
-        return { ok: false, reason: 'Run some code first — there’s no model to simplify.' };
+        return { ok: false, reason: "Run some code first — there’s no model to simplify." };
       }
       if (!currentManifold) {
         return { ok: false, reason: 'Simplify needs a solid (manifold) model. Render-only imports can’t be reduced.' };
@@ -5101,6 +5110,111 @@ async function main() {
     return { versionIndex: v?.index ?? null, voxelCount: count };
   }
   initSimplifyUI(clipControls, simplifyHandlers);
+
+  // --- Cut panel ---
+  // Boolean-cuts the live mesh off the main thread via the geometry Worker.
+  // The baseline is snapshotted when the panel opens; apply swaps the live
+  // mesh in place; save bakes the result as a new imported-style version.
+  const cutHandlers: CutHandlers = {
+    open(userInitiated) {
+      if (userInitiated) {
+        if (isPaintOpen()) closePaintMenu();
+        if (isAnnotateOpen()) closeAnnotateMenu();
+        if (isSimplifyOpen()) closeSimplifyMenu();
+        closeMeasureIfActive();
+      }
+      if (!currentMeshData) {
+        return { ok: false, reason: 'Run some code first — there’s no model to cut.' };
+      }
+      // Snapshot the baseline on first open (or after a reset).
+      if (!cutBaseMesh) cutBaseMesh = currentMeshData;
+      cutResultMesh = null;
+      return { ok: true };
+    },
+
+    getMesh() {
+      return currentMeshData;
+    },
+
+    async apply(params, preserveColors) {
+      const base = cutBaseMesh ?? currentMeshData;
+      if (!base) return null;
+      const baseSnapshot = cutBaseMesh;
+      // Gather paint tri-colors if the user wants them preserved.
+      const srcColors = preserveColors && (hasColorRegions() || hasModelColorRegions())
+        ? buildTriColors(base.numTri) ?? undefined
+        : undefined;
+      try {
+        const result = await cutInWorker(
+          base,
+          params.shape,
+          params.keepSide,
+          params.mat4x3,
+          params.scale,
+          srcColors,
+        );
+        // Bail if a code run updated the mesh while we were waiting.
+        if (cutBaseMesh !== baseSnapshot) return null;
+        if (!result) return null;
+        // If the Worker returned colors, embed them in the mesh for the viewport.
+        const meshToShow: MeshData = result.triColors
+          ? { ...result.mesh, triColors: result.triColors }
+          : result.mesh;
+        applyLiveGeometry(meshToShow);
+        cutResultMesh = meshToShow;
+        // Update baseline so a second Apply starts from the current cut result,
+        // keeping paint regions and triangle counts consistent.
+        cutBaseMesh = result.mesh;
+        return { triangleCount: result.mesh.numTri };
+      } catch (err) {
+        return null;
+      }
+    },
+
+    async save() {
+      if (!getState().session) {
+        return { ok: false, message: 'Open a session before saving.' };
+      }
+      const result = cutResultMesh;
+      if (!result) {
+        return { ok: false, message: 'Apply the cut first, then save.' };
+      }
+      try {
+        const originalCode = getValue();
+        const current = getState().currentVersion;
+        let savedOriginal = false;
+        const baseline = cutBaseMesh;
+        if (baseline && (!current || editorContentDiffersFrom(current.code))) {
+          const original = await snapshotMeshAsVersion(baseline, originalCode);
+          savedOriginal = !!(await saveVersion(originalCode, original.geometryData, original.thumbnail));
+        }
+        const baked = toImportedMesh(`cut-${result.numTri}tri`, result);
+        const code = generateImportCode([baked], { manifold: true });
+        setActiveImports([baked]);
+        setValue(code);
+        await runCodeSync(code);
+        const thumbnail = await captureThumbnail();
+        const geometryData = getGeometryDataObj();
+        await saveVersion(code, geometryData, thumbnail, 'cut', undefined, {
+          force: true,
+          importedMeshes: [baked],
+        });
+        cutBaseMesh = null;
+        cutResultMesh = null;
+        const tri = result.numTri.toLocaleString();
+        return {
+          ok: true,
+          message: savedOriginal
+            ? `Saved original + cut result (${tri} triangles).`
+            : `Saved cut result as a new version (${tri} triangles).`,
+        };
+      } catch (e) {
+        return { ok: false, message: `Save failed: ${(e as Error).message}` };
+      }
+    },
+  };
+  initCutUI(clipControls, cutHandlers);
+
   initMeasureToggle(clipControls);
   initOrbitLockToggle(clipControls);
 
@@ -10971,16 +11085,20 @@ async function main() {
         const displayMesh = applyTriColorsIfVisible(mesh);
         updateMesh(displayMesh);
         updatePaintMesh(mesh);
+        onCutMeshChanged(mesh);
       } else {
         updateMesh(result.mesh);
         updatePaintMesh(result.mesh); // always pass uncolored mesh for adjacency
+        onCutMeshChanged(result.mesh);
       }
 
       updateGeometryData(elapsed, src);
       syncClipSliderBounds();
-      // A fresh run replaces the geometry, so any simplify baseline is stale.
-      // Drop it and let an open panel re-snapshot the new mesh.
+      // A fresh run replaces the geometry, so any simplify/cut baseline is stale.
+      // Drop them and let open panels re-snapshot the new mesh.
       simplifyBaselineMesh = null;
+      cutBaseMesh = null;
+      cutResultMesh = null;
       refreshSimplifyIfOpen();
       setStatus(statusBar, 'ready', 'Ready');
     }
@@ -11073,6 +11191,7 @@ async function main() {
         close();
       } else {
         closeSimplifyMenu();
+        closeCutMenu();
         activateMeasure();
         setMeasureLock(true);
         measureBtn.className = activeClass;
@@ -11095,6 +11214,7 @@ async function main() {
       if (isAnnotateOpen()) { closeAnnotateMenu(); closed = true; }
       if (isPaintOpen()) { closePaintMenu(); closed = true; }
       if (isSimplifyOpen()) { closeSimplifyMenu(); closed = true; }
+      if (isCutOpen()) { closeCutMenu(); closed = true; }
       if (closeMeasureIfActive()) closed = true;
       if (getClipState().enabled) { setClipping(false); syncClipUI(); closed = true; }
       if (closed) e.preventDefault();

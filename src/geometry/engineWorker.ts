@@ -15,6 +15,7 @@
 //   { type: 'clearBrepShape',    callId }
 //   { type: 'simplify',          callId, mesh, targetTriangles, maxTolerance }
 //   { type: 'simplify_cancel',   callId }
+//   { type: 'cut',               callId, mesh, shape, keepSide, mat4x3, scale, triColors? }
 //
 // Protocol — Worker → Main:
 //   { type: 'ready' }
@@ -27,6 +28,7 @@
 //   { type: 'clearBrepShape_result',   callId, error }
 //   { type: 'simplify_progress',       callId, fraction }
 //   { type: 'simplify_result',         callId, mesh, triangleCount, tolerance, cancelled, error }
+//   { type: 'cut_result',              callId, mesh, triColors, error }
 //   { type: 'error',                   callId, message }
 //
 // Mesh typed arrays are transferred (zero-copy) to the main thread.
@@ -42,6 +44,7 @@ import { setCircularSegmentsOverride } from './qualitySettings';
 import type { Language } from './engines/types';
 import { simplifyToTriangleBudget } from './simplify';
 import type { MeshData } from './types';
+import { performCut, type CutParams } from '../cut/cutWorker';
 
 /** Per-callId cancel flags for in-flight simplify jobs. The simplify loop
  *  yields to the event loop between iterations, so a `simplify_cancel`
@@ -435,6 +438,51 @@ self.onmessage = async (event: MessageEvent) => {
       self.postMessage({
         type: 'clearBrepImports_result',
         callId,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+    return;
+  }
+
+  // ── cut ──────────────────────────────────────────────────────────────────
+  if (msg.type === 'cut') {
+    const { callId, mesh, shape, keepSide, mat4x3, scale, triColors } = msg as unknown as {
+      callId: string;
+      mesh: MeshData;
+      shape: CutParams['shape'];
+      keepSide: CutParams['keepSide'];
+      mat4x3: number[];
+      scale: [number, number, number];
+      triColors?: Uint8Array;
+    };
+    if (!manifoldReady) {
+      self.postMessage({
+        type: 'cut_result', callId, mesh: null, triColors: null,
+        error: 'Geometry engine not initialised — try again after loading completes.',
+      });
+      return;
+    }
+    try {
+      const mod = getManifoldModule();
+      const result = performCut(mod, mesh, { shape, keepSide, mat4x3, scale, triColors });
+      if (!result) {
+        self.postMessage({ type: 'cut_result', callId, mesh: null, triColors: null, error: null });
+        return;
+      }
+      const transfer: Transferable[] = [result.mesh.vertProperties.buffer, result.mesh.triVerts.buffer];
+      if (result.mesh.mergeFromVert) transfer.push(result.mesh.mergeFromVert.buffer);
+      if (result.mesh.mergeToVert)   transfer.push(result.mesh.mergeToVert.buffer);
+      if (result.mesh.runIndex)      transfer.push(result.mesh.runIndex.buffer);
+      if (result.mesh.runOriginalID) transfer.push(result.mesh.runOriginalID.buffer);
+      if (result.triColors)          transfer.push(result.triColors.buffer);
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (self as any).postMessage(
+        { type: 'cut_result', callId, mesh: result.mesh, triColors: result.triColors ?? null, error: null },
+        transfer,
+      );
+    } catch (err) {
+      self.postMessage({
+        type: 'cut_result', callId, mesh: null, triColors: null,
         error: err instanceof Error ? err.message : String(err),
       });
     }
