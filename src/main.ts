@@ -3944,6 +3944,11 @@ async function main() {
   let _runTimerStart = 0;
   let _runShowTimer: number | null = null;
   let _runTimerInterval: number | null = null;
+  // True only while the current in-flight runCodeSync was started by runCode()'s
+  // RAF callback (i.e. an auto-run or manual Run button). False when an explicit
+  // call owns it (partwright.run, version load). Used to decide whether a new
+  // RAF auto-run may cancel the current run or must suppress itself instead.
+  let _rafOwnsRun = false;
 
   // Last error from an auto-run, held back from the editor UI until typing
   // settles or focus leaves (see surfacePendingError). `src` guards against
@@ -10959,12 +10964,20 @@ async function main() {
     clearEditorErrorPanel(editorErrorPanel);
 
     requestAnimationFrame(async () => {
-      // If a render is already in flight, cancel it so the latest code runs
-      // immediately rather than being silently dropped. The generation counter
-      // in runCodeSync ensures the old result is discarded even if the Worker
-      // somehow returns before the termination propagates.
-      if (_running) cancelCurrentExecution();
+      if (_running) {
+        if (_rafOwnsRun) {
+          // The in-flight run was also started by a RAF auto-run — cancel it so
+          // the latest edited code renders immediately instead of being dropped.
+          cancelCurrentExecution();
+        } else {
+          // An explicit call (partwright.run, version load) owns the current
+          // run — suppress this auto-run rather than preempting it.
+          return;
+        }
+      }
+      _rafOwnsRun = true;
       await runCodeSync(src, opts);
+      if (!_running) _rafOwnsRun = false;
     });
   }
 
