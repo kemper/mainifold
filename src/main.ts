@@ -4949,7 +4949,7 @@ async function main() {
         closeMeasureIfActive();
       }
       if (!currentMeshData) {
-        return { ok: false, reason: ‘Run some code first — there’s no model to simplify.’ };
+        return { ok: false, reason: "Run some code first — there’s no model to simplify." };
       }
       if (!currentManifold) {
         return { ok: false, reason: 'Simplify needs a solid (manifold) model. Render-only imports can’t be reduced.' };
