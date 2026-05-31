@@ -245,6 +245,9 @@ export const manifoldJsEngine: Engine = {
       BREP,
       meshOps: meshOpsNamespace,
       sdf: sdfNamespace,
+      // Text helpers — flat aliases so agents can write api.text(...) directly.
+      text: curvesNamespace.text,
+      textSection: curvesNamespace.textSection,
       // Flat aliases for the most-used meshOps verbs — agents reach for shorter
       // names like `api.intersects(a,b)` and `api.placeOn(part, table)` much more
       // often than they reach for the namespace, so we promote those to api.* too.
