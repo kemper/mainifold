@@ -14,6 +14,11 @@
 
 import type { MeshData } from '../geometry/types';
 import { fuzzySkin, type FuzzySkinOptions } from './fuzzySkin';
+import { knitTexture, type KnitTextureOptions } from './knitTexture';
+import { cableKnit, type CableKnitOptions } from './cableKnit';
+import { waffleStitch, type WaffleStitchOptions } from './waffleStitch';
+import { furVelvet, type FurVelvetOptions } from './furVelvet';
+import { wovenFabric, type WovenFabricOptions } from './wovenFabric';
 import { smoothSurface, type SmoothOptions } from './smoothSurface';
 import { voxelizeMesh, type VoxelizeOptions } from './voxelizeMesh';
 import { extractPositions, bboxOf } from './meshSubdivide';
@@ -21,7 +26,7 @@ import { encodeGrid } from '../geometry/voxel/grid';
 import { scaleMesh } from './scaleMesh';
 import { meshGrid } from '../geometry/voxel/mesher';
 
-export type SurfaceModifierId = 'fuzzy' | 'smooth' | 'voxelize';
+export type SurfaceModifierId = 'fuzzy' | 'knit' | 'cable' | 'waffle' | 'fur' | 'woven' | 'smooth' | 'voxelize';
 
 export interface ModifierManifoldResult {
   kind: 'manifold';
@@ -58,7 +63,25 @@ export function modelDiagonal(mesh: MeshData): number {
 /** Size-relative starting parameters for fuzzy skin (subtle ~1% displacement). */
 export function defaultFuzzyOptions(mesh: MeshData): Required<FuzzySkinOptions> {
   const d = modelDiagonal(mesh) || 10;
-  return { amplitude: d * 0.01, scale: d * 0.04, octaves: 2, seed: 1, subdivide: true };
+  return { amplitude: d * 0.01, scale: d * 0.04, octaves: 2, seed: 1, quality: 3, subdivide: true };
+}
+
+/** Size-relative starting parameters for knit texture (~3% amplitude, ~5% stitch width). */
+export function defaultKnitOptions(mesh: MeshData): Required<KnitTextureOptions> {
+  const d = modelDiagonal(mesh) || 10;
+  const sw = d * 0.05;
+  return {
+    amplitude: d * 0.03,
+    stitchWidth: sw,
+    stitchHeight: sw * 1.4,
+    rowOffset: 0.5,
+    roundness: 0.5,
+    grainAngleDeg: 0,
+    variation: 0.1,
+    seed: 1,
+    quality: 3,
+    subdivide: true,
+  };
 }
 
 /** Starting parameters for the smooth/round modifier. */
@@ -75,6 +98,12 @@ return Manifold.ofMesh(api.imports[0]);
 `;
 }
 
+export { type KnitTextureOptions };
+export { type CableKnitOptions };
+export { type WaffleStitchOptions };
+export { type FurVelvetOptions };
+export { type WovenFabricOptions };
+
 export function applyFuzzy(mesh: MeshData, opts: FuzzySkinOptions): ModifierManifoldResult {
   const baked = fuzzySkin(mesh, opts);
   return {
@@ -83,6 +112,131 @@ export function applyFuzzy(mesh: MeshData, opts: FuzzySkinOptions): ModifierMani
     mesh: baked,
     code: manifoldWrapper([
       `Fuzzy skin applied on ${today()} — amplitude ${opts.amplitude}, feature ~${opts.scale}.`,
+      `The textured mesh is baked onto api.imports[0]. Re-apply from the Surface panel to retune.`,
+    ]),
+  };
+}
+
+export function applyKnit(mesh: MeshData, opts: KnitTextureOptions): ModifierManifoldResult {
+  const baked = knitTexture(mesh, opts);
+  return {
+    kind: 'manifold',
+    label: 'knit texture',
+    mesh: baked,
+    code: manifoldWrapper([
+      `Knit texture applied on ${today()} — stitch ${opts.stitchWidth.toFixed(2)} × ${(opts.stitchHeight ?? opts.stitchWidth * 1.4).toFixed(2)}, amplitude ${opts.amplitude}.`,
+      `The textured mesh is baked onto api.imports[0]. Re-apply from the Surface panel to retune.`,
+    ]),
+  };
+}
+
+export function defaultCableOptions(mesh: MeshData): Required<CableKnitOptions> {
+  const d = modelDiagonal(mesh) || 10;
+  const cw = d * 0.08;
+  return {
+    amplitude: d * 0.03,
+    cableWidth: cw,
+    cablePitch: cw * 2.5,
+    plyWidth: cw * 0.3,
+    grainAngleDeg: 0,
+    variation: 0.08,
+    seed: 1,
+    quality: 3,
+    subdivide: true,
+  };
+}
+
+export function defaultWaffleOptions(mesh: MeshData): Required<WaffleStitchOptions> {
+  const d = modelDiagonal(mesh) || 10;
+  return {
+    amplitude: d * 0.025,
+    cellWidth: d * 0.06,
+    cellHeight: d * 0.06,
+    sharpness: 3,
+    rowOffset: 0,
+    grainAngleDeg: 0,
+    seed: 1,
+    quality: 3,
+    subdivide: true,
+  };
+}
+
+export function defaultFurOptions(mesh: MeshData): Required<FurVelvetOptions> {
+  const d = modelDiagonal(mesh) || 10;
+  const fs = d * 0.02;
+  return {
+    amplitude: d * 0.025,
+    fiberSpacing: fs,
+    fiberLength: fs * 6,
+    octaves: 2,
+    grainAngleDeg: 0,
+    seed: 1,
+    quality: 3,
+    subdivide: true,
+  };
+}
+
+export function defaultWovenOptions(mesh: MeshData): Required<WovenFabricOptions> {
+  const d = modelDiagonal(mesh) || 10;
+  return {
+    amplitude: d * 0.02,
+    threadSpacing: d * 0.04,
+    threadWidth: 0.4,
+    underDepth: 0.3,
+    grainAngleDeg: 0,
+    seed: 1,
+    quality: 3,
+    subdivide: true,
+  };
+}
+
+export function applyCable(mesh: MeshData, opts: CableKnitOptions): ModifierManifoldResult {
+  const baked = cableKnit(mesh, opts);
+  return {
+    kind: 'manifold',
+    label: 'cable knit',
+    mesh: baked,
+    code: manifoldWrapper([
+      `Cable knit applied on ${today()} — cable width ${opts.cableWidth.toFixed(2)}, pitch ${(opts.cablePitch ?? opts.cableWidth * 2.5).toFixed(2)}.`,
+      `The textured mesh is baked onto api.imports[0]. Re-apply from the Surface panel to retune.`,
+    ]),
+  };
+}
+
+export function applyWaffle(mesh: MeshData, opts: WaffleStitchOptions): ModifierManifoldResult {
+  const baked = waffleStitch(mesh, opts);
+  return {
+    kind: 'manifold',
+    label: 'waffle stitch',
+    mesh: baked,
+    code: manifoldWrapper([
+      `Waffle stitch applied on ${today()} — cell ${opts.cellWidth.toFixed(2)} × ${(opts.cellHeight ?? opts.cellWidth).toFixed(2)}, sharpness ${opts.sharpness ?? 3}.`,
+      `The textured mesh is baked onto api.imports[0]. Re-apply from the Surface panel to retune.`,
+    ]),
+  };
+}
+
+export function applyFur(mesh: MeshData, opts: FurVelvetOptions): ModifierManifoldResult {
+  const baked = furVelvet(mesh, opts);
+  return {
+    kind: 'manifold',
+    label: 'fur / velvet',
+    mesh: baked,
+    code: manifoldWrapper([
+      `Fur/velvet texture applied on ${today()} — fiber spacing ${opts.fiberSpacing.toFixed(3)}, length ${(opts.fiberLength ?? opts.fiberSpacing * 6).toFixed(3)}.`,
+      `The textured mesh is baked onto api.imports[0]. Re-apply from the Surface panel to retune.`,
+    ]),
+  };
+}
+
+export function applyWoven(mesh: MeshData, opts: WovenFabricOptions): ModifierManifoldResult {
+  const baked = wovenFabric(mesh, opts);
+  return {
+    kind: 'manifold',
+    label: 'woven fabric',
+    mesh: baked,
+    code: manifoldWrapper([
+      `Woven fabric applied on ${today()} — thread spacing ${opts.threadSpacing.toFixed(3)}, width ${opts.threadWidth ?? 0.4}.`,
       `The textured mesh is baked onto api.imports[0]. Re-apply from the Surface panel to retune.`,
     ]),
   };
