@@ -60,6 +60,7 @@ function getSettingsForLang(lang: Language): QualitySettings {
 
 let currentLang: Language = 'manifold-js';
 let panelEl: HTMLElement | null = null;
+let viewportPaneRef: HTMLElement | null = null;
 let radioEls: HTMLInputElement[] = [];
 let openState = false;
 
@@ -71,6 +72,7 @@ export function initCurvatureQualityPanel(
   initialLang: Language,
 ): void {
   currentLang = initialLang;
+  viewportPaneRef = viewportPane;
   buildPanel(viewportPane);
   buildButton(clipControls);
 }
@@ -100,16 +102,16 @@ export function isCurvatureQualityOpen(): boolean {
 export function closeCurvatureQuality(): void {
   if (!openState) return;
   openState = false;
-  panelEl?.classList.add('hidden');
+  panelEl?.remove();
 }
 
 // ---- Build helpers -----------------------------------------------------
 
-function buildPanel(viewportPane: HTMLElement): void {
+function buildPanel(_viewportPane: HTMLElement): void {
   const root = document.createElement('div');
   root.id = 'curvature-quality-panel';
   // Default position: below the clip-controls bar (top-2 = 8px + ~30px bar ≈ top-10)
-  root.className = 'hidden absolute top-10 right-2 z-10 w-52 flex flex-col rounded-lg bg-zinc-900/85 backdrop-blur border border-zinc-700 shadow-lg text-zinc-200 pointer-events-auto';
+  root.className = 'absolute top-10 right-2 z-10 w-52 flex flex-col rounded-lg bg-zinc-900/85 backdrop-blur border border-zinc-700 shadow-lg text-zinc-200 pointer-events-auto';
 
   // Header — drag handle + title + close button
   const header = document.createElement('div');
@@ -202,7 +204,7 @@ function buildPanel(viewportPane: HTMLElement): void {
 
   function clampIntoView(): void {
     const parent = root.offsetParent as HTMLElement | null;
-    if (!parent || root.classList.contains('hidden')) return;
+    if (!parent || !root.isConnected) return;
     const pad = 8;
     const pr = parent.getBoundingClientRect();
     const rr = root.getBoundingClientRect();
@@ -257,7 +259,8 @@ function buildPanel(viewportPane: HTMLElement): void {
 
   window.addEventListener('resize', () => { if (openState) clampIntoView(); });
 
-  viewportPane.appendChild(root);
+  // Don't append to the DOM yet — panel is attached only when opened so its
+  // radio inputs don't conflict with other DOM radio buttons while hidden.
   panelEl = root;
 }
 
@@ -272,7 +275,9 @@ function buildButton(clipControls: HTMLElement): void {
       closeCurvatureQuality();
     } else {
       openState = true;
-      panelEl?.classList.remove('hidden');
+      if (panelEl && viewportPaneRef && !panelEl.isConnected) {
+        viewportPaneRef.appendChild(panelEl);
+      }
       refreshRadios();
     }
   });
