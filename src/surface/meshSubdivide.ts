@@ -155,6 +155,38 @@ export function subdivideToMaxEdge(mesh: MeshData, opts: SubdivideOptions): Mesh
   };
 }
 
+/**
+ * Triplanar projection helper.
+ *
+ * Returns the three axis-plane (s, t) coordinate pairs and L1-normalised
+ * blend weights (sum to 1) derived from the vertex normal.
+ *
+ *   X-dominant (pairs[0] = (py, pz)): used when the surface faces mostly ±X.
+ *   Y-dominant (pairs[1] = (px, pz)): used when the surface faces mostly ±Y.
+ *   Z-dominant (pairs[2] = (px, py)): used when the surface faces mostly ±Z.
+ *
+ * To compute a triplanar displacement, sample your texture function with each
+ * (s, t) pair and blend:
+ *   let d = 0;
+ *   for (let i = 0; i < 3; i++) {
+ *     const [s, t] = pairs[i];
+ *     const u = cosA * s + sinA * t;   // column axis (rotated by grainAngleDeg)
+ *     const v = -sinA * s + cosA * t;  // row    axis (perpendicular)
+ *     d += weights[i] * displace(u, v);
+ *   }
+ */
+export function triplanarCoords(
+  px: number, py: number, pz: number,
+  nx: number, ny: number, nz: number,
+): { pairs: [[number, number], [number, number], [number, number]]; weights: [number, number, number] } {
+  const ax = Math.abs(nx), ay = Math.abs(ny), az = Math.abs(nz);
+  const sum = ax + ay + az || 1;
+  return {
+    pairs:   [[py, pz], [px, pz], [px, py]],
+    weights: [ax / sum, ay / sum, az / sum],
+  };
+}
+
 /** Area-weighted per-vertex normals for a position-only mesh. Returns a
  *  Float32Array of `numVert * 3` unit normals (degenerate verts get [0,0,1]). */
 export function computeVertexNormals(positions: Float32Array, triVerts: Uint32Array): Float32Array {

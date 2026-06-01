@@ -23,6 +23,7 @@ import {
   extractPositions,
   computeVertexNormals,
   bboxOf,
+  triplanarCoords,
 } from './meshSubdivide';
 
 export interface WaffleStitchOptions {
@@ -70,28 +71,29 @@ export function waffleStitch(mesh: MeshData, opts: WaffleStitchOptions): MeshDat
 
   for (let v = 0; v < base.numVert; v++) {
     const px = positions[v * 3], py = positions[v * 3 + 1], pz = positions[v * 3 + 2];
-
-    const gx = cosA * px + sinA * py;
-    const gz = pz;
-
-    const col = gx / cellW;
-    const row = gz / cellH;
-    const rowInt = Math.floor(row);
-
-    // Optional brick offset (honeycomb variant).
-    const colShifted = col + (((rowInt % 2) + 2) % 2 === 1 ? rowOffset : 0);
-    const uf = ((colShifted % 1) + 1) % 1;  // 0..1
-    const vf = ((row % 1) + 1) % 1;          // 0..1
-
-    // Border proximity: 1 at cell edges, 0 at cell center.
-    const uB = Math.cos(uf * Math.PI) ** 2;   // cos²(uf·π)
-    const vB = Math.cos(vf * Math.PI) ** 2;
-
-    // Raised border (max of both), recessed interior.
-    const border = Math.max(uB, vB) ** sharpness;
-
-    const d = amplitude * border;
     const nx = normals[v * 3], ny = normals[v * 3 + 1], nz = normals[v * 3 + 2];
+
+    const { pairs, weights } = triplanarCoords(px, py, pz, nx, ny, nz);
+    let d = 0;
+    for (let i = 0; i < 3; i++) {
+      const [s, t] = pairs[i];
+      const gx = cosA * s + sinA * t;
+      const gz = -sinA * s + cosA * t;
+
+      const col = gx / cellW;
+      const row = gz / cellH;
+      const rowInt = Math.floor(row);
+
+      const colShifted = col + (((rowInt % 2) + 2) % 2 === 1 ? rowOffset : 0);
+      const uf = ((colShifted % 1) + 1) % 1;
+      const vf = ((row % 1) + 1) % 1;
+
+      const uB = Math.cos(uf * Math.PI) ** 2;
+      const vB = Math.cos(vf * Math.PI) ** 2;
+      const border = Math.max(uB, vB) ** sharpness;
+      d += weights[i] * amplitude * border;
+    }
+
     positions[v * 3]     = px + nx * d;
     positions[v * 3 + 1] = py + ny * d;
     positions[v * 3 + 2] = pz + nz * d;

@@ -28,6 +28,7 @@ import {
   extractPositions,
   computeVertexNormals,
   bboxOf,
+  triplanarCoords,
 } from './meshSubdivide';
 
 export interface KnitTextureOptions {
@@ -99,46 +100,37 @@ export function knitTexture(mesh: MeshData, opts: KnitTextureOptions): MeshData 
 
   for (let v = 0; v < base.numVert; v++) {
     const px = positions[v * 3], py = positions[v * 3 + 1], pz = positions[v * 3 + 2];
-
-    // Project world position onto knit-grain axes.
-    // Column axis (u): rotated in XY plane. Row axis (v): always Z (up the model).
-    // grainAngleDeg=0  → columns run along X, rows run along Z.
-    // grainAngleDeg=90 → columns run along Y, rows run along Z.
-    const gx = cosA * px + sinA * py;
-
-    const col = gx / stitchW;
-    const row = pz / stitchH;
-
-    // Brick row offset: odd rows shift by rowOffset fraction of stitch width.
-    const rowInt = Math.floor(row);
-    const evenRow = ((rowInt % 2) + 2) % 2 === 0;
-    const colShifted = col + (evenRow ? 0 : rowOffset);
-
-    // Fractional position within stitch cell [0, 1).
-    const uf = ((colShifted % 1) + 1) % 1;
-    const vf = ((row % 1) + 1) % 1;
-
-    // Per-stitch amplitude variation (deterministic, organic).
-    const colInt = Math.floor(colShifted);
-    const stitchScale = 1 + variation * (hash2(colInt, rowInt, seed) * 2 - 1);
-
-    // Column wave: +1 at column edges (uf=0,1) where the stitch "legs" are,
-    // -1 at column center (uf=0.5) which is the stitch valley between V's.
-    // Bipolar range lets the center actually recess inward — giving the visible
-    // depth contrast that makes the V pattern readable rather than just bumps.
-    const uWave = Math.cos(uf * TAU);  // +1 at edges, -1 at center
-
-    // Row modulation: 1 at row boundaries (vf=0,1 = stitch head crossings),
-    // 0 at row centre (vf=0.5 = middle of the V-leg). Using half-cosine so the
-    // modulation is always non-negative and only amplifies, never flips sign.
-    const vShape = (1 + Math.cos(vf * TAU)) / 2;  // 1 at boundaries, 0 at center
-
-    // roundness=0 → pure bipolar column ridges (stitch legs run full height).
-    // roundness=1 → ridges concentrated at row boundaries (stitch head bumps).
-    // Mixed roundness gives the classic stockinette V: clear legs with raised heads.
-    const d = amplitude * stitchScale * uWave * (1 - roundness + roundness * vShape);
-
     const nx = normals[v * 3], ny = normals[v * 3 + 1], nz = normals[v * 3 + 2];
+
+    // Triplanar blend: sample the stitch pattern from all three axis planes
+    // weighted by how much the surface normal faces each plane. This makes
+    // the pattern follow the surface on every face of a cube or sphere
+    // instead of degenerating into columns when a face is perpendicular to Z.
+    const { pairs, weights } = triplanarCoords(px, py, pz, nx, ny, nz);
+    let d = 0;
+    for (let i = 0; i < 3; i++) {
+      const [s, t] = pairs[i];
+      const gx = cosA * s + sinA * t;   // column axis (grain-rotated)
+      const gz = -sinA * s + cosA * t;  // row    axis (perpendicular)
+
+      const col = gx / stitchW;
+      const row = gz / stitchH;
+
+      const rowInt = Math.floor(row);
+      const evenRow = ((rowInt % 2) + 2) % 2 === 0;
+      const colShifted = col + (evenRow ? 0 : rowOffset);
+
+      const uf = ((colShifted % 1) + 1) % 1;
+      const vf = ((row % 1) + 1) % 1;
+
+      const colInt = Math.floor(colShifted);
+      const stitchScale = 1 + variation * (hash2(colInt, rowInt, seed) * 2 - 1);
+
+      const uWave = Math.cos(uf * TAU);
+      const vShape = (1 + Math.cos(vf * TAU)) / 2;
+      d += weights[i] * amplitude * stitchScale * uWave * (1 - roundness + roundness * vShape);
+    }
+
     positions[v * 3]     = px + nx * d;
     positions[v * 3 + 1] = py + ny * d;
     positions[v * 3 + 2] = pz + nz * d;

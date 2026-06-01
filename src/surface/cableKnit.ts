@@ -25,6 +25,7 @@ import {
   extractPositions,
   computeVertexNormals,
   bboxOf,
+  triplanarCoords,
 } from './meshSubdivide';
 
 export interface CableKnitOptions {
@@ -90,33 +91,32 @@ export function cableKnit(mesh: MeshData, opts: CableKnitOptions): MeshData {
 
   for (let v = 0; v < base.numVert; v++) {
     const px = positions[v * 3], py = positions[v * 3 + 1], pz = positions[v * 3 + 2];
-
-    // Column axis in XY, row axis along Z.
-    const gx = cosA * px + sinA * py;
-    const gz = pz;
-
-    const colF = gx / cableW;
-    const colInt = Math.floor(colF);
-    const uf = colF - colInt;  // 0..1 across cable column
-
-    const rowF = gz / pitch;   // continuous height normalized by pitch
-
-    // Parity: alternate cables mirror their twist direction.
-    const parity = ((colInt % 2) + 2) % 2 === 0 ? 1 : -1;
-
-    // Per-cable variation.
-    const rowInt = Math.floor(rowF);
-    const cableAmp = amplitude * (1 + variation * (hash2(colInt, rowInt, seed) * 2 - 1));
-
-    // Two ply-center u-positions oscillate sinusoidally across the cable width.
-    const phase = TAU * rowF;
-    const u1 = 0.5 + sweep * Math.sin(phase * parity);
-    const u2 = 0.5 - sweep * Math.sin(phase * parity);
-
-    // Displacement = sum of two Gaussian bumps.
-    const d = cableAmp * (gaussian(uf - u1, sigma) + gaussian(uf - u2, sigma));
-
     const nx = normals[v * 3], ny = normals[v * 3 + 1], nz = normals[v * 3 + 2];
+
+    const { pairs, weights } = triplanarCoords(px, py, pz, nx, ny, nz);
+    let d = 0;
+    for (let i = 0; i < 3; i++) {
+      const [s, t] = pairs[i];
+      const gx = cosA * s + sinA * t;
+      const gz = -sinA * s + cosA * t;
+
+      const colF = gx / cableW;
+      const colInt = Math.floor(colF);
+      const uf = colF - colInt;
+
+      const rowF = gz / pitch;
+      const rowInt = Math.floor(rowF);
+
+      const parity = ((colInt % 2) + 2) % 2 === 0 ? 1 : -1;
+      const cableAmp = amplitude * (1 + variation * (hash2(colInt, rowInt, seed) * 2 - 1));
+
+      const phase = TAU * rowF;
+      const u1 = 0.5 + sweep * Math.sin(phase * parity);
+      const u2 = 0.5 - sweep * Math.sin(phase * parity);
+
+      d += weights[i] * cableAmp * (gaussian(uf - u1, sigma) + gaussian(uf - u2, sigma));
+    }
+
     positions[v * 3]     = px + nx * d;
     positions[v * 3 + 1] = py + ny * d;
     positions[v * 3 + 2] = pz + nz * d;

@@ -29,6 +29,7 @@ import {
   extractPositions,
   computeVertexNormals,
   bboxOf,
+  triplanarCoords,
 } from './meshSubdivide';
 
 export interface WovenFabricOptions {
@@ -77,44 +78,39 @@ export function wovenFabric(mesh: MeshData, opts: WovenFabricOptions): MeshData 
 
   for (let v = 0; v < base.numVert; v++) {
     const px = positions[v * 3], py = positions[v * 3 + 1], pz = positions[v * 3 + 2];
-
-    // Warp axis = Z (up the model); weft axis = rotated XY.
-    const gx = cosA * px + sinA * py;  // across warp (weft direction)
-    const gz = pz;                      // along warp
-
-    // Position in thread-cell space.
-    const warpF  = gz / spacing;  // along warp threads
-    const weftF  = gx / spacing;  // across warp = along weft threads
-
-    const warpInt = Math.floor(warpF);
-    const weftInt = Math.floor(weftF);
-    const uf = warpF - warpInt;   // position within warp cell [0,1]
-    const vf = weftF - weftInt;   // position within weft cell [0,1]
-
-    // Over/under parity: alternates at every crossing.
-    const warpOver = ((warpInt + weftInt) % 2 + 2) % 2 === 0;
-
-    // Thread ridge shapes — cosine bump; zero outside ±halfFrac of cell center.
-    const warpCentre = 0.5;
-    const weftCentre = 0.5;
-    const warpDist = Math.abs(uf - warpCentre);
-    const weftDist = Math.abs(vf - weftCentre);
-
-    // Cos² bump scaled to `halfFrac` width.
-    const warpShape = warpDist < halfFrac
-      ? Math.cos((warpDist / halfFrac) * (Math.PI / 2)) ** 2
-      : 0;
-    const weftShape = weftDist < halfFrac
-      ? Math.cos((weftDist / halfFrac) * (Math.PI / 2)) ** 2
-      : 0;
-
-    const overShape  = warpOver ? warpShape  : weftShape;
-    const underShape = warpOver ? weftShape  : warpShape;
-
-    // "Over" thread elevated, "under" thread slightly depressed.
-    const d = amplitude * (overShape - underDepth * underShape);
-
     const nx = normals[v * 3], ny = normals[v * 3 + 1], nz = normals[v * 3 + 2];
+
+    const { pairs, weights } = triplanarCoords(px, py, pz, nx, ny, nz);
+    let d = 0;
+    for (let i = 0; i < 3; i++) {
+      const [s, t] = pairs[i];
+      const gx = cosA * s + sinA * t;   // weft axis
+      const gz = -sinA * s + cosA * t;  // warp axis
+
+      const warpF = gz / spacing;
+      const weftF = gx / spacing;
+
+      const warpInt = Math.floor(warpF);
+      const weftInt = Math.floor(weftF);
+      const uf = warpF - warpInt;
+      const vf = weftF - weftInt;
+
+      const warpOver = ((warpInt + weftInt) % 2 + 2) % 2 === 0;
+
+      const warpDist = Math.abs(uf - 0.5);
+      const weftDist = Math.abs(vf - 0.5);
+
+      const warpShape = warpDist < halfFrac
+        ? Math.cos((warpDist / halfFrac) * (Math.PI / 2)) ** 2 : 0;
+      const weftShape = weftDist < halfFrac
+        ? Math.cos((weftDist / halfFrac) * (Math.PI / 2)) ** 2 : 0;
+
+      const overShape  = warpOver ? warpShape : weftShape;
+      const underShape = warpOver ? weftShape : warpShape;
+
+      d += weights[i] * amplitude * (overShape - underDepth * underShape);
+    }
+
     positions[v * 3]     = px + nx * d;
     positions[v * 3 + 1] = py + ny * d;
     positions[v * 3 + 2] = pz + nz * d;

@@ -24,6 +24,7 @@ import {
   extractPositions,
   computeVertexNormals,
   bboxOf,
+  triplanarCoords,
 } from './meshSubdivide';
 
 export interface FurVelvetOptions {
@@ -107,17 +108,19 @@ export function furVelvet(mesh: MeshData, opts: FurVelvetOptions): MeshData {
 
   for (let v = 0; v < base.numVert; v++) {
     const px = positions[v * 3], py = positions[v * 3 + 1], pz = positions[v * 3 + 2];
-
-    // Rotate into grain axes: u = across fiber, vg = along fiber (Z by default).
-    const u = cosA * px + sinA * py;   // cross-grain
-    const vg = pz;                      // along-grain (Z)
-
-    // Sample anisotropic FBM: fine sampling across grain, coarse along grain.
-    const n = fbm(u * crossFreq, vg * grainFreq, 0, octaves, seed);
-    // The raw noise is [-1, 1]; remap so it pushes mostly outward.
-    const d = amplitude * (n * 0.5 + 0.5);
-
     const nx = normals[v * 3], ny = normals[v * 3 + 1], nz = normals[v * 3 + 2];
+
+    const { pairs, weights } = triplanarCoords(px, py, pz, nx, ny, nz);
+    let d = 0;
+    for (let i = 0; i < 3; i++) {
+      const [s, t] = pairs[i];
+      const u  = cosA * s + sinA * t;    // cross-grain
+      const vg = -sinA * s + cosA * t;   // along-grain
+
+      const n = fbm(u * crossFreq, vg * grainFreq, 0, octaves, seed);
+      d += weights[i] * amplitude * (n * 0.5 + 0.5);
+    }
+
     positions[v * 3]     = px + nx * d;
     positions[v * 3 + 1] = py + ny * d;
     positions[v * 3 + 2] = pz + nz * d;
