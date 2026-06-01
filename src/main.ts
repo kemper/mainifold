@@ -37,6 +37,7 @@ import { createToolbar, isAutoRun, setAutoRun, setToolbarLanguage, setAiToolbarS
 import { installKeyboardShortcuts } from './ui/keyboardShortcuts';
 import { registerCommands } from './ui/commandPalette';
 import { showQualitySettingsModal } from './ui/qualitySettingsModal';
+import { initCurvatureQualityPanel, notifyLanguageChange as notifyQualityLanguageChange, isCurvatureQualityOpen, closeCurvatureQuality } from './ui/curvatureQualityPanel';
 import { combo, MOD_LABEL, SHIFT_LABEL, ALT_LABEL } from './ui/shortcutDefs';
 import { showToast } from './ui/toast';
 import { initAiPanel, setActiveSession as setAiActiveSession, toggleAiPanel, toggleAiPanelFromToolbar, prefillAiInput } from './ui/aiPanel';
@@ -127,7 +128,7 @@ import type { BuiltExport } from './export/gltf';
 function registerExportFromBuilt(built: BuiltExport, source: string): void {
   registerInboxExport(built.blob, built.filename, source, built.mimeType);
 }
-import type { MeshData, SourceDiagnostic } from './geometry/types';
+import type { MeshData, MeshResult, SourceDiagnostic } from './geometry/types';
 import { analyzeZProfile, type ZProfile } from './geometry/profileAnalysis';
 import { probeAtXY, probeRay, probePixel, measureDistance, type ProbeResult, type GeneralRayResult, type PixelHit, type PixelMiss } from './geometry/rayCast';
 import { checkContainment, type ContainmentWarning } from './geometry/containmentCheck';
@@ -5302,6 +5303,8 @@ async function main() {
   if (paintBtnEl) clipControls.insertBefore(reliefViewportBtn, paintBtnEl);
   else clipControls.appendChild(reliefViewportBtn);
 
+  initCurvatureQualityPanel(clipControls, viewportPane, getActiveLanguage());
+
   initEscapeMenuClose();
 
   // When a color region is painted, re-render the mesh with colors.
@@ -5496,6 +5499,7 @@ async function main() {
     setEditorLanguage(lang);
     setToolbarLanguage(lang);
     setVoxelPaintAvailable(lang === 'voxel');
+    notifyQualityLanguageChange(lang);
     syncEditorTitle(getState());
     const loadingLabel =
       lang === 'scad' ? 'Loading OpenSCAD...' :
@@ -11034,10 +11038,21 @@ async function main() {
     clearEditorErrorPanel(editorErrorPanel);
     const t0 = performance.now();
     startRunTimer(t0);
+
+    // SCAD preview callback: receives the fast Phase 1 mesh and updates the
+    // viewport immediately so the user sees geometry while Phase 2 renders.
+    const onScadPreview = getActiveLanguage() === 'scad'
+      ? (previewResult: MeshResult) => {
+          if (myGen !== _runGeneration || !previewResult.mesh) return;
+          currentMeshData = previewResult.mesh;
+          updateMesh(previewResult.mesh);
+        }
+      : undefined;
+
     // Feed the Customizer's current overrides into the model's api.params(...).
     let result: Awaited<ReturnType<typeof executeCodeAsync>>;
     try {
-      result = await executeCodeAsync(src, undefined, currentParamValues);
+      result = await executeCodeAsync(src, undefined, currentParamValues, onScadPreview);
     } catch (err) {
       // Worker was terminated (cancelled by user, cancelled for a newer run,
       // timeout, or crash). Only clean up if we're still the active run —
@@ -11317,6 +11332,7 @@ async function main() {
       if (isSelectActive() && getSelectedAnnotationId()) return;
 
       let closed = false;
+      if (isCurvatureQualityOpen()) { closeCurvatureQuality(); closed = true; }
       if (isAnnotateOpen()) { closeAnnotateMenu(); closed = true; }
       if (isPaintOpen()) { closePaintMenu(); closed = true; }
       if (isSimplifyOpen()) { closeSimplifyMenu(); closed = true; }
