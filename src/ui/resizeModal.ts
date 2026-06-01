@@ -381,7 +381,8 @@ export function initResizeUI(api: ResizeApi): void {
       ?? document.getElementById('paint-toggle')
       ?? document.querySelector<HTMLElement>('[id$="-viewport-toggle"]');
     if (!anchor || !anchor.parentElement) return;
-    const btn = el('button', anchor.className || BTN_BASE);
+    const btnCls = anchor.className.split(' ').filter(c => c !== 'hidden').join(' ') || BTN_BASE;
+    const btn = el('button', btnCls);
     btn.id = 'resize-viewport-toggle';
     btn.textContent = '⇲ Resize';
     btn.title = 'Scale the model along X, Y, and Z';

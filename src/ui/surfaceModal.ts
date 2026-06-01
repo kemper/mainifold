@@ -292,7 +292,8 @@ export function initSurfaceUI(api: SurfaceApi): void {
       ?? document.getElementById('paint-toggle')
       ?? document.querySelector<HTMLElement>('[id$="-viewport-toggle"]');
     if (!anchor || !anchor.parentElement) return;
-    const btn = el('button', anchor.className || BTN_BASE);
+    const btnCls = anchor.className.split(' ').filter(c => c !== 'hidden').join(' ') || BTN_BASE;
+    const btn = el('button', btnCls);
     btn.id = 'surface-viewport-toggle';
     btn.textContent = '✦ Surface';
     btn.title = 'Apply fuzzy skin, smooth/round, or voxelize the current model';
