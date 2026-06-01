@@ -138,6 +138,8 @@ import { initTooltips } from './ui/tooltip';
 import { initTheme, getTheme, setTheme } from './ui/theme';
 import type { Theme } from './ui/theme';
 import { initPaintUI, isPaintOpen, forceDeactivate as closePaintMenu } from './color/paintUI';
+import { initImagePaintUI, setSmoothStampCallback } from './color/imagePaintUI';
+import { stampImageOntoMesh, buildTangentFrame, entriesToPerTriColors, remapPerTriColors } from './color/imagePaint';
 import { initVoxelPaintUI, setVoxelPaintAvailable, syncActiveState as syncVoxelPaintUI } from './color/voxelPaintUI';
 import { initSimplifyUI, isSimplifyOpen, refreshSimplifyIfOpen, forceDeactivate as closeSimplifyMenu, type SimplifyHandlers } from './ui/simplifyUI';
 import { updatePaintMesh, setOnRegionPainted } from './color/paintMode';
@@ -165,7 +167,7 @@ import { restoreView as restoreAnnotationViewById } from './annotations/selectMo
 import { applyTriColors, applyTriColorsIfVisible, hasRegions as hasColorRegions, onChange as onColorRegionsChange, onVisibilityChange as onPaintVisibilityChange, clearRegions, serialize as serializeRegions, addRegion, getRegions, removeRegion, removeLastRegion, redoLastRegion, setRegionVisibility, setRegionTriangles, buildTriColors, createEmptyTriColors, overlayPainted, setModelColorRegions, hasModelColorRegions, clearModelColorRegions, getModelRegions, type SerializedColorRegion, type RegionDescriptor } from './color/regions';
 import { setPaintLabels } from './color/labels';
 import { setBucketTolerance as setPaintBucketTolerance, getBucketTolerance as getPaintBucketTolerance, setBrushRadius as setPaintBrushRadius, getBrushRadius as getPaintBrushRadius, setBrushSmooth as setPaintBrushSmooth, isBrushSmooth as isPaintBrushSmooth, setBrushSmoothDivisor as setPaintBrushSmoothDivisor, getBrushSmoothDivisor as getPaintBrushSmoothDivisor, setBrushSurface as setPaintBrushSurface, getBrushSurface as getPaintBrushSurface, setBrushPaintDepth as setPaintBrushDepth, getBrushPaintDepth as getPaintBrushDepth, SMOOTH_DIVISOR_MIN, SMOOTH_DIVISOR_MAX } from './color/paintMode';
-import { buildStrokeMesh, buildRefinedMesh, brushRefineRegion, strokeFootprintTriangles, deriveSampleNormals, buildGeodesicField, tangentBasis, childrenByParent, type BrushStroke, type BrushShape, type RefineRegion } from './color/subdivide';
+import { buildStrokeMesh, buildRefinedMesh, buildRefinedMeshFromSet, brushRefineRegion, strokeFootprintTriangles, deriveSampleNormals, buildGeodesicField, tangentBasis, childrenByParent, type BrushStroke, type BrushShape, type RefineRegion } from './color/subdivide';
 import { refineInWorker, SubdivisionAbortError, terminateSubdivisionWorker } from './color/subdivisionClient';
 import { startProgress, endProgress, __setProgressModalDelayForTests } from './ui/progressModal';
 import { syncLockState, disableRun, enableRun } from './color/editorLock';
@@ -722,39 +724,45 @@ function remapTriangleIds(ids: Iterable<number>, parentToChildren: Map<number, n
   return out;
 }
 
+interface ResolveResult {
+  triangles: Set<number>;
+  perTriColors?: Map<number, [number, number, number]>;
+}
+
 /** Resolve a single region descriptor to a triangle set on `mesh`. Shared by
  *  rehydration (loading a saved version) and the live rebuild after a smooth
- *  brush stroke changes the working mesh. */
+ *  brush stroke changes the working mesh. Returns perTriColors for imagePaint
+ *  descriptors (per-triangle color map rebuilt from stored entries). */
 function resolveDescriptorTriangles(
   descriptor: RegionDescriptor,
   mesh: MeshData,
   adjacency: AdjacencyGraph | null,
   parentToChildren: Map<number, number[]> | null,
-): Set<number> {
+): ResolveResult {
   switch (descriptor.kind) {
     case 'coplanar': {
-      if (!adjacency) return new Set<number>();
+      if (!adjacency) return { triangles: new Set<number>() };
       const { seedPoint, seedNormal, normalTolerance } = descriptor;
       const seedTri = resolveSeed(seedPoint, seedNormal, mesh, adjacency, normalTolerance);
-      return seedTri >= 0 ? findCoplanarRegion(seedTri, adjacency, normalTolerance) : new Set<number>();
+      return { triangles: seedTri >= 0 ? findCoplanarRegion(seedTri, adjacency, normalTolerance) : new Set<number>() };
     }
     case 'triangles':
       // Raw ids index the base tessellation; carry them across any subdivision.
-      return remapTriangleIds(descriptor.ids, parentToChildren);
+      return { triangles: remapTriangleIds(descriptor.ids, parentToChildren) };
     case 'slab': {
       const { normal, offset, thickness } = descriptor;
-      return findSlabTriangles(mesh, normal, offset, thickness);
+      return { triangles: findSlabTriangles(mesh, normal, offset, thickness) };
     }
     case 'box': {
       const { center, size, quaternion, shape } = descriptor;
-      return findShapeTriangles(mesh, shape ?? 'box', { center, size, quaternion });
+      return { triangles: findShapeTriangles(mesh, shape ?? 'box', { center, size, quaternion }) };
     }
     case 'cylinder': {
       // Same triangle collector `paintInCylinder` uses for the live call —
       // re-resolves the shell against the (possibly subdivided) current mesh
       // so smoothing-driven refinement carries forward across re-runs.
       const { center, rMin, rMax, zMin, zMax, normalCone, coverageMode, maxTriangleArea } = descriptor;
-      return findCylinderTriangles(mesh, center, rMin, rMax, zMin, zMax, normalCone, coverageMode ?? 'centroid', maxTriangleArea);
+      return { triangles: findCylinderTriangles(mesh, center, rMin, rMax, zMin, zMax, normalCone, coverageMode ?? 'centroid', maxTriangleArea) };
     }
     case 'byLabel': {
       // Labels are runtime state — manifold-3d assigns fresh originalIDs on
@@ -762,16 +770,16 @@ function resolveDescriptorTriangles(
       // built (it indexes the base mesh, hence the remap). Missing label →
       // empty set → region drops silently.
       const ids = currentLabelMap?.get(descriptor.label);
-      return ids ? remapTriangleIds(ids, parentToChildren) : new Set<number>();
+      return { triangles: ids ? remapTriangleIds(ids, parentToChildren) : new Set<number>() };
     }
     case 'connectedFromSeed': {
-      if (!adjacency) return new Set<number>();
+      if (!adjacency) return { triangles: new Set<number>() };
       const { seedPoint, seedNormal, maxDeviationDeg, clampMin, clampMax } = descriptor;
       // Find the closest triangle to the seed point — robust across re-runs
       // because triangle indices are unstable but world-space points are not.
       // Then BFS-flood gated by deviation from the stored seed normal.
       const nearest = findNearestTriangle(seedPoint, mesh, adjacency);
-      if (nearest.triIndex < 0) return new Set<number>();
+      if (nearest.triIndex < 0) return { triangles: new Set<number>() };
       const cos = Math.cos(maxDeviationDeg * Math.PI / 180);
       // Restore the original clamp predicate so re-resolution after a
       // geometry edit walks the same bounded region the user painted.
@@ -796,10 +804,14 @@ function resolveDescriptorTriangles(
         }
         triangles = filtered;
       }
-      return triangles;
+      return { triangles };
     }
     case 'brushStroke':
-      return strokeFootprintTriangles(mesh, descriptorToStroke(descriptor));
+      return { triangles: strokeFootprintTriangles(mesh, descriptorToStroke(descriptor)) };
+    case 'imagePaint':
+      // Re-expand the stored [triIdx,r,g,b,…] entries through the subdivision
+      // map (children inherit their parent's projected color).
+      return entriesToPerTriColors(descriptor.entries, parentToChildren);
   }
 }
 
@@ -896,9 +908,9 @@ function rehydrateColorRegions(geometryData: Record<string, unknown> | null): { 
   // reconcile (we've already built the mesh here).
   suspendReconcile = true;
   for (const region of regions) {
-    const triangles = resolveDescriptorTriangles(region.descriptor, mesh, adjacency, parentToChildren);
+    const { triangles, perTriColors } = resolveDescriptorTriangles(region.descriptor, mesh, adjacency, parentToChildren);
     if (triangles.size > 0) {
-      addRegion(region.name, region.color, region.source, region.descriptor, triangles, region.visible !== false);
+      addRegion(region.name, region.color, region.source, region.descriptor, triangles, region.visible !== false, perTriColors);
       report.carried.push(region.name);
     } else {
       report.dropped.push(region.name);
@@ -948,7 +960,8 @@ function rebuildPaintedGeometry(): void {
   updatePaintMesh(mesh);
   const adjacency = buildAdjacency(mesh);
   for (const region of getRegions()) {
-    setRegionTriangles(region.id, resolveDescriptorTriangles(region.descriptor, mesh, adjacency, parentToChildren));
+    const { triangles, perTriColors } = resolveDescriptorTriangles(region.descriptor, mesh, adjacency, parentToChildren);
+    setRegionTriangles(region.id, triangles, perTriColors);
   }
   paintedColorRefresh();
   syncLockState();
@@ -988,10 +1001,11 @@ function appendStrokeRefine(descriptor: Extract<RegionDescriptor, { kind: 'brush
   for (const region of getRegions()) {
     const d = region.descriptor;
     if (d.kind === 'triangles' || d.kind === 'byLabel' || !overlapsSplit(region)) {
-      setRegionTriangles(region.id, remapTriangleIds(region.triangles, parentToChildren));
+      setRegionTriangles(region.id, remapTriangleIds(region.triangles, parentToChildren), remapPerTriColors(region.perTriColors, parentToChildren));
     } else {
       if (!adjacency && (d.kind === 'coplanar' || d.kind === 'connectedFromSeed')) adjacency = buildAdjacency(mesh);
-      setRegionTriangles(region.id, resolveDescriptorTriangles(d, mesh, adjacency, parentToChildren));
+      const { triangles, perTriColors } = resolveDescriptorTriangles(d, mesh, adjacency, parentToChildren);
+      setRegionTriangles(region.id, triangles, perTriColors);
     }
   }
   paintedColorRefresh();
@@ -1230,10 +1244,11 @@ async function appendStrokeRefineAsync(
       if (d === descriptor) {
         setRegionTriangles(region.id, newTris ? new Set(newTris) : new Set<number>());
       } else if (d.kind === 'triangles' || d.kind === 'byLabel' || !overlapsSplit(region)) {
-        setRegionTriangles(region.id, remapTriangleIds(region.triangles, parentToChildren));
+        setRegionTriangles(region.id, remapTriangleIds(region.triangles, parentToChildren), remapPerTriColors(region.perTriColors, parentToChildren));
       } else {
         if (!adjacency && (d.kind === 'coplanar' || d.kind === 'connectedFromSeed')) adjacency = buildAdjacency(mesh);
-        setRegionTriangles(region.id, resolveDescriptorTriangles(d, mesh, adjacency, parentToChildren));
+        const { triangles, perTriColors } = resolveDescriptorTriangles(d, mesh, adjacency, parentToChildren);
+        setRegionTriangles(region.id, triangles, perTriColors);
       }
     }
     paintedColorRefresh();
@@ -1293,7 +1308,8 @@ async function rebuildPaintedGeometryAsync(): Promise<void> {
       if (workerTris) {
         setRegionTriangles(region.id, new Set(workerTris));
       } else {
-        setRegionTriangles(region.id, resolveDescriptorTriangles(d, mesh, adjacency, parentToChildren));
+        const { triangles, perTriColors } = resolveDescriptorTriangles(d, mesh, adjacency, parentToChildren);
+        setRegionTriangles(region.id, triangles, perTriColors);
       }
     }
     paintedColorRefresh();
@@ -5238,6 +5254,118 @@ async function main() {
   initDimensionsToggle(clipControls);
   initAnnotateUI(clipControls);
   initPaintUI(clipControls);
+  initImagePaintUI(clipControls);
+  setSmoothStampCallback((imageData, stampOpts, maxEdge) => {
+    if (!currentMeshData) return null;
+
+    const { hitPoint: [hpX, hpY, hpZ], hitNormal: [nx, ny, nz], size, rotationDeg } = stampOpts;
+    const halfSize = size / 2;
+    const { tr: [trX, trY, trZ], br: [brX, brY, brZ] } = buildTangentFrame(stampOpts.hitNormal, rotationDeg);
+    const { numProp, vertProperties, triVerts } = currentMeshData;
+
+    // Build adjacency once — used for the BFS footprint walk and the region remap.
+    const adjacency = buildAdjacency(currentMeshData);
+
+    // Find the mesh triangle the user clicked as the BFS seed.
+    const { triIndex: startTri } = findNearestTriangle([hpX, hpY, hpZ], currentMeshData, adjacency);
+    if (startTri < 0) return null;
+
+    // Footprint test: UV square (with margin) AND depth slab so we don't cross
+    // through the model to the far side.
+    const MARGIN = 0.15;
+    const lo = -(1 + MARGIN), hi = 1 + MARGIN;
+    const inFootprint = (px: number, py: number, pz: number) => {
+      const dx = px - hpX, dy = py - hpY, dz = pz - hpZ;
+      if (dx * nx + dy * ny + dz * nz < -halfSize) return false; // depth slab
+      const u = (dx * trX + dy * trY + dz * trZ) / halfSize;
+      const v = (dx * brX + dy * brY + dz * brZ) / halfSize;
+      return u >= lo && u <= hi && v >= lo && v <= hi;
+    };
+
+    // Step 1: BFS from the hit triangle — walk across shared mesh edges, only
+    // continuing through forward-facing triangles. This mirrors the paint brush's
+    // geodesic approach: paint stays on the reachable surface, never bleeds
+    // through the model to the far side.
+    const footprintTris = new Set<number>();
+    const visited = new Set<number>([startTri]);
+    const queue: number[] = [startTri];
+
+    while (queue.length > 0) {
+      const t = queue.shift()!;
+      const v0 = triVerts[t * 3], v1 = triVerts[t * 3 + 1], v2 = triVerts[t * 3 + 2];
+      const x0 = vertProperties[v0 * numProp], y0 = vertProperties[v0 * numProp + 1], z0 = vertProperties[v0 * numProp + 2];
+      const x1 = vertProperties[v1 * numProp], y1 = vertProperties[v1 * numProp + 1], z1 = vertProperties[v1 * numProp + 2];
+      const x2 = vertProperties[v2 * numProp], y2 = vertProperties[v2 * numProp + 1], z2 = vertProperties[v2 * numProp + 2];
+
+      // Stop propagating at back-facing triangles (they form the geometric horizon).
+      const ex = x1 - x0, ey = y1 - y0, ez = z1 - z0;
+      const fx = x2 - x0, fy = y2 - y0, fz = z2 - z0;
+      if ((ey * fz - ez * fy) * nx + (ez * fx - ex * fz) * ny + (ex * fy - ey * fx) * nz <= 0) continue;
+
+      const cx = (x0 + x1 + x2) / 3, cy = (y0 + y1 + y2) / 3, cz = (z0 + z1 + z2) / 3;
+      if (inFootprint(cx, cy, cz) || inFootprint(x0, y0, z0) || inFootprint(x1, y1, z1) || inFootprint(x2, y2, z2)) {
+        footprintTris.add(t);
+        for (const n of adjacency.neighbors[t]) {
+          if (!visited.has(n)) { visited.add(n); queue.push(n); }
+        }
+      }
+    }
+
+    if (footprintTris.size === 0) return null;
+
+    // Step 2: Confined subdivision. `overlapsStamp` keeps refinement inside the
+    // stamp square (+ a thin margin) and the depth slab: as a big seed triangle
+    // splits 1→4, children that land outside the square stop refining, so the
+    // fine tessellation stays within the stamp footprint instead of flooding the
+    // whole base triangle. This is the paint-tool's "refine only within the
+    // region" strategy — a 12-tri cube now grows a few thousand triangles inside
+    // the stamp, not 500k across the whole face.
+    const REFINE_MARGIN = 0.03;
+    const ov = -(1 + REFINE_MARGIN), oh = 1 + REFINE_MARGIN;
+    const sampleInStamp = (px: number, py: number, pz: number): boolean => {
+      const dx = px - hpX, dy = py - hpY, dz = pz - hpZ;
+      if (dx * nx + dy * ny + dz * nz < -halfSize) return false; // depth slab
+      const u = (dx * trX + dy * trY + dz * trZ) / halfSize;
+      const v = (dx * brX + dy * brY + dz * brZ) / halfSize;
+      return u >= ov && u <= oh && v >= ov && v <= oh;
+    };
+    const overlapsStamp = (a: number[], b: number[], c: number[]): boolean => {
+      const cx = (a[0] + b[0] + c[0]) / 3, cy = (a[1] + b[1] + c[1]) / 3, cz = (a[2] + b[2] + c[2]) / 3;
+      return sampleInStamp(cx, cy, cz)
+        || sampleInStamp(a[0], a[1], a[2])
+        || sampleInStamp(b[0], b[1], b[2])
+        || sampleInStamp(c[0], c[1], c[2]);
+    };
+
+    // Step 3: Subdivide the footprint to maxEdge, confined by overlapsStamp.
+    const { mesh, childToParent } = buildRefinedMeshFromSet(currentMeshData, footprintTris, maxEdge, overlapsStamp);
+    const parentToChildren = childrenByParent(childToParent);
+    currentMeshData = mesh;
+    // Advance paintBaseMesh to the subdivided mesh so the paint reconciler
+    // (triggered by addRegion after we return) sees currentMeshData ===
+    // paintBaseMesh and skips the rebuild-from-base step that would otherwise
+    // revert our subdivision back to the coarse geometry.
+    paintBaseMesh = mesh;
+    updatePaintMesh(mesh);
+
+    // Step 4: Remap existing paint regions onto the subdivided mesh.
+    let regionAdjacency: AdjacencyGraph | null = null;
+    for (const region of getRegions()) {
+      const d = region.descriptor;
+      if (d.kind === 'triangles' || d.kind === 'byLabel') {
+        setRegionTriangles(region.id, remapTriangleIds(region.triangles, parentToChildren), remapPerTriColors(region.perTriColors, parentToChildren));
+      } else {
+        if (!regionAdjacency && (d.kind === 'coplanar' || d.kind === 'connectedFromSeed')) regionAdjacency = buildAdjacency(mesh);
+        const { triangles, perTriColors } = resolveDescriptorTriangles(d, mesh, regionAdjacency, parentToChildren);
+        setRegionTriangles(region.id, triangles, perTriColors);
+      }
+    }
+    paintedColorRefresh();
+
+    // Step 5: Stamp on the now-fine mesh for crisp image edges.
+    const finalResult = stampImageOntoMesh(mesh, imageData, stampOpts);
+    return { result: finalResult, parentToChildren };
+  });
   initVoxelPaintUI(clipControls, {
     activate: async () => {
       const code = getValue();
@@ -11188,7 +11316,8 @@ async function main() {
           if (!adjacency && (d.kind === 'coplanar' || d.kind === 'connectedFromSeed')) {
             adjacency = buildAdjacency(mesh);
           }
-          setRegionTriangles(region.id, resolveDescriptorTriangles(d, mesh, adjacency, null));
+          const { triangles, perTriColors } = resolveDescriptorTriangles(d, mesh, adjacency, null);
+          setRegionTriangles(region.id, triangles, perTriColors);
         }
         const displayMesh = applyTriColorsIfVisible(mesh);
         updateMesh(displayMesh);
