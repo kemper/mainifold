@@ -14,10 +14,13 @@ import { createGearsNamespace } from '../gears';
 import { createThreadsNamespace } from '../threads';
 import { createEnclosureNamespace } from '../enclosure';
 import { createKnurlNamespace } from '../knurl';
+import { createSculptOps } from '../sculpt';
 import { getBrepNamespace, consumeBrepAllocations, disposeBrepAllocationsExcept, consumeBrepToManifoldLabels, consumeBrepToManifoldLabelColors } from '../brepRuntime';
 import { parseLabelColor } from '../../color/labelColor';
 import type { RegionDescriptor } from '../../color/regions';
+import { COLOR_PATTERN_KINDS, type ColorPatternKind, type PatternScope } from '../../color/colorPattern';
 import { SURFACE_OP_FIELDS, isSurfaceOpId, parseSurfaceOpts, type SurfaceOp, type SurfaceOpId } from '../../surface/surfaceOpSpec';
+import { isMaterialPresetName, MATERIAL_PRESET_NAMES, type MaterialSpec } from '../../renderer/materialSpec';
 import { wasmFaultHint } from '../workerFaults';
 import { assertNumber, assertNumberTuple, ValidationError } from '../../validation/apiValidation';
 
@@ -78,6 +81,8 @@ let threadsNamespace: any = null;
 let enclosureNamespace: any = null;
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 let knurlNamespace: any = null;
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+let sculptNamespace: any = null;
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 export function getManifoldModule(): any {
@@ -225,6 +230,7 @@ export const manifoldJsEngine: Engine = {
       // standoff bores), so it's built after fastenersNamespace above.
       enclosureNamespace = createEnclosureNamespace(mod, { fasteners: fastenersNamespace });
       knurlNamespace = createKnurlNamespace(mod);
+      sculptNamespace = createSculptOps(mod);
       // Publish the fully-built module only after every namespace is ready, so
       // a concurrent caller that sees `manifoldModule` set never observes a
       // half-initialised set of namespaces.
@@ -287,6 +293,13 @@ export const manifoldJsEngine: Engine = {
     // overlap, in declaration order. Cleared on every run.
     const paintOps: { name: string; color: [number, number, number]; descriptor: RegionDescriptor }[] = [];
     let paintSeq = 0;
+
+    // Viewport material declared in code via `api.material(...)` — a shading
+    // preset (brass/glass/…) applied by the main thread's viewport after the
+    // run. Recorded, not baked: geometry and exports are untouched, and because
+    // it lives in the code it re-applies on every run/load with no schema
+    // change. Last call wins. Cleared on every run.
+    let materialSpec: MaterialSpec | null = null;
 
     // Surface textures declared in code via `api.surface.*` (fuzzy / knit / cable
     // / waffle / fur / woven / voronoi / smooth). Like `api.paint.*`, these do
@@ -467,6 +480,89 @@ export const manifoldJsEngine: Engine = {
         const rgb = paintColor(col, 'api.paint.label');
         paintOps.push({ name: `paint·label ${labelName}`, color: rgb, descriptor: { kind: 'byLabel', label: labelName } });
       },
+      /** Algorithmic colourway — fill a scope with a procedural pattern, the colour
+       *  twin of `api.surface.*` textures. Every triangle in `scope` gets ONE palette
+       *  colour from a field, so the result stays multi-material printable.
+       *  `api.paint.pattern({ pattern, colors, scope, scale, axis, warp, coverage, seed })`
+       *   - pattern: 'stripes' (tabby/tiger/zebra/brindle) | 'spots' (leopard/dalmatian)
+       *              | 'patches' (calico/cow/tortie) | 'gradient' (siamese points)
+       *              | 'checker' (3D checkerboard by cell parity)
+       *   - colors:  [base, mark, third?] — hex or [r,g,b]; ≥2 required
+       *   - scope:   'labelName' (e.g. 'body', so it never touches eyes/nose) — omit = whole model */
+      pattern(opts: unknown): void {
+        const o = paintObj(opts, "api.paint.pattern({ pattern, colors, scope?, scale?, axis?, warp?, coverage?, seed?, anchors? })");
+        const { pattern, colors, scope, scale, axis, warp, coverage, seed, anchors, ...rest } = o;
+        paintRejectUnknown('api.paint.pattern', rest);
+        if (typeof pattern !== 'string' || !COLOR_PATTERN_KINDS.includes(pattern as ColorPatternKind)) {
+          throw new Error(`api.paint.pattern pattern: expected one of ${COLOR_PATTERN_KINDS.map(k => `'${k}'`).join(', ')}.`);
+        }
+        if (!Array.isArray(colors) || colors.length < 2) {
+          throw new Error('api.paint.pattern colors: expected an array of at least 2 colors [base, mark, third?].');
+        }
+        const rgbColors = colors.map((c, i) => paintColor(c, `api.paint.pattern colors[${i}]`));
+        let scopeObj: PatternScope | undefined;
+        if (scope !== undefined) {
+          if (typeof scope === 'string') {
+            if (scope.length === 0) throw new Error('api.paint.pattern scope: label name must be non-empty.');
+            scopeObj = { label: scope };
+          } else if (scope && typeof scope === 'object' && !Array.isArray(scope)) {
+            const { label: l, above, below, box, sphere, ...srest } = scope as Record<string, unknown>;
+            paintRejectUnknown('api.paint.pattern scope', srest);
+            const s: PatternScope = {};
+            if (l !== undefined) {
+              if (typeof l !== 'string' || l.length === 0) throw new Error('api.paint.pattern scope.label: must be a non-empty string.');
+              s.label = l;
+            }
+            const parsePlane = (v: unknown, where: string): { axis: 'x' | 'y' | 'z'; at: number } => {
+              const o = paintObj(v, where);
+              const { axis: a, at, ...rest } = o;
+              paintRejectUnknown(where, rest);
+              if (typeof a !== 'string' || !(a in AXIS_NORMAL)) throw new Error(`${where}.axis: expected 'x', 'y' or 'z'.`);
+              return { axis: a as 'x' | 'y' | 'z', at: paintNum(at, `${where}.at`) };
+            };
+            if (above !== undefined) s.above = parsePlane(above, 'api.paint.pattern scope.above');
+            if (below !== undefined) s.below = parsePlane(below, 'api.paint.pattern scope.below');
+            if (box !== undefined) {
+              const o = paintObj(box, 'api.paint.pattern scope.box');
+              const { min, max, ...rest } = o;
+              paintRejectUnknown('api.paint.pattern scope.box', rest);
+              s.box = { min: paintVec3(min, 'api.paint.pattern scope.box.min'), max: paintVec3(max, 'api.paint.pattern scope.box.max') };
+            }
+            if (sphere !== undefined) {
+              const o = paintObj(sphere, 'api.paint.pattern scope.sphere');
+              const { center, radius, ...rest } = o;
+              paintRejectUnknown('api.paint.pattern scope.sphere', rest);
+              const rad = paintNum(radius, 'api.paint.pattern scope.sphere.radius');
+              if (rad <= 0) throw new Error('api.paint.pattern scope.sphere.radius: must be > 0.');
+              s.sphere = { center: paintVec3(center, 'api.paint.pattern scope.sphere.center'), radius: rad };
+            }
+            scopeObj = Object.keys(s).length > 0 ? s : undefined;
+          } else {
+            throw new Error("api.paint.pattern scope: expected a label name string (e.g. 'body') or { label, above, below, box, sphere }.");
+          }
+        }
+        if (axis !== undefined && (typeof axis !== 'string' || !(axis in AXIS_NORMAL))) {
+          throw new Error("api.paint.pattern axis: expected 'x', 'y' or 'z'.");
+        }
+        let anchorPts: [number, number, number][] | undefined;
+        if (anchors !== undefined) {
+          if (!Array.isArray(anchors)) throw new Error('api.paint.pattern anchors: expected an array of [x, y, z] points.');
+          anchorPts = anchors.map((a, i) => paintVec3(a, `api.paint.pattern anchors[${i}]`));
+        }
+        const descriptor: RegionDescriptor = {
+          kind: 'pattern',
+          pattern: pattern as ColorPatternKind,
+          colors: rgbColors,
+          ...(scopeObj ? { scope: scopeObj } : {}),
+          ...(scale !== undefined ? { scale: paintNum(scale, 'api.paint.pattern scale') } : {}),
+          ...(axis !== undefined ? { axis: axis as 'x' | 'y' | 'z' } : {}),
+          ...(warp !== undefined ? { warp: paintNum(warp, 'api.paint.pattern warp') } : {}),
+          ...(coverage !== undefined ? { coverage: paintNum(coverage, 'api.paint.pattern coverage') } : {}),
+          ...(seed !== undefined ? { seed: paintNum(seed, 'api.paint.pattern seed') } : {}),
+          ...(anchorPts ? { anchors: anchorPts } : {}),
+        };
+        paintOps.push({ name: `paint·pattern ${pattern} ${++paintSeq}`, color: rgbColors[0], descriptor });
+      },
     };
 
     // === api.surface.* — surface textures declared in code (recorded, applied
@@ -506,6 +602,50 @@ export const manifoldJsEngine: Engine = {
         }
         recordSurfaceOp(id, params);
       },
+    };
+
+    // === api.material — declare the viewport shading material in code ===
+    const material = (nameOrOpts: unknown): void => {
+      const usage = `api.material(preset | { preset?, color?, metalness?, roughness?, clearcoat?, transmission?, opacity? }) — presets: ${MATERIAL_PRESET_NAMES.join(', ')}`;
+      let spec: MaterialSpec;
+      if (typeof nameOrOpts === 'string') {
+        if (!isMaterialPresetName(nameOrOpts)) {
+          throw new Error(`api.material: unknown preset "${nameOrOpts}". ${usage}`);
+        }
+        spec = { preset: nameOrOpts };
+      } else if (nameOrOpts && typeof nameOrOpts === 'object' && !Array.isArray(nameOrOpts)) {
+        const o = nameOrOpts as Record<string, unknown>;
+        const { preset, color, metalness, roughness, clearcoat, transmission, opacity, ...rest } = o;
+        const unknownKeys = Object.keys(rest);
+        if (unknownKeys.length > 0) {
+          throw new Error(`api.material: unknown key(s) ${unknownKeys.map(k => `"${k}"`).join(', ')}. ${usage}`);
+        }
+        spec = {};
+        if (preset !== undefined) {
+          if (!isMaterialPresetName(preset)) throw new Error(`api.material: unknown preset "${String(preset)}". ${usage}`);
+          spec.preset = preset;
+        }
+        if (color !== undefined) {
+          const rgb = parseLabelColor(color);
+          if (!rgb) throw new Error('api.material color: expected a hex string like "#b87333" or an [r,g,b] array of three numbers in 0..1.');
+          spec.color = rgb;
+        }
+        const unit = (v: unknown, name: string): number => {
+          if (typeof v !== 'number' || !Number.isFinite(v) || v < 0 || v > 1) {
+            throw new Error(`api.material ${name}: expected a number in 0..1.`);
+          }
+          return v;
+        };
+        if (metalness !== undefined) spec.metalness = unit(metalness, 'metalness');
+        if (roughness !== undefined) spec.roughness = unit(roughness, 'roughness');
+        if (clearcoat !== undefined) spec.clearcoat = unit(clearcoat, 'clearcoat');
+        if (transmission !== undefined) spec.transmission = unit(transmission, 'transmission');
+        if (opacity !== undefined) spec.opacity = unit(opacity, 'opacity');
+        if (Object.keys(spec).length === 0) throw new Error(`api.material: options object is empty. ${usage}`);
+      } else {
+        throw new Error(`api.material: expected a preset name or an options object. ${usage}`);
+      }
+      materialSpec = spec;
     };
 
     // Imported meshes (STL etc.) attached to the active version are exposed as
@@ -584,6 +724,18 @@ export const manifoldJsEngine: Engine = {
       linearPattern: meshOpsNamespace.linearPattern,
       circularPattern: meshOpsNamespace.circularPattern,
       spiralPattern: meshOpsNamespace.spiralPattern,
+      // Surface scatter + named deforms + SDF rounding/welding (Blender-parity
+      // verbs — see /ai/deform.md):
+      scatter: meshOpsNamespace.scatter,
+      wrapAround: meshOpsNamespace.wrapAround,
+      bend: meshOpsNamespace.bend,
+      twist: meshOpsNamespace.twist,
+      taper: meshOpsNamespace.taper,
+      alongCurve: meshOpsNamespace.alongCurve,
+      round: meshOpsNamespace.round,
+      smoothWeld: meshOpsNamespace.smoothWeld,
+      // Declarative sculpt nudges (grab / inflate / flatten):
+      sculpt: sculptNamespace,
       // Robust booleans + heal:
       expectUnion: meshOpsNamespace.expectUnion,
       expectDifference: meshOpsNamespace.expectDifference,
@@ -597,6 +749,7 @@ export const manifoldJsEngine: Engine = {
       labeledUnion,
       paint,
       surface,
+      material,
       imports,
       renderMesh,
     };
@@ -727,6 +880,7 @@ export const manifoldJsEngine: Engine = {
         labelColors: labelColors.size > 0 ? labelColors : undefined,
         paintOps: paintOps.length > 0 ? paintOps : undefined,
         surfaceOps: surfaceOps.length > 0 ? surfaceOps : undefined,
+        materialSpec: materialSpec ?? undefined,
         paramsSchema: paramCapture.collectSchema(),
         renderOnly,
       };

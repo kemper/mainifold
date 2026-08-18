@@ -174,4 +174,74 @@ test.describe('multi-part OBJ / STL / GLB export', () => {
     // Painted? No — plain cubes → plain .obj. Either way the multi-part OBJ path ran.
     expect(download!.suggestedFilename()).toMatch(/\.(obj|zip)$/);
   });
+
+  test('concurrent console exports each bundle ALL parts (shared pool not torn down mid-bake)', async ({ page }) => {
+    await page.goto('/editor');
+    await page.waitForTimeout(4000);
+
+    // Two multi-part exports fired at once share the singleton geometry pool.
+    // Without serialization, whichever finishes first disposes the pool and
+    // rejects the other's in-flight bakes — silently truncating its file. The
+    // export-bake mutex must make them run one-after-another so BOTH bundle all 4.
+    const out = await page.evaluate(async () => {
+      const pw = (window as unknown as { partwright: any }).partwright;
+      (await import('/src/geometry/units.ts')).setUnits('mm');
+      await pw.runAndSave('return api.Manifold.cube([12,12,12], true);', 'a');
+      await pw.createPart('B'); await pw.runAndSave('return api.Manifold.cube([10,10,10], true);', 'b');
+      await pw.createPart('C'); await pw.runAndSave('return api.Manifold.cube([8,8,8], true);', 'c');
+      await pw.createPart('D'); await pw.runAndSave('return api.Manifold.cube([6,6,6], true);', 'd');
+      const [obj, stl, glb] = await Promise.all([
+        pw.exportOBJPartsData(undefined, 'concurrent-obj'),
+        pw.exportSTLPartsData(undefined, 'concurrent-stl'),
+        pw.exportGLBPartsData(undefined, 'concurrent-glb'),
+      ]);
+      return { obj, stl, glb };
+    });
+
+    for (const r of [out.obj, out.stl, out.glb]) {
+      expect((r as { error?: string }).error).toBeUndefined();
+      expect((r as { parts: number }).parts).toBe(4);
+    }
+  });
+
+  test('export part picker lists parts by group and toggles whole groups', async ({ page }) => {
+    await page.goto('/editor');
+    await page.waitForFunction(
+      () => !!(window as unknown as { partwright?: { setPartGroup?: unknown } }).partwright?.setPartGroup,
+      { timeout: 20_000 },
+    );
+
+    // A 3-part session: one ungrouped part plus a two-member "Armor" group.
+    await page.evaluate(async () => {
+      const pw = (window as unknown as { partwright: any }).partwright;
+      (await import('/src/geometry/units.ts')).setUnits('mm');
+      await pw.runAndSave('return api.Manifold.cube([10,10,10], true);', 'base');
+      await pw.createPart('Helmet');
+      await pw.runAndSave('return api.Manifold.cube([8,8,8], true);', 'h');
+      await pw.createPart('Greaves');
+      await pw.runAndSave('return api.Manifold.cube([6,6,6], true);', 'g');
+      await pw.setPartGroup(['Helmet', 'Greaves'], 'Armor');
+    });
+    await page.waitForTimeout(1000);
+
+    await page.locator('#btn-export').click();
+    await page.locator('#export-dropdown').getByText('OBJ', { exact: true }).click();
+
+    const modal = page.getByRole('dialog');
+    await expect(modal.getByText(/Export parts to OBJ/i)).toBeVisible({ timeout: 10000 });
+
+    // The Armor group renders as a header with a whole-group checkbox + count.
+    const groupHeader = modal.locator('[data-export-group="Armor"]');
+    await expect(groupHeader).toHaveCount(1);
+    const groupCb = groupHeader.locator('input[type="checkbox"]');
+
+    // Selecting the group checks both members (header count 2/2).
+    await groupCb.check();
+    await expect(groupHeader).toContainText('2/2');
+
+    // Deselecting the group unchecks both members (0/2), and the total drops to
+    // just the one ungrouped part that was preselected as "currently viewing".
+    await groupCb.click();
+    await expect(groupHeader).toContainText('0/2');
+  });
 });

@@ -524,6 +524,34 @@ function AdvancedSettingsBody(props: { cfg: Signal<AppConfig>; onReset: () => vo
           onChange={v => set('renderer', 'gridDivisions', v)}
         />
         <Field
+          label="Assembly build workers"
+          hint="Parts the Assembly (all-parts) view builds in parallel. Clamped to CPU cores − 1."
+          tooltip="The Assembly view meshes every part of a session at once. Each parallel worker boots its own manifold-3d WASM instance, so this trades memory for grid fill speed. 1 serializes the builds (still fills progressively). Clamped at runtime to your CPU core count minus one."
+          defaultValue={APP_CONFIG_DEFAULTS.renderer.assemblyPoolSize}
+          value={c.renderer.assemblyPoolSize}
+          min={1} max={16} integer
+          onChange={v => set('renderer', 'assemblyPoolSize', v)}
+        />
+        <Field
+          label="Export build workers"
+          hint="Parts a multi-part export bakes in parallel. Clamped to CPU cores − 1 and the part count."
+          tooltip="A multi-part export (3MF / OBJ / STL / GLB) re-runs each part's code to bake its mesh. Baking them in parallel across several geometry workers cuts the wall-clock time for large assemblies. Each worker boots its own manifold-3d WASM instance, so this trades memory for speed. 1 bakes parts one at a time. Clamped at runtime to your CPU core count minus one and to the number of parts you're exporting."
+          defaultValue={APP_CONFIG_DEFAULTS.renderer.exportPoolSize}
+          value={c.renderer.exportPoolSize}
+          min={1} max={16} integer
+          onChange={v => set('renderer', 'exportPoolSize', v)}
+        />
+        <Field
+          label="Assembly grid gutter"
+          unit="× cell"
+          hint="Spacing between parts in the Assembly grid, as a fraction of the largest part."
+          tooltip="How much empty space sits between cells in the all-parts grid, as a fraction of the largest part's footprint. 0.25 leaves a quarter-cell gap; 0 packs parts edge to edge."
+          defaultValue={APP_CONFIG_DEFAULTS.renderer.assemblyGridGutter}
+          value={c.renderer.assemblyGridGutter}
+          min={0} max={2} step={0.05}
+          onChange={v => set('renderer', 'assemblyGridGutter', v)}
+        />
+        <Field
           label="Ambient light intensity"
           tooltip="The intensity of the omnidirectional ambient light in the viewport. Ambient light illuminates all surfaces equally regardless of normal direction — raising it reduces harsh shadows. Combined with the directional lights, the total scene illumination is ambient + primary + secondary. Takes effect after a page reload."
           defaultValue={APP_CONFIG_DEFAULTS.renderer.ambientLightIntensity}
@@ -758,6 +786,26 @@ function AdvancedSettingsBody(props: { cfg: Signal<AppConfig>; onReset: () => vo
           value={c.import.filamentConfidenceWarnThreshold}
           min={0.1} max={1} step={0.05}
           onChange={v => set('import', 'filamentConfidenceWarnThreshold', v)}
+        />
+        <Field
+          label="Convert-to-code cell budget"
+          unit="cells"
+          hint="levelSet resolution budget for convertToCode at 'standard' quality."
+          tooltip="Converting a mesh import to code rebuilds it as a smooth levelSet whose grid resolution is derived from this sample budget (draft quality = ×0.25, fine = ×4). More cells = a smoother, more faithful remake but a slower build — build time is roughly proportional to this number. 6M ≈ ten seconds on a mid-size model."
+          defaultValue={APP_CONFIG_DEFAULTS.import.reconstructCellBudget}
+          value={c.import.reconstructCellBudget}
+          min={200_000} max={100_000_000} integer
+          onChange={v => set('import', 'reconstructCellBudget', v)}
+        />
+        <Field
+          label="Reconstruction eval samples"
+          unit="points"
+          hint="Surface samples per mesh for convertToCode / evalAgainstImport reports."
+          tooltip="The faithfulness report (chamfer/hausdorff) samples this many points on each surface and measures nearest-neighbor distances. More samples tighten the measurement's noise floor (reported as sampleSpacing) at the cost of a slower report."
+          defaultValue={APP_CONFIG_DEFAULTS.import.reconstructEvalSamples}
+          value={c.import.reconstructEvalSamples}
+          min={500} max={100_000} integer
+          onChange={v => set('import', 'reconstructEvalSamples', v)}
         />
       </Section>
 

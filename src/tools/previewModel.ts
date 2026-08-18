@@ -9,6 +9,7 @@ import { openscadEngine, runScadAsync } from '../geometry/engines/openscad';
 import type { Language } from '../geometry/engines/types';
 import type { MeshResult } from '../geometry/engines/types';
 import { componentsOverlap } from './bboxOverlap';
+import { sourceUsesManifoldText, preloadTextFonts } from '../geometry/textGlyphs';
 import { resolvePaintOps } from '../color/paintOpsResolve';
 import { APP_CONFIG_DEFAULTS } from '../config/appConfig';
 
@@ -137,6 +138,14 @@ export async function previewModel(
     };
   }
 
+  // Pre-load Liberation Sans if the code uses text — mirrors engineWorker's
+  // heuristic so `api.text` works in the headless preview tier too (the fonts
+  // fetch resolves from disk under vite SSR).
+  if (engine === 'manifold-js'
+      && (sourceUsesManifoldText(code) || /\bapi\.(?:fasteners|printFit)\b/.test(code) || /[{,]\s*(?:fasteners|printFit)\s*[,}]/.test(code))) {
+    await preloadTextFonts();
+  }
+
   let raw: MeshResult;
   if (engine === 'voxel') {
     raw = voxelEngine.run(code, opts.params);
@@ -203,11 +212,16 @@ export async function previewModel(
   if (r.paintOps && r.paintOps.length > 0) {
     const resolved = resolvePaintOps(r.paintOps, mesh, r.labelMap);
     if (!triColors) triColors = new Uint8Array(numTri * 3).fill(170);
+    const to255 = (c: readonly number[]): [number, number, number] =>
+      [Math.round(Math.max(0, Math.min(1, c[0])) * 255), Math.round(Math.max(0, Math.min(1, c[1])) * 255), Math.round(Math.max(0, Math.min(1, c[2])) * 255)];
     for (const op of resolved) {
-      const [cr, cg, cb] = op.color.map((v) => Math.round(Math.max(0, Math.min(1, v)) * 255));
+      const [cr, cg, cb] = to255(op.color);
       for (const id of op.triangles) {
         if (id < 0 || id >= numTri) continue;
-        triColors[id * 3] = cr; triColors[id * 3 + 1] = cg; triColors[id * 3 + 2] = cb;
+        // Pattern ops carry a per-triangle colour; fall back to the flat colour.
+        const pc = op.perTriColors?.get(id);
+        const [r, g, b] = pc ? to255(pc) : [cr, cg, cb];
+        triColors[id * 3] = r; triColors[id * 3 + 1] = g; triColors[id * 3 + 2] = b;
       }
     }
     paintOpStats = resolved.map((op) => ({ name: op.name, kind: op.kind, triangleCount: op.triangles.size }));

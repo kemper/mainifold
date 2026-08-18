@@ -61,7 +61,7 @@ export const SUBDOC_NAMES_LIST = [
   'curves', 'bosl2', 'replicad', 'sdf', 'figure', 'voxel', 'colors', 'print-safety',
   'fasteners', 'joints', 'gears', 'threads', 'reference-images', 'file-io', 'annotations',
   'printing', 'relief', 'textures', 'mechanisms', 'iteration-workflow', 'gotchas',
-  'visual-verification', 'spending', 'manifold-api',
+  'visual-verification', 'spending', 'manifold-api', 'reconstruction', 'deform',
   // Deprecated: 'print-fit' split into 'fasteners' + 'joints'. Kept so an older
   // cached prompt requesting it gets the redirect stub instead of an error.
   'print-fit',
@@ -463,7 +463,7 @@ const ALL_TOOLS: ToolDefinition[] = [
   },
   {
     name: 'readDoc',
-    description: 'Fetch one of the topic-specific docs from /ai/<name>.md. Use this when the core ai.md points you at a subdoc and you need its full content before writing code. Names: curves, bosl2, replicad, sdf, figure, voxel, colors, print-safety, fasteners, joints, gears, threads, reference-images, file-io, annotations, printing, relief, textures, mechanisms, iteration-workflow, gotchas, visual-verification, spending, manifold-api.',
+    description: 'Fetch one of the topic-specific docs from /ai/<name>.md. Use this when the core ai.md points you at a subdoc and you need its full content before writing code. Names: curves, bosl2, replicad, sdf, figure, voxel, colors, print-safety, fasteners, joints, gears, threads, reference-images, file-io, annotations, printing, relief, textures, mechanisms, deform, iteration-workflow, gotchas, visual-verification, spending, manifold-api.',
     input_schema: {
       type: 'object',
       properties: {
@@ -1301,6 +1301,37 @@ Plus preserveColor (default true — bake path only; on the code path paint re-r
     },
   },
   {
+    name: 'convertToCode',
+    description: `Rebuild the current model (typically a mesh import) as self-contained, editable manifold-js code — a smooth remake interpolated from measured Z-sections, with no dependency on the import. Runs the generated code, saves a version, and measures the remake against the source.
+
+**When to use:** the user imported an STL and wants editable code instead of an opaque mesh wrapper, or asks to "reverse-engineer" / "convert this model to code". Requires a manifold-js session with a model loaded.
+
+**After it returns:** check metrics.chamfer (mean surface deviation) and metrics.hausdorff (worst point). Distances below metrics.sampleSpacing are sampling noise, not real error. Use evalAgainstImport to re-measure after you edit the generated code.
+
+Returns { ok, stats, metrics, version } or { error }.`,
+    input_schema: {
+      type: 'object',
+      properties: {
+        quality: { type: 'string', enum: ['draft', 'standard', 'fine'], description: "Speed/smoothness preset. 'draft' ≈ 4× faster, 'fine' ≈ 4× slower and smoothest. Default 'standard'." },
+        step: { type: 'number', description: 'Explicit Z-section pitch (world units); overrides the preset. Smaller = more sections.' },
+        edge: { type: 'number', description: 'Explicit levelSet edge length (world units); smaller = finer surface + slower build.' },
+      },
+    },
+  },
+  {
+    name: 'evalAgainstImport',
+    description: `Measure how faithful the current model is to an imported mesh: chamfer (mean surface deviation), hausdorff (worst point), and per-direction quantiles from matched surface samples.
+
+**When to use:** after convertToCode or after editing reconstructed code, to verify the remake still matches the imported original. Distances below sampleSpacing are sampling noise. Returns { ok, importIndex, filename, chamfer, hausdorff, ... } or { error }.`,
+    input_schema: {
+      type: 'object',
+      properties: {
+        index: { type: 'integer', description: 'Imported-mesh index (default 0).', minimum: 0 },
+        samples: { type: 'integer', description: 'Surface samples per mesh — more = tighter noise floor, slower. Default from settings (~4000).', minimum: 100, maximum: 200000 },
+      },
+    },
+  },
+  {
     name: 'scaleModel',
     description: `Resize the current model by per-axis multiplicative factors and save a new version. 1 = unchanged, 2 = double, 0.5 = half. For a uniform resize pass the same factor for sx, sy, and sz.
 
@@ -1474,6 +1505,29 @@ export const CONFIRM_REQUIRED_TOOLS = new Set([
   'importSvgAsRelief',
 ]);
 
+/** Pure-read tools the model may call during plan mode to ground its plan in
+ *  the current session state (open code, versions, geometry, notes, docs).
+ *  Deliberately excludes anything that mutates the session (setCode,
+ *  modifyAndTest, forkVersion, createPart, importImageAsRelief,
+ *  setActiveLanguage, setPrinterSettings, setReliefPreviewMode) AND anything
+ *  that executes user code (runCode, runAndAssert, runAndExplain, runIsolated)
+ *  — the point of plan mode is to plan, not to build. renderView/renderViews
+ *  are allowed because they only snapshot the current saved geometry (no code
+ *  execution), and they stay gated by the Views vision toggle so the user's
+ *  cost preferences still apply. */
+const PLAN_MODE_TOOLS = new Set([
+  'getActiveLanguage', 'getCode', 'getParams', 'getGeometryData', 'getMeshSummary',
+  'getFeatureCentroids', 'getReferenceImages', 'getAttachments', 'getSessionContext', 'listVersions',
+  'listSessionNotes', 'readDoc', 'findFaces', 'listComponents', 'listLabels',
+  'getModelColors',
+  'listRegions', 'probePixel', 'paintPreview', 'paintExplain', 'query', 'probeRay',
+  'listParts', 'getCurrentPart', 'assertPaint', 'sliceAtZVisual', 'checkPrintability',
+  'getPrinterSettings', 'getReliefSwapGuide',
+  // Idempotent renders of the CURRENT saved geometry — no code execution, no
+  // mutation. Still gated by VIEWS_GATED below so vision-off keeps them out.
+  'renderView', 'renderViews',
+]);
+
 /** Tools that are safe to auto-retry on error: pure reads/queries, idempotent
  *  renders, and runs that don't commit (re-executing reproduces the same
  *  transient state). The chat loop's `autoRetry` re-invokes a failed tool, so
@@ -1500,7 +1554,7 @@ export const RETRY_SAFE_TOOLS = new Set([
 ]);
 
 const RUN_GATED = new Set(['runCode', 'setParams']);
-const SAVE_GATED = new Set(['runAndSave', 'loadVersion', 'saveVersion', 'applySurfaceTexture', 'applyVoronoiLamp', 'engraveModel', 'voxelizeModel', 'scaleModel', 'placeModel', 'rotateModel', 'layFlatModel']);
+const SAVE_GATED = new Set(['runAndSave', 'loadVersion', 'saveVersion', 'applySurfaceTexture', 'applyVoronoiLamp', 'engraveModel', 'voxelizeModel', 'convertToCode', 'scaleModel', 'placeModel', 'rotateModel', 'layFlatModel']);
 const PAINT_GATED = new Set(['paintRegion', 'paintFaces', 'paintNear', 'paintStroke', 'paintImage', 'paintInBox', 'paintInOrientedBox', 'paintSlab', 'paintNearestRegion', 'paintComponent', 'paintByLabel', 'paintByLabels', 'paintConnected', 'undoLastPaint', 'redoLastPaint', 'removeRegion', 'clearColors', 'copyColorsFromVersion']);
 /** Tools that ship a PNG back to the model via a multimodal content
  *  block. Gated by the Views vision toggle so the user can disable
@@ -1517,10 +1571,19 @@ const AUTORESUME_GATED = new Set(['finish']);
 const NOTES_GATED = new Set(['addSessionNote']);
 
 export function buildToolList(toggles: ChatToggles): ToolDefinition[] {
-  // Plan-mode turns are tool-free — the model's only job is to write a plan.
-  // An empty list prevents any tool call, including always-available read
-  // tools that could otherwise be used to set code or query session state.
-  if (toggles.planFirst) return [];
+  // Plan-mode turns expose the pure-read subset (PLAN_MODE_TOOLS) so the model
+  // can ground its plan in the actual session state — the open code, saved
+  // versions, geometry stats, session notes, and docs — instead of guessing.
+  // Mutating tools and code-execution tools stay hidden until the user
+  // approves. renderView/renderViews are still filtered by VIEWS_GATED so a
+  // vision-off session doesn't pay for images during planning either.
+  if (toggles.planFirst) {
+    return ALL_TOOLS.filter(t => {
+      if (!PLAN_MODE_TOOLS.has(t.name)) return false;
+      if (VIEWS_GATED.has(t.name)) return toggles.vision.views;
+      return true;
+    });
+  }
 
   return ALL_TOOLS.filter(t => {
     if (ALWAYS_AVAILABLE.has(t.name)) return true;
@@ -2152,6 +2215,13 @@ async function dispatch(api: PartwrightAPI, name: string, input: Record<string, 
       return api.engraveModel(input);
     case 'voxelizeModel':
       return api.voxelizeModel(input);
+    case 'convertToCode':
+      return api.convertToCode(input);
+    case 'evalAgainstImport':
+      return api.evalAgainstImport(
+        input.index as number | undefined,
+        input.samples !== undefined ? { samples: input.samples as number } : undefined,
+      );
     case 'scaleModel':
       return api.scaleModel(input.sx as number, input.sy as number, input.sz as number, { mode: input.mode as 'auto' | 'parametric' | 'bake' | undefined, preserveColor: input.preserveColor as boolean | undefined });
     case 'placeModel':

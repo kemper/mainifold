@@ -163,6 +163,29 @@ export interface AppConfig {
      *  the viewport shows a rough shape in ~1-2s instead of waiting 10-50s.
      *  Higher = faster/rougher preview; 1 (or below) disables the preview pass. */
     sdfPreviewScale: number;
+    /** Compile SDF distance functions to flat JS before marching (`sdfCompile.ts`).
+     *  ~6–11× faster per eval, verified byte-identical against the closure tree
+     *  (a mismatch silently falls back to the closure). Kill-switch only — leave
+     *  on. NOTE: read in the geometry Worker, where overrides aren't visible, so
+     *  toggling this off only affects main-thread eval paths. */
+    sdfCompile: boolean;
+    /** Max nodes emitted into one generated SDF function before splitting into a
+     *  sub-function. Bounds body size so V8 keeps each function optimized (a
+     *  single huge function deopts and runs slower). */
+    sdfCompileChunkNodes: number;
+    /** Max concurrent geometry Workers the Assembly view spawns to build parts
+     *  in parallel. Each worker boots its own manifold-3d WASM, so this trades
+     *  memory for fill speed; clamped to (hardwareConcurrency − 1) at runtime.
+     *  1 ⇒ builds are serialized (still progressive). */
+    assemblyPoolSize: number;
+    /** Max concurrent geometry Workers a multi-part export spawns to bake parts
+     *  in parallel. Each worker boots its own manifold-3d WASM, so this trades
+     *  memory for export speed; clamped at runtime to both (hardwareConcurrency −
+     *  1) and the number of parts being exported. 1 ⇒ parts bake one at a time. */
+    exportPoolSize: number;
+    /** Spacing between Assembly-grid cells as a fraction of the largest part's
+     *  footprint (0.25 ⇒ a quarter-cell gutter). */
+    assemblyGridGutter: number;
   };
   import: {
     /** Vertex-weld tolerance for STL imports (world units). */
@@ -183,6 +206,12 @@ export interface AppConfig {
     filamentMatchThreshold: number;
     /** Confidence score below which the filament swap guide shows a warning (0–1). */
     filamentConfidenceWarnThreshold: number;
+    /** levelSet cell budget for convertToCode at 'standard' quality — the
+     *  mesh→code speed/smoothness knob ('draft' = ×0.25, 'fine' = ×4). */
+    reconstructCellBudget: number;
+    /** Surface samples per mesh for convertToCode / evalAgainstImport
+     *  chamfer+hausdorff reports (more = tighter noise floor, slower). */
+    reconstructEvalSamples: number;
   };
   ui: {
     /** How long toast notifications stay on screen (ms). */
@@ -333,6 +362,11 @@ export const APP_CONFIG_DEFAULTS: AppConfig = {
     enhanceMaxTriangles: 5_000_000,
     surfaceTexturePersistMaxTriangles: 1_000_000,
     sdfPreviewScale: 2.5,
+    sdfCompile: true,
+    sdfCompileChunkNodes: 120,
+    assemblyPoolSize: 3,
+    exportPoolSize: 8,
+    assemblyGridGutter: 0.18,
   },
   import: {
     stlWeldTolerance: 1e-5,
@@ -343,6 +377,8 @@ export const APP_CONFIG_DEFAULTS: AppConfig = {
     remoteFetchTimeoutMs: 15_000,
     filamentMatchThreshold: 0.18,
     filamentConfidenceWarnThreshold: 0.9,
+    reconstructCellBudget: 6_000_000,
+    reconstructEvalSamples: 4000,
   },
   ui: {
     toastDurationMs: 2200,
