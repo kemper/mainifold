@@ -988,7 +988,7 @@
         ],
         "tool_call": true,
         "structured_output": true,
-        "temperature": false,
+        "temperature": true,
         "knowledge": "2025-08-31",
         "release_date": "2026-02-05",
         "last_updated": "2026-02-05",
@@ -1082,7 +1082,7 @@
         ],
         "tool_call": true,
         "structured_output": true,
-        "temperature": false,
+        "temperature": true,
         "knowledge": "2025-08-31",
         "release_date": "2025-12-11",
         "last_updated": "2025-12-11",
@@ -1178,7 +1178,7 @@
         ],
         "tool_call": true,
         "structured_output": true,
-        "temperature": false,
+        "temperature": true,
         "knowledge": "2025-08-31",
         "release_date": "2026-03-17",
         "last_updated": "2026-03-17",
@@ -1395,7 +1395,7 @@
         ],
         "tool_call": true,
         "structured_output": true,
-        "temperature": false,
+        "temperature": true,
         "knowledge": "2025-08-31",
         "release_date": "2026-03-05",
         "last_updated": "2026-03-05",
@@ -1542,7 +1542,7 @@
         ],
         "tool_call": true,
         "structured_output": true,
-        "temperature": false,
+        "temperature": true,
         "knowledge": "2025-08-31",
         "release_date": "2026-03-17",
         "last_updated": "2026-03-17",
@@ -1587,7 +1587,7 @@
         ],
         "tool_call": true,
         "structured_output": true,
-        "temperature": false,
+        "temperature": true,
         "knowledge": "2024-09-30",
         "release_date": "2025-11-13",
         "last_updated": "2025-11-13",
@@ -1936,50 +1936,6 @@
             "output": 18,
             "cache_read": 0.4
           }
-        }
-      },
-      "gemini-robotics-er-1.6-preview": {
-        "id": "gemini-robotics-er-1.6-preview",
-        "name": "Gemini Robotics-ER 1.6 Preview",
-        "description": "Vision-language model for embodied reasoning: spatial understanding, task planning, and physical-world agentic robotics",
-        "family": "gemini",
-        "attachment": true,
-        "reasoning": true,
-        "reasoning_options": [
-          {
-            "type": "toggle"
-          },
-          {
-            "type": "budget_tokens",
-            "min": 0
-          }
-        ],
-        "tool_call": true,
-        "structured_output": true,
-        "temperature": true,
-        "knowledge": "2025-01",
-        "release_date": "2026-04-14",
-        "last_updated": "2026-04-14",
-        "modalities": {
-          "input": [
-            "text",
-            "image",
-            "video",
-            "audio"
-          ],
-          "output": [
-            "text"
-          ]
-        },
-        "open_weights": false,
-        "limit": {
-          "context": 131072,
-          "output": 65536
-        },
-        "cost": {
-          "input": 1,
-          "output": 5,
-          "input_audio": 2
         }
       },
       "gemini-2.5-computer-use-preview-10-2025": {
