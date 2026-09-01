@@ -29,7 +29,11 @@ part, each with `state.json` as the resume file.
 3. **Waves.** Spawn one `inverse-sculpt` subagent per unconverged part,
    ~4 concurrent (engine/CPU contention — same reason Playwright pins
    workers:1). Each gets: the part dir path, the instruction to read
-   PLAYBOOK.md first, and its budget (≤15 turns).
+   PLAYBOOK.md first, and its budget (≤15 turns). Before waiting on the
+   wave, check off the launched parts against the full unconverged set —
+   a part that bootstrap-converged on its own can make the launch count
+   *look* complete while a sibling was silently never assigned; a final
+   sweep is too late to catch it cheaply.
 4. **Between waves (the ratchet).** Merge returned PLAYBOOK trap/tactic
    candidates into `scripts/inverse-cad/PLAYBOOK.md` §7/§5 BEFORE the next
    wave. Respawn fresh subagents for unconverged parts (fresh context +
@@ -55,3 +59,13 @@ part, each with `state.json` as the resume file.
   you, not them) or filed as an issue before the next wave.
 - Convergence data (`state.json` history) is evidence for the final report —
   don't delete part dirs after success.
+- **A part's `best/` can be an interim, still-polishing result, not a
+  finished one** — check `state.json`'s phase (`done`/`plateau`) before
+  consuming another part's `best/` mid-run (baking a catalog entry, reading
+  it for a cross-review). Treat "best/ exists" and "agent finished" as two
+  different facts.
+- **A `gates.mjs` change mid-run invalidates prior passes silently** — a
+  part already marked `done` under the old gate definition is not
+  automatically valid under the new one. Re-run gate evaluation against
+  every stored `best/` after changing `gates.mjs`, before trusting `phase:
+  done` in the next wave's triage.

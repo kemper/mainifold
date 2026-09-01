@@ -77,6 +77,15 @@ Returns the **union of the instances only** (like `circularPattern`) — add it 
 the base yourself. Author the instance with its base at the origin, "up" = +Z.
 A total-triangle budget (~2M) throws before building a runaway union.
 
+**Sizing `offset`** is trial-and-error unless you anchor it to the instance's
+own geometry, not the base's: it's a sink/rise along the local Z of the
+*instance*, so size it against the instance's own half-thickness along that
+axis — a spike whose base spans 2 units along its mount axis wants
+`offset ≈ -1` (about half its base thickness) to fuse flush; too shallow
+leaves a visible seam, too deep buries the instance's visible feature
+entirely. Render one instance at the target scale before scattering 120 of
+them to calibrate `offset` visually rather than computing it blind.
+
 ## Round — fillet every edge of any solid
 
 ```js
@@ -92,7 +101,10 @@ opening+closing of a signed-distance lattice, remeshed via `levelSet`. Facts to
 respect: features thinner than `2·radius` are smoothed **away** — and in
 practice a flat face starts visibly bulging into a pill well before that limit,
 so on a shape with one thin dimension keep the radius under ~1/4 of the
-thinnest extent (a 5-unit-thick shell wants radius ≲ 1.2, not 1.8); the output
+thinnest extent (a 5-unit-thick shell wants radius ≲ 1.2, not 1.8) — as a
+starting point elsewhere, radius ≈ 4–6% of the relevant edge length reads as
+a "machined" chamfer; render and adjust from there rather than guessing
+larger. The output
 is a remeshed surface (labels/paint regions on the input do NOT carry through —
 round first, label/paint after); accuracy is ~the lattice voxel, and a radius
 too small for the model errors with the fix in the message. For exact
